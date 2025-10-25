@@ -1,0 +1,44 @@
+# 日志文件
+*.log
+server.log
+
+# 数据库（包含节点配置等敏感信息）
+*.db
+*.sqlite
+config/proxy.db
+
+# sing-box配置文件（包含节点配置）
+config/config.json
+config/*.log
+
+# 临时文件
+*.tmp
+*.swp
+*~
+.DS_Store
+*.pid
+
+# 构建产物
+sb-proxy
+main_new
+backend/main
+
+# Node
+node_modules/
+.npm
+frontend/dist/
+
+# 编辑器
+.vscode/
+.idea/
+
+# 测试文件
+*.test.js
+test/
+
+# 环境变量（包含密码）
+.env
+.env.local
+
+# 文档（内部使用）
+PRIVACY_AUDIT_REPORT.md
