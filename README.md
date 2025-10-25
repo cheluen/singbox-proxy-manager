@@ -1,4 +1,4 @@
-# SingBox 代理转发管理系统
+# SingBox 代理转发管理系统-纯为了学习相关技术自用
 
 <div align="center">
 
