@@ -104,6 +104,7 @@ func main() {
 		authorized.GET("/nodes/:id", handler.GetNode)
 		authorized.POST("/nodes", handler.CreateNode)
 		authorized.POST("/nodes/batch-import", handler.BatchImportNodes)
+		authorized.POST("/nodes/batch-delete", handler.BatchDeleteNodes)
 		authorized.PUT("/nodes/:id", handler.UpdateNode)
 		authorized.DELETE("/nodes/:id", handler.DeleteNode)
 		authorized.POST("/nodes/reorder", handler.ReorderNodes)
