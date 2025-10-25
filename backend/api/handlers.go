@@ -418,6 +418,61 @@ func (h *Handler) DeleteNode(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"message": "node deleted"})
 }
 
+// BatchDeleteNodes deletes multiple proxy nodes at once (only restarts sing-box once)
+func (h *Handler) BatchDeleteNodes(c *gin.Context) {
+	var req struct {
+		IDs []int `json:"ids" binding:"required"`
+	}
+
+	if err := c.BindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid request"})
+		return
+	}
+
+	if len(req.IDs) == 0 {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "no nodes to delete"})
+		return
+	}
+
+	// Begin transaction
+	tx, err := h.db.Begin()
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "database error"})
+		return
+	}
+	defer tx.Rollback()
+
+	// Delete all nodes in one transaction
+	deletedCount := 0
+	for _, id := range req.IDs {
+		result, err := tx.Exec("DELETE FROM proxy_nodes WHERE id = ?", id)
+		if err != nil {
+			continue
+		}
+		if affected, _ := result.RowsAffected(); affected > 0 {
+			deletedCount++
+		}
+	}
+
+	if err := tx.Commit(); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to commit transaction"})
+		return
+	}
+
+	// Only regenerate and restart once after all deletions
+	if deletedCount > 0 {
+		if err := h.regenerateAndRestart(); err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to update sing-box config"})
+			return
+		}
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"message": "nodes deleted",
+		"deleted_count": deletedCount,
+	})
+}
+
 // ReorderNodes reorders proxy nodes and updates inbound ports
 func (h *Handler) ReorderNodes(c *gin.Context) {
 	var req struct {

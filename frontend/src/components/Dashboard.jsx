@@ -225,7 +225,8 @@ function Dashboard({ onLogout }) {
 
     try {
       setLoading(true)
-      await Promise.all(selectedNodeIds.map(id => api.delete(`/nodes/${id}`)))
+      // Use batch delete API - only restarts sing-box once
+      await api.post('/nodes/batch-delete', { ids: selectedNodeIds })
       message.success(t('batch_delete_success').replace('{{count}}', selectedNodeIds.length))
       setSelectedNodeIds([])
       loadNodes()
