@@ -42,8 +42,8 @@
 
 ```bash
 # 1. 克隆项目
-git clone <您的仓库地址>
-cd sb-proxy
+git clone https://github.com/cheluen/singbox-proxy-manager.git
+cd singbox-proxy-manager
 
 # 2. 修改默认密码（重要！）
 # 编辑 docker-compose.yml，修改 ADMIN_PASSWORD
@@ -309,8 +309,7 @@ docker compose up -d --build
 
 如有问题或建议，欢迎通过以下方式联系：
 
-- 提交 [GitHub Issue](您的仓库地址/issues)
-- 发送邮件到：[您的邮箱]
+- 提交 [GitHub Issue](https://github.com/cheluen/singbox-proxy-manager/issues)
 
 ---
 
@@ -318,6 +317,6 @@ docker compose up -d --build
 
 **[⬆ 回到顶部](#singbox-代理转发管理系统)**
 
-Made with ❤️ by [您的名字]
+Made with ❤️ | [GitHub](https://github.com/cheluen/singbox-proxy-manager)
 
 </div>
