@@ -32,7 +32,7 @@ func NewHandler(db *sql.DB, singBoxService *services.SingBoxService) *Handler {
 func (h *Handler) regenerateAndRestart() error {
 	// Get all nodes from database
 	rows, err := h.db.Query(`
-		SELECT id, name, type, config, inbound_port, username, password, 
+		SELECT id, name, type, config, inbound_port, username, password,
 		       sort_order, node_ip, location, country_code, latency, enabled, created_at, updated_at
 		FROM proxy_nodes
 		ORDER BY sort_order ASC
@@ -63,6 +63,55 @@ func (h *Handler) regenerateAndRestart() error {
 
 	// Restart sing-box
 	return h.singBoxService.Restart()
+}
+
+// reorderRemainingNodes reorders all remaining nodes and reassigns ports to fill gaps
+func (h *Handler) reorderRemainingNodes() error {
+	// Get start port from settings
+	var startPort int
+	if err := h.db.QueryRow("SELECT start_port FROM settings LIMIT 1").Scan(&startPort); err != nil {
+		return err
+	}
+
+	// Get all remaining nodes ordered by current sort_order
+	rows, err := h.db.Query("SELECT id FROM proxy_nodes ORDER BY sort_order ASC")
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+
+	var nodeIDs []int
+	for rows.Next() {
+		var id int
+		if err := rows.Scan(&id); err != nil {
+			return err
+		}
+		nodeIDs = append(nodeIDs, id)
+	}
+
+	// Begin transaction to update all nodes
+	tx, err := h.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+
+	// Update each node with new sort_order and inbound_port
+	for newSortOrder, nodeID := range nodeIDs {
+		newPort := startPort + newSortOrder
+		_, err := tx.Exec(`
+			UPDATE proxy_nodes
+			SET sort_order = ?, inbound_port = ?, updated_at = CURRENT_TIMESTAMP
+			WHERE id = ?
+		`, newSortOrder, newPort, nodeID)
+
+		if err != nil {
+			return err
+		}
+	}
+
+	// Commit transaction
+	return tx.Commit()
 }
 
 // Auth middleware
@@ -409,6 +458,12 @@ func (h *Handler) DeleteNode(c *gin.Context) {
 		return
 	}
 
+	// Reorder remaining nodes to fill the gap
+	if err := h.reorderRemainingNodes(); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to reorder nodes"})
+		return
+	}
+
 	// Regenerate global config and restart sing-box
 	if err := h.regenerateAndRestart(); err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to update sing-box config"})
@@ -459,8 +514,14 @@ func (h *Handler) BatchDeleteNodes(c *gin.Context) {
 		return
 	}
 
-	// Only regenerate and restart once after all deletions
+	// Reorder remaining nodes to fill the gaps
 	if deletedCount > 0 {
+		if err := h.reorderRemainingNodes(); err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to reorder nodes"})
+			return
+		}
+
+		// Only regenerate and restart once after all deletions and reordering
 		if err := h.regenerateAndRestart(); err != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to update sing-box config"})
 			return
