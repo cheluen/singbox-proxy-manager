@@ -10,6 +10,7 @@ const proxyTypes = [
   { value: 'vmess', label: 'VMess' },
   { value: 'hy2', label: 'Hysteria2' },
   { value: 'tuic', label: 'TUIC' },
+  { value: 'trojan', label: 'Trojan' },
 ]
 
 function NodeForm({ node, onSave, onCancel }) {
@@ -112,6 +113,21 @@ function NodeForm({ node, onSave, onCancel }) {
           insecure_skip_verify: values.insecure_skip_verify || false,
           zero_rtt_handshake: values.zero_rtt_handshake || false,
         }
+
+      case 'trojan':
+        return {
+          ...config,
+          password: values.trojan_password || values.password,
+          network: values.network,
+          sni: values.sni,
+          alpn: values.alpn ? values.alpn.split(',').map(s => s.trim()).filter(Boolean) : [],
+          fingerprint: values.fingerprint,
+          insecure: values.insecure || false,
+          host: values.host,
+          path: values.path,
+          service_name: values.service_name,
+          method: values.http_method,
+        }
       
       default:
         return config
@@ -128,6 +144,10 @@ function NodeForm({ node, onSave, onCancel }) {
   }
 
   const initialConfig = node ? parseConfig(node.config) : {}
+  const normalizedConfig = { ...initialConfig }
+  if (Array.isArray(initialConfig.alpn)) {
+    normalizedConfig.alpn = initialConfig.alpn.join(',')
+  }
 
   const initialValues = {
     name: node?.name || '',
@@ -135,9 +155,9 @@ function NodeForm({ node, onSave, onCancel }) {
     inbound_port: node?.inbound_port || 0,
     username: node?.username || '',
     password: node?.password || '',
-    server: initialConfig.server || '',
-    server_port: initialConfig.server_port || 443,
-    ...initialConfig,
+    server: normalizedConfig.server || '',
+    server_port: normalizedConfig.server_port || 443,
+    ...normalizedConfig,
   }
 
   const renderSSFields = () => (
@@ -356,6 +376,51 @@ function NodeForm({ node, onSave, onCancel }) {
     </>
   )
 
+  const renderTrojanFields = () => (
+    <>
+      <Form.Item
+        label="Password"
+        name="trojan_password"
+        rules={[{ required: true, message: 'Required' }]}
+      >
+        <Input.Password />
+      </Form.Item>
+      <Form.Item label="Network" name="network">
+        <Select>
+          <Option value="tcp">TCP</Option>
+          <Option value="ws">WebSocket</Option>
+          <Option value="grpc">gRPC</Option>
+          <Option value="http">HTTP</Option>
+          <Option value="httpupgrade">HTTPUpgrade</Option>
+        </Select>
+      </Form.Item>
+      <Form.Item label="SNI" name="sni">
+        <Input />
+      </Form.Item>
+      <Form.Item label="ALPN (comma-separated)" name="alpn">
+        <Input placeholder="e.g., h2, http/1.1" />
+      </Form.Item>
+      <Form.Item label="Fingerprint" name="fingerprint">
+        <Input placeholder="e.g., chrome, firefox" />
+      </Form.Item>
+      <Form.Item label="Host Header" name="host">
+        <Input placeholder="e.g., example.com" />
+      </Form.Item>
+      <Form.Item label="Path" name="path">
+        <Input placeholder="e.g., /ws" />
+      </Form.Item>
+      <Form.Item label="HTTP Method (for http/h2)" name="http_method">
+        <Input placeholder="e.g., GET" />
+      </Form.Item>
+      <Form.Item label="Service Name (gRPC)" name="service_name">
+        <Input />
+      </Form.Item>
+      <Form.Item name="insecure" valuePropName="checked">
+        <Switch checkedChildren="Skip Verify" unCheckedChildren="Verify" />
+      </Form.Item>
+    </>
+  )
+
   const renderConfigFields = () => {
     switch (proxyType) {
       case 'ss':
@@ -368,6 +433,8 @@ function NodeForm({ node, onSave, onCancel }) {
         return renderHy2Fields()
       case 'tuic':
         return renderTUICFields()
+      case 'trojan':
+        return renderTrojanFields()
       default:
         return null
     }

@@ -19,7 +19,7 @@
 ### 核心功能
 - 🚀 **单进程架构** - 使用单个 sing-box 进程管理所有节点，资源占用低
 - 🔐 **认证保护** - 支持为每个代理节点设置独立的用户名密码
-- 🌐 **多协议支持** - 完整支持 VLESS、VMess、Hysteria2、TUIC、Shadowsocks
+- 🌐 **多协议支持** - 完整支持 VLESS、VMess、Trojan、Hysteria2、TUIC、Shadowsocks
 - 🔄 **双模式代理** - 单端口同时支持 HTTP 和 SOCKS5 协议
 - 📊 **IP 检测** - 实时检测节点 IP、地理位置和延迟
 
@@ -187,11 +187,12 @@ environment:
 |------|------|------|------|
 | HTTP | ✅ | - | 支持认证 |
 | SOCKS5 | ✅ | - | 支持认证 |
-| VLESS | - | ✅ | Reality、WebSocket、gRPC |
-| VMess | - | ✅ | WebSocket、HTTP/2 |
-| Hysteria2 | - | ✅ | UDP 优化 |
-| TUIC | - | ✅ | QUIC 协议 |
-| Shadowsocks | - | ✅ | AEAD 加密 |
+| VLESS | - | ✅ | Reality（pbk/sid/spx）、WS、gRPC、HTTP/Upgrade、ALPN、指纹 |
+| VMess | - | ✅ | WS、HTTP/2、gRPC、HTTPUpgrade、全套安全/填充参数 |
+| Trojan | - | ✅ | TLS/utls 指纹、WS/GRPC/HTTP/HTTPUpgrade 传输、SNI/ALPN、可跳过校验 |
+| Hysteria2 | - | ✅ | brutal/obfs/salamander、带宽/网络/跳点参数、TLS 指纹 |
+| TUIC | - | ✅ | QUIC/UDP 模式、0-RTT、心跳、SNI/ALPN、RTT 优化 |
+| Shadowsocks | - | ✅ | AEAD/2022、UDP over TCP、插件参数 |
 
 > **说明**：入站端口使用 mixed 模式，单端口同时支持 HTTP 和 SOCKS5
 

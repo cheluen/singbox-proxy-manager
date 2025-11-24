@@ -245,6 +245,7 @@ function Dashboard({ onLogout }) {
 
     setCheckingIP(true)
     let completed = 0
+    let failed = 0
     const total = selectedNodeIds.length
 
     // Open notification with initial progress
@@ -267,6 +268,9 @@ function Dashboard({ onLogout }) {
           completed++
         } catch (error) {
           console.error(`Failed to check IP for node ${id}:`, error)
+          failed++
+          const msg = error.response?.data?.error || t('server_error')
+          message.error(`ID ${id}: ${msg}`)
         }
 
         // Update notification with current progress (only if not the last one)
@@ -284,10 +288,18 @@ function Dashboard({ onLogout }) {
 
       // Close the progress notification and show success
       notification.destroy(key)
-      notification.success({
-        message: t('batch_check_ip_success').replace('{{count}}', completed.toString()),
-        duration: 3,
-      })
+      if (completed > 0) {
+        notification.success({
+          message: t('batch_check_ip_success').replace('{{count}}', completed.toString()),
+          duration: 3,
+        })
+      }
+      if (failed > 0) {
+        notification.warning({
+          message: `${failed} ${t('status_unverified')}`,
+          duration: 4,
+        })
+      }
 
       loadNodes()
     } finally {
@@ -487,6 +499,19 @@ function Dashboard({ onLogout }) {
       key: 'latency',
       width: 100,
       render: (latency) => latency > 0 ? `${latency}ms` : '-',
+    },
+    {
+      title: t('status'),
+      key: 'status',
+      width: 120,
+      render: (_, record) => {
+        const healthy = record.node_ip && record.latency > 0
+        return (
+          <Tag color={healthy ? 'green' : 'red'}>
+            {healthy ? t('status_healthy') : t('status_unverified')}
+          </Tag>
+        )
+      },
     },
     {
       title: t('enabled'),
