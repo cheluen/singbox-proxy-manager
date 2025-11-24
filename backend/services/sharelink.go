@@ -13,19 +13,21 @@ import (
 // ParseShareLink parses various proxy share link formats
 func ParseShareLink(link string) (interface{}, string, string, error) {
 	link = strings.TrimSpace(link)
-	
+
 	if strings.HasPrefix(link, "ss://") {
 		return parseSSLink(link)
 	} else if strings.HasPrefix(link, "vless://") {
 		return parseVLESSLink(link)
 	} else if strings.HasPrefix(link, "vmess://") {
 		return parseVMESSLink(link)
+	} else if strings.HasPrefix(link, "trojan://") {
+		return parseTrojanLink(link)
 	} else if strings.HasPrefix(link, "hysteria2://") || strings.HasPrefix(link, "hy2://") {
 		return parseHysteria2Link(link)
 	} else if strings.HasPrefix(link, "tuic://") {
 		return parseTUICLink(link)
 	}
-	
+
 	return nil, "", "", fmt.Errorf("unsupported link format")
 }
 
@@ -33,7 +35,7 @@ func ParseShareLink(link string) (interface{}, string, string, error) {
 // Format: ss://base64(method:password)@server:port?params#name
 func parseSSLink(link string) (interface{}, string, string, error) {
 	link = strings.TrimPrefix(link, "ss://")
-	
+
 	// Split name if exists
 	parts := strings.SplitN(link, "#", 2)
 	link = parts[0]
@@ -41,7 +43,7 @@ func parseSSLink(link string) (interface{}, string, string, error) {
 	if len(parts) == 2 {
 		name, _ = url.QueryUnescape(parts[1])
 	}
-	
+
 	// Split params
 	parts = strings.SplitN(link, "?", 2)
 	link = parts[0]
@@ -49,17 +51,17 @@ func parseSSLink(link string) (interface{}, string, string, error) {
 	if len(parts) == 2 {
 		params, _ = url.ParseQuery(parts[1])
 	}
-	
+
 	// Split server part
 	atIndex := strings.LastIndex(link, "@")
 	if atIndex == -1 {
 		return nil, "", "", fmt.Errorf("invalid ss link format")
 	}
-	
+
 	// Decode credentials
 	credentials := link[:atIndex]
 	serverPart := link[atIndex+1:]
-	
+
 	decoded, err := base64.RawURLEncoding.DecodeString(credentials)
 	if err != nil {
 		decoded, err = base64.StdEncoding.DecodeString(credentials)
@@ -67,28 +69,28 @@ func parseSSLink(link string) (interface{}, string, string, error) {
 			return nil, "", "", fmt.Errorf("failed to decode credentials")
 		}
 	}
-	
+
 	// Parse method:password
 	credParts := strings.SplitN(string(decoded), ":", 2)
 	if len(credParts) != 2 {
 		return nil, "", "", fmt.Errorf("invalid credentials format")
 	}
-	
+
 	method := credParts[0]
 	password := credParts[1]
-	
+
 	// Parse server:port
 	serverParts := strings.SplitN(serverPart, ":", 2)
 	if len(serverParts) != 2 {
 		return nil, "", "", fmt.Errorf("invalid server format")
 	}
-	
+
 	server := serverParts[0]
 	port, err := strconv.Atoi(serverParts[1])
 	if err != nil {
 		return nil, "", "", fmt.Errorf("invalid port")
 	}
-	
+
 	config := models.SSConfig{
 		Server:     server,
 		ServerPort: port,
@@ -97,12 +99,12 @@ func parseSSLink(link string) (interface{}, string, string, error) {
 		Plugin:     params.Get("plugin"),
 		PluginOpts: params.Get("plugin-opts"),
 	}
-	
+
 	// Parse additional parameters
 	if params.Get("udp_over_tcp") == "1" || params.Get("udp_over_tcp") == "true" {
 		config.UDPOverTCP = true
 	}
-	
+
 	return config, "ss", name, nil
 }
 
@@ -110,7 +112,7 @@ func parseSSLink(link string) (interface{}, string, string, error) {
 // Format: vless://uuid@server:port?params#name
 func parseVLESSLink(link string) (interface{}, string, string, error) {
 	link = strings.TrimPrefix(link, "vless://")
-	
+
 	// Split name if exists
 	parts := strings.SplitN(link, "#", 2)
 	link = parts[0]
@@ -118,7 +120,7 @@ func parseVLESSLink(link string) (interface{}, string, string, error) {
 	if len(parts) == 2 {
 		name, _ = url.QueryUnescape(parts[1])
 	}
-	
+
 	// Split params
 	parts = strings.SplitN(link, "?", 2)
 	basicPart := parts[0]
@@ -126,58 +128,58 @@ func parseVLESSLink(link string) (interface{}, string, string, error) {
 	if len(parts) == 2 {
 		params, _ = url.ParseQuery(parts[1])
 	}
-	
+
 	// Parse uuid@server:port
 	atIndex := strings.LastIndex(basicPart, "@")
 	if atIndex == -1 {
 		return nil, "", "", fmt.Errorf("invalid vless link format")
 	}
-	
+
 	uuid := basicPart[:atIndex]
 	serverPart := basicPart[atIndex+1:]
-	
+
 	serverParts := strings.SplitN(serverPart, ":", 2)
 	if len(serverParts) != 2 {
 		return nil, "", "", fmt.Errorf("invalid server format")
 	}
-	
+
 	server := serverParts[0]
 	port, err := strconv.Atoi(serverParts[1])
 	if err != nil {
 		return nil, "", "", fmt.Errorf("invalid port")
 	}
-	
+
 	config := models.VLESSConfig{
-		Server:      server,
-		ServerPort:  port,
-		UUID:        uuid,
-		Flow:        params.Get("flow"),
-		Encryption:  params.Get("encryption"),
-		Network:     params.Get("type"),
-		Security:    params.Get("security"),
-		SNI:         params.Get("sni"),
-		Fingerprint: params.Get("fp"),
-		PublicKey:   params.Get("pbk"),
-		ShortID:     params.Get("sid"),
-		SpiderX:     params.Get("spx"),
-		Path:        params.Get("path"),
-		Host:        params.Get("host"),
-		ServiceName: params.Get("serviceName"),
-		HeaderType:  params.Get("headerType"),
-		Seed:        params.Get("seed"),
+		Server:         server,
+		ServerPort:     port,
+		UUID:           uuid,
+		Flow:           params.Get("flow"),
+		Encryption:     params.Get("encryption"),
+		Network:        params.Get("type"),
+		Security:       params.Get("security"),
+		SNI:            params.Get("sni"),
+		Fingerprint:    params.Get("fp"),
+		PublicKey:      params.Get("pbk"),
+		ShortID:        params.Get("sid"),
+		SpiderX:        params.Get("spx"),
+		Path:           params.Get("path"),
+		Host:           params.Get("host"),
+		ServiceName:    params.Get("serviceName"),
+		HeaderType:     params.Get("headerType"),
+		Seed:           params.Get("seed"),
 		PacketEncoding: params.Get("packetEncoding"),
 	}
-	
+
 	// Parse insecure
 	if params.Get("allowInsecure") == "1" || params.Get("insecure") == "1" {
 		config.Insecure = true
 	}
-	
+
 	// Handle ALPN
 	if alpn := params.Get("alpn"); alpn != "" {
 		config.ALPN = alpn
 	}
-	
+
 	// Handle max early data
 	if med := params.Get("maxEarlyData"); med != "" {
 		if medInt, err := strconv.Atoi(med); err == nil {
@@ -185,13 +187,13 @@ func parseVLESSLink(link string) (interface{}, string, string, error) {
 		}
 	}
 	config.EarlyDataHeader = params.Get("earlyDataHeaderName")
-	
+
 	// HTTPUpgrade specific
 	if config.Network == "httpupgrade" {
 		config.HTTPUpgradePath = params.Get("path")
 		config.HTTPUpgradeHost = params.Get("host")
 	}
-	
+
 	return config, "vless", name, nil
 }
 
@@ -199,7 +201,7 @@ func parseVLESSLink(link string) (interface{}, string, string, error) {
 // Format: vmess://base64(json)
 func parseVMESSLink(link string) (interface{}, string, string, error) {
 	link = strings.TrimPrefix(link, "vmess://")
-	
+
 	decoded, err := base64.RawURLEncoding.DecodeString(link)
 	if err != nil {
 		decoded, err = base64.StdEncoding.DecodeString(link)
@@ -207,7 +209,7 @@ func parseVMESSLink(link string) (interface{}, string, string, error) {
 			return nil, "", "", fmt.Errorf("failed to decode vmess link")
 		}
 	}
-	
+
 	var vmessJSON struct {
 		Add      string      `json:"add"`
 		Port     interface{} `json:"port"`
@@ -232,16 +234,16 @@ func parseVMESSLink(link string) (interface{}, string, string, error) {
 		GlobalPadding   interface{} `json:"globalPadding"`
 		AuthLength      interface{} `json:"authenticatedLength"`
 	}
-	
+
 	if err := json.Unmarshal(decoded, &vmessJSON); err != nil {
 		return nil, "", "", fmt.Errorf("failed to parse vmess json")
 	}
-	
+
 	name := vmessJSON.PS
 	if name == "" {
 		name = "VMess Node"
 	}
-	
+
 	port := 0
 	switch v := vmessJSON.Port.(type) {
 	case string:
@@ -251,7 +253,7 @@ func parseVMESSLink(link string) (interface{}, string, string, error) {
 	case int:
 		port = v
 	}
-	
+
 	alterID := 0
 	switch v := vmessJSON.AID.(type) {
 	case string:
@@ -261,7 +263,7 @@ func parseVMESSLink(link string) (interface{}, string, string, error) {
 	case int:
 		alterID = v
 	}
-	
+
 	config := models.VMESSConfig{
 		Server:      vmessJSON.Add,
 		ServerPort:  port,
@@ -278,7 +280,7 @@ func parseVMESSLink(link string) (interface{}, string, string, error) {
 		HeaderType:  vmessJSON.Type,
 		Seed:        vmessJSON.Seed,
 	}
-	
+
 	// Parse insecure
 	switch v := vmessJSON.Insecure.(type) {
 	case bool:
@@ -288,7 +290,7 @@ func parseVMESSLink(link string) (interface{}, string, string, error) {
 	case float64:
 		config.Insecure = v == 1
 	}
-	
+
 	// Parse max early data
 	switch v := vmessJSON.MaxEarlyData.(type) {
 	case string:
@@ -301,7 +303,7 @@ func parseVMESSLink(link string) (interface{}, string, string, error) {
 		config.MaxEarlyData = v
 	}
 	config.EarlyDataHeader = vmessJSON.EarlyDataHeader
-	
+
 	// Parse global padding
 	switch v := vmessJSON.GlobalPadding.(type) {
 	case bool:
@@ -311,7 +313,7 @@ func parseVMESSLink(link string) (interface{}, string, string, error) {
 	case float64:
 		config.GlobalPadding = v == 1
 	}
-	
+
 	// Parse authenticated length
 	switch v := vmessJSON.AuthLength.(type) {
 	case bool:
@@ -321,35 +323,34 @@ func parseVMESSLink(link string) (interface{}, string, string, error) {
 	case float64:
 		config.AuthenticatedLength = v == 1
 	}
-	
+
 	// Handle service name for gRPC
 	if vmessJSON.Net == "grpc" {
 		config.ServiceName = vmessJSON.Path
 	}
-	
+
 	// HTTPUpgrade specific
 	if vmessJSON.Net == "httpupgrade" {
 		config.HTTPUpgradePath = vmessJSON.Path
 		config.HTTPUpgradeHost = vmessJSON.Host
 	}
-	
+
 	return config, "vmess", name, nil
 }
 
-// parseHysteria2Link parses Hysteria2 share links
-// Format: hysteria2://password@server:port?params#name or hy2://...
-func parseHysteria2Link(link string) (interface{}, string, string, error) {
-	link = strings.TrimPrefix(link, "hysteria2://")
-	link = strings.TrimPrefix(link, "hy2://")
-	
+// parseTrojanLink parses Trojan share links
+// Format: trojan://password@server:port?params#name
+func parseTrojanLink(link string) (interface{}, string, string, error) {
+	link = strings.TrimPrefix(link, "trojan://")
+
 	// Split name if exists
 	parts := strings.SplitN(link, "#", 2)
 	link = parts[0]
-	name := "Hysteria2 Node"
+	name := "Trojan Node"
 	if len(parts) == 2 {
 		name, _ = url.QueryUnescape(parts[1])
 	}
-	
+
 	// Split params
 	parts = strings.SplitN(link, "?", 2)
 	basicPart := parts[0]
@@ -357,33 +358,120 @@ func parseHysteria2Link(link string) (interface{}, string, string, error) {
 	if len(parts) == 2 {
 		params, _ = url.ParseQuery(parts[1])
 	}
-	
+
 	// Parse password@server:port
 	atIndex := strings.LastIndex(basicPart, "@")
 	if atIndex == -1 {
-		return nil, "", "", fmt.Errorf("invalid hysteria2 link format")
+		return nil, "", "", fmt.Errorf("invalid trojan link format")
 	}
-	
 	password := basicPart[:atIndex]
 	serverPart := basicPart[atIndex+1:]
-	
+
 	serverParts := strings.SplitN(serverPart, ":", 2)
 	if len(serverParts) != 2 {
 		return nil, "", "", fmt.Errorf("invalid server format")
 	}
-	
+
 	server := serverParts[0]
 	port, err := strconv.Atoi(serverParts[1])
 	if err != nil {
 		return nil, "", "", fmt.Errorf("invalid port")
 	}
-	
+
+	network := params.Get("type")
+	if network == "" {
+		network = params.Get("transport")
+	}
+
+	insecure := params.Get("allowInsecure") == "1" || params.Get("insecure") == "1"
+	sni := params.Get("sni")
+	if sni == "" {
+		sni = params.Get("peer")
+	}
+
+	alpn := []string{}
+	if raw := params.Get("alpn"); raw != "" {
+		for _, v := range strings.Split(raw, ",") {
+			v = strings.TrimSpace(v)
+			if v != "" {
+				alpn = append(alpn, v)
+			}
+		}
+	}
+
+	cfg := models.TrojanConfig{
+		Server:      server,
+		ServerPort:  port,
+		Password:    password,
+		Network:     network,
+		SNI:         sni,
+		ALPN:        alpn,
+		Fingerprint: params.Get("fp"),
+		Insecure:    insecure,
+		Host:        params.Get("host"),
+		Path:        params.Get("path"),
+		ServiceName: params.Get("serviceName"),
+		HTTPMethod:  params.Get("method"),
+	}
+
+	if cfg.ServiceName == "" && params.Get("service_name") != "" {
+		cfg.ServiceName = params.Get("service_name")
+	}
+	if cfg.ServiceName == "" && params.Get("grpc-service-name") != "" {
+		cfg.ServiceName = params.Get("grpc-service-name")
+	}
+
+	return cfg, "trojan", name, nil
+}
+
+// parseHysteria2Link parses Hysteria2 share links
+// Format: hysteria2://password@server:port?params#name or hy2://...
+func parseHysteria2Link(link string) (interface{}, string, string, error) {
+	link = strings.TrimPrefix(link, "hysteria2://")
+	link = strings.TrimPrefix(link, "hy2://")
+
+	// Split name if exists
+	parts := strings.SplitN(link, "#", 2)
+	link = parts[0]
+	name := "Hysteria2 Node"
+	if len(parts) == 2 {
+		name, _ = url.QueryUnescape(parts[1])
+	}
+
+	// Split params
+	parts = strings.SplitN(link, "?", 2)
+	basicPart := parts[0]
+	params := url.Values{}
+	if len(parts) == 2 {
+		params, _ = url.ParseQuery(parts[1])
+	}
+
+	// Parse password@server:port
+	atIndex := strings.LastIndex(basicPart, "@")
+	if atIndex == -1 {
+		return nil, "", "", fmt.Errorf("invalid hysteria2 link format")
+	}
+
+	password := basicPart[:atIndex]
+	serverPart := basicPart[atIndex+1:]
+
+	serverParts := strings.SplitN(serverPart, ":", 2)
+	if len(serverParts) != 2 {
+		return nil, "", "", fmt.Errorf("invalid server format")
+	}
+
+	server := serverParts[0]
+	port, err := strconv.Atoi(serverParts[1])
+	if err != nil {
+		return nil, "", "", fmt.Errorf("invalid port")
+	}
+
 	upMbps, _ := strconv.Atoi(params.Get("up"))
 	downMbps, _ := strconv.Atoi(params.Get("down"))
 	brutalUpMbps, _ := strconv.Atoi(params.Get("brutal_up_mbps"))
 	brutalDownMbps, _ := strconv.Atoi(params.Get("brutal_down_mbps"))
 	insecure := params.Get("insecure") == "1" || params.Get("allowInsecure") == "1"
-	
+
 	config := models.Hysteria2Config{
 		Server:             server,
 		ServerPort:         port,
@@ -401,12 +489,12 @@ func parseHysteria2Link(link string) (interface{}, string, string, error) {
 		Network:            params.Get("network"),
 		HopInterval:        params.Get("hopInterval"),
 	}
-	
+
 	// Handle ALPN
 	if alpn := params.Get("alpn"); alpn != "" {
 		config.ALPN = strings.Split(alpn, ",")
 	}
-	
+
 	return config, "hy2", name, nil
 }
 
@@ -414,7 +502,7 @@ func parseHysteria2Link(link string) (interface{}, string, string, error) {
 // Format: tuic://uuid:password@server:port?params#name
 func parseTUICLink(link string) (interface{}, string, string, error) {
 	link = strings.TrimPrefix(link, "tuic://")
-	
+
 	// Split name if exists
 	parts := strings.SplitN(link, "#", 2)
 	link = parts[0]
@@ -422,7 +510,7 @@ func parseTUICLink(link string) (interface{}, string, string, error) {
 	if len(parts) == 2 {
 		name, _ = url.QueryUnescape(parts[1])
 	}
-	
+
 	// Split params
 	parts = strings.SplitN(link, "?", 2)
 	basicPart := parts[0]
@@ -430,40 +518,40 @@ func parseTUICLink(link string) (interface{}, string, string, error) {
 	if len(parts) == 2 {
 		params, _ = url.ParseQuery(parts[1])
 	}
-	
+
 	// Parse uuid:password@server:port
 	atIndex := strings.LastIndex(basicPart, "@")
 	if atIndex == -1 {
 		return nil, "", "", fmt.Errorf("invalid tuic link format")
 	}
-	
+
 	credPart := basicPart[:atIndex]
 	serverPart := basicPart[atIndex+1:]
-	
+
 	credParts := strings.SplitN(credPart, ":", 2)
 	if len(credParts) != 2 {
 		return nil, "", "", fmt.Errorf("invalid credentials format")
 	}
-	
+
 	uuid := credParts[0]
 	password := credParts[1]
-	
+
 	serverParts := strings.SplitN(serverPart, ":", 2)
 	if len(serverParts) != 2 {
 		return nil, "", "", fmt.Errorf("invalid server format")
 	}
-	
+
 	server := serverParts[0]
 	port, err := strconv.Atoi(serverParts[1])
 	if err != nil {
 		return nil, "", "", fmt.Errorf("invalid port")
 	}
-	
+
 	insecure := params.Get("insecure") == "1" || params.Get("allowInsecure") == "1"
 	zeroRTT := params.Get("zero_rtt_handshake") == "1"
 	disableSNI := params.Get("disable_sni") == "1"
 	reduceRTT := params.Get("reduce_rtt") == "1"
-	
+
 	config := models.TUICConfig{
 		Server:             server,
 		ServerPort:         port,
@@ -480,11 +568,11 @@ func parseTUICLink(link string) (interface{}, string, string, error) {
 		Heartbeat:          params.Get("heartbeat"),
 		Network:            params.Get("network"),
 	}
-	
+
 	// Handle ALPN
 	if alpn := params.Get("alpn"); alpn != "" {
 		config.ALPN = strings.Split(alpn, ",")
 	}
-	
+
 	return config, "tuic", name, nil
 }

@@ -45,6 +45,9 @@ export default {
   node_ip: 'Node IP',
   location: 'Location',
   latency: 'Latency',
+  status: 'Status',
+  status_healthy: 'Healthy',
+  status_unverified: 'Not Tested/Failed',
   actions: 'Actions',
   auto_assign: 'Auto Assign',
   

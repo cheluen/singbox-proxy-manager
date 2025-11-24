@@ -15,16 +15,18 @@ import (
 )
 
 type Handler struct {
-	db              *sql.DB
-	singBoxService  *services.SingBoxService
-	sessionToken    string
-	sessionExpiry   time.Time
+	db             *sql.DB
+	singBoxService *services.SingBoxService
+	sessionToken   string
+	sessionExpiry  time.Time
+	checkProxyIP   func(proxyAddr string, username string, password string) (*services.IPInfo, error)
 }
 
 func NewHandler(db *sql.DB, singBoxService *services.SingBoxService) *Handler {
 	return &Handler{
 		db:             db,
 		singBoxService: singBoxService,
+		checkProxyIP:   services.CheckProxyIP,
 	}
 }
 
@@ -254,7 +256,7 @@ func (h *Handler) CreateNode(c *gin.Context) {
 		// Auto-assign based on first node's port
 		var firstNodePort int
 		err := h.db.QueryRow("SELECT inbound_port FROM proxy_nodes ORDER BY sort_order ASC LIMIT 1").Scan(&firstNodePort)
-		
+
 		if err == sql.ErrNoRows {
 			// This is the first node, use start_port
 			var startPort int
@@ -274,7 +276,7 @@ func (h *Handler) CreateNode(c *gin.Context) {
 		INSERT INTO proxy_nodes (name, type, config, inbound_port, username, password, sort_order, latency, enabled)
 		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
 	`, req.Name, req.Type, req.Config, req.InboundPort, req.Username, req.Password, req.SortOrder, 0, req.Enabled)
-	
+
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to create node"})
 		return
@@ -298,25 +300,25 @@ func (h *Handler) BatchImportNodes(c *gin.Context) {
 		Links   []string `json:"links"`
 		Enabled bool     `json:"enabled"`
 	}
-	
+
 	if err := c.BindJSON(&req); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid request"})
 		return
 	}
-	
+
 	if len(req.Links) == 0 {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "no links provided"})
 		return
 	}
-	
+
 	results := []map[string]interface{}{}
 	successCount := 0
-	
+
 	for _, link := range req.Links {
 		result := map[string]interface{}{
 			"link": link,
 		}
-		
+
 		// Parse share link
 		parsedConfig, proxyType, name, err := services.ParseShareLink(link)
 		if err != nil {
@@ -325,7 +327,7 @@ func (h *Handler) BatchImportNodes(c *gin.Context) {
 			results = append(results, result)
 			continue
 		}
-		
+
 		// Convert to JSON
 		configJSON, err := json.Marshal(parsedConfig)
 		if err != nil {
@@ -334,17 +336,17 @@ func (h *Handler) BatchImportNodes(c *gin.Context) {
 			results = append(results, result)
 			continue
 		}
-		
+
 		// Get max sort order
 		var maxOrder int
 		h.db.QueryRow("SELECT COALESCE(MAX(sort_order), -1) FROM proxy_nodes").Scan(&maxOrder)
 		sortOrder := maxOrder + 1
-		
+
 		// Auto-assign inbound port
 		var inboundPort int
 		var firstNodePort int
 		err = h.db.QueryRow("SELECT inbound_port FROM proxy_nodes ORDER BY sort_order ASC LIMIT 1").Scan(&firstNodePort)
-		
+
 		if err == sql.ErrNoRows {
 			// This is the first node, use start_port
 			var startPort int
@@ -359,22 +361,22 @@ func (h *Handler) BatchImportNodes(c *gin.Context) {
 			results = append(results, result)
 			continue
 		}
-		
+
 		// Insert node
 		dbResult, err := h.db.Exec(`
 			INSERT INTO proxy_nodes (name, type, config, inbound_port, username, password, sort_order, latency, enabled)
 			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
 		`, name, proxyType, string(configJSON), inboundPort, "", "", sortOrder, 0, req.Enabled)
-		
+
 		if err != nil {
 			result["success"] = false
 			result["error"] = "failed to create node"
 			results = append(results, result)
 			continue
 		}
-		
+
 		id, _ := dbResult.LastInsertId()
-		
+
 		result["success"] = true
 		result["id"] = id
 		result["name"] = name
@@ -390,7 +392,7 @@ func (h *Handler) BatchImportNodes(c *gin.Context) {
 			return
 		}
 	}
-	
+
 	c.JSON(http.StatusOK, gin.H{
 		"total":   len(req.Links),
 		"success": successCount,
@@ -428,7 +430,7 @@ func (h *Handler) UpdateNode(c *gin.Context) {
 		    enabled = ?, updated_at = CURRENT_TIMESTAMP
 		WHERE id = ?
 	`, req.Name, req.Type, req.Config, req.Username, req.Password, req.Enabled, id)
-	
+
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to update node"})
 		return
@@ -529,7 +531,7 @@ func (h *Handler) BatchDeleteNodes(c *gin.Context) {
 	}
 
 	c.JSON(http.StatusOK, gin.H{
-		"message": "nodes deleted",
+		"message":       "nodes deleted",
 		"deleted_count": deletedCount,
 	})
 }
@@ -568,7 +570,7 @@ func (h *Handler) ReorderNodes(c *gin.Context) {
 			SET sort_order = ?, inbound_port = ?, updated_at = CURRENT_TIMESTAMP
 			WHERE id = ?
 		`, order.SortOrder, newPort, order.ID)
-		
+
 		if err != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to update order"})
 			return
@@ -603,7 +605,7 @@ func (h *Handler) CheckNodeIP(c *gin.Context) {
 	err = h.db.QueryRow(`
 		SELECT id, name, inbound_port, username, password, enabled FROM proxy_nodes WHERE id = ?
 	`, id).Scan(&node.ID, &nodeName, &node.InboundPort, &node.Username, &node.Password, &node.Enabled)
-	
+
 	if err != nil {
 		fmt.Printf("[API] Node %d not found in database: %v\n", id, err)
 		c.JSON(http.StatusNotFound, gin.H{"error": "node not found"})
@@ -621,14 +623,37 @@ func (h *Handler) CheckNodeIP(c *gin.Context) {
 
 	// Check IP through the proxy with authentication
 	proxyAddr := fmt.Sprintf("127.0.0.1:%d", node.InboundPort)
-	ipInfo, err := services.CheckProxyIP(proxyAddr, node.Username, node.Password)
+	ipInfo, err := h.checkProxyIP(proxyAddr, node.Username, node.Password)
 	if err != nil {
 		fmt.Printf("[API] Failed to check IP for node %d: %v\n", id, err)
+		// Clear stale status on failure so UI can show the node as invalid
+		if _, clearErr := h.db.Exec(`
+			UPDATE proxy_nodes 
+			SET node_ip = '', location = '', country_code = '', latency = 0, updated_at = CURRENT_TIMESTAMP
+			WHERE id = ?
+		`, id); clearErr != nil {
+			fmt.Printf("[API] Failed to clear node %d status after error: %v\n", id, clearErr)
+		}
 		c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("failed to check IP: %v", err)})
 		return
 	}
 
-	fmt.Printf("[API] Successfully checked IP for node %d: %s (%s), latency: %dms\n", 
+	// If HTTP path failed but SOCKS5 succeeded, treat it as an error because mixed inbound should serve both.
+	if ipInfo.Transport != "" && ipInfo.Transport != "http" {
+		msg := "http proxy failed while socks5 succeeded"
+		if ipInfo.HTTPError != "" {
+			msg = ipInfo.HTTPError
+		}
+		_, _ = h.db.Exec(`
+			UPDATE proxy_nodes 
+			SET node_ip = '', location = '', country_code = '', latency = 0, updated_at = CURRENT_TIMESTAMP
+			WHERE id = ?
+		`, id)
+		c.JSON(http.StatusBadGateway, gin.H{"error": msg})
+		return
+	}
+
+	fmt.Printf("[API] Successfully checked IP for node %d: %s (%s), latency: %dms\n",
 		id, ipInfo.IP, ipInfo.Location, ipInfo.Latency)
 
 	// Update node with IP info, location, country code, and latency
@@ -637,7 +662,7 @@ func (h *Handler) CheckNodeIP(c *gin.Context) {
 		SET node_ip = ?, location = ?, country_code = ?, latency = ?, updated_at = CURRENT_TIMESTAMP
 		WHERE id = ?
 	`, ipInfo.IP, ipInfo.Location, ipInfo.CountryCode, ipInfo.Latency, id)
-	
+
 	if err != nil {
 		fmt.Printf("[API] Failed to update node %d in database: %v\n", id, err)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to update node"})
@@ -673,7 +698,7 @@ func (h *Handler) BatchSetAuth(c *gin.Context) {
 			SET username = ?, password = ?, updated_at = CURRENT_TIMESTAMP
 			WHERE id = ?
 		`, req.Username, req.Password, nodeID)
-		
+
 		if err != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to update auth"})
 			return

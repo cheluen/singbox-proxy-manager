@@ -24,11 +24,11 @@ func NewSingBoxService(configDir string) *SingBoxService {
 
 // SingBoxConfig represents sing-box configuration structure
 type SingBoxConfig struct {
-	Log      LogConfig        `json:"log"`
-	DNS      *DNSConfig       `json:"dns,omitempty"`
-	Inbounds []InboundConfig  `json:"inbounds"`
+	Log       LogConfig        `json:"log"`
+	DNS       *DNSConfig       `json:"dns,omitempty"`
+	Inbounds  []InboundConfig  `json:"inbounds"`
 	Outbounds []OutboundConfig `json:"outbounds"`
-	Route    RouteConfig      `json:"route,omitempty"`
+	Route     RouteConfig      `json:"route,omitempty"`
 }
 
 type DNSConfig struct {
@@ -118,6 +118,10 @@ func (s *SingBoxService) GenerateGlobalConfig(nodes []models.ProxyNode) error {
 			Tag:    inboundTag,
 			Listen: "::",
 			Port:   node.InboundPort,
+			Extra: map[string]interface{}{
+				"sniff":                      true,
+				"sniff_override_destination": true,
+			},
 		}
 
 		// Add authentication if provided
@@ -239,6 +243,8 @@ func (s *SingBoxService) generateOutbound(node *models.ProxyNode, tag string) (O
 		return s.generateHysteria2Outbound(parsedConfig.(*models.Hysteria2Config), tag)
 	case "tuic":
 		return s.generateTUICOutbound(parsedConfig.(*models.TUICConfig), tag)
+	case "trojan":
+		return s.generateTrojanOutbound(parsedConfig.(*models.TrojanConfig), tag)
 	default:
 		return OutboundConfig{}, fmt.Errorf("unsupported proxy type: %s", node.Type)
 	}
@@ -648,6 +654,97 @@ func (s *SingBoxService) generateTUICOutbound(config *models.TUICConfig, tag str
 		tls["insecure"] = true
 	}
 	outbound.Extra["tls"] = tls
+
+	return outbound, nil
+}
+
+func (s *SingBoxService) generateTrojanOutbound(config *models.TrojanConfig, tag string) (OutboundConfig, error) {
+	outbound := OutboundConfig{
+		Type:   "trojan",
+		Tag:    tag,
+		Server: config.Server,
+		Port:   config.ServerPort,
+		Extra: map[string]interface{}{
+			"password":        config.Password,
+			"domain_strategy": "prefer_ipv4",
+		},
+	}
+
+	// TLS configuration (Trojan requires TLS)
+	tls := map[string]interface{}{
+		"enabled": true,
+	}
+	if config.SNI != "" {
+		tls["server_name"] = config.SNI
+	}
+	if len(config.ALPN) > 0 {
+		tls["alpn"] = config.ALPN
+	}
+	if config.Fingerprint != "" {
+		tls["utls"] = map[string]interface{}{
+			"enabled":     true,
+			"fingerprint": config.Fingerprint,
+		}
+	}
+	if config.Insecure {
+		tls["insecure"] = true
+	}
+	outbound.Extra["tls"] = tls
+
+	// Transport configuration
+	if config.Network != "" && config.Network != "tcp" {
+		transport := map[string]interface{}{
+			"type": config.Network,
+		}
+
+		switch config.Network {
+		case "ws":
+			if config.Path != "" {
+				transport["path"] = config.Path
+			}
+			if config.Host != "" || len(config.Headers) > 0 {
+				headers := map[string]string{}
+				if config.Host != "" {
+					headers["Host"] = config.Host
+				}
+				for k, v := range config.Headers {
+					headers[k] = v
+				}
+				if len(headers) > 0 {
+					transport["headers"] = headers
+				}
+			}
+		case "grpc":
+			if config.ServiceName != "" {
+				transport["service_name"] = config.ServiceName
+			}
+		case "http", "h2":
+			if config.Host != "" {
+				transport["host"] = []string{config.Host}
+			}
+			if config.Path != "" {
+				transport["path"] = config.Path
+			}
+			if config.HTTPMethod != "" {
+				transport["method"] = config.HTTPMethod
+			}
+		case "httpupgrade":
+			if config.Path != "" {
+				transport["path"] = config.Path
+			}
+			if config.Host != "" {
+				transport["host"] = config.Host
+			}
+		}
+
+		outbound.Extra["transport"] = transport
+		outbound.Extra["network"] = config.Network
+	}
+
+	// Multiplex
+	if config.MultiplexConfig != nil {
+		outbound.Extra["multiplex"] = config.MultiplexConfig
+	}
 
 	return outbound, nil
 }

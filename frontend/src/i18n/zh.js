@@ -45,6 +45,9 @@ export default {
   node_ip: '节点IP',
   location: '位置',
   latency: '延迟',
+  status: '状态',
+  status_healthy: '可用',
+  status_unverified: '未检测/失效',
   actions: '操作',
   auto_assign: '自动分配',
   

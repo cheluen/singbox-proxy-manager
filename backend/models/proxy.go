@@ -10,7 +10,7 @@ import (
 type ProxyNode struct {
 	ID          int       `json:"id"`
 	Name        string    `json:"name"`
-	Type        string    `json:"type"` // ss, vless, vmess, hy2, tuic
+	Type        string    `json:"type"`   // ss, vless, vmess, hy2, tuic
 	Config      string    `json:"config"` // JSON string of protocol-specific config
 	InboundPort int       `json:"inbound_port"`
 	Username    string    `json:"username"`
@@ -27,15 +27,15 @@ type ProxyNode struct {
 
 // SSConfig represents Shadowsocks configuration
 type SSConfig struct {
-	Server            string `json:"server"`
-	ServerPort        int    `json:"server_port"`
-	Method            string `json:"method"`
-	Password          string `json:"password"`
-	Plugin            string `json:"plugin,omitempty"`
-	PluginOpts        string `json:"plugin_opts,omitempty"`
+	Server     string `json:"server"`
+	ServerPort int    `json:"server_port"`
+	Method     string `json:"method"`
+	Password   string `json:"password"`
+	Plugin     string `json:"plugin,omitempty"`
+	PluginOpts string `json:"plugin_opts,omitempty"`
 	// Additional parameters
-	UDPOverTCP        bool   `json:"udp_over_tcp,omitempty"`
-	MultiplexConfig   map[string]interface{} `json:"multiplex,omitempty"`
+	UDPOverTCP      bool                   `json:"udp_over_tcp,omitempty"`
+	MultiplexConfig map[string]interface{} `json:"multiplex,omitempty"`
 }
 
 // VLESSConfig represents VLESS configuration
@@ -45,7 +45,7 @@ type VLESSConfig struct {
 	UUID        string `json:"uuid"`
 	Flow        string `json:"flow,omitempty"`
 	Encryption  string `json:"encryption,omitempty"`
-	Network     string `json:"network,omitempty"` // tcp, kcp, ws, http, quic, grpc, httpupgrade
+	Network     string `json:"network,omitempty"`  // tcp, kcp, ws, http, quic, grpc, httpupgrade
 	Security    string `json:"security,omitempty"` // none, tls, reality
 	SNI         string `json:"sni,omitempty"`
 	ALPN        string `json:"alpn,omitempty"`
@@ -61,32 +61,32 @@ type VLESSConfig struct {
 	MaxEarlyData    int               `json:"max_early_data,omitempty"`
 	EarlyDataHeader string            `json:"early_data_header,omitempty"`
 	// gRPC options
-	ServiceName     string `json:"service_name,omitempty"`
+	ServiceName string `json:"service_name,omitempty"`
 	// TCP/KCP/QUIC options
-	HeaderType      string            `json:"header_type,omitempty"`
-	Seed            string            `json:"seed,omitempty"`
+	HeaderType string `json:"header_type,omitempty"`
+	Seed       string `json:"seed,omitempty"`
 	// HTTPUpgrade options
-	HTTPUpgradePath string            `json:"http_upgrade_path,omitempty"`
-	HTTPUpgradeHost string            `json:"http_upgrade_host,omitempty"`
+	HTTPUpgradePath string `json:"http_upgrade_path,omitempty"`
+	HTTPUpgradeHost string `json:"http_upgrade_host,omitempty"`
 	// Packet encoding
-	PacketEncoding  string            `json:"packet_encoding,omitempty"`
+	PacketEncoding string `json:"packet_encoding,omitempty"`
 	// Multiplex
 	MultiplexConfig map[string]interface{} `json:"multiplex,omitempty"`
 }
 
 // VMESSConfig represents VMess configuration
 type VMESSConfig struct {
-	Server          string `json:"server"`
-	ServerPort      int    `json:"server_port"`
-	UUID            string `json:"uuid"`
-	AlterID         int    `json:"alter_id"`
-	Security        string `json:"security,omitempty"` // auto, aes-128-gcm, chacha20-poly1305, none, zero
-	Network         string `json:"network,omitempty"`  // tcp, kcp, ws, http, quic, grpc, httpupgrade
-	TLS             string `json:"tls,omitempty"`      // none, tls
-	SNI             string `json:"sni,omitempty"`
-	ALPN            string `json:"alpn,omitempty"`
-	Fingerprint     string `json:"fingerprint,omitempty"`
-	Insecure        bool   `json:"insecure,omitempty"`
+	Server      string `json:"server"`
+	ServerPort  int    `json:"server_port"`
+	UUID        string `json:"uuid"`
+	AlterID     int    `json:"alter_id"`
+	Security    string `json:"security,omitempty"` // auto, aes-128-gcm, chacha20-poly1305, none, zero
+	Network     string `json:"network,omitempty"`  // tcp, kcp, ws, http, quic, grpc, httpupgrade
+	TLS         string `json:"tls,omitempty"`      // none, tls
+	SNI         string `json:"sni,omitempty"`
+	ALPN        string `json:"alpn,omitempty"`
+	Fingerprint string `json:"fingerprint,omitempty"`
+	Insecure    bool   `json:"insecure,omitempty"`
 	// WebSocket options
 	Path            string            `json:"path,omitempty"`
 	Headers         map[string]string `json:"headers,omitempty"`
@@ -94,20 +94,20 @@ type VMESSConfig struct {
 	MaxEarlyData    int               `json:"max_early_data,omitempty"`
 	EarlyDataHeader string            `json:"early_data_header,omitempty"`
 	// gRPC options
-	ServiceName     string `json:"service_name,omitempty"`
+	ServiceName string `json:"service_name,omitempty"`
 	// HTTP options
-	Method          string   `json:"method,omitempty"`
-	HTTPPath        []string `json:"http_path,omitempty"`
+	Method   string   `json:"method,omitempty"`
+	HTTPPath []string `json:"http_path,omitempty"`
 	// TCP/KCP/QUIC options
-	HeaderType      string `json:"header_type,omitempty"`
-	Seed            string `json:"seed,omitempty"`
+	HeaderType string `json:"header_type,omitempty"`
+	Seed       string `json:"seed,omitempty"`
 	// HTTPUpgrade options
 	HTTPUpgradePath string `json:"http_upgrade_path,omitempty"`
 	HTTPUpgradeHost string `json:"http_upgrade_host,omitempty"`
 	// Packet encoding
-	PacketEncoding  string `json:"packet_encoding,omitempty"`
+	PacketEncoding string `json:"packet_encoding,omitempty"`
 	// Global padding
-	GlobalPadding   bool   `json:"global_padding,omitempty"`
+	GlobalPadding       bool `json:"global_padding,omitempty"`
 	AuthenticatedLength bool `json:"authenticated_length,omitempty"`
 	// Multiplex
 	MultiplexConfig map[string]interface{} `json:"multiplex,omitempty"`
@@ -127,11 +127,29 @@ type Hysteria2Config struct {
 	Fingerprint        string   `json:"fingerprint,omitempty"`
 	InsecureSkipVerify bool     `json:"insecure_skip_verify,omitempty"`
 	// Additional Hysteria2 parameters
-	SalamanderPassword string   `json:"salamander_password,omitempty"`
-	BrutalDownMbps     int      `json:"brutal_down_mbps,omitempty"`
-	BrutalUpMbps       int      `json:"brutal_up_mbps,omitempty"`
-	Network            string   `json:"network,omitempty"` // tcp or udp
-	HopInterval        string   `json:"hop_interval,omitempty"`
+	SalamanderPassword string `json:"salamander_password,omitempty"`
+	BrutalDownMbps     int    `json:"brutal_down_mbps,omitempty"`
+	BrutalUpMbps       int    `json:"brutal_up_mbps,omitempty"`
+	Network            string `json:"network,omitempty"` // tcp or udp
+	HopInterval        string `json:"hop_interval,omitempty"`
+}
+
+// TrojanConfig represents Trojan configuration
+type TrojanConfig struct {
+	Server          string                 `json:"server"`
+	ServerPort      int                    `json:"server_port"`
+	Password        string                 `json:"password"`
+	Network         string                 `json:"network,omitempty"` // tcp, ws, grpc, http, httpupgrade
+	SNI             string                 `json:"sni,omitempty"`
+	ALPN            []string               `json:"alpn,omitempty"`
+	Fingerprint     string                 `json:"fingerprint,omitempty"`
+	Insecure        bool                   `json:"insecure,omitempty"`
+	Host            string                 `json:"host,omitempty"`         // ws/http Host header
+	Path            string                 `json:"path,omitempty"`         // ws/http path
+	ServiceName     string                 `json:"service_name,omitempty"` // grpc service name
+	HTTPMethod      string                 `json:"method,omitempty"`       // http/h2 method
+	Headers         map[string]string      `json:"headers,omitempty"`      // transport headers
+	MultiplexConfig map[string]interface{} `json:"multiplex,omitempty"`
 }
 
 // TUICConfig represents TUIC configuration
@@ -149,18 +167,18 @@ type TUICConfig struct {
 	ZeroRTTHandshake   bool     `json:"zero_rtt_handshake,omitempty"`
 	Heartbeat          string   `json:"heartbeat,omitempty"`
 	// Additional TUIC parameters
-	Network            string   `json:"network,omitempty"` // tcp or udp
-	DisableSNI         bool     `json:"disable_sni,omitempty"`
-	ReduceRTT          bool     `json:"reduce_rtt,omitempty"`
+	Network    string `json:"network,omitempty"` // tcp or udp
+	DisableSNI bool   `json:"disable_sni,omitempty"`
+	ReduceRTT  bool   `json:"reduce_rtt,omitempty"`
 }
 
 // Settings represents global settings
 type Settings struct {
-	ID          int       `json:"id"`
-	AdminPassword string  `json:"admin_password"`
-	StartPort   int       `json:"start_port"`
-	CreatedAt   time.Time `json:"created_at"`
-	UpdatedAt   time.Time `json:"updated_at"`
+	ID            int       `json:"id"`
+	AdminPassword string    `json:"admin_password"`
+	StartPort     int       `json:"start_port"`
+	CreatedAt     time.Time `json:"created_at"`
+	UpdatedAt     time.Time `json:"updated_at"`
 }
 
 // InitDB initializes the database
@@ -233,10 +251,12 @@ func (p *ProxyNode) ParseConfig() (interface{}, error) {
 		config = &Hysteria2Config{}
 	case "tuic":
 		config = &TUICConfig{}
+	case "trojan":
+		config = &TrojanConfig{}
 	default:
 		return nil, nil
 	}
-	
+
 	if err := json.Unmarshal([]byte(p.Config), config); err != nil {
 		return nil, err
 	}
