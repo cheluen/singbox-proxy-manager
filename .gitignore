@@ -6,6 +6,7 @@ server.log
 *.db
 *.sqlite
 config/proxy.db
+config/
 
 # sing-box配置文件（包含节点配置）
 config/config.json
