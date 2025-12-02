@@ -176,6 +176,20 @@ type TUICConfig struct {
 	ReduceRTT  bool   `json:"reduce_rtt,omitempty"`
 }
 
+// AnyTLSConfig represents AnyTLS configuration
+type AnyTLSConfig struct {
+	Server                   string   `json:"server"`
+	ServerPort               int      `json:"server_port"`
+	Password                 string   `json:"password"`
+	SNI                      string   `json:"sni,omitempty"`
+	ALPN                     []string `json:"alpn,omitempty"`
+	Fingerprint              string   `json:"fingerprint,omitempty"`
+	Insecure                 bool     `json:"insecure,omitempty"`
+	IdleSessionCheckInterval string   `json:"idle_session_check_interval,omitempty"`
+	IdleSessionTimeout       string   `json:"idle_session_timeout,omitempty"`
+	MinIdleSession           int      `json:"min_idle_session,omitempty"`
+}
+
 // Settings represents global settings
 type Settings struct {
 	ID            int       `json:"id"`
@@ -271,6 +285,8 @@ func (p *ProxyNode) ParseConfig() (interface{}, error) {
 		config = &TUICConfig{}
 	case "trojan":
 		config = &TrojanConfig{}
+	case "anytls":
+		config = &AnyTLSConfig{}
 	default:
 		return nil, nil
 	}

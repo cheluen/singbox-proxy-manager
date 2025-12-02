@@ -11,6 +11,7 @@ const proxyTypes = [
   { value: 'hy2', label: 'Hysteria2' },
   { value: 'tuic', label: 'TUIC' },
   { value: 'trojan', label: 'Trojan' },
+  { value: 'anytls', label: 'AnyTLS' },
 ]
 
 function NodeForm({ node, onSave, onCancel }) {
@@ -128,6 +129,19 @@ function NodeForm({ node, onSave, onCancel }) {
           service_name: values.service_name,
           method: values.http_method,
         }
+
+      case 'anytls':
+        return {
+          ...config,
+          password: values.anytls_password,
+          sni: values.sni,
+          alpn: values.alpn ? values.alpn.split(',').map(s => s.trim()).filter(Boolean) : [],
+          fingerprint: values.fingerprint,
+          insecure: values.insecure || false,
+          idle_session_check_interval: values.idle_session_check_interval || '',
+          idle_session_timeout: values.idle_session_timeout || '',
+          min_idle_session: values.min_idle_session || 0,
+        }
       
       default:
         return config
@@ -149,6 +163,9 @@ function NodeForm({ node, onSave, onCancel }) {
     normalizedConfig.alpn = initialConfig.alpn.join(',')
   }
 
+  const protocolPassword = normalizedConfig.password
+  delete normalizedConfig.password
+
   const initialValues = {
     name: node?.name || '',
     enabled: node?.enabled !== false,
@@ -158,6 +175,11 @@ function NodeForm({ node, onSave, onCancel }) {
     server: normalizedConfig.server || '',
     server_port: normalizedConfig.server_port || 443,
     ...normalizedConfig,
+    ss_password: node?.type === 'ss' ? protocolPassword : '',
+    hy2_password: node?.type === 'hy2' ? protocolPassword : '',
+    tuic_password: node?.type === 'tuic' ? protocolPassword : '',
+    trojan_password: node?.type === 'trojan' ? protocolPassword : '',
+    anytls_password: node?.type === 'anytls' ? protocolPassword : '',
   }
 
   const renderSSFields = () => (
@@ -376,6 +398,45 @@ function NodeForm({ node, onSave, onCancel }) {
     </>
   )
 
+  const renderAnyTLSFields = () => (
+    <>
+      <Form.Item
+        label="Password"
+        name="anytls_password"
+        rules={[{ required: true, message: 'Required' }]}
+      >
+        <Input.Password />
+      </Form.Item>
+      <Form.Item label="SNI" name="sni">
+        <Input placeholder="example.com" />
+      </Form.Item>
+      <Form.Item label="ALPN (comma-separated)" name="alpn">
+        <Input placeholder="h2,http/1.1" />
+      </Form.Item>
+      <Form.Item label="Fingerprint" name="fingerprint">
+        <Select allowClear>
+          <Option value="chrome">Chrome</Option>
+          <Option value="firefox">Firefox</Option>
+          <Option value="safari">Safari</Option>
+          <Option value="edge">Edge</Option>
+          <Option value="random">Random</Option>
+        </Select>
+      </Form.Item>
+      <Form.Item name="insecure" valuePropName="checked">
+        <Switch checkedChildren="Skip Verify" unCheckedChildren="Verify" />
+      </Form.Item>
+      <Form.Item label="Idle Check Interval" name="idle_session_check_interval">
+        <Input placeholder="30s" />
+      </Form.Item>
+      <Form.Item label="Idle Timeout" name="idle_session_timeout">
+        <Input placeholder="10m" />
+      </Form.Item>
+      <Form.Item label="Min Idle Sessions" name="min_idle_session">
+        <InputNumber min={0} style={{ width: '100%' }} />
+      </Form.Item>
+    </>
+  )
+
   const renderTrojanFields = () => (
     <>
       <Form.Item
@@ -435,6 +496,8 @@ function NodeForm({ node, onSave, onCancel }) {
         return renderTUICFields()
       case 'trojan':
         return renderTrojanFields()
+      case 'anytls':
+        return renderAnyTLSFields()
       default:
         return null
     }
