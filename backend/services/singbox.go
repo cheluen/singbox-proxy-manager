@@ -246,6 +246,8 @@ func (s *SingBoxService) generateOutbound(node *models.ProxyNode, tag string) (O
 		return s.generateTUICOutbound(parsedConfig.(*models.TUICConfig), tag)
 	case "trojan":
 		return s.generateTrojanOutbound(parsedConfig.(*models.TrojanConfig), tag)
+	case "anytls":
+		return s.generateAnyTLSOutbound(parsedConfig.(*models.AnyTLSConfig), tag)
 	default:
 		return OutboundConfig{}, fmt.Errorf("unsupported proxy type: %s", node.Type)
 	}
@@ -260,7 +262,7 @@ func (s *SingBoxService) generateSSOutbound(config *models.SSConfig, tag string)
 		Extra: map[string]interface{}{
 			"method":          config.Method,
 			"password":        config.Password,
-			"domain_strategy": "prefer_ipv4",
+			
 		},
 	}
 
@@ -290,7 +292,7 @@ func (s *SingBoxService) generateVLESSOutbound(config *models.VLESSConfig, tag s
 		Port:   config.ServerPort,
 		Extra: map[string]interface{}{
 			"uuid":            config.UUID,
-			"domain_strategy": "prefer_ipv4",
+			
 		},
 	}
 
@@ -410,7 +412,7 @@ func (s *SingBoxService) generateVMESSOutbound(config *models.VMESSConfig, tag s
 		Extra: map[string]interface{}{
 			"uuid":            config.UUID,
 			"alter_id":        config.AlterID,
-			"domain_strategy": "prefer_ipv4",
+			
 		},
 	}
 
@@ -527,7 +529,7 @@ func (s *SingBoxService) generateHysteria2Outbound(config *models.Hysteria2Confi
 		Port:   config.ServerPort,
 		Extra: map[string]interface{}{
 			"password":        config.Password,
-			"domain_strategy": "prefer_ipv4",
+			
 		},
 	}
 
@@ -609,7 +611,7 @@ func (s *SingBoxService) generateTUICOutbound(config *models.TUICConfig, tag str
 		Extra: map[string]interface{}{
 			"uuid":            config.UUID,
 			"password":        config.Password,
-			"domain_strategy": "prefer_ipv4",
+			
 		},
 	}
 
@@ -667,7 +669,7 @@ func (s *SingBoxService) generateTrojanOutbound(config *models.TrojanConfig, tag
 		Port:   config.ServerPort,
 		Extra: map[string]interface{}{
 			"password":        config.Password,
-			"domain_strategy": "prefer_ipv4",
+			
 		},
 	}
 
@@ -746,6 +748,53 @@ func (s *SingBoxService) generateTrojanOutbound(config *models.TrojanConfig, tag
 	if config.MultiplexConfig != nil {
 		outbound.Extra["multiplex"] = config.MultiplexConfig
 	}
+
+	return outbound, nil
+}
+
+func (s *SingBoxService) generateAnyTLSOutbound(config *models.AnyTLSConfig, tag string) (OutboundConfig, error) {
+	outbound := OutboundConfig{
+		Type:   "anytls",
+		Tag:    tag,
+		Server: config.Server,
+		Port:   config.ServerPort,
+		Extra: map[string]interface{}{
+			"password":        config.Password,
+			
+		},
+	}
+
+	// Session management options
+	if config.IdleSessionCheckInterval != "" {
+		outbound.Extra["idle_session_check_interval"] = config.IdleSessionCheckInterval
+	}
+	if config.IdleSessionTimeout != "" {
+		outbound.Extra["idle_session_timeout"] = config.IdleSessionTimeout
+	}
+	if config.MinIdleSession > 0 {
+		outbound.Extra["min_idle_session"] = config.MinIdleSession
+	}
+
+	// TLS configuration (required for AnyTLS)
+	tls := map[string]interface{}{
+		"enabled": true,
+	}
+	if config.SNI != "" {
+		tls["server_name"] = config.SNI
+	}
+	if len(config.ALPN) > 0 {
+		tls["alpn"] = config.ALPN
+	}
+	if config.Fingerprint != "" {
+		tls["utls"] = map[string]interface{}{
+			"enabled":     true,
+			"fingerprint": config.Fingerprint,
+		}
+	}
+	if config.Insecure {
+		tls["insecure"] = true
+	}
+	outbound.Extra["tls"] = tls
 
 	return outbound, nil
 }

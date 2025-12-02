@@ -26,6 +26,8 @@ func ParseShareLink(link string) (interface{}, string, string, error) {
 		return parseHysteria2Link(link)
 	} else if strings.HasPrefix(link, "tuic://") {
 		return parseTUICLink(link)
+	} else if strings.HasPrefix(link, "anytls://") {
+		return parseAnyTLSLink(link)
 	}
 
 	return nil, "", "", fmt.Errorf("unsupported link format")
@@ -575,4 +577,100 @@ func parseTUICLink(link string) (interface{}, string, string, error) {
 	}
 
 	return config, "tuic", name, nil
+}
+
+// parseAnyTLSLink parses AnyTLS share links
+// Format: anytls://password@server:port?params#name
+func parseAnyTLSLink(link string) (interface{}, string, string, error) {
+	link = strings.TrimPrefix(link, "anytls://")
+
+	// Split name if exists
+	parts := strings.SplitN(link, "#", 2)
+	link = parts[0]
+	name := "AnyTLS Node"
+	if len(parts) == 2 {
+		name, _ = url.QueryUnescape(parts[1])
+	}
+
+	// Split params
+	parts = strings.SplitN(link, "?", 2)
+	basicPart := parts[0]
+	params := url.Values{}
+	if len(parts) == 2 {
+		params, _ = url.ParseQuery(parts[1])
+	}
+
+	// Parse password@server:port
+	atIndex := strings.LastIndex(basicPart, "@")
+	if atIndex == -1 {
+		return nil, "", "", fmt.Errorf("invalid anytls link format")
+	}
+	password := basicPart[:atIndex]
+	serverPart := basicPart[atIndex+1:]
+
+	// Handle IPv6 addresses
+	var server string
+	var port int
+	if strings.HasPrefix(serverPart, "[") {
+		// IPv6 format: [ipv6]:port
+		closeBracket := strings.LastIndex(serverPart, "]")
+		if closeBracket == -1 {
+			return nil, "", "", fmt.Errorf("invalid IPv6 format")
+		}
+		server = serverPart[1:closeBracket]
+		portStr := strings.TrimPrefix(serverPart[closeBracket+1:], ":")
+		var err error
+		port, err = strconv.Atoi(portStr)
+		if err != nil {
+			return nil, "", "", fmt.Errorf("invalid port")
+		}
+	} else {
+		// IPv4 or domain format: host:port
+		serverParts := strings.SplitN(serverPart, ":", 2)
+		if len(serverParts) != 2 {
+			return nil, "", "", fmt.Errorf("invalid server format")
+		}
+		server = serverParts[0]
+		var err error
+		port, err = strconv.Atoi(serverParts[1])
+		if err != nil {
+			return nil, "", "", fmt.Errorf("invalid port")
+		}
+	}
+
+	insecure := params.Get("insecure") == "1" || params.Get("allowInsecure") == "1"
+	sni := params.Get("sni")
+	if sni == "" {
+		sni = server
+	}
+
+	alpn := []string{}
+	if raw := params.Get("alpn"); raw != "" {
+		for _, v := range strings.Split(raw, ",") {
+			v = strings.TrimSpace(v)
+			if v != "" {
+				alpn = append(alpn, v)
+			}
+		}
+	}
+
+	config := models.AnyTLSConfig{
+		Server:                   server,
+		ServerPort:               port,
+		Password:                 password,
+		SNI:                      sni,
+		ALPN:                     alpn,
+		Fingerprint:              params.Get("fp"),
+		Insecure:                 insecure,
+		IdleSessionCheckInterval: params.Get("idle_session_check_interval"),
+		IdleSessionTimeout:       params.Get("idle_session_timeout"),
+	}
+
+	if minIdle := params.Get("min_idle_session"); minIdle != "" {
+		if val, err := strconv.Atoi(minIdle); err == nil {
+			config.MinIdleSession = val
+		}
+	}
+
+	return config, "anytls", name, nil
 }
