@@ -13,6 +13,7 @@ import (
 type SingBoxService struct {
 	configDir string
 	process   *exec.Cmd
+	logFile   *os.File
 	mu        sync.RWMutex
 }
 
@@ -757,9 +758,19 @@ func (s *SingBoxService) Start() error {
 	// Stop existing process if any
 	if s.process != nil {
 		if s.process.Process != nil {
-			s.process.Process.Kill()
+			if err := s.process.Process.Kill(); err != nil {
+				// Log but continue - process may already be dead
+				fmt.Printf("Warning: failed to kill existing process: %v\n", err)
+			}
+			s.process.Wait() // Prevent zombie process, ignore error as process may be already reaped
 		}
 		s.process = nil
+	}
+
+	// Close existing log file handle if any
+	if s.logFile != nil {
+		s.logFile.Close()
+		s.logFile = nil
 	}
 
 	configPath := filepath.Join(s.configDir, "config.json")
@@ -786,6 +797,7 @@ func (s *SingBoxService) Start() error {
 	}
 
 	s.process = cmd
+	s.logFile = logFile // Save log file handle for later cleanup
 	return nil
 }
 
@@ -807,6 +819,13 @@ func (s *SingBoxService) Stop() error {
 	}
 
 	s.process = nil
+
+	// Close log file handle
+	if s.logFile != nil {
+		s.logFile.Close()
+		s.logFile = nil
+	}
+
 	return nil
 }
 

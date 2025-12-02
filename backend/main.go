@@ -42,24 +42,32 @@ func main() {
 	singBoxService := services.NewSingBoxService(configDir)
 
 	// Generate global config for all nodes and start sing-box
-	rows, _ := db.Query(`
+	rows, err := db.Query(`
 		SELECT id, name, type, config, inbound_port, username, password, 
 		       sort_order, node_ip, location, country_code, latency, enabled, created_at, updated_at
 		FROM proxy_nodes
 		ORDER BY sort_order ASC
 	`)
-	
-	var nodes []models.ProxyNode
-	for rows.Next() {
-		var node models.ProxyNode
-		rows.Scan(
-			&node.ID, &node.Name, &node.Type, &node.Config, &node.InboundPort,
-			&node.Username, &node.Password, &node.SortOrder, &node.NodeIP, &node.Location,
-			&node.CountryCode, &node.Latency, &node.Enabled, &node.CreatedAt, &node.UpdatedAt,
-		)
-		nodes = append(nodes, node)
+	if err != nil {
+		log.Printf("Failed to query proxy nodes: %v", err)
 	}
-	rows.Close()
+
+	var nodes []models.ProxyNode
+	if rows != nil {
+		for rows.Next() {
+			var node models.ProxyNode
+			if err := rows.Scan(
+				&node.ID, &node.Name, &node.Type, &node.Config, &node.InboundPort,
+				&node.Username, &node.Password, &node.SortOrder, &node.NodeIP, &node.Location,
+				&node.CountryCode, &node.Latency, &node.Enabled, &node.CreatedAt, &node.UpdatedAt,
+			); err != nil {
+				log.Printf("Failed to scan proxy node: %v", err)
+				continue
+			}
+			nodes = append(nodes, node)
+		}
+		rows.Close()
+	}
 
 	if err := singBoxService.GenerateGlobalConfig(nodes); err != nil {
 		log.Printf("Failed to generate global config: %v", err)

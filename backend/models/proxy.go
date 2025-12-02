@@ -3,7 +3,11 @@ package models
 import (
 	"database/sql"
 	"encoding/json"
+	"log"
+	"os"
 	"time"
+
+	"golang.org/x/crypto/bcrypt"
 )
 
 // ProxyNode represents a proxy node configuration
@@ -228,10 +232,24 @@ func InitDB(db *sql.DB) error {
 		return err
 	}
 	if count == 0 {
-		_, err = db.Exec("INSERT INTO settings (admin_password, start_port) VALUES (?, ?)", "admin123", 30001)
+		// Get initial password from environment variable or use default
+		initialPassword := os.Getenv("ADMIN_PASSWORD")
+		if initialPassword == "" {
+			initialPassword = "admin123"
+		}
+
+		// Hash the initial password with bcrypt
+		hashedPassword, err := bcrypt.GenerateFromPassword([]byte(initialPassword), bcrypt.DefaultCost)
+		if err != nil {
+			log.Printf("Failed to hash initial password: %v", err)
+			return err
+		}
+
+		_, err = db.Exec("INSERT INTO settings (admin_password, start_port) VALUES (?, ?)", string(hashedPassword), 30001)
 		if err != nil {
 			return err
 		}
+		log.Println("Initial admin password has been set and hashed")
 	}
 
 	return nil
