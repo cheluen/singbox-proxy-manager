@@ -1,13 +1,17 @@
 package api
 
 import (
+	"crypto/rand"
 	"database/sql"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"log"
 	"net/http"
 	"sb-proxy/backend/models"
 	"sb-proxy/backend/services"
 	"strconv"
+	"sync"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -19,6 +23,7 @@ type Handler struct {
 	singBoxService *services.SingBoxService
 	sessionToken   string
 	sessionExpiry  time.Time
+	sessionMu      sync.RWMutex
 	checkProxyIP   func(proxyAddr string, username string, password string) (*services.IPInfo, error)
 }
 
@@ -124,7 +129,12 @@ func (h *Handler) AuthMiddleware() gin.HandlerFunc {
 			token = c.Query("token")
 		}
 
-		if token != h.sessionToken || time.Now().After(h.sessionExpiry) {
+		h.sessionMu.RLock()
+		validToken := h.sessionToken
+		expiry := h.sessionExpiry
+		h.sessionMu.RUnlock()
+
+		if token != validToken || time.Now().After(expiry) {
 			c.JSON(http.StatusUnauthorized, gin.H{"error": "unauthorized"})
 			c.Abort()
 			return
@@ -152,22 +162,29 @@ func (h *Handler) Login(c *gin.Context) {
 		return
 	}
 
-	// Compare password
+	// Compare password using bcrypt only (no plaintext fallback for security)
 	if err := bcrypt.CompareHashAndPassword([]byte(settings.AdminPassword), []byte(req.Password)); err != nil {
-		// Try direct comparison for initial setup
-		if settings.AdminPassword != req.Password {
-			c.JSON(http.StatusUnauthorized, gin.H{"error": "invalid password"})
-			return
-		}
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "invalid password"})
+		return
 	}
 
-	// Generate session token
-	h.sessionToken = fmt.Sprintf("token_%d_%d", time.Now().Unix(), settings.ID)
+	// Generate cryptographically secure session token
+	tokenBytes := make([]byte, 32)
+	if _, err := rand.Read(tokenBytes); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to generate token"})
+		return
+	}
+
+	h.sessionMu.Lock()
+	h.sessionToken = base64.URLEncoding.EncodeToString(tokenBytes)
 	h.sessionExpiry = time.Now().Add(24 * time.Hour)
+	token := h.sessionToken
+	expiry := h.sessionExpiry
+	h.sessionMu.Unlock()
 
 	c.JSON(http.StatusOK, gin.H{
-		"token":  h.sessionToken,
-		"expiry": h.sessionExpiry.Unix(),
+		"token":  token,
+		"expiry": expiry.Unix(),
 	})
 }
 
@@ -761,14 +778,32 @@ func (h *Handler) UpdateSettings(c *gin.Context) {
 	}
 
 	if req.StartPort != nil {
-		_, err := h.db.Exec("UPDATE settings SET start_port = ?, updated_at = CURRENT_TIMESTAMP", *req.StartPort)
+		// Use transaction to ensure atomic update of all ports
+		tx, err := h.db.Begin()
 		if err != nil {
+			log.Printf("Failed to begin transaction: %v", err)
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to start transaction"})
+			return
+		}
+
+		// Update settings
+		_, err = tx.Exec("UPDATE settings SET start_port = ?, updated_at = CURRENT_TIMESTAMP", *req.StartPort)
+		if err != nil {
+			tx.Rollback()
+			log.Printf("Failed to update start_port: %v", err)
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to update start port"})
 			return
 		}
 
-		// Update all node ports
-		rows, _ := h.db.Query("SELECT id, sort_order, enabled FROM proxy_nodes ORDER BY sort_order")
+		// Query all node ports
+		rows, err := tx.Query("SELECT id, sort_order, enabled FROM proxy_nodes ORDER BY sort_order")
+		if err != nil {
+			tx.Rollback()
+			log.Printf("Failed to query nodes: %v", err)
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to query nodes"})
+			return
+		}
+
 		var nodes []struct {
 			ID        int
 			SortOrder int
@@ -781,14 +816,42 @@ func (h *Handler) UpdateSettings(c *gin.Context) {
 				SortOrder int
 				Enabled   bool
 			}
-			rows.Scan(&node.ID, &node.SortOrder, &node.Enabled)
+			if err := rows.Scan(&node.ID, &node.SortOrder, &node.Enabled); err != nil {
+				rows.Close()
+				tx.Rollback()
+				log.Printf("Failed to scan node: %v", err)
+				c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to read node data"})
+				return
+			}
 			nodes = append(nodes, node)
 		}
 		rows.Close()
 
+		// Check for iteration errors
+		if err := rows.Err(); err != nil {
+			tx.Rollback()
+			log.Printf("Error iterating nodes: %v", err)
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to read nodes"})
+			return
+		}
+
+		// Update all node ports within transaction
 		for _, node := range nodes {
 			newPort := *req.StartPort + node.SortOrder
-			h.db.Exec("UPDATE proxy_nodes SET inbound_port = ? WHERE id = ?", newPort, node.ID)
+			_, err := tx.Exec("UPDATE proxy_nodes SET inbound_port = ? WHERE id = ?", newPort, node.ID)
+			if err != nil {
+				tx.Rollback()
+				log.Printf("Failed to update port for node %d: %v", node.ID, err)
+				c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to update node port"})
+				return
+			}
+		}
+
+		// Commit transaction
+		if err := tx.Commit(); err != nil {
+			log.Printf("Failed to commit transaction: %v", err)
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to commit changes"})
+			return
 		}
 
 		// Regenerate global config and restart sing-box
