@@ -11,7 +11,7 @@ variables:
 # Go代码lint检查
 lint-backend:
   stage: lint
-  image: golang:1.21
+  image: golang:1.23
   before_script:
     - curl -sSfL https://raw.githubusercontent.com/golangci/golangci-lint/master/install.sh | sh -s -- -b $(go env GOPATH)/bin v1.61.0
   script:
@@ -50,7 +50,7 @@ lint-frontend:
 # 后端Go编译测试
 test-backend:
   stage: test
-  image: golang:1.21
+  image: golang:1.23
   script:
     - go mod download
     - CGO_ENABLED=0 go build -o main ./backend
@@ -145,7 +145,7 @@ build-frontend-dist:
 # 构建FreeBSD完整发布包
 build-freebsd:
   stage: build
-  image: golang:1.21
+  image: golang:1.23
   needs:
     - job: build-frontend-dist
       artifacts: true
@@ -188,7 +188,7 @@ build-freebsd:
 # 构建Linux完整发布包
 build-linux:
   stage: build
-  image: golang:1.21
+  image: golang:1.23
   needs:
     - job: build-frontend-dist
       artifacts: true
