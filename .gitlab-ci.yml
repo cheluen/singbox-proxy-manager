@@ -52,7 +52,8 @@ test-backend:
   image: golang:1.21
   script:
     - go mod download
-    - CGO_ENABLED=1 go build -o main ./backend
+    - CGO_ENABLED=0 go build -o main ./backend
+    - go test ./backend/... -v
   cache:
     key: go-modules
     paths:
@@ -122,4 +123,36 @@ build-release:
     - docker build -t $DOCKER_IMAGE:$CI_COMMIT_TAG .
     - docker push $DOCKER_IMAGE:$CI_COMMIT_TAG
   only:
+    - tags
+
+# 构建FreeBSD可执行文件
+build-freebsd:
+  stage: build
+  image: golang:1.21
+  script:
+    - go mod download
+    - GOOS=freebsd GOARCH=amd64 CGO_ENABLED=0 go build -o singbox-proxy-manager-freebsd-amd64 ./backend
+  artifacts:
+    name: "singbox-proxy-manager-freebsd-$CI_COMMIT_SHORT_SHA"
+    paths:
+      - singbox-proxy-manager-freebsd-amd64
+    expire_in: 30 days
+  only:
+    - main
+    - tags
+
+# 构建Linux可执行文件（不依赖Docker）
+build-linux:
+  stage: build
+  image: golang:1.21
+  script:
+    - go mod download
+    - GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build -o singbox-proxy-manager-linux-amd64 ./backend
+  artifacts:
+    name: "singbox-proxy-manager-linux-$CI_COMMIT_SHORT_SHA"
+    paths:
+      - singbox-proxy-manager-linux-amd64
+    expire_in: 30 days
+  only:
+    - main
     - tags

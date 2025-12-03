@@ -12,7 +12,7 @@ RUN go mod download
 # Force rebuild by adding timestamp
 RUN echo "Build at $(date)" > /tmp/buildtime
 COPY backend/ ./backend/
-RUN CGO_ENABLED=1 go build -o main ./backend
+RUN CGO_ENABLED=0 go build -o main ./backend
 
 FROM debian:bookworm-slim
 RUN apt-get update && apt-get install -y --no-install-recommends \
