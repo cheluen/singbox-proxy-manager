@@ -2,6 +2,7 @@ stages:
   - lint
   - test
   - build
+  - release
 
 variables:
   DOCKER_IMAGE: $CI_REGISTRY_IMAGE
@@ -155,4 +156,42 @@ build-linux:
     expire_in: 30 days
   only:
     - main
+    - tags
+
+# 自动发布到Releases（仅tag触发）
+release-binaries:
+  stage: release
+  image: registry.gitlab.com/gitlab-org/release-cli:latest
+  needs:
+    - job: build-freebsd
+      artifacts: true
+    - job: build-linux
+      artifacts: true
+  script:
+    - echo "Creating release for $CI_COMMIT_TAG"
+  release:
+    tag_name: $CI_COMMIT_TAG
+    name: "Release $CI_COMMIT_TAG"
+    description: |
+      ## 下载
+      - **Linux (amd64)**: singbox-proxy-manager-linux-amd64
+      - **FreeBSD (amd64)**: singbox-proxy-manager-freebsd-amd64
+      - **Docker**: `docker pull $CI_REGISTRY_IMAGE:$CI_COMMIT_TAG`
+      
+      ## 使用说明
+      1. 下载对应平台的可执行文件
+      2. 下载前端dist目录（从源码构建或Docker镜像中提取）
+      3. 下载sing-box对应平台版本
+      4. 运行: `./singbox-proxy-manager-linux-amd64`
+    assets:
+      links:
+        - name: "singbox-proxy-manager-linux-amd64"
+          url: "${CI_PROJECT_URL}/-/jobs/${CI_JOB_ID}/artifacts/file/singbox-proxy-manager-linux-amd64"
+          filepath: "/binaries/singbox-proxy-manager-linux-amd64"
+          link_type: package
+        - name: "singbox-proxy-manager-freebsd-amd64"
+          url: "${CI_PROJECT_URL}/-/jobs/${CI_JOB_ID}/artifacts/file/singbox-proxy-manager-freebsd-amd64"
+          filepath: "/binaries/singbox-proxy-manager-freebsd-amd64"
+          link_type: package
+  only:
     - tags
