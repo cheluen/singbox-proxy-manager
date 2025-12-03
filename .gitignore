@@ -43,3 +43,6 @@ test/
 
 # 文档（内部使用）
 PRIVACY_AUDIT_REPORT.md
+
+# Git检查点备份
+*.patch
