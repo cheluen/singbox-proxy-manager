@@ -150,15 +150,13 @@ build-freebsd:
     - job: build-frontend-dist
       artifacts: true
   variables:
-    SINGBOX_VERSION: "1.12.11"
+    SINGBOX_VERSION: "1.12.12"
   script:
     - go mod download
     - GOOS=freebsd GOARCH=amd64 CGO_ENABLED=0 go build -o main ./backend
-    # 下载FreeBSD版sing-box
-    - apt-get update && apt-get install -y curl
-    - curl -Lo sing-box.tar.gz "https://github.com/SagerNet/sing-box/releases/download/v${SINGBOX_VERSION}/sing-box-${SINGBOX_VERSION}-freebsd-amd64.tar.gz"
-    - tar xzf sing-box.tar.gz
-    - mv sing-box-*/sing-box .
+    # 从源码编译FreeBSD版sing-box（官方无预编译版）
+    - git clone --depth 1 --branch v${SINGBOX_VERSION} https://github.com/SagerNet/sing-box.git
+    - cd sing-box && GOOS=freebsd GOARCH=amd64 CGO_ENABLED=0 go build -o ../sing-box ./cmd/sing-box && cd ..
     # 创建发布包
     - mkdir -p singbox-proxy-manager-freebsd-amd64
     - mv main singbox-proxy-manager-freebsd-amd64/
@@ -195,13 +193,13 @@ build-linux:
     - job: build-frontend-dist
       artifacts: true
   variables:
-    SINGBOX_VERSION: "1.12.11"
+    SINGBOX_VERSION: "1.12.12"
   script:
     - go mod download
     - GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build -o main ./backend
     # 下载Linux版sing-box
     - apt-get update && apt-get install -y curl
-    - curl -Lo sing-box.tar.gz "https://github.com/SagerNet/sing-box/releases/download/v${SINGBOX_VERSION}/sing-box-${SINGBOX_VERSION}-linux-amd64.tar.gz"
+    - curl -fLo sing-box.tar.gz "https://github.com/SagerNet/sing-box/releases/download/v${SINGBOX_VERSION}/sing-box-${SINGBOX_VERSION}-linux-amd64.tar.gz"
     - tar xzf sing-box.tar.gz
     - mv sing-box-*/sing-box .
     # 创建发布包
