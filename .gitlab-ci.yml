@@ -1,10 +1,50 @@
 stages:
+  - lint
   - test
   - build
 
 variables:
   DOCKER_IMAGE: $CI_REGISTRY_IMAGE
   DOCKER_TAG: $CI_COMMIT_SHORT_SHA
+
+# Go代码lint检查
+lint-backend:
+  stage: lint
+  image: golang:1.21
+  before_script:
+    - curl -sSfL https://raw.githubusercontent.com/golangci/golangci-lint/master/install.sh | sh -s -- -b $(go env GOPATH)/bin v1.61.0
+  script:
+    - golangci-lint run ./backend/...
+  only:
+    changes:
+      - backend/**/*
+      - go.mod
+      - go.sum
+      - .golangci.yml
+    refs:
+      - main
+      - merge_requests
+  allow_failure: false
+
+# 前端ESLint检查
+lint-frontend:
+  stage: lint
+  image: node:18-alpine
+  script:
+    - cd frontend
+    - npm ci
+    - npm run lint
+  cache:
+    key: npm-modules
+    paths:
+      - frontend/node_modules/
+  only:
+    changes:
+      - frontend/**/*
+    refs:
+      - main
+      - merge_requests
+  allow_failure: false
 
 # 后端Go编译测试
 test-backend:

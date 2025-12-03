@@ -6,8 +6,9 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"sb-proxy/backend/models"
 	"sync"
+
+	"sb-proxy/backend/models"
 )
 
 type SingBoxService struct {
@@ -260,9 +261,8 @@ func (s *SingBoxService) generateSSOutbound(config *models.SSConfig, tag string)
 		Server: config.Server,
 		Port:   config.ServerPort,
 		Extra: map[string]interface{}{
-			"method":          config.Method,
-			"password":        config.Password,
-			
+			"method":   config.Method,
+			"password": config.Password,
 		},
 	}
 
@@ -291,8 +291,7 @@ func (s *SingBoxService) generateVLESSOutbound(config *models.VLESSConfig, tag s
 		Server: config.Server,
 		Port:   config.ServerPort,
 		Extra: map[string]interface{}{
-			"uuid":            config.UUID,
-			
+			"uuid": config.UUID,
 		},
 	}
 
@@ -410,9 +409,8 @@ func (s *SingBoxService) generateVMESSOutbound(config *models.VMESSConfig, tag s
 		Server: config.Server,
 		Port:   config.ServerPort,
 		Extra: map[string]interface{}{
-			"uuid":            config.UUID,
-			"alter_id":        config.AlterID,
-			
+			"uuid":     config.UUID,
+			"alter_id": config.AlterID,
 		},
 	}
 
@@ -528,8 +526,7 @@ func (s *SingBoxService) generateHysteria2Outbound(config *models.Hysteria2Confi
 		Server: config.Server,
 		Port:   config.ServerPort,
 		Extra: map[string]interface{}{
-			"password":        config.Password,
-			
+			"password": config.Password,
 		},
 	}
 
@@ -609,9 +606,8 @@ func (s *SingBoxService) generateTUICOutbound(config *models.TUICConfig, tag str
 		Server: config.Server,
 		Port:   config.ServerPort,
 		Extra: map[string]interface{}{
-			"uuid":            config.UUID,
-			"password":        config.Password,
-			
+			"uuid":     config.UUID,
+			"password": config.Password,
 		},
 	}
 
@@ -668,8 +664,7 @@ func (s *SingBoxService) generateTrojanOutbound(config *models.TrojanConfig, tag
 		Server: config.Server,
 		Port:   config.ServerPort,
 		Extra: map[string]interface{}{
-			"password":        config.Password,
-			
+			"password": config.Password,
 		},
 	}
 
@@ -759,8 +754,7 @@ func (s *SingBoxService) generateAnyTLSOutbound(config *models.AnyTLSConfig, tag
 		Server: config.Server,
 		Port:   config.ServerPort,
 		Extra: map[string]interface{}{
-			"password":        config.Password,
-			
+			"password": config.Password,
 		},
 	}
 

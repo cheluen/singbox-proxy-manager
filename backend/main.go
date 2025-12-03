@@ -5,6 +5,7 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+
 	"sb-proxy/backend/api"
 	"sb-proxy/backend/models"
 	"sb-proxy/backend/services"
@@ -88,12 +89,12 @@ func main() {
 		c.Writer.Header().Set("Access-Control-Allow-Origin", "*")
 		c.Writer.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
 		c.Writer.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization")
-		
+
 		if c.Request.Method == "OPTIONS" {
 			c.AbortWithStatus(204)
 			return
 		}
-		
+
 		c.Next()
 	})
 
@@ -118,7 +119,7 @@ func main() {
 		authorized.POST("/nodes/reorder", handler.ReorderNodes)
 		authorized.GET("/nodes/:id/check-ip", handler.CheckNodeIP)
 		authorized.POST("/nodes/batch-auth", handler.BatchSetAuth)
-		
+
 		// Share link parsing
 		authorized.POST("/parse-link", handler.ParseShareLink)
 
