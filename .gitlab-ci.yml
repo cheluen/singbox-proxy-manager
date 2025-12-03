@@ -236,9 +236,9 @@ auto-release:
   image: registry.gitlab.com/gitlab-org/release-cli:latest
   needs:
     - job: build-freebsd
-      artifacts: true
+      artifacts: false
     - job: build-linux
-      artifacts: true
+      artifacts: false
   variables:
     AUTO_TAG: "v0.0.${CI_PIPELINE_IID}"
   script:
@@ -285,9 +285,9 @@ release-binaries:
   image: registry.gitlab.com/gitlab-org/release-cli:latest
   needs:
     - job: build-freebsd
-      artifacts: true
+      artifacts: false
     - job: build-linux
-      artifacts: true
+      artifacts: false
   script:
     - echo "Creating release for $CI_COMMIT_TAG"
   release:
