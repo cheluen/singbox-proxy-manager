@@ -158,7 +158,7 @@ build-freebsd:
     - git clone --depth 1 --branch v${SINGBOX_VERSION} https://github.com/SagerNet/sing-box.git
     - cd sing-box && GOOS=freebsd GOARCH=amd64 CGO_ENABLED=0 go build -o ../sing-box ./cmd/sing-box && cd ..
     # 创建发布包
-    - mkdir -p singbox-proxy-manager-freebsd-amd64
+    - mkdir -p singbox-proxy-manager-freebsd-amd64/frontend
     - mv main singbox-proxy-manager-freebsd-amd64/
     - mv sing-box singbox-proxy-manager-freebsd-amd64/
     - cp -r frontend/dist singbox-proxy-manager-freebsd-amd64/frontend/
@@ -203,7 +203,7 @@ build-linux:
     - tar xzf sing-box.tar.gz
     - mv sing-box-*/sing-box .
     # 创建发布包
-    - mkdir -p singbox-proxy-manager-linux-amd64
+    - mkdir -p singbox-proxy-manager-linux-amd64/frontend
     - mv main singbox-proxy-manager-linux-amd64/
     - mv sing-box singbox-proxy-manager-linux-amd64/
     - cp -r frontend/dist singbox-proxy-manager-linux-amd64/frontend/
