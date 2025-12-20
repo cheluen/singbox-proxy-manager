@@ -279,47 +279,6 @@ auto-release:
   rules:
     - if: '$CI_COMMIT_BRANCH == "main" && $CI_PIPELINE_SOURCE == "push"'
 
-# 手动tag发布到Releases（手动创建tag时触发）
-release-binaries:
-  stage: release
-  image: registry.gitlab.com/gitlab-org/release-cli:latest
-  needs:
-    - job: build-freebsd
-      artifacts: false
-    - job: build-linux
-      artifacts: false
-  script:
-    - echo "Creating release for $CI_COMMIT_TAG"
-  release:
-    tag_name: $CI_COMMIT_TAG
-    name: "Release $CI_COMMIT_TAG"
-    description: |
-      ## 正式发布版本 ${CI_COMMIT_TAG}
-      
-      ### 完整发布包（开箱即用）
-      
-      包含：后端程序 + 前端文件 + sing-box + 启动脚本
-      
-      | 平台 | 下载 |
-      |------|------|
-      | Linux (amd64) | singbox-proxy-manager-linux-amd64.tar.gz |
-      | FreeBSD (amd64) | singbox-proxy-manager-freebsd-amd64.tar.gz |
-      | Docker | `docker pull ${CI_REGISTRY_IMAGE}:${CI_COMMIT_TAG}` |
-      
-      ### 使用方法
-      ```bash
-      tar xzf singbox-proxy-manager-linux-amd64.tar.gz
-      cd singbox-proxy-manager-linux-amd64
-      ADMIN_PASSWORD=your_password ./start.sh
-      # 访问 http://localhost:30000
-      ```
-    assets:
-      links:
-        - name: "singbox-proxy-manager-linux-amd64.tar.gz"
-          url: "${CI_PROJECT_URL}/-/jobs/artifacts/${CI_COMMIT_TAG}/raw/singbox-proxy-manager-linux-amd64.tar.gz?job=build-linux"
-          link_type: package
-        - name: "singbox-proxy-manager-freebsd-amd64.tar.gz"
-          url: "${CI_PROJECT_URL}/-/jobs/artifacts/${CI_COMMIT_TAG}/raw/singbox-proxy-manager-freebsd-amd64.tar.gz?job=build-freebsd"
-          link_type: package
-  only:
-    - tags
+# 注意：release-binaries job已移除
+# 因为auto-release会在push到main时自动创建tag和release
+# 如需手动发布，请直接在GitLab UI创建release或使用auto-release生成的release
