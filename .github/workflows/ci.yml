@@ -1,0 +1,321 @@
+name: CI/CD
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+env:
+  SINGBOX_VERSION: "1.12.12"
+
+jobs:
+  # Go代码lint检查
+  lint-backend:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.23'
+
+      - name: golangci-lint
+        uses: golangci/golangci-lint-action@v6
+        with:
+          version: v1.61.0
+          working-directory: ./
+          args: ./backend/...
+
+  # 前端ESLint检查
+  lint-frontend:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '18'
+          cache: 'npm'
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Install dependencies
+        run: npm ci
+        working-directory: frontend
+
+      - name: Run ESLint
+        run: npm run lint
+        working-directory: frontend
+
+  # 后端Go编译测试
+  test-backend:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.23'
+
+      - name: Download dependencies
+        run: go mod download
+
+      - name: Build
+        run: CGO_ENABLED=0 go build -o main ./backend
+
+      - name: Test
+        run: go test ./backend/... -v
+
+  # 前端构建测试
+  test-frontend:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '18'
+          cache: 'npm'
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Install dependencies
+        run: npm ci
+        working-directory: frontend
+
+      - name: Build
+        run: npm run build
+        working-directory: frontend
+
+  # 构建并推送Docker镜像
+  build-docker:
+    runs-on: ubuntu-latest
+    needs: [test-backend, test-frontend]
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Login to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          push: true
+          tags: |
+            ghcr.io/${{ github.repository }}:${{ github.sha }}
+            ghcr.io/${{ github.repository }}:latest
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  # 构建前端dist
+  build-frontend-dist:
+    runs-on: ubuntu-latest
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '18'
+          cache: 'npm'
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Install dependencies
+        run: npm ci
+        working-directory: frontend
+
+      - name: Build
+        run: npm run build
+        working-directory: frontend
+
+      - name: Upload frontend dist
+        uses: actions/upload-artifact@v4
+        with:
+          name: frontend-dist
+          path: frontend/dist/
+          retention-days: 1
+
+  # 构建Linux完整发布包
+  build-linux:
+    runs-on: ubuntu-latest
+    needs: [build-frontend-dist]
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.23'
+
+      - name: Download frontend dist
+        uses: actions/download-artifact@v4
+        with:
+          name: frontend-dist
+          path: frontend/dist/
+
+      - name: Download dependencies
+        run: go mod download
+
+      - name: Build backend
+        run: GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build -o main ./backend
+
+      - name: Download sing-box
+        run: |
+          curl -fLo sing-box.tar.gz "https://github.com/SagerNet/sing-box/releases/download/v${{ env.SINGBOX_VERSION }}/sing-box-${{ env.SINGBOX_VERSION }}-linux-amd64.tar.gz"
+          tar xzf sing-box.tar.gz
+          mv sing-box-*/sing-box .
+
+      - name: Create release package
+        run: |
+          mkdir -p singbox-proxy-manager-linux-amd64/frontend
+          mv main singbox-proxy-manager-linux-amd64/
+          mv sing-box singbox-proxy-manager-linux-amd64/
+          cp -r frontend/dist singbox-proxy-manager-linux-amd64/frontend/
+          mkdir -p singbox-proxy-manager-linux-amd64/config
+          cat > singbox-proxy-manager-linux-amd64/start.sh << 'EOF'
+          #!/bin/sh
+          cd "$(dirname "$0")"
+          export PATH="$PWD:$PATH"
+          export CONFIG_DIR="$PWD/config"
+          export PORT="${PORT:-30000}"
+          export ADMIN_PASSWORD="${ADMIN_PASSWORD:-admin123}"
+          ./main
+          EOF
+          chmod +x singbox-proxy-manager-linux-amd64/start.sh
+          tar czf singbox-proxy-manager-linux-amd64.tar.gz singbox-proxy-manager-linux-amd64/
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: singbox-proxy-manager-linux-amd64
+          path: singbox-proxy-manager-linux-amd64.tar.gz
+          retention-days: 30
+
+  # 构建FreeBSD完整发布包
+  build-freebsd:
+    runs-on: ubuntu-latest
+    needs: [build-frontend-dist]
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.23'
+
+      - name: Download frontend dist
+        uses: actions/download-artifact@v4
+        with:
+          name: frontend-dist
+          path: frontend/dist/
+
+      - name: Download dependencies
+        run: go mod download
+
+      - name: Build backend for FreeBSD
+        run: GOOS=freebsd GOARCH=amd64 CGO_ENABLED=0 go build -o main ./backend
+
+      - name: Build sing-box for FreeBSD
+        run: |
+          git clone --depth 1 --branch v${{ env.SINGBOX_VERSION }} https://github.com/SagerNet/sing-box.git
+          cd sing-box && GOOS=freebsd GOARCH=amd64 CGO_ENABLED=0 go build -o ../sing-box ./cmd/sing-box
+
+      - name: Create release package
+        run: |
+          mkdir -p singbox-proxy-manager-freebsd-amd64/frontend
+          mv main singbox-proxy-manager-freebsd-amd64/
+          mv sing-box singbox-proxy-manager-freebsd-amd64/
+          cp -r frontend/dist singbox-proxy-manager-freebsd-amd64/frontend/
+          mkdir -p singbox-proxy-manager-freebsd-amd64/config
+          cat > singbox-proxy-manager-freebsd-amd64/start.sh << 'EOF'
+          #!/bin/sh
+          cd "$(dirname "$0")"
+          export PATH="$PWD:$PATH"
+          export CONFIG_DIR="$PWD/config"
+          export PORT="${PORT:-30000}"
+          export ADMIN_PASSWORD="${ADMIN_PASSWORD:-admin123}"
+          ./main
+          EOF
+          chmod +x singbox-proxy-manager-freebsd-amd64/start.sh
+          tar czf singbox-proxy-manager-freebsd-amd64.tar.gz singbox-proxy-manager-freebsd-amd64/
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: singbox-proxy-manager-freebsd-amd64
+          path: singbox-proxy-manager-freebsd-amd64.tar.gz
+          retention-days: 30
+
+  # 自动发布到Releases
+  auto-release:
+    runs-on: ubuntu-latest
+    needs: [build-linux, build-freebsd, build-docker]
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download Linux artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: singbox-proxy-manager-linux-amd64
+          path: ./
+
+      - name: Download FreeBSD artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: singbox-proxy-manager-freebsd-amd64
+          path: ./
+
+      - name: Generate version tag
+        id: version
+        run: echo "tag=v0.0.${{ github.run_number }}" >> $GITHUB_OUTPUT
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.version.outputs.tag }}
+          name: "Auto Release ${{ steps.version.outputs.tag }}"
+          body: |
+            ## 自动构建版本 ${{ steps.version.outputs.tag }}
+
+            Commit: ${{ github.sha }}
+
+            ### 完整发布包（开箱即用）
+
+            包含：后端程序 + 前端文件 + sing-box + 启动脚本
+
+            | 平台 | 下载 |
+            |------|------|
+            | Linux (amd64) | singbox-proxy-manager-linux-amd64.tar.gz |
+            | FreeBSD (amd64) | singbox-proxy-manager-freebsd-amd64.tar.gz |
+            | Docker | `docker pull ghcr.io/${{ github.repository }}:latest` |
+
+            ### 使用方法
+            ```bash
+            tar xzf singbox-proxy-manager-linux-amd64.tar.gz
+            cd singbox-proxy-manager-linux-amd64
+            ADMIN_PASSWORD=your_password ./start.sh
+            # 访问 http://localhost:30000
+            ```
+          files: |
+            singbox-proxy-manager-linux-amd64.tar.gz
+            singbox-proxy-manager-freebsd-amd64.tar.gz
+          draft: false
+          prerelease: false
