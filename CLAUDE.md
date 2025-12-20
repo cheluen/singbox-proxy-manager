@@ -265,14 +265,3 @@ When sing-box config format changes:
 - No HTTPS on management interface by default (use reverse proxy for production)
 - All proxy configs stored unencrypted in SQLite database
 
-# 开发工作流与规范(必须遵循)
-- **1**.默认使用中文回答
-- **2**.分析项目一律只从代码入手，忽略注释和文档，因为注释和文档可能是不符合代码的
-- **3**.禁止伪代码和占位符,必须提供完整实现
-- **4**.任何代码变更前必须用exa mcp或context7 mcp工具查询相关文档
-- **5**.工作开始前必须使用git创建检查点备份文件
-- **6**.涉及前端必须用playwright mcp测试UI和功能，确保前后端对齐
-- **7**.测试必须包含项目支持的所有部署方式
-- **8**.采用TDD工作流程：编码 → 测试 → 结果反馈 → 修复 → 测试（循环）
-- **9**.工作完成后清除所有测试文件和临时文件
-- **10**.所有工作完成后需要进行自省，看看有没有遵循CLAUDE.md的开发工作流与规范，如果没有就必须重来一遍工作流程并遵循CLAUDE.md的开发工作流与规范

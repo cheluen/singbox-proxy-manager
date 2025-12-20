@@ -43,6 +43,7 @@ test/
 
 # 文档（内部使用）
 PRIVACY_AUDIT_REPORT.md
-
+CLAUDE.md
+AGENTS.md
 # Git检查点备份
 *.patch
