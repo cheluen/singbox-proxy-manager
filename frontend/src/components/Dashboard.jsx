@@ -24,6 +24,9 @@ import {
   ImportOutlined,
   DeleteOutlined,
   EditOutlined,
+  ExportOutlined,
+  CopyOutlined,
+  SwapOutlined,
   CheckCircleOutlined,
   CloseCircleOutlined,
   ThunderboltOutlined,
@@ -39,8 +42,6 @@ import BatchAuthModal from './BatchAuthModal'
 const { Header, Content } = Layout
 const { Title } = Typography
 const { TextArea } = Input
-
-const APP_VERSION = '1.0.0'
 
 // Get country flag emoji from country name or code
 const getCountryFlag = (location) => {
@@ -88,6 +89,7 @@ function Dashboard({ onLogout }) {
   const { t, i18n } = useTranslation()
   const [nodes, setNodes] = useState([])
   const [loading, setLoading] = useState(false)
+  const [appVersion, setAppVersion] = useState('')
   const [modalVisible, setModalVisible] = useState(false)
   const [settingsVisible, setSettingsVisible] = useState(false)
   const [batchAuthVisible, setBatchAuthVisible] = useState(false)
@@ -98,10 +100,28 @@ function Dashboard({ onLogout }) {
   const [batchImportLinks, setBatchImportLinks] = useState('')
   const [enableAfterImport, setEnableAfterImport] = useState(true)
   const [checkingIP, setCheckingIP] = useState(false)
+  const [exportVisible, setExportVisible] = useState(false)
+  const [exportText, setExportText] = useState('')
+  const [exportLoading, setExportLoading] = useState(false)
+  const [replaceVisible, setReplaceVisible] = useState(false)
+  const [replaceNode, setReplaceNode] = useState(null)
+  const [replaceLink, setReplaceLink] = useState('')
+  const [replaceUpdateName, setReplaceUpdateName] = useState(true)
+  const [replaceLoading, setReplaceLoading] = useState(false)
 
   useEffect(() => {
     loadNodes()
+    loadVersion()
   }, [])
+
+  const loadVersion = async () => {
+    try {
+      const response = await api.get('/version')
+      setAppVersion(response.data?.version || '')
+    } catch {
+      setAppVersion('')
+    }
+  }
 
   const loadNodes = async () => {
     setLoading(true)
@@ -253,38 +273,51 @@ function Dashboard({ onLogout }) {
     notification.info({
       key,
       message: t('batch_check_ip_running')
-        .replace('{{current}}', '1')
+        .replace('{{current}}', '0')
         .replace('{{total}}', total.toString()),
       duration: 0, // Don't auto close
       icon: <ThunderboltOutlined style={{ color: '#1890ff' }} />,
     })
 
     try {
-      for (let i = 0; i < selectedNodeIds.length; i++) {
-        const id = selectedNodeIds[i]
-        
-        try {
-          await api.get(`/nodes/${id}/check-ip`)
-          completed++
-        } catch (error) {
-          console.error(`Failed to check IP for node ${id}:`, error)
-          failed++
-          const msg = error.response?.data?.error || t('server_error')
-          message.error(`ID ${id}: ${msg}`)
-        }
+      const concurrency = Math.min(5, total)
+      let nextIndex = 0
 
-        // Update notification with current progress (only if not the last one)
-        if (i < selectedNodeIds.length - 1) {
-          notification.info({
-            key,
-            message: t('batch_check_ip_running')
-              .replace('{{current}}', (i + 2).toString())
-              .replace('{{total}}', total.toString()),
-            duration: 0,
-            icon: <ThunderboltOutlined style={{ color: '#1890ff' }} />,
-          })
+      const runWorker = async () => {
+        while (true) {
+          const currentIndex = nextIndex
+          nextIndex += 1
+          if (currentIndex >= selectedNodeIds.length) {
+            return
+          }
+
+          const id = selectedNodeIds[currentIndex]
+
+          try {
+            await api.get(`/nodes/${id}/check-ip`)
+            completed += 1
+          } catch (error) {
+            console.error(`Failed to check IP for node ${id}:`, error)
+            failed += 1
+            const msg = error.response?.data?.error || t('server_error')
+            message.error(`ID ${id}: ${msg}`)
+          } finally {
+            const done = completed + failed
+            if (done < total) {
+              notification.info({
+                key,
+                message: t('batch_check_ip_running')
+                  .replace('{{current}}', done.toString())
+                  .replace('{{total}}', total.toString()),
+                duration: 0,
+                icon: <ThunderboltOutlined style={{ color: '#1890ff' }} />,
+              })
+            }
+          }
         }
       }
+
+      await Promise.all(Array.from({ length: concurrency }, () => runWorker()))
 
       // Close the progress notification and show success
       notification.destroy(key)
@@ -304,6 +337,101 @@ function Dashboard({ onLogout }) {
       loadNodes()
     } finally {
       setCheckingIP(false)
+    }
+  }
+
+  const copyToClipboard = async (text) => {
+    if (!text) return
+    try {
+      await navigator.clipboard.writeText(text)
+      message.success(t('copied'))
+    } catch {
+      try {
+        const textarea = document.createElement('textarea')
+        textarea.value = text
+        textarea.style.position = 'fixed'
+        textarea.style.opacity = '0'
+        document.body.appendChild(textarea)
+        textarea.focus()
+        textarea.select()
+        document.execCommand('copy')
+        document.body.removeChild(textarea)
+        message.success(t('copied'))
+      } catch {
+        message.error(t('copy_failed'))
+      }
+    }
+  }
+
+  const handleExportNode = async (node) => {
+    try {
+      setExportLoading(true)
+      const response = await api.get(`/nodes/${node.id}/export`)
+      const link = response.data?.link || ''
+      setExportText(link)
+      setExportVisible(true)
+    } catch (error) {
+      message.error(error.response?.data?.error || t('server_error'))
+    } finally {
+      setExportLoading(false)
+    }
+  }
+
+  const handleBatchExport = async () => {
+    if (selectedNodeIds.length === 0) {
+      message.warning(t('select_nodes'))
+      return
+    }
+
+    try {
+      setExportLoading(true)
+      const response = await api.post('/nodes/batch-export', { ids: selectedNodeIds })
+      const results = response.data?.results || []
+      const links = results
+        .filter((r) => r.success && r.link)
+        .map((r) => r.link)
+      const failedCount = (response.data?.failed ?? 0)
+      if (failedCount > 0) {
+        message.warning(t('export_partial').replace('{{count}}', failedCount.toString()))
+      }
+      setExportText(links.join('\n'))
+      setExportVisible(true)
+    } catch (error) {
+      message.error(error.response?.data?.error || t('server_error'))
+    } finally {
+      setExportLoading(false)
+    }
+  }
+
+  const openReplaceModal = (node) => {
+    setReplaceNode(node)
+    setReplaceLink('')
+    setReplaceUpdateName(true)
+    setReplaceVisible(true)
+  }
+
+  const handleConfirmReplace = async () => {
+    if (!replaceNode?.id) return
+    if (!replaceLink.trim()) {
+      message.warning(t('enter_share_link'))
+      return
+    }
+
+    try {
+      setReplaceLoading(true)
+      await api.put(`/nodes/${replaceNode.id}/replace`, {
+        link: replaceLink.trim(),
+        update_name: replaceUpdateName,
+      })
+      message.success(t('node_replaced'))
+      setReplaceVisible(false)
+      setReplaceNode(null)
+      setReplaceLink('')
+      loadNodes()
+    } catch (error) {
+      message.error(error.response?.data?.error || t('server_error'))
+    } finally {
+      setReplaceLoading(false)
     }
   }
 
@@ -414,6 +542,14 @@ function Dashboard({ onLogout }) {
       key: 'name',
       ellipsis: true,
       width: 200,
+    },
+    {
+      title: t('remark'),
+      dataIndex: 'remark',
+      key: 'remark',
+      ellipsis: true,
+      width: 220,
+      render: (remark) => remark || '-',
     },
     {
       title: t('node_type'),
@@ -530,10 +666,27 @@ function Dashboard({ onLogout }) {
     {
       title: t('actions'),
       key: 'actions',
-      width: 100,
+      width: 140,
       fixed: 'right',
       render: (_, record) => (
         <Space size="small">
+          <Tooltip title={t('export')}>
+            <Button
+              type="link"
+              size="small"
+              icon={<CopyOutlined />}
+              loading={exportLoading}
+              onClick={() => handleExportNode(record)}
+            />
+          </Tooltip>
+          <Tooltip title={t('replace')}>
+            <Button
+              type="link"
+              size="small"
+              icon={<SwapOutlined />}
+              onClick={() => openReplaceModal(record)}
+            />
+          </Tooltip>
           <Tooltip title={t('edit')}>
             <Button
               type="link"
@@ -608,7 +761,7 @@ function Dashboard({ onLogout }) {
           <Title level={3} style={{ color: 'white', margin: 0 }}>
             {t('app_title')}
           </Title>
-          <Tag color="green">{t('version')} {APP_VERSION}</Tag>
+          <Tag color="green">{t('version')} {appVersion || '-'}</Tag>
         </div>
         <Space>
           <Select
@@ -671,6 +824,13 @@ function Dashboard({ onLogout }) {
             {selectedNodeIds.length > 0 && (
               <Space>
                 <Tag color="blue">{t('selected_count').replace('{{count}}', selectedNodeIds.length)}</Tag>
+                <Button
+                  icon={<ExportOutlined />}
+                  onClick={handleBatchExport}
+                  loading={exportLoading}
+                >
+                  {t('batch_export')}
+                </Button>
                 <Button
                   icon={<ThunderboltOutlined />}
                   onClick={handleBatchCheckIP}
@@ -779,6 +939,54 @@ function Dashboard({ onLogout }) {
             onChange={(e) => setEnableAfterImport(e.target.checked)}
           >
             {t('enable_after_import')}
+          </Checkbox>
+        </Space>
+      </Modal>
+
+      <Modal
+        title={t('export')}
+        open={exportVisible}
+        onCancel={() => setExportVisible(false)}
+        onOk={() => copyToClipboard(exportText)}
+        okText={t('copy')}
+        cancelText={t('cancel')}
+        okButtonProps={{ disabled: !exportText }}
+        width={700}
+      >
+        <TextArea
+          rows={10}
+          value={exportText}
+          readOnly
+        />
+      </Modal>
+
+      <Modal
+        title={t('replace')}
+        open={replaceVisible}
+        onCancel={() => {
+          setReplaceVisible(false)
+          setReplaceNode(null)
+          setReplaceLink('')
+        }}
+        onOk={handleConfirmReplace}
+        okText={t('confirm')}
+        cancelText={t('cancel')}
+        confirmLoading={replaceLoading}
+        width={700}
+      >
+        <Space direction="vertical" style={{ width: '100%' }} size="middle">
+          <div>{t('replace_desc')}</div>
+          <Input
+            placeholder={t('enter_share_link')}
+            value={replaceLink}
+            onChange={(e) => setReplaceLink(e.target.value)}
+            allowClear
+          />
+          <Checkbox
+            checked={replaceUpdateName}
+            onChange={(e) => setReplaceUpdateName(e.target.checked)}
+          >
+            {t('replace_update_name')}
           </Checkbox>
         </Space>
       </Modal>

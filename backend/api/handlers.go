@@ -40,7 +40,7 @@ func NewHandler(db *sql.DB, singBoxService *services.SingBoxService) *Handler {
 func (h *Handler) regenerateAndRestart() error {
 	// Get all nodes from database
 	rows, err := h.db.Query(`
-		SELECT id, name, type, config, inbound_port, username, password,
+		SELECT id, name, remark, type, config, inbound_port, username, password,
 		       sort_order, node_ip, location, country_code, latency, enabled, created_at, updated_at
 		FROM proxy_nodes
 		ORDER BY sort_order ASC
@@ -54,7 +54,7 @@ func (h *Handler) regenerateAndRestart() error {
 	for rows.Next() {
 		var node models.ProxyNode
 		err := rows.Scan(
-			&node.ID, &node.Name, &node.Type, &node.Config, &node.InboundPort,
+			&node.ID, &node.Name, &node.Remark, &node.Type, &node.Config, &node.InboundPort,
 			&node.Username, &node.Password, &node.SortOrder, &node.NodeIP, &node.Location,
 			&node.CountryCode, &node.Latency, &node.Enabled, &node.CreatedAt, &node.UpdatedAt,
 		)
@@ -192,7 +192,7 @@ func (h *Handler) Login(c *gin.Context) {
 // GetNodes returns all proxy nodes
 func (h *Handler) GetNodes(c *gin.Context) {
 	rows, err := h.db.Query(`
-		SELECT id, name, type, config, inbound_port, username, password, 
+		SELECT id, name, remark, type, config, inbound_port, username, password, 
 		       sort_order, node_ip, location, country_code, latency, enabled, created_at, updated_at
 		FROM proxy_nodes
 		ORDER BY sort_order ASC
@@ -207,7 +207,7 @@ func (h *Handler) GetNodes(c *gin.Context) {
 	for rows.Next() {
 		var node models.ProxyNode
 		err := rows.Scan(
-			&node.ID, &node.Name, &node.Type, &node.Config, &node.InboundPort,
+			&node.ID, &node.Name, &node.Remark, &node.Type, &node.Config, &node.InboundPort,
 			&node.Username, &node.Password, &node.SortOrder, &node.NodeIP,
 			&node.Location, &node.CountryCode, &node.Latency, &node.Enabled, &node.CreatedAt, &node.UpdatedAt,
 		)
@@ -230,11 +230,11 @@ func (h *Handler) GetNode(c *gin.Context) {
 
 	var node models.ProxyNode
 	err = h.db.QueryRow(`
-		SELECT id, name, type, config, inbound_port, username, password,
+		SELECT id, name, remark, type, config, inbound_port, username, password,
 		       sort_order, node_ip, location, country_code, latency, enabled, created_at, updated_at
 		FROM proxy_nodes WHERE id = ?
 	`, id).Scan(
-		&node.ID, &node.Name, &node.Type, &node.Config, &node.InboundPort,
+		&node.ID, &node.Name, &node.Remark, &node.Type, &node.Config, &node.InboundPort,
 		&node.Username, &node.Password, &node.SortOrder, &node.NodeIP,
 		&node.Location, &node.CountryCode, &node.Latency, &node.Enabled, &node.CreatedAt, &node.UpdatedAt,
 	)
@@ -291,9 +291,9 @@ func (h *Handler) CreateNode(c *gin.Context) {
 
 	// Insert node
 	result, err := h.db.Exec(`
-		INSERT INTO proxy_nodes (name, type, config, inbound_port, username, password, sort_order, latency, enabled)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-	`, req.Name, req.Type, req.Config, req.InboundPort, req.Username, req.Password, req.SortOrder, 0, req.Enabled)
+		INSERT INTO proxy_nodes (name, remark, type, config, inbound_port, username, password, sort_order, latency, enabled)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+	`, req.Name, req.Remark, req.Type, req.Config, req.InboundPort, req.Username, req.Password, req.SortOrder, 0, req.Enabled)
 
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to create node"})
@@ -382,9 +382,9 @@ func (h *Handler) BatchImportNodes(c *gin.Context) {
 
 		// Insert node
 		dbResult, err := h.db.Exec(`
-			INSERT INTO proxy_nodes (name, type, config, inbound_port, username, password, sort_order, latency, enabled)
-			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-		`, name, proxyType, string(configJSON), inboundPort, "", "", sortOrder, 0, req.Enabled)
+			INSERT INTO proxy_nodes (name, remark, type, config, inbound_port, username, password, sort_order, latency, enabled)
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		`, name, "", proxyType, string(configJSON), inboundPort, "", "", sortOrder, 0, req.Enabled)
 
 		if err != nil {
 			result["success"] = false
@@ -444,10 +444,10 @@ func (h *Handler) UpdateNode(c *gin.Context) {
 	// Update node
 	_, err = h.db.Exec(`
 		UPDATE proxy_nodes 
-		SET name = ?, type = ?, config = ?, username = ?, password = ?, 
+		SET name = ?, remark = ?, type = ?, config = ?, username = ?, password = ?, 
 		    enabled = ?, updated_at = CURRENT_TIMESTAMP
 		WHERE id = ?
-	`, req.Name, req.Type, req.Config, req.Username, req.Password, req.Enabled, id)
+	`, req.Name, req.Remark, req.Type, req.Config, req.Username, req.Password, req.Enabled, id)
 
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to update node"})
@@ -890,4 +890,183 @@ func (h *Handler) ParseShareLink(c *gin.Context) {
 		"name":   name,
 		"config": string(configJSON),
 	})
+}
+
+// ExportNode exports a node as its share link format.
+func (h *Handler) ExportNode(c *gin.Context) {
+	id, err := strconv.Atoi(c.Param("id"))
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid id"})
+		return
+	}
+
+	var node models.ProxyNode
+	if err := h.db.QueryRow(`
+		SELECT id, name, remark, type, config
+		FROM proxy_nodes WHERE id = ?
+	`, id).Scan(&node.ID, &node.Name, &node.Remark, &node.Type, &node.Config); err != nil {
+		if err == sql.ErrNoRows {
+			c.JSON(http.StatusNotFound, gin.H{"error": "node not found"})
+			return
+		}
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "database error"})
+		return
+	}
+
+	link, err := services.BuildShareLink(node)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{"link": link})
+}
+
+// BatchExportNodes exports multiple nodes as share links.
+func (h *Handler) BatchExportNodes(c *gin.Context) {
+	var req struct {
+		IDs []int `json:"ids" binding:"required"`
+	}
+
+	if err := c.BindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid request"})
+		return
+	}
+
+	if len(req.IDs) == 0 {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "no nodes selected"})
+		return
+	}
+
+	results := []map[string]interface{}{}
+	successCount := 0
+
+	for _, id := range req.IDs {
+		result := map[string]interface{}{
+			"id": id,
+		}
+
+		var node models.ProxyNode
+		if err := h.db.QueryRow(`
+			SELECT id, name, remark, type, config
+			FROM proxy_nodes WHERE id = ?
+		`, id).Scan(&node.ID, &node.Name, &node.Remark, &node.Type, &node.Config); err != nil {
+			result["success"] = false
+			if err == sql.ErrNoRows {
+				result["error"] = "node not found"
+			} else {
+				result["error"] = "database error"
+			}
+			results = append(results, result)
+			continue
+		}
+
+		link, err := services.BuildShareLink(node)
+		if err != nil {
+			result["success"] = false
+			result["error"] = err.Error()
+			results = append(results, result)
+			continue
+		}
+
+		result["success"] = true
+		result["name"] = node.Name
+		result["type"] = node.Type
+		result["link"] = link
+		results = append(results, result)
+		successCount++
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"total":   len(req.IDs),
+		"success": successCount,
+		"failed":  len(req.IDs) - successCount,
+		"results": results,
+	})
+}
+
+// ReplaceNode replaces a node's config using a share link.
+func (h *Handler) ReplaceNode(c *gin.Context) {
+	id, err := strconv.Atoi(c.Param("id"))
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid id"})
+		return
+	}
+
+	var req struct {
+		Link       string `json:"link" binding:"required"`
+		UpdateName *bool  `json:"update_name,omitempty"`
+	}
+
+	if err := c.BindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid request"})
+		return
+	}
+
+	parsedConfig, proxyType, name, err := services.ParseShareLink(req.Link)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": fmt.Sprintf("failed to parse link: %v", err)})
+		return
+	}
+
+	configJSON, err := json.Marshal(parsedConfig)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "failed to marshal config"})
+		return
+	}
+
+	updateName := true
+	if req.UpdateName != nil {
+		updateName = *req.UpdateName
+	}
+
+	var res sql.Result
+	if updateName {
+		res, err = h.db.Exec(`
+			UPDATE proxy_nodes
+			SET name = ?, type = ?, config = ?,
+			    node_ip = '', location = '', country_code = '', latency = 0,
+			    updated_at = CURRENT_TIMESTAMP
+			WHERE id = ?
+		`, name, proxyType, string(configJSON), id)
+	} else {
+		res, err = h.db.Exec(`
+			UPDATE proxy_nodes
+			SET type = ?, config = ?,
+			    node_ip = '', location = '', country_code = '', latency = 0,
+			    updated_at = CURRENT_TIMESTAMP
+			WHERE id = ?
+		`, proxyType, string(configJSON), id)
+	}
+
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to update node"})
+		return
+	}
+	if affected, _ := res.RowsAffected(); affected == 0 {
+		c.JSON(http.StatusNotFound, gin.H{"error": "node not found"})
+		return
+	}
+
+	if err := h.regenerateAndRestart(); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to update sing-box config"})
+		return
+	}
+
+	var node models.ProxyNode
+	err = h.db.QueryRow(`
+		SELECT id, name, remark, type, config, inbound_port, username, password,
+		       sort_order, node_ip, location, country_code, latency, enabled, created_at, updated_at
+		FROM proxy_nodes WHERE id = ?
+	`, id).Scan(
+		&node.ID, &node.Name, &node.Remark, &node.Type, &node.Config, &node.InboundPort,
+		&node.Username, &node.Password, &node.SortOrder, &node.NodeIP,
+		&node.Location, &node.CountryCode, &node.Latency, &node.Enabled, &node.CreatedAt, &node.UpdatedAt,
+	)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "database error"})
+		return
+	}
+
+	c.JSON(http.StatusOK, node)
 }

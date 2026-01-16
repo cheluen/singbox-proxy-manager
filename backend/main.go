@@ -3,16 +3,55 @@ package main
 import (
 	"database/sql"
 	"log"
+	"net/http"
 	"os"
 	"path/filepath"
 
 	"sb-proxy/backend/api"
 	"sb-proxy/backend/models"
 	"sb-proxy/backend/services"
+	"sb-proxy/internal/version"
 
 	"github.com/gin-gonic/gin"
+	"github.com/tursodatabase/libsql-client-go/libsql"
 	_ "modernc.org/sqlite"
 )
+
+func openDatabase(configDir string) (*sql.DB, error) {
+	tursoURL := os.Getenv("TURSO_DATABASE_URL")
+	tursoToken := os.Getenv("TURSO_AUTH_TOKEN")
+	if tursoURL != "" && tursoToken != "" {
+		connector, err := libsql.NewConnector(tursoURL, libsql.WithAuthToken(tursoToken))
+		if err != nil {
+			return nil, err
+		}
+
+		db := sql.OpenDB(connector)
+		if err := db.Ping(); err != nil {
+			db.Close()
+			return nil, err
+		}
+
+		log.Printf("Using Turso database: %s", tursoURL)
+		return db, nil
+	}
+	if tursoURL != "" || tursoToken != "" {
+		log.Printf("Turso config incomplete (need both TURSO_DATABASE_URL and TURSO_AUTH_TOKEN), falling back to local sqlite")
+	}
+
+	dbPath := filepath.Join(configDir, "proxy.db")
+	db, err := sql.Open("sqlite", dbPath)
+	if err != nil {
+		return nil, err
+	}
+	if err := db.Ping(); err != nil {
+		db.Close()
+		return nil, err
+	}
+
+	log.Printf("Using local sqlite database: %s", dbPath)
+	return db, nil
+}
 
 func main() {
 	// Get config directory from environment or use default
@@ -27,8 +66,7 @@ func main() {
 	}
 
 	// Initialize database
-	dbPath := filepath.Join(configDir, "proxy.db")
-	db, err := sql.Open("sqlite", dbPath)
+	db, err := openDatabase(configDir)
 	if err != nil {
 		log.Fatalf("Failed to open database: %v", err)
 	}
@@ -44,7 +82,7 @@ func main() {
 
 	// Generate global config for all nodes and start sing-box
 	rows, err := db.Query(`
-		SELECT id, name, type, config, inbound_port, username, password, 
+		SELECT id, name, remark, type, config, inbound_port, username, password, 
 		       sort_order, node_ip, location, country_code, latency, enabled, created_at, updated_at
 		FROM proxy_nodes
 		ORDER BY sort_order ASC
@@ -58,7 +96,7 @@ func main() {
 		for rows.Next() {
 			var node models.ProxyNode
 			if err := rows.Scan(
-				&node.ID, &node.Name, &node.Type, &node.Config, &node.InboundPort,
+				&node.ID, &node.Name, &node.Remark, &node.Type, &node.Config, &node.InboundPort,
 				&node.Username, &node.Password, &node.SortOrder, &node.NodeIP, &node.Location,
 				&node.CountryCode, &node.Latency, &node.Enabled, &node.CreatedAt, &node.UpdatedAt,
 			); err != nil {
@@ -102,6 +140,9 @@ func main() {
 	handler := api.NewHandler(db, singBoxService)
 
 	// Public routes
+	r.GET("/api/version", func(c *gin.Context) {
+		c.JSON(http.StatusOK, gin.H{"version": version.Version()})
+	})
 	r.POST("/api/login", handler.Login)
 
 	// Protected routes
@@ -114,8 +155,11 @@ func main() {
 		authorized.POST("/nodes", handler.CreateNode)
 		authorized.POST("/nodes/batch-import", handler.BatchImportNodes)
 		authorized.POST("/nodes/batch-delete", handler.BatchDeleteNodes)
+		authorized.POST("/nodes/batch-export", handler.BatchExportNodes)
 		authorized.PUT("/nodes/:id", handler.UpdateNode)
+		authorized.PUT("/nodes/:id/replace", handler.ReplaceNode)
 		authorized.DELETE("/nodes/:id", handler.DeleteNode)
+		authorized.GET("/nodes/:id/export", handler.ExportNode)
 		authorized.POST("/nodes/reorder", handler.ReorderNodes)
 		authorized.GET("/nodes/:id/check-ip", handler.CheckNodeIP)
 		authorized.POST("/nodes/batch-auth", handler.BatchSetAuth)

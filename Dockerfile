@@ -12,13 +12,15 @@ RUN go mod download
 # Force rebuild by adding timestamp
 RUN echo "Build at $(date)" > /tmp/buildtime
 COPY backend/ ./backend/
+COPY internal/ ./internal/
 RUN CGO_ENABLED=0 go build -o main ./backend
 
 FROM debian:bookworm-slim
+ARG SINGBOX_VERSION=1.12.12
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates \
     curl \
-    && curl -Lo /tmp/sing-box.tar.gz https://github.com/SagerNet/sing-box/releases/download/v1.12.11/sing-box-1.12.11-linux-amd64.tar.gz \
+    && curl -Lo /tmp/sing-box.tar.gz "https://github.com/SagerNet/sing-box/releases/download/v${SINGBOX_VERSION}/sing-box-${SINGBOX_VERSION}-linux-amd64.tar.gz" \
     && tar -xzf /tmp/sing-box.tar.gz -C /tmp \
     && mv /tmp/sing-box-*/sing-box /usr/local/bin/ \
     && chmod +x /usr/local/bin/sing-box \

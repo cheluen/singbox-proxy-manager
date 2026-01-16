@@ -101,6 +101,10 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Read app version
+        id: app_version
+        run: echo "version=$(cat internal/version/version.txt)" >> $GITHUB_OUTPUT
+
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
@@ -115,9 +119,12 @@ jobs:
         uses: docker/build-push-action@v5
         with:
           context: .
+          build-args: |
+            SINGBOX_VERSION=${{ env.SINGBOX_VERSION }}
           push: true
           tags: |
             ghcr.io/${{ github.repository }}:${{ github.sha }}
+            ghcr.io/${{ github.repository }}:v${{ steps.app_version.outputs.version }}
             ghcr.io/${{ github.repository }}:latest
           cache-from: type=gha
           cache-to: type=gha,mode=max
@@ -286,9 +293,13 @@ jobs:
           name: singbox-proxy-manager-freebsd-amd64
           path: ./
 
+      - name: Read app version
+        id: app_version
+        run: echo "version=$(cat internal/version/version.txt)" >> $GITHUB_OUTPUT
+
       - name: Generate version tag
         id: version
-        run: echo "tag=v0.0.${{ github.run_number }}" >> $GITHUB_OUTPUT
+        run: echo "tag=v${{ steps.app_version.outputs.version }}" >> $GITHUB_OUTPUT
 
       - name: Create Release
         uses: softprops/action-gh-release@v2
