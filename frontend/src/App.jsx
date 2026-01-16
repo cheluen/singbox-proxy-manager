@@ -1,18 +1,17 @@
-import React, { useState, useEffect } from 'react'
+import React, { useState } from 'react'
 import { ConfigProvider, theme, message } from 'antd'
 import Login from './components/Login'
 import Dashboard from './components/Dashboard'
 import api from './utils/api'
 
 function App() {
-  const [token, setToken] = useState(localStorage.getItem('token'))
-  const [loading, setLoading] = useState(false)
-
-  useEffect(() => {
-    if (token) {
-      api.setToken(token)
+  const [token, setToken] = useState(() => {
+    const savedToken = localStorage.getItem('token')
+    if (savedToken) {
+      api.setToken(savedToken)
     }
-  }, [token])
+    return savedToken
+  })
 
   const handleLogin = (newToken) => {
     localStorage.setItem('token', newToken)

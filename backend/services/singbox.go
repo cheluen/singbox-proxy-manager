@@ -249,6 +249,10 @@ func (s *SingBoxService) generateOutbound(node *models.ProxyNode, tag string) (O
 		return s.generateTrojanOutbound(parsedConfig.(*models.TrojanConfig), tag)
 	case "anytls":
 		return s.generateAnyTLSOutbound(parsedConfig.(*models.AnyTLSConfig), tag)
+	case "socks5":
+		return s.generateSOCKS5Outbound(parsedConfig.(*models.SOCKS5Config), tag)
+	case "http":
+		return s.generateHTTPProxyOutbound(parsedConfig.(*models.HTTPProxyConfig), tag)
 	default:
 		return OutboundConfig{}, fmt.Errorf("unsupported proxy type: %s", node.Type)
 	}
@@ -789,6 +793,59 @@ func (s *SingBoxService) generateAnyTLSOutbound(config *models.AnyTLSConfig, tag
 		tls["insecure"] = true
 	}
 	outbound.Extra["tls"] = tls
+
+	return outbound, nil
+}
+
+func (s *SingBoxService) generateSOCKS5Outbound(config *models.SOCKS5Config, tag string) (OutboundConfig, error) {
+	outbound := OutboundConfig{
+		Type:   "socks",
+		Tag:    tag,
+		Server: config.Server,
+		Port:   config.ServerPort,
+		Extra: map[string]interface{}{
+			"version": "5",
+		},
+	}
+
+	if config.Username != "" {
+		outbound.Extra["username"] = config.Username
+	}
+	if config.Password != "" {
+		outbound.Extra["password"] = config.Password
+	}
+
+	return outbound, nil
+}
+
+func (s *SingBoxService) generateHTTPProxyOutbound(config *models.HTTPProxyConfig, tag string) (OutboundConfig, error) {
+	outbound := OutboundConfig{
+		Type:   "http",
+		Tag:    tag,
+		Server: config.Server,
+		Port:   config.ServerPort,
+		Extra:  map[string]interface{}{},
+	}
+
+	if config.Username != "" {
+		outbound.Extra["username"] = config.Username
+	}
+	if config.Password != "" {
+		outbound.Extra["password"] = config.Password
+	}
+
+	if config.TLS {
+		tls := map[string]interface{}{
+			"enabled": true,
+		}
+		if config.SNI != "" {
+			tls["server_name"] = config.SNI
+		}
+		if config.Insecure {
+			tls["insecure"] = true
+		}
+		outbound.Extra["tls"] = tls
+	}
 
 	return outbound, nil
 }

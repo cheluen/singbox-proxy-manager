@@ -29,6 +29,10 @@ func ParseShareLink(link string) (interface{}, string, string, error) {
 		return parseTUICLink(link)
 	} else if strings.HasPrefix(link, "anytls://") {
 		return parseAnyTLSLink(link)
+	} else if strings.HasPrefix(link, "socks5://") || strings.HasPrefix(link, "socks://") {
+		return parseSOCKS5Link(link)
+	} else if strings.HasPrefix(link, "http://") || strings.HasPrefix(link, "https://") {
+		return parseHTTPProxyLink(link)
 	}
 
 	return nil, "", "", fmt.Errorf("unsupported link format")
@@ -674,4 +678,78 @@ func parseAnyTLSLink(link string) (interface{}, string, string, error) {
 	}
 
 	return config, "anytls", name, nil
+}
+
+func parseSOCKS5Link(link string) (interface{}, string, string, error) {
+	parsed, err := url.Parse(link)
+	if err != nil {
+		return nil, "", "", fmt.Errorf("invalid socks5 link: %v", err)
+	}
+
+	name := "SOCKS5 Node"
+	if parsed.Fragment != "" {
+		name, _ = url.QueryUnescape(parsed.Fragment)
+	}
+
+	portStr := parsed.Port()
+	if portStr == "" {
+		return nil, "", "", fmt.Errorf("missing port")
+	}
+	port, err := strconv.Atoi(portStr)
+	if err != nil {
+		return nil, "", "", fmt.Errorf("invalid port")
+	}
+
+	cfg := models.SOCKS5Config{
+		Server:     parsed.Hostname(),
+		ServerPort: port,
+	}
+
+	if parsed.User != nil {
+		cfg.Username = parsed.User.Username()
+		if pwd, ok := parsed.User.Password(); ok {
+			cfg.Password = pwd
+		}
+	}
+
+	return cfg, "socks5", name, nil
+}
+
+func parseHTTPProxyLink(link string) (interface{}, string, string, error) {
+	parsed, err := url.Parse(link)
+	if err != nil {
+		return nil, "", "", fmt.Errorf("invalid http proxy link: %v", err)
+	}
+
+	name := "HTTP Proxy"
+	if parsed.Fragment != "" {
+		name, _ = url.QueryUnescape(parsed.Fragment)
+	}
+
+	portStr := parsed.Port()
+	if portStr == "" {
+		return nil, "", "", fmt.Errorf("missing port")
+	}
+	port, err := strconv.Atoi(portStr)
+	if err != nil {
+		return nil, "", "", fmt.Errorf("invalid port")
+	}
+
+	q := parsed.Query()
+	cfg := models.HTTPProxyConfig{
+		Server:     parsed.Hostname(),
+		ServerPort: port,
+		TLS:        parsed.Scheme == "https",
+		SNI:        q.Get("sni"),
+		Insecure:   q.Get("insecure") == "1" || q.Get("allowInsecure") == "1",
+	}
+
+	if parsed.User != nil {
+		cfg.Username = parsed.User.Username()
+		if pwd, ok := parsed.User.Password(); ok {
+			cfg.Password = pwd
+		}
+	}
+
+	return cfg, "http", name, nil
 }

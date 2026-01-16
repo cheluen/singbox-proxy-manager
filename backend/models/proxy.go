@@ -3,6 +3,7 @@ package models
 import (
 	"database/sql"
 	"encoding/json"
+	"fmt"
 	"log"
 	"os"
 	"time"
@@ -14,7 +15,8 @@ import (
 type ProxyNode struct {
 	ID          int       `json:"id"`
 	Name        string    `json:"name"`
-	Type        string    `json:"type"`   // ss, vless, vmess, hy2, tuic
+	Remark      string    `json:"remark"`
+	Type        string    `json:"type"`   // ss, vless, vmess, hy2, tuic, trojan, anytls, socks5, http
 	Config      string    `json:"config"` // JSON string of protocol-specific config
 	InboundPort int       `json:"inbound_port"`
 	Username    string    `json:"username"`
@@ -190,6 +192,25 @@ type AnyTLSConfig struct {
 	MinIdleSession           int      `json:"min_idle_session,omitempty"`
 }
 
+// SOCKS5Config represents SOCKS5 proxy configuration
+type SOCKS5Config struct {
+	Server     string `json:"server"`
+	ServerPort int    `json:"server_port"`
+	Username   string `json:"username,omitempty"`
+	Password   string `json:"password,omitempty"`
+}
+
+// HTTPProxyConfig represents HTTP/HTTPS proxy configuration
+type HTTPProxyConfig struct {
+	Server     string `json:"server"`
+	ServerPort int    `json:"server_port"`
+	Username   string `json:"username,omitempty"`
+	Password   string `json:"password,omitempty"`
+	TLS        bool   `json:"tls,omitempty"`
+	Insecure   bool   `json:"insecure,omitempty"`
+	SNI        string `json:"sni,omitempty"`
+}
+
 // Settings represents global settings
 type Settings struct {
 	ID            int       `json:"id"`
@@ -206,6 +227,7 @@ func InitDB(db *sql.DB) error {
 		CREATE TABLE IF NOT EXISTS proxy_nodes (
 			id INTEGER PRIMARY KEY AUTOINCREMENT,
 			name TEXT NOT NULL,
+			remark TEXT DEFAULT '',
 			type TEXT NOT NULL,
 			config TEXT NOT NULL,
 			inbound_port INTEGER NOT NULL,
@@ -222,6 +244,10 @@ func InitDB(db *sql.DB) error {
 		)
 	`)
 	if err != nil {
+		return err
+	}
+
+	if err := ensureColumn(db, "proxy_nodes", "remark", "ALTER TABLE proxy_nodes ADD COLUMN remark TEXT DEFAULT ''"); err != nil {
 		return err
 	}
 
@@ -269,6 +295,32 @@ func InitDB(db *sql.DB) error {
 	return nil
 }
 
+func ensureColumn(db *sql.DB, table string, column string, alterSQL string) error {
+	rows, err := db.Query(fmt.Sprintf("PRAGMA table_info(%s)", table))
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+
+	for rows.Next() {
+		var cid int
+		var name string
+		var colType string
+		var notNull int
+		var dflt sql.NullString
+		var pk int
+		if err := rows.Scan(&cid, &name, &colType, &notNull, &dflt, &pk); err != nil {
+			return err
+		}
+		if name == column {
+			return nil
+		}
+	}
+
+	_, err = db.Exec(alterSQL)
+	return err
+}
+
 // ParseConfig parses the config string based on proxy type
 func (p *ProxyNode) ParseConfig() (interface{}, error) {
 	var config interface{}
@@ -287,6 +339,10 @@ func (p *ProxyNode) ParseConfig() (interface{}, error) {
 		config = &TrojanConfig{}
 	case "anytls":
 		config = &AnyTLSConfig{}
+	case "socks5":
+		config = &SOCKS5Config{}
+	case "http":
+		config = &HTTPProxyConfig{}
 	default:
 		return nil, nil
 	}

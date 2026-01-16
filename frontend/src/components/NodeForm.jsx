@@ -12,6 +12,8 @@ const proxyTypes = [
   { value: 'tuic', label: 'TUIC' },
   { value: 'trojan', label: 'Trojan' },
   { value: 'anytls', label: 'AnyTLS' },
+  { value: 'socks5', label: 'SOCKS5' },
+  { value: 'http', label: 'HTTP Proxy' },
 ]
 
 function NodeForm({ node, onSave, onCancel }) {
@@ -27,6 +29,7 @@ function NodeForm({ node, onSave, onCancel }) {
       
       await onSave({
         name: values.name,
+        remark: values.remark || '',
         type: proxyType,
         config: JSON.stringify(config),
         inbound_port: values.inbound_port || 0, // 0 means auto-assign
@@ -142,6 +145,23 @@ function NodeForm({ node, onSave, onCancel }) {
           idle_session_timeout: values.idle_session_timeout || '',
           min_idle_session: values.min_idle_session || 0,
         }
+
+      case 'socks5':
+        return {
+          ...config,
+          username: values.proxy_username || '',
+          password: values.proxy_password || '',
+        }
+
+      case 'http':
+        return {
+          ...config,
+          username: values.proxy_username || '',
+          password: values.proxy_password || '',
+          tls: values.proxy_tls || false,
+          sni: values.proxy_sni || '',
+          insecure: values.proxy_insecure || false,
+        }
       
       default:
         return config
@@ -163,11 +183,23 @@ function NodeForm({ node, onSave, onCancel }) {
     normalizedConfig.alpn = initialConfig.alpn.join(',')
   }
 
+  const protocolUsername = normalizedConfig.username
   const protocolPassword = normalizedConfig.password
+  delete normalizedConfig.username
   delete normalizedConfig.password
+
+  const proxyTLS = node?.type === 'http' ? normalizedConfig.tls : false
+  const proxySNI = node?.type === 'http' ? normalizedConfig.sni : ''
+  const proxyInsecure = node?.type === 'http' ? normalizedConfig.insecure : false
+  if (node?.type === 'http') {
+    delete normalizedConfig.tls
+    delete normalizedConfig.sni
+    delete normalizedConfig.insecure
+  }
 
   const initialValues = {
     name: node?.name || '',
+    remark: node?.remark || '',
     enabled: node?.enabled !== false,
     inbound_port: node?.inbound_port || 0,
     username: node?.username || '',
@@ -180,6 +212,11 @@ function NodeForm({ node, onSave, onCancel }) {
     tuic_password: node?.type === 'tuic' ? protocolPassword : '',
     trojan_password: node?.type === 'trojan' ? protocolPassword : '',
     anytls_password: node?.type === 'anytls' ? protocolPassword : '',
+    proxy_username: node?.type === 'socks5' || node?.type === 'http' ? protocolUsername : '',
+    proxy_password: node?.type === 'socks5' || node?.type === 'http' ? protocolPassword : '',
+    proxy_tls: proxyTLS,
+    proxy_sni: proxySNI,
+    proxy_insecure: proxyInsecure,
   }
 
   const renderSSFields = () => (
@@ -482,6 +519,37 @@ function NodeForm({ node, onSave, onCancel }) {
     </>
   )
 
+  const renderSOCKS5Fields = () => (
+    <>
+      <Form.Item label="Proxy Username" name="proxy_username">
+        <Input />
+      </Form.Item>
+      <Form.Item label="Proxy Password" name="proxy_password">
+        <Input.Password />
+      </Form.Item>
+    </>
+  )
+
+  const renderHTTPProxyFields = () => (
+    <>
+      <Form.Item label="Proxy Username" name="proxy_username">
+        <Input />
+      </Form.Item>
+      <Form.Item label="Proxy Password" name="proxy_password">
+        <Input.Password />
+      </Form.Item>
+      <Form.Item name="proxy_tls" valuePropName="checked">
+        <Switch checkedChildren="HTTPS" unCheckedChildren="HTTP" />
+      </Form.Item>
+      <Form.Item label="SNI (for HTTPS)" name="proxy_sni">
+        <Input placeholder="example.com" />
+      </Form.Item>
+      <Form.Item name="proxy_insecure" valuePropName="checked">
+        <Switch checkedChildren="Skip Verify" unCheckedChildren="Verify" />
+      </Form.Item>
+    </>
+  )
+
   const renderConfigFields = () => {
     switch (proxyType) {
       case 'ss':
@@ -498,6 +566,10 @@ function NodeForm({ node, onSave, onCancel }) {
         return renderTrojanFields()
       case 'anytls':
         return renderAnyTLSFields()
+      case 'socks5':
+        return renderSOCKS5Fields()
+      case 'http':
+        return renderHTTPProxyFields()
       default:
         return null
     }
@@ -516,6 +588,10 @@ function NodeForm({ node, onSave, onCancel }) {
         rules={[{ required: true, message: 'Please enter node name' }]}
       >
         <Input />
+      </Form.Item>
+
+      <Form.Item label="Remark" name="remark">
+        <TextArea rows={2} placeholder="Optional" />
       </Form.Item>
 
       <Form.Item label="Proxy Type" required>

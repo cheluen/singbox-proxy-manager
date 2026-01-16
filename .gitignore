@@ -47,3 +47,4 @@ CLAUDE.md
 AGENTS.md
 # Git检查点备份
 *.patch
+.ace-tool/
