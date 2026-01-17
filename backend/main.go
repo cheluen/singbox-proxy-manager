@@ -1,7 +1,9 @@
 package main
 
 import (
+	"context"
 	"database/sql"
+	"fmt"
 	"log"
 	"net/http"
 	"os"
@@ -14,7 +16,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/tursodatabase/libsql-client-go/libsql"
-	_ "modernc.org/sqlite"
+	sqlite "modernc.org/sqlite"
 )
 
 func openDatabase(configDir string) (*sql.DB, error) {
@@ -39,11 +41,26 @@ func openDatabase(configDir string) (*sql.DB, error) {
 		log.Printf("Turso config incomplete (need both TURSO_DATABASE_URL and TURSO_AUTH_TOKEN), falling back to local sqlite")
 	}
 
+	sqlite.RegisterConnectionHook(func(conn sqlite.ExecQuerierContext, dsn string) error {
+		if _, err := conn.ExecContext(context.Background(), "PRAGMA foreign_keys = ON", nil); err != nil {
+			return fmt.Errorf("sqlite init failed (foreign_keys): %w", err)
+		}
+		if _, err := conn.ExecContext(context.Background(), "PRAGMA busy_timeout = 10000", nil); err != nil {
+			return fmt.Errorf("sqlite init failed (busy_timeout): %w", err)
+		}
+		if _, err := conn.ExecContext(context.Background(), "PRAGMA journal_mode = WAL", nil); err != nil {
+			return fmt.Errorf("sqlite init failed (journal_mode): %w", err)
+		}
+		return nil
+	})
+
 	dbPath := filepath.Join(configDir, "proxy.db")
 	db, err := sql.Open("sqlite", dbPath)
 	if err != nil {
 		return nil, err
 	}
+	db.SetMaxOpenConns(1)
+	db.SetMaxIdleConns(1)
 	if err := db.Ping(); err != nil {
 		db.Close()
 		return nil, err

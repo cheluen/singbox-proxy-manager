@@ -743,7 +743,6 @@ func (s *SingBoxService) generateTrojanOutbound(config *models.TrojanConfig, tag
 		}
 
 		outbound.Extra["transport"] = transport
-		outbound.Extra["network"] = config.Network
 	}
 
 	// Multiplex
