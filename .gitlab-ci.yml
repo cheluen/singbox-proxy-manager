@@ -11,9 +11,7 @@ variables:
 # Go代码lint检查
 lint-backend:
   stage: lint
-  image: golang:1.24
-  before_script:
-    - curl -sSfL https://raw.githubusercontent.com/golangci/golangci-lint/master/install.sh | sh -s -- -b $(go env GOPATH)/bin v1.61.0
+  image: golangci/golangci-lint:v2.8.0
   script:
     - golangci-lint run ./backend/...
   only:

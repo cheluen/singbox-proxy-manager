@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"net"
 	"net/http"
 	"net/url"
 	"time"
@@ -26,6 +27,28 @@ type IPInfo struct {
 
 const maxIPCheckResponseBytes = 1024 * 1024
 
+func waitForTCPReady(addr string, maxWait time.Duration) error {
+	deadline := time.Now().Add(maxWait)
+	backoff := 50 * time.Millisecond
+
+	for {
+		conn, err := net.DialTimeout("tcp", addr, 500*time.Millisecond)
+		if err == nil {
+			_ = conn.Close()
+			return nil
+		}
+
+		if time.Now().After(deadline) {
+			return err
+		}
+
+		time.Sleep(backoff)
+		if backoff < 500*time.Millisecond {
+			backoff *= 2
+		}
+	}
+}
+
 // CheckProxyIP checks the IP and location through a proxy
 // proxyAddr should be in format "host:port" or "username:password@host:port"
 func CheckProxyIP(proxyAddr string, username string, password string) (*IPInfo, error) {
@@ -33,6 +56,10 @@ func CheckProxyIP(proxyAddr string, username string, password string) (*IPInfo, 
 
 	// Measure latency start time
 	startTime := time.Now()
+
+	if err := waitForTCPReady(proxyAddr, 2*time.Second); err != nil {
+		return nil, fmt.Errorf("proxy not ready: %w", err)
+	}
 
 	// Build proxy URL with authentication if provided
 	proxyURLStr := "http://"

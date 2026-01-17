@@ -643,7 +643,7 @@ func (h *Handler) CheckNodeIP(c *gin.Context) {
 	fmt.Printf("[API] Checking IP for node %d (%s) on port %d (auth: %v)\n", id, nodeName, node.InboundPort, node.Username != "")
 
 	// Check IP through the proxy with authentication
-	proxyAddr := fmt.Sprintf("127.0.0.1:%d", node.InboundPort)
+	proxyAddr := fmt.Sprintf("localhost:%d", node.InboundPort)
 	ipInfo, err := h.checkProxyIP(proxyAddr, node.Username, node.Password)
 	if err != nil {
 		fmt.Printf("[API] Failed to check IP for node %d: %v\n", id, err)
