@@ -24,6 +24,8 @@ type IPInfo struct {
 	HTTPError   string `json:"http_error,omitempty"`
 }
 
+const maxIPCheckResponseBytes = 1024 * 1024
+
 // CheckProxyIP checks the IP and location through a proxy
 // proxyAddr should be in format "host:port" or "username:password@host:port"
 func CheckProxyIP(proxyAddr string, username string, password string) (*IPInfo, error) {
@@ -159,9 +161,12 @@ func checkWithService(client *http.Client, serviceURL string) (*IPInfo, error) {
 		return nil, fmt.Errorf("service returned status: %d", resp.StatusCode)
 	}
 
-	body, err := io.ReadAll(resp.Body)
+	body, err := io.ReadAll(io.LimitReader(resp.Body, maxIPCheckResponseBytes+1))
 	if err != nil {
 		return nil, fmt.Errorf("failed to read response: %v", err)
+	}
+	if len(body) > maxIPCheckResponseBytes {
+		return nil, fmt.Errorf("response too large")
 	}
 
 	// Parse response based on service

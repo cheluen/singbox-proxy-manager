@@ -106,7 +106,8 @@ func (s *SingBoxService) GenerateGlobalConfig(nodes []models.ProxyNode) error {
 	}
 
 	// Generate inbounds, outbounds, and route rules for each enabled node
-	for _, node := range nodes {
+	for i := range nodes {
+		node := &nodes[i]
 		if !node.Enabled {
 			continue
 		}
@@ -139,7 +140,7 @@ func (s *SingBoxService) GenerateGlobalConfig(nodes []models.ProxyNode) error {
 		config.Inbounds = append(config.Inbounds, inbound)
 
 		// Generate outbound
-		outbound, err := s.generateOutbound(&node, outboundTag)
+		outbound, err := s.generateOutbound(node, outboundTag)
 		if err != nil {
 			return fmt.Errorf("failed to generate outbound for node %d: %v", node.ID, err)
 		}
