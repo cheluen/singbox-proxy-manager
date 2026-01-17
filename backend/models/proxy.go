@@ -16,7 +16,7 @@ type ProxyNode struct {
 	ID          int       `json:"id"`
 	Name        string    `json:"name"`
 	Remark      string    `json:"remark"`
-	Type        string    `json:"type"`   // ss, vless, vmess, hy2, tuic, trojan, anytls, socks5, http
+	Type        string    `json:"type"`   // ss, vless, vmess, hy2, tuic, trojan, anytls, socks5, http, direct
 	Config      string    `json:"config"` // JSON string of protocol-specific config
 	InboundPort int       `json:"inbound_port"`
 	Username    string    `json:"username"`
@@ -29,6 +29,13 @@ type ProxyNode struct {
 	Enabled     bool      `json:"enabled"`
 	CreatedAt   time.Time `json:"created_at"`
 	UpdatedAt   time.Time `json:"updated_at"`
+}
+
+// DirectConfig represents sing-box direct outbound configuration.
+// It supports optional destination overrides (deprecated in sing-box v1.12.x but still accepted).
+type DirectConfig struct {
+	OverrideAddress string `json:"override_address,omitempty"`
+	OverridePort    int    `json:"override_port,omitempty"`
 }
 
 // SSConfig represents Shadowsocks configuration
@@ -325,6 +332,8 @@ func ensureColumn(db *sql.DB, table string, column string, alterSQL string) erro
 func (p *ProxyNode) ParseConfig() (interface{}, error) {
 	var config interface{}
 	switch p.Type {
+	case "direct":
+		config = &DirectConfig{}
 	case "ss":
 		config = &SSConfig{}
 	case "vless":

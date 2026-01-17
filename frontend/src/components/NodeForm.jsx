@@ -5,6 +5,7 @@ const { TextArea } = Input
 const { Option } = Select
 
 const proxyTypes = [
+  { value: 'direct', label: 'Direct (Local)' },
   { value: 'ss', label: 'Shadowsocks' },
   { value: 'vless', label: 'VLESS' },
   { value: 'vmess', label: 'VMess' },
@@ -45,6 +46,10 @@ function NodeForm({ node, onSave, onCancel }) {
   }
 
   const buildConfig = (type, values) => {
+    if (type === 'direct') {
+      return {}
+    }
+
     const config = {
       server: values.server,
       server_port: values.server_port,
@@ -552,6 +557,8 @@ function NodeForm({ node, onSave, onCancel }) {
 
   const renderConfigFields = () => {
     switch (proxyType) {
+      case 'direct':
+        return null
       case 'ss':
         return renderSSFields()
       case 'vless':
@@ -607,7 +614,8 @@ function NodeForm({ node, onSave, onCancel }) {
       <Form.Item
         label="Server Address"
         name="server"
-        rules={[{ required: true, message: 'Required' }]}
+        rules={proxyType === 'direct' ? [] : [{ required: true, message: 'Required' }]}
+        hidden={proxyType === 'direct'}
       >
         <Input />
       </Form.Item>
@@ -615,7 +623,8 @@ function NodeForm({ node, onSave, onCancel }) {
       <Form.Item
         label="Server Port"
         name="server_port"
-        rules={[{ required: true, message: 'Required' }]}
+        rules={proxyType === 'direct' ? [] : [{ required: true, message: 'Required' }]}
+        hidden={proxyType === 'direct'}
       >
         <InputNumber min={1} max={65535} style={{ width: '100%' }} />
       </Form.Item>
