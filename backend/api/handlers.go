@@ -276,15 +276,16 @@ func (h *Handler) CreateNode(c *gin.Context) {
 		var firstNodePort int
 		err := h.db.QueryRow("SELECT inbound_port FROM proxy_nodes ORDER BY sort_order ASC LIMIT 1").Scan(&firstNodePort)
 
-		if err == sql.ErrNoRows {
+		switch err {
+		case sql.ErrNoRows:
 			// This is the first node, use start_port
 			var startPort int
 			h.db.QueryRow("SELECT start_port FROM settings LIMIT 1").Scan(&startPort)
 			req.InboundPort = startPort
-		} else if err == nil {
+		case nil:
 			// Calculate based on first node's port and sort order
 			req.InboundPort = firstNodePort + req.SortOrder
-		} else {
+		default:
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to determine port"})
 			return
 		}
@@ -366,15 +367,16 @@ func (h *Handler) BatchImportNodes(c *gin.Context) {
 		var firstNodePort int
 		err = h.db.QueryRow("SELECT inbound_port FROM proxy_nodes ORDER BY sort_order ASC LIMIT 1").Scan(&firstNodePort)
 
-		if err == sql.ErrNoRows {
+		switch err {
+		case sql.ErrNoRows:
 			// This is the first node, use start_port
 			var startPort int
 			h.db.QueryRow("SELECT start_port FROM settings LIMIT 1").Scan(&startPort)
 			inboundPort = startPort
-		} else if err == nil {
+		case nil:
 			// Calculate based on first node's port and sort order
 			inboundPort = firstNodePort + sortOrder
-		} else {
+		default:
 			result["success"] = false
 			result["error"] = "failed to determine port"
 			results = append(results, result)
