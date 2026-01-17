@@ -236,6 +236,8 @@ func (s *SingBoxService) generateOutbound(node *models.ProxyNode, tag string) (O
 	}
 
 	switch node.Type {
+	case "direct":
+		return s.generateDirectOutbound(parsedConfig.(*models.DirectConfig), tag)
 	case "ss":
 		return s.generateSSOutbound(parsedConfig.(*models.SSConfig), tag)
 	case "vless":
@@ -257,6 +259,26 @@ func (s *SingBoxService) generateOutbound(node *models.ProxyNode, tag string) (O
 	default:
 		return OutboundConfig{}, fmt.Errorf("unsupported proxy type: %s", node.Type)
 	}
+}
+
+func (s *SingBoxService) generateDirectOutbound(config *models.DirectConfig, tag string) (OutboundConfig, error) {
+	outbound := OutboundConfig{
+		Type: "direct",
+		Tag:  tag,
+	}
+
+	extra := map[string]interface{}{}
+	if config.OverrideAddress != "" {
+		extra["override_address"] = config.OverrideAddress
+	}
+	if config.OverridePort != 0 {
+		extra["override_port"] = config.OverridePort
+	}
+	if len(extra) > 0 {
+		outbound.Extra = extra
+	}
+
+	return outbound, nil
 }
 
 func (s *SingBoxService) generateSSOutbound(config *models.SSConfig, tag string) (OutboundConfig, error) {
