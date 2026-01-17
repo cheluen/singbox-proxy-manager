@@ -5,7 +5,7 @@ RUN npm install
 COPY frontend/ ./
 RUN npm run build
 
-FROM golang:1.21 AS backend-builder
+FROM golang:1.24 AS backend-builder
 WORKDIR /app
 COPY go.mod go.sum ./
 RUN go mod download
