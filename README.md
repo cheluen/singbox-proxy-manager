@@ -2,9 +2,9 @@
 
 <div align="center">
 
-![Version](https://img.shields.io/badge/version-1.0.0-blue.svg)
+![Version](https://img.shields.io/badge/version-1.1.2-blue.svg)
 ![License](https://img.shields.io/badge/license-MIT-green.svg)
-![SingBox](https://img.shields.io/badge/sing--box-1.12.11-orange.svg)
+![SingBox](https://img.shields.io/badge/sing--box-1.12.12-orange.svg)
 
 一个基于 sing-box 的代理节点管理和转发系统，提供简洁易用的 Web 界面。
 
@@ -19,13 +19,14 @@
 ### 核心功能
 - 🚀 **单进程架构** - 使用单个 sing-box 进程管理所有节点，资源占用低
 - 🔐 **认证保护** - 支持为每个代理节点设置独立的用户名密码
-- 🌐 **多协议支持** - 完整支持 VLESS、VMess、Trojan、Hysteria2、TUIC、Shadowsocks、AnyTLS
+- 🌐 **多协议支持** - 支持 VLESS、VMess、Trojan、Hysteria2、TUIC、Shadowsocks、AnyTLS，以及 SOCKS5/HTTP 上游代理
 - 🔄 **双模式代理** - 单端口同时支持 HTTP 和 SOCKS5 协议
 - 📊 **IP 检测** - 实时检测节点 IP、地理位置和延迟
 
 ### 管理功能
 - ✨ **可视化管理** - 现代化的 React + Ant Design 界面
 - 📥 **批量操作** - 支持批量导入、删除、设置认证、检测 IP
+- 📝 **备注/导出/替换** - 给节点加备注；支持导出原分享链接；支持用新分享链接直接替换节点
 - 🔧 **灵活配置** - 自定义入站端口，自动或手动分配
 - 🌍 **多语言** - 支持中文/英文界面切换
 - 📱 **拖拽排序** - 拖拽节点即可重新排序并自动分配端口
@@ -113,7 +114,11 @@ environment:
   - PORT=30000              # 管理界面端口
   - CONFIG_DIR=/app/config  # 配置文件目录
   - ADMIN_PASSWORD=admin123 # 管理密码（请修改！）
+  - TURSO_DATABASE_URL=${TURSO_DATABASE_URL} # 可选：Turso 远程数据库 URL（需与 TURSO_AUTH_TOKEN 一起设置）
+  - TURSO_AUTH_TOKEN=${TURSO_AUTH_TOKEN}     # 可选：Turso 认证 Token（需与 TURSO_DATABASE_URL 一起设置）
 ```
+
+> 不想用 Turso 可以不设置 `TURSO_DATABASE_URL / TURSO_AUTH_TOKEN`，留空会自动使用本地 SQLite。
 
 ### 端口说明
 
@@ -122,10 +127,14 @@ environment:
 
 ### 数据持久化
 
-数据存储在 `./config` 目录：
+默认使用本地 SQLite，数据存储在 `./config` 目录：
 - `config.json`：sing-box 配置文件
 - `proxy.db`：节点数据库
 - `singbox.log`：sing-box 日志
+
+如果启用了 Turso 远程数据库：
+- 节点/设置数据会存到 Turso（不再写入本地 `proxy.db`）
+- `./config` 目录仍会保存 `config.json` 和 `singbox.log`（方便排障）
 
 ```bash
 # 备份数据
@@ -159,6 +168,22 @@ environment:
   - ADMIN_PASSWORD=${ADMIN_PASSWORD}
 ```
 
+### 使用 Turso 远程数据库（可选）
+
+不想折腾就别配：默认走本地 SQLite，配合 `./config` 挂载已经能持久化数据。
+
+当你希望“数据不跟着机器/磁盘走”（比如迁移服务器、或者想把数据放云上）时，可以用 Turso。
+
+1. 在 Turso 控制台创建数据库，拿到两项信息：`TURSO_DATABASE_URL` 和 `TURSO_AUTH_TOKEN`（两者缺一不可）
+2. 在项目根目录新建 `.env`，把这两项按原样写进去（不要提交到 Git）
+   - 本项目的 `docker-compose.yml` 已经预留了这两项环境变量，你只需要提供 `.env` 的值
+3. 重启服务
+
+```bash
+docker compose down
+docker compose up -d
+```
+
 ### 自定义入站端口范围
 
 首次添加节点时设置起始端口，后续节点将顺延分配。
@@ -168,15 +193,15 @@ environment:
 ## 🛠️ 技术栈
 
 ### 后端
-- **语言**：Go 1.21
+- **语言**：Go 1.24
 - **框架**：Gin
-- **数据库**：SQLite（纯Go实现，支持跨平台编译）
-- **代理核心**：sing-box 1.12.11
+- **数据库**：SQLite（默认，本地存储）/ Turso（可选，远程 libsql）
+- **代理核心**：sing-box 1.12.12
 
 ### 前端
 - **框架**：React 18
 - **UI 库**：Ant Design 5
-- **构建工具**：Vite 5
+- **构建工具**：Vite 6
 - **国际化**：i18next
 
 ---
@@ -185,8 +210,8 @@ environment:
 
 | 协议 | 入站 | 出站 | 特性 |
 |------|------|------|------|
-| HTTP | ✅ | - | 支持认证 |
-| SOCKS5 | ✅ | - | 支持认证 |
+| HTTP | ✅ | ✅ | 入站/出站均支持认证（出站可选 TLS） |
+| SOCKS5 | ✅ | ✅ | 入站/出站均支持认证 |
 | VLESS | - | ✅ | Reality（pbk/sid/spx）、WS、gRPC、HTTP/Upgrade、ALPN、指纹 |
 | VMess | - | ✅ | WS、HTTP/2、gRPC、HTTPUpgrade、全套安全/填充参数 |
 | Trojan | - | ✅ | TLS/utls 指纹、WS/GRPC/HTTP/HTTPUpgrade 传输、SNI/ALPN、可跳过校验 |
