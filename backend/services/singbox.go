@@ -352,7 +352,8 @@ func (s *SingBoxService) generateVLESSOutbound(config *models.VLESSConfig, tag s
 			"type": config.Network,
 		}
 
-		if config.Network == "ws" {
+		switch config.Network {
+		case "ws":
 			if config.Path != "" {
 				transport["path"] = config.Path
 			}
@@ -367,18 +368,18 @@ func (s *SingBoxService) generateVLESSOutbound(config *models.VLESSConfig, tag s
 					transport["early_data_header_name"] = config.EarlyDataHeader
 				}
 			}
-		} else if config.Network == "grpc" {
+		case "grpc":
 			if config.ServiceName != "" {
 				transport["service_name"] = config.ServiceName
 			}
-		} else if config.Network == "httpupgrade" {
+		case "httpupgrade":
 			if config.HTTPUpgradePath != "" {
 				transport["path"] = config.HTTPUpgradePath
 			}
 			if config.HTTPUpgradeHost != "" {
 				transport["host"] = config.HTTPUpgradeHost
 			}
-		} else if config.Network == "quic" || config.Network == "kcp" {
+		case "quic", "kcp":
 			if config.Seed != "" {
 				transport["seed"] = config.Seed
 			}
@@ -387,7 +388,7 @@ func (s *SingBoxService) generateVLESSOutbound(config *models.VLESSConfig, tag s
 					"type": config.HeaderType,
 				}
 			}
-		} else if config.Network == "http" {
+		case "http":
 			if config.Host != "" {
 				transport["host"] = []string{config.Host}
 			}
@@ -464,7 +465,8 @@ func (s *SingBoxService) generateVMESSOutbound(config *models.VMESSConfig, tag s
 			"type": config.Network,
 		}
 
-		if config.Network == "ws" {
+		switch config.Network {
+		case "ws":
 			if config.Path != "" {
 				transport["path"] = config.Path
 			}
@@ -479,18 +481,18 @@ func (s *SingBoxService) generateVMESSOutbound(config *models.VMESSConfig, tag s
 					transport["early_data_header_name"] = config.EarlyDataHeader
 				}
 			}
-		} else if config.Network == "grpc" {
+		case "grpc":
 			if config.ServiceName != "" {
 				transport["service_name"] = config.ServiceName
 			}
-		} else if config.Network == "httpupgrade" {
+		case "httpupgrade":
 			if config.HTTPUpgradePath != "" {
 				transport["path"] = config.HTTPUpgradePath
 			}
 			if config.HTTPUpgradeHost != "" {
 				transport["host"] = config.HTTPUpgradeHost
 			}
-		} else if config.Network == "quic" || config.Network == "kcp" {
+		case "quic", "kcp":
 			if config.Seed != "" {
 				transport["seed"] = config.Seed
 			}
@@ -499,7 +501,7 @@ func (s *SingBoxService) generateVMESSOutbound(config *models.VMESSConfig, tag s
 					"type": config.HeaderType,
 				}
 			}
-		} else if config.Network == "http" {
+		case "http":
 			if config.Host != "" {
 				transport["host"] = []string{config.Host}
 			}
