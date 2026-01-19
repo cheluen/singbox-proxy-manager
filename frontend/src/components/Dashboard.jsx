@@ -1,21 +1,23 @@
 import React, { useState, useEffect } from 'react'
 import {
-  Layout,
-  Typography,
-  Button,
-  Space,
-  message,
-  notification,
-  Modal,
-  Input,
-  Switch,
-  Checkbox,
-  Table,
-  Tag,
-  Popconfirm,
-  Tooltip,
-  Select,
-} from 'antd'
+    Layout,
+    Typography,
+    Button,
+    Space,
+    message,
+    notification,
+    Modal,
+    Input,
+    Switch,
+    Checkbox,
+    Table,
+    Tag,
+    Collapse,
+    Descriptions,
+    Popconfirm,
+    Tooltip,
+    Select,
+  } from 'antd'
 import {
   LogoutOutlined,
   PlusOutlined,
@@ -85,10 +87,10 @@ const getCountryName = (location) => {
   return parts.length > 1 ? parts[parts.length - 1] : location
 }
 
-function Dashboard({ onLogout }) {
-  const { t, i18n } = useTranslation()
-  const [nodes, setNodes] = useState([])
-  const [loading, setLoading] = useState(false)
+  function Dashboard({ onLogout }) {
+    const { t, i18n } = useTranslation()
+    const [nodes, setNodes] = useState([])
+    const [loading, setLoading] = useState(false)
   const [appVersion, setAppVersion] = useState('')
   const [modalVisible, setModalVisible] = useState(false)
   const [settingsVisible, setSettingsVisible] = useState(false)
@@ -104,10 +106,13 @@ function Dashboard({ onLogout }) {
   const [exportText, setExportText] = useState('')
   const [exportLoading, setExportLoading] = useState(false)
   const [replaceVisible, setReplaceVisible] = useState(false)
-  const [replaceNode, setReplaceNode] = useState(null)
-  const [replaceLink, setReplaceLink] = useState('')
-  const [replaceUpdateName, setReplaceUpdateName] = useState(true)
-  const [replaceLoading, setReplaceLoading] = useState(false)
+    const [replaceNode, setReplaceNode] = useState(null)
+    const [replaceLink, setReplaceLink] = useState('')
+    const [replaceUpdateName, setReplaceUpdateName] = useState(true)
+    const [replaceLoading, setReplaceLoading] = useState(false)
+    const [autoCheckAfterCreate, setAutoCheckAfterCreate] = useState(false)
+    const [remarkDrafts, setRemarkDrafts] = useState({})
+    const [remarkSaving, setRemarkSaving] = useState({})
 
   useEffect(() => {
     loadNodes()
@@ -142,8 +147,81 @@ function Dashboard({ onLogout }) {
   }
 
   const handleCreateNode = () => {
+    setAutoCheckAfterCreate(false)
     setEditingNode(null)
     setModalVisible(true)
+  }
+
+  const runNodeIPChecks = async (nodeIds, notificationKey) => {
+    const ids = Array.from(new Set(nodeIds)).filter(
+      (id) => id !== null && id !== undefined
+    )
+    if (ids.length === 0) return
+
+    let completed = 0
+    let failed = 0
+    const total = ids.length
+
+    const key = notificationKey
+    notification.info({
+      key,
+      message: t('batch_check_ip_running')
+        .replace('{{current}}', '0')
+        .replace('{{total}}', total.toString()),
+      duration: 0,
+      icon: <ThunderboltOutlined style={{ color: '#1890ff' }} />,
+    })
+
+    const concurrency = Math.min(5, total)
+    let nextIndex = 0
+
+    const runWorker = async () => {
+      while (true) {
+        const currentIndex = nextIndex
+        nextIndex += 1
+        if (currentIndex >= ids.length) return
+
+        const id = ids[currentIndex]
+        try {
+          await api.get(`/nodes/${id}/check-ip`)
+          completed += 1
+        } catch (error) {
+          failed += 1
+          const msg = error.response?.data?.error || t('server_error')
+          message.error(`ID ${id}: ${msg}`)
+        } finally {
+          const done = completed + failed
+          if (done < total) {
+            notification.info({
+              key,
+              message: t('batch_check_ip_running')
+                .replace('{{current}}', done.toString())
+                .replace('{{total}}', total.toString()),
+              duration: 0,
+              icon: <ThunderboltOutlined style={{ color: '#1890ff' }} />,
+            })
+          }
+        }
+      }
+    }
+
+    await Promise.all(Array.from({ length: concurrency }, () => runWorker()))
+
+    notification.destroy(key)
+    if (completed > 0) {
+      notification.success({
+        message: t('batch_check_ip_success').replace('{{count}}', completed.toString()),
+        duration: 3,
+      })
+    }
+    if (failed > 0) {
+      notification.warning({
+        message: `${failed} ${t('status_unverified')}`,
+        duration: 4,
+      })
+    }
+
+    loadNodes()
   }
 
   const handleImportLink = async (link) => {
@@ -151,11 +229,12 @@ function Dashboard({ onLogout }) {
       message.loading({ content: t('loading'), key: 'parselink' })
       const response = await api.post('/parse-link', { link })
       const { type, name, config } = response.data
-      
+
       const parsedConfig = typeof config === 'string' ? JSON.parse(config) : config
-      
+
       message.success({ content: t('success'), key: 'parselink' })
-      
+      setAutoCheckAfterCreate(true)
+
       setEditingNode({
         name,
         type,
@@ -173,8 +252,8 @@ function Dashboard({ onLogout }) {
   }
 
   const handleBatchImport = async () => {
-    const links = batchImportLinks.split('\n').filter(link => link.trim())
-    
+    const links = batchImportLinks.split('\n').filter((link) => link.trim())
+
     if (links.length === 0) {
       message.error(t('invalid_request'))
       return
@@ -183,36 +262,47 @@ function Dashboard({ onLogout }) {
     try {
       setLoading(true)
       message.loading({ content: t('loading'), key: 'batchimport' })
-      
+
       const response = await api.post('/nodes/batch-import', {
         links,
-        enabled: enableAfterImport
+        enabled: enableAfterImport,
       })
 
-      const { success, failed } = response.data
+      const { success = 0, failed = 0, results = [] } = response.data || {}
+      const importedIds = results
+        .filter((r) => r?.success && r?.id)
+        .map((r) => Number(r.id))
+        .filter((id) => Number.isFinite(id))
 
       if (success > 0) {
         message.success({
           content: `${t('import_success').replace('{{count}}', success)}`,
           key: 'batchimport',
-          duration: 3
+          duration: 3,
         })
       }
 
       if (failed > 0) {
         message.warning({
           content: `${t('import_failed').replace('{{count}}', failed)}`,
-          duration: 5
+          duration: 5,
         })
       }
 
       setBatchImportVisible(false)
       setBatchImportLinks('')
       loadNodes()
+
+      if (enableAfterImport && importedIds.length > 0) {
+        setCheckingIP(true)
+        runNodeIPChecks(importedIds, 'import-check-ip').finally(() => {
+          setCheckingIP(false)
+        })
+      }
     } catch (error) {
       message.error({
         content: error.response?.data?.error || t('server_error'),
-        key: 'batchimport'
+        key: 'batchimport',
       })
     } finally {
       setLoading(false)
@@ -220,6 +310,7 @@ function Dashboard({ onLogout }) {
   }
 
   const handleEditNode = (node) => {
+    setAutoCheckAfterCreate(false)
     setEditingNode({
       ...node,
       config: node.config
@@ -257,88 +348,19 @@ function Dashboard({ onLogout }) {
     }
   }
 
-  const handleBatchCheckIP = async () => {
-    if (selectedNodeIds.length === 0) {
-      message.warning(t('select_nodes'))
-      return
+    const handleBatchCheckIP = async () => {
+      if (selectedNodeIds.length === 0) {
+        message.warning(t('select_nodes'))
+        return
+      }
+
+      setCheckingIP(true)
+      try {
+        await runNodeIPChecks(selectedNodeIds, 'batch-check-ip')
+      } finally {
+        setCheckingIP(false)
+      }
     }
-
-    setCheckingIP(true)
-    let completed = 0
-    let failed = 0
-    const total = selectedNodeIds.length
-
-    // Open notification with initial progress
-    const key = 'batch-check-ip'
-    notification.info({
-      key,
-      message: t('batch_check_ip_running')
-        .replace('{{current}}', '0')
-        .replace('{{total}}', total.toString()),
-      duration: 0, // Don't auto close
-      icon: <ThunderboltOutlined style={{ color: '#1890ff' }} />,
-    })
-
-    try {
-      const concurrency = Math.min(5, total)
-      let nextIndex = 0
-
-      const runWorker = async () => {
-        while (true) {
-          const currentIndex = nextIndex
-          nextIndex += 1
-          if (currentIndex >= selectedNodeIds.length) {
-            return
-          }
-
-          const id = selectedNodeIds[currentIndex]
-
-          try {
-            await api.get(`/nodes/${id}/check-ip`)
-            completed += 1
-          } catch (error) {
-            console.error(`Failed to check IP for node ${id}:`, error)
-            failed += 1
-            const msg = error.response?.data?.error || t('server_error')
-            message.error(`ID ${id}: ${msg}`)
-          } finally {
-            const done = completed + failed
-            if (done < total) {
-              notification.info({
-                key,
-                message: t('batch_check_ip_running')
-                  .replace('{{current}}', done.toString())
-                  .replace('{{total}}', total.toString()),
-                duration: 0,
-                icon: <ThunderboltOutlined style={{ color: '#1890ff' }} />,
-              })
-            }
-          }
-        }
-      }
-
-      await Promise.all(Array.from({ length: concurrency }, () => runWorker()))
-
-      // Close the progress notification and show success
-      notification.destroy(key)
-      if (completed > 0) {
-        notification.success({
-          message: t('batch_check_ip_success').replace('{{count}}', completed.toString()),
-          duration: 3,
-        })
-      }
-      if (failed > 0) {
-        notification.warning({
-          message: `${failed} ${t('status_unverified')}`,
-          duration: 4,
-        })
-      }
-
-      loadNodes()
-    } finally {
-      setCheckingIP(false)
-    }
-  }
 
   const copyToClipboard = async (text) => {
     if (!text) return
@@ -436,17 +458,32 @@ function Dashboard({ onLogout }) {
   }
 
   const handleSaveNode = async (values) => {
+    const isEditing = !!editingNode?.id
+    const shouldAutoCheck =
+      !isEditing && autoCheckAfterCreate && values.enabled !== false
+
     try {
-      if (editingNode?.id) {
+      let createdId
+
+      if (isEditing) {
         await api.put(`/nodes/${editingNode.id}`, values)
         message.success(t('node_updated'))
       } else {
-        await api.post('/nodes', values)
+        const response = await api.post('/nodes', values)
+        createdId = response.data?.id
         message.success(t('node_created'))
       }
       setModalVisible(false)
       setEditingNode(null)
+      setAutoCheckAfterCreate(false)
       loadNodes()
+
+      if (shouldAutoCheck && createdId) {
+        setCheckingIP(true)
+        runNodeIPChecks([createdId], `import-check-ip-${createdId}`).finally(() => {
+          setCheckingIP(false)
+        })
+      }
     } catch (error) {
       message.error(error.response?.data?.error || t('server_error'))
     }
@@ -488,24 +525,151 @@ function Dashboard({ onLogout }) {
     }
   }
 
-  const handleBatchSetAuth = async (auth) => {
-    try {
-      await api.post('/nodes/batch-auth', {
-        node_ids: selectedNodeIds,
-        ...auth,
-      })
-      message.success(t('auth_updated'))
-      setBatchAuthVisible(false)
-      loadNodes()
-    } catch (error) {
-      message.error(t('server_error'))
+    const handleBatchSetAuth = async (auth) => {
+      try {
+        await api.post('/nodes/batch-auth', {
+          node_ids: selectedNodeIds,
+          ...auth,
+        })
+        message.success(t('auth_updated'))
+        setBatchAuthVisible(false)
+        loadNodes()
+      } catch (error) {
+        message.error(t('server_error'))
+      }
     }
-  }
 
-  const columns = [
-    {
-      title: '',
-      key: 'drag',
+    const getRemarkDraft = (record) => {
+      if (!record?.id) return ''
+      return remarkDrafts[record.id] ?? record.remark ?? ''
+    }
+
+    const setRemarkDraft = (id, value) => {
+      setRemarkDrafts((prev) => ({
+        ...prev,
+        [id]: value,
+      }))
+    }
+
+    const resetRemarkDraft = (record) => {
+      if (!record?.id) return
+      setRemarkDrafts((prev) => ({
+        ...prev,
+        [record.id]: record.remark ?? '',
+      }))
+    }
+
+    const handleSaveRemark = async (record) => {
+      if (!record?.id) return
+
+      const draft = getRemarkDraft(record)
+      const original = record.remark ?? ''
+      if (draft === original) return
+
+      setRemarkSaving((prev) => ({ ...prev, [record.id]: true }))
+      try {
+        await api.put(`/nodes/${record.id}/remark`, { remark: draft })
+        message.success(t('success'))
+        setNodes((prev) =>
+          prev.map((n) => (n.id === record.id ? { ...n, remark: draft } : n))
+        )
+      } catch (error) {
+        message.error(error.response?.data?.error || t('server_error'))
+      } finally {
+        setRemarkSaving((prev) => ({ ...prev, [record.id]: false }))
+      }
+    }
+
+    const expandedRowRender = (record) => {
+      const draft = getRemarkDraft(record)
+      const original = record.remark ?? ''
+      const saving = !!remarkSaving[record.id]
+
+      const statusText =
+        record.node_ip && record.latency > 0
+          ? t('status_healthy')
+          : t('status_unverified')
+
+      return (
+        <Collapse
+          size="small"
+          items={[
+            {
+              key: 'record',
+              label: t('node_record'),
+              children: (
+                <Descriptions
+                  size="small"
+                  column={3}
+                  items={[
+                    {
+                      key: 'port',
+                      label: t('inbound_port'),
+                      children: record.inbound_port ?? '-',
+                    },
+                    {
+                      key: 'ip',
+                      label: t('node_ip'),
+                      children: record.node_ip || '-',
+                    },
+                    {
+                      key: 'location',
+                      label: t('location'),
+                      children: record.location || '-',
+                    },
+                    {
+                      key: 'latency',
+                      label: t('latency'),
+                      children: record.latency > 0 ? `${record.latency}ms` : '-',
+                    },
+                    {
+                      key: 'status',
+                      label: t('status'),
+                      children: statusText,
+                    },
+                  ]}
+                />
+              ),
+            },
+            {
+              key: 'remark',
+              label: t('remark'),
+              children: (
+                <Space direction="vertical" style={{ width: '100%' }} size="middle">
+                  <TextArea
+                    value={draft}
+                    rows={3}
+                    placeholder={t('remark_placeholder')}
+                    onChange={(e) => setRemarkDraft(record.id, e.target.value)}
+                  />
+                  <Space>
+                    <Button
+                      type="primary"
+                      onClick={() => handleSaveRemark(record)}
+                      loading={saving}
+                      disabled={saving || draft === original}
+                    >
+                      {t('save')}
+                    </Button>
+                    <Button
+                      onClick={() => resetRemarkDraft(record)}
+                      disabled={saving || draft === original}
+                    >
+                      {t('reset')}
+                    </Button>
+                  </Space>
+                </Space>
+              ),
+            },
+          ]}
+        />
+      )
+    }
+
+    const columns = [
+      {
+        title: '',
+        key: 'drag',
       width: 40,
       render: () => <HolderOutlined style={{ cursor: 'grab', color: '#999' }} />,
     },
@@ -536,25 +700,17 @@ function Dashboard({ onLogout }) {
         />
       ),
     },
-    {
-      title: t('node_name'),
-      dataIndex: 'name',
-      key: 'name',
-      ellipsis: true,
-      width: 200,
-    },
-    {
-      title: t('remark'),
-      dataIndex: 'remark',
-      key: 'remark',
-      ellipsis: true,
-      width: 220,
-      render: (remark) => remark || '-',
-    },
-    {
-      title: t('node_type'),
-      dataIndex: 'type',
-      key: 'type',
+      {
+        title: t('node_name'),
+        dataIndex: 'name',
+        key: 'name',
+        ellipsis: true,
+        width: 200,
+      },
+      {
+        title: t('node_type'),
+        dataIndex: 'type',
+        key: 'type',
       width: 100,
       render: (type) => <Tag color="blue">{type.toUpperCase()}</Tag>,
     },
@@ -708,30 +864,65 @@ function Dashboard({ onLogout }) {
     },
   ]
 
-  const DraggableRow = (props) => {
-    const index = nodes.findIndex(item => item.id === props['data-row-key'])
-    if (index === -1) return <tr {...props} />
-    
-    return (
-      <Draggable draggableId={`node-${props['data-row-key']}`} index={index}>
-        {(provided, snapshot) => (
-          <tr
-            ref={provided.innerRef}
-            {...provided.draggableProps}
-            style={{
-              ...provided.draggableProps.style,
-              background: snapshot.isDragging ? '#e6f7ff' : undefined,
-            }}
-          >
-            <td {...provided.dragHandleProps} style={{ cursor: 'grab' }}>
-              <HolderOutlined style={{ color: '#999' }} />
-            </td>
-            {React.Children.toArray(props.children).slice(1)}
+    const DraggableRow = (props) => {
+      const rowKey = props['data-row-key']
+      const { className, style, ...restProps } = props
+
+      if (className?.includes('ant-table-expanded-row')) {
+        return (
+          <tr className={className} style={style} {...restProps}>
+            {props.children}
           </tr>
-        )}
-      </Draggable>
-    )
-  }
+        )
+      }
+
+      const index = nodes.findIndex((item) => String(item.id) === String(rowKey))
+      if (index === -1) {
+        return (
+          <tr className={className} style={style} {...restProps}>
+            {props.children}
+          </tr>
+        )
+      }
+
+      return (
+        <Draggable draggableId={`node-${String(rowKey)}`} index={index}>
+          {(provided, snapshot) => {
+            const children = React.Children.toArray(props.children)
+            const dragCellIndex = children.findIndex(
+              (child) => child?.props?.['data-col-key'] === 'drag'
+            )
+            if (dragCellIndex >= 0) {
+              const dragCell = children[dragCellIndex]
+              children[dragCellIndex] = React.cloneElement(dragCell, {
+                ...dragCell.props,
+                ...provided.dragHandleProps,
+                style: {
+                  ...dragCell.props?.style,
+                  cursor: 'grab',
+                },
+              })
+            }
+
+            return (
+              <tr
+                ref={provided.innerRef}
+                {...restProps}
+                {...provided.draggableProps}
+                className={className}
+                style={{
+                  ...style,
+                  ...provided.draggableProps.style,
+                  background: snapshot.isDragging ? '#e6f7ff' : style?.background,
+                }}
+              >
+                {children}
+              </tr>
+            )
+          }}
+        </Draggable>
+      )
+    }
 
   const DraggableBody = (props) => (
     <Droppable droppableId="table-body">
@@ -857,16 +1048,19 @@ function Dashboard({ onLogout }) {
             )}
           </div>
 
-          <DragDropContext onDragEnd={handleDragEnd}>
-            <Table
-              columns={columns}
-              dataSource={nodes}
-              rowKey="id"
-              loading={loading}
-              pagination={false}
-              scroll={{ x: 1500 }}
-              locale={{
-                emptyText: t('no_nodes')
+            <DragDropContext onDragEnd={handleDragEnd}>
+              <Table
+                columns={columns}
+                dataSource={nodes}
+                rowKey="id"
+                expandable={{
+                  expandedRowRender,
+                }}
+                loading={loading}
+                pagination={false}
+                scroll={{ x: 1500 }}
+                locale={{
+                  emptyText: t('no_nodes')
               }}
               components={{
                 body: {
@@ -885,6 +1079,7 @@ function Dashboard({ onLogout }) {
         onCancel={() => {
           setModalVisible(false)
           setEditingNode(null)
+          setAutoCheckAfterCreate(false)
         }}
         footer={null}
         width={800}
@@ -895,6 +1090,7 @@ function Dashboard({ onLogout }) {
           onCancel={() => {
             setModalVisible(false)
             setEditingNode(null)
+            setAutoCheckAfterCreate(false)
           }}
         />
       </Modal>
