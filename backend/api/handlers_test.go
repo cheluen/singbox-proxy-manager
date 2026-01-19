@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strconv"
+	"strings"
 	"testing"
 
 	"sb-proxy/backend/models"
@@ -169,5 +170,41 @@ func TestCheckNodeIPRejectsSocksFallback(t *testing.T) {
 	}
 	if ip != "" || location != "" || countryCode != "" || latency != 0 {
 		t.Fatalf("expected cleared status after fallback, got ip=%s location=%s country=%s latency=%d", ip, location, countryCode, latency)
+	}
+}
+
+func TestUpdateNodeRemarkUpdatesRemark(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	handler := newTestHandler(t, func(proxyAddr, username, password string) (*services.IPInfo, error) {
+		return nil, fmt.Errorf("not used")
+	})
+
+	nodeID := insertTestNode(t, handler.db)
+
+	rec := httptest.NewRecorder()
+	ctx, _ := gin.CreateTestContext(rec)
+	ctx.Params = gin.Params{gin.Param{Key: "id", Value: strconv.Itoa(nodeID)}}
+
+	req, _ := http.NewRequest(
+		http.MethodPut,
+		"/api/nodes/"+strconv.Itoa(nodeID)+"/remark",
+		strings.NewReader(`{"remark":"hello"}`),
+	)
+	req.Header.Set("Content-Type", "application/json")
+	ctx.Request = req
+
+	handler.UpdateNodeRemark(ctx)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("unexpected status %d", rec.Code)
+	}
+
+	var remark string
+	if err := handler.db.QueryRow("SELECT remark FROM proxy_nodes WHERE id = ?", nodeID).Scan(&remark); err != nil {
+		t.Fatalf("query node: %v", err)
+	}
+	if remark != "hello" {
+		t.Fatalf("expected remark to be updated, got %q", remark)
 	}
 }

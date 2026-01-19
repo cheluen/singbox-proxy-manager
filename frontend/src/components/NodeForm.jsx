@@ -30,7 +30,7 @@ function NodeForm({ node, onSave, onCancel }) {
       
       await onSave({
         name: values.name,
-        remark: values.remark || '',
+        remark: node?.remark || '',
         type: proxyType,
         config: JSON.stringify(config),
         inbound_port: values.inbound_port || 0, // 0 means auto-assign
@@ -595,10 +595,6 @@ function NodeForm({ node, onSave, onCancel }) {
         rules={[{ required: true, message: 'Please enter node name' }]}
       >
         <Input />
-      </Form.Item>
-
-      <Form.Item label="Remark" name="remark">
-        <TextArea rows={2} placeholder="Optional" />
       </Form.Item>
 
       <Form.Item label="Proxy Type" required>

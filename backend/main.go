@@ -174,6 +174,7 @@ func main() {
 		authorized.POST("/nodes/batch-delete", handler.BatchDeleteNodes)
 		authorized.POST("/nodes/batch-export", handler.BatchExportNodes)
 		authorized.PUT("/nodes/:id", handler.UpdateNode)
+		authorized.PUT("/nodes/:id/remark", handler.UpdateNodeRemark)
 		authorized.PUT("/nodes/:id/replace", handler.ReplaceNode)
 		authorized.DELETE("/nodes/:id", handler.DeleteNode)
 		authorized.GET("/nodes/:id/export", handler.ExportNode)

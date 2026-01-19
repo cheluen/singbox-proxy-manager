@@ -466,6 +466,40 @@ func (h *Handler) UpdateNode(c *gin.Context) {
 	c.JSON(http.StatusOK, req)
 }
 
+func (h *Handler) UpdateNodeRemark(c *gin.Context) {
+	id, err := strconv.Atoi(c.Param("id"))
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid id"})
+		return
+	}
+
+	var req struct {
+		Remark string `json:"remark"`
+	}
+	if err := c.BindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid request"})
+		return
+	}
+
+	res, err := h.db.Exec(`
+		UPDATE proxy_nodes
+		SET remark = ?, updated_at = CURRENT_TIMESTAMP
+		WHERE id = ?
+	`, req.Remark, id)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to update remark"})
+		return
+	}
+
+	affected, _ := res.RowsAffected()
+	if affected == 0 {
+		c.JSON(http.StatusNotFound, gin.H{"error": "node not found"})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{"id": id, "remark": req.Remark})
+}
+
 // DeleteNode deletes a proxy node
 func (h *Handler) DeleteNode(c *gin.Context) {
 	id, err := strconv.Atoi(c.Param("id"))
