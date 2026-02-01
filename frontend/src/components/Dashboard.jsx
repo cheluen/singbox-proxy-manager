@@ -1076,6 +1076,7 @@ const getCountryName = (location) => {
       <Modal
         title={editingNode?.id ? t('edit') : t('add_node')}
         open={modalVisible}
+        destroyOnClose
         onCancel={() => {
           setModalVisible(false)
           setEditingNode(null)
