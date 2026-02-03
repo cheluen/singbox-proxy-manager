@@ -18,10 +18,17 @@ export default {
   // Login
   login_title: '管理员登录',
   password: '密码',
+  new_password: '新密码',
+  confirm_password: '确认密码',
   login: '登录',
+  setup: '设置密码',
   logout: '退出登录',
   login_success: '登录成功',
   login_failed: '登录失败',
+  setup_required: '首次使用需要先设置管理员密码',
+  setup_success: '管理员密码设置成功',
+  setup_failed: '设置失败',
+  admin_password_locked_hint: '当前管理员密码由 ADMIN_PASSWORD 环境变量管理',
   
   // Navigation
   nodes: '节点管理',
@@ -117,6 +124,9 @@ export default {
   
   // Placeholders
   enter_password: '请输入密码',
+  enter_confirm_password: '请再次输入密码',
+  password_min_8: '密码至少 8 位',
+  password_not_match: '两次输入的密码不一致',
   enter_node_name: '请输入节点名称',
   enter_share_link: '请输入分享链接',
   enter_username: '请输入用户名',

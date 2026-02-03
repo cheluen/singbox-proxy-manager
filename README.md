@@ -2,7 +2,7 @@
 
 <div align="center">
 
-![Version](https://img.shields.io/badge/version-1.1.2-blue.svg)
+![Version](https://img.shields.io/badge/version-1.2.0-blue.svg)
 ![License](https://img.shields.io/badge/license-MIT-green.svg)
 ![SingBox](https://img.shields.io/badge/sing--box-1.12.12-orange.svg)
 
@@ -46,8 +46,9 @@
 git clone https://github.com/cheluen/singbox-proxy-manager.git
 cd singbox-proxy-manager
 
-# 2. 修改默认密码（重要！）
-# 编辑 docker-compose.yml，修改 ADMIN_PASSWORD
+# 2. 可选：设置管理员密码（推荐）
+# 方式 A：通过环境变量 ADMIN_PASSWORD 指定固定管理员密码（面板内将无法修改）
+# 方式 B：不设置 ADMIN_PASSWORD，首次打开面板会要求设置管理员密码（可在面板内修改）
 nano docker-compose.yml
 
 # 3. 启动服务
@@ -66,7 +67,9 @@ docker compose logs -f
 ### 1. 登录系统
 
 - 默认端口：`30000`
-- 默认密码：`admin123`（**请立即修改！**）
+- **不再提供默认密码**
+  - 若设置 `ADMIN_PASSWORD` 且不为空：登录密码为该值；面板内无法修改管理员密码（需修改环境变量并重启服务）
+  - 若未设置 `ADMIN_PASSWORD`：首次打开管理面板会要求先设置管理员密码（设置后可在面板内修改）
 
 ### 2. 添加节点
 
@@ -74,7 +77,7 @@ docker compose logs -f
 1. 点击「添加节点」按钮
 2. 粘贴分享链接（支持 vless://、vmess://、hysteria2:// 等）
 3. 设置入站端口（留空自动分配）
-4. 设置认证用户名密码（可选）
+4. 系统会为每个新节点自动生成入站用户名/密码（可在面板内单独或批量修改）
 
 #### 方式二：批量导入
 1. 点击「批量导入」
@@ -89,8 +92,8 @@ docker compose logs -f
 代理类型：HTTP 或 SOCKS5
 服务器：您的服务器IP
 端口：30001、30002、30003...（对应各节点）
-用户名：在管理界面设置的用户名
-密码：在管理界面设置的密码
+用户名：在管理界面查看/修改（新节点会自动生成）
+密码：在管理界面查看/修改（新节点会自动生成）
 ```
 
 ### 4. 管理节点
@@ -113,7 +116,16 @@ docker compose logs -f
 environment:
   - PORT=30000              # 管理界面端口
   - CONFIG_DIR=/app/config  # 配置文件目录
-  - ADMIN_PASSWORD=admin123 # 管理密码（请修改！）
+  - ADMIN_PASSWORD=          # 可选：管理员密码（不为空则使用该值；面板内无法修改）
+  - CORS_ALLOWED_ORIGINS=    # 可选：管理 API 允许的跨域来源（逗号分隔；默认不启用 CORS）
+  - LOGIN_RATE_LIMIT_WINDOW_SECONDS=60   # 可选：登录限速窗口（秒）
+  - LOGIN_RATE_LIMIT_MAX_ATTEMPTS=10     # 可选：窗口内最大失败次数
+  - LOGIN_RATE_LIMIT_BLOCK_SECONDS=600   # 可选：触发限速后的封禁时间（秒）
+  - HTTP_READ_HEADER_TIMEOUT=5s          # 可选：管理 API 读请求头超时
+  - HTTP_READ_TIMEOUT=15s                # 可选：读请求体超时
+  - HTTP_WRITE_TIMEOUT=30s               # 可选：写响应超时
+  - HTTP_IDLE_TIMEOUT=60s                # 可选：空闲连接超时
+  - HTTP_MAX_HEADER_BYTES=1048576        # 可选：最大请求头大小（字节）
   - TURSO_DATABASE_URL=${TURSO_DATABASE_URL} # 可选：Turso 远程数据库 URL（需与 TURSO_AUTH_TOKEN 一起设置）
   - TURSO_AUTH_TOKEN=${TURSO_AUTH_TOKEN}     # 可选：Turso 认证 Token（需与 TURSO_DATABASE_URL 一起设置）
 ```
@@ -226,11 +238,9 @@ docker compose up -d
 
 ## 🔒 安全建议
 
-1. **立即修改默认密码**
-   ```bash
-   # 编辑 docker-compose.yml
-   - ADMIN_PASSWORD=您的强密码
-   ```
+1. **设置强管理员密码**
+   - 推荐：通过环境变量 `ADMIN_PASSWORD` 配置固定密码（面板内无法修改，需改环境变量并重启）
+   - 或者：不设置 `ADMIN_PASSWORD`，首次打开面板时设置一个强密码（后续可在面板内修改）
 
 2. **限制访问 IP**（可选）
    ```bash

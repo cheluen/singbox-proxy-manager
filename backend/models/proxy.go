@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"strings"
 	"time"
 
 	"golang.org/x/crypto/bcrypt"
@@ -220,11 +221,12 @@ type HTTPProxyConfig struct {
 
 // Settings represents global settings
 type Settings struct {
-	ID            int       `json:"id"`
-	AdminPassword string    `json:"admin_password"`
-	StartPort     int       `json:"start_port"`
-	CreatedAt     time.Time `json:"created_at"`
-	UpdatedAt     time.Time `json:"updated_at"`
+	ID               int       `json:"id"`
+	AdminPassword    string    `json:"admin_password"`
+	AdminPasswordSet int       `json:"admin_password_set"`
+	StartPort        int       `json:"start_port"`
+	CreatedAt        time.Time `json:"created_at"`
+	UpdatedAt        time.Time `json:"updated_at"`
 }
 
 // InitDB initializes the database
@@ -263,12 +265,35 @@ func InitDB(db *sql.DB) error {
 		CREATE TABLE IF NOT EXISTS settings (
 			id INTEGER PRIMARY KEY AUTOINCREMENT,
 			admin_password TEXT NOT NULL,
+			admin_password_set INTEGER DEFAULT 0,
 			start_port INTEGER DEFAULT 10000,
 			created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
 			updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
 		)
 	`)
 	if err != nil {
+		return err
+	}
+
+	if err := ensureColumn(db, "settings", "admin_password_set", "ALTER TABLE settings ADD COLUMN admin_password_set INTEGER DEFAULT 0"); err != nil {
+		return err
+	}
+
+	// Create admin_sessions table for multi-session & multi-instance auth
+	_, err = db.Exec(`
+		CREATE TABLE IF NOT EXISTS admin_sessions (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			token_hash TEXT NOT NULL,
+			expires_at INTEGER NOT NULL,
+			user_agent TEXT DEFAULT '',
+			ip TEXT DEFAULT '',
+			created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+		)
+	`)
+	if err != nil {
+		return err
+	}
+	if _, err := db.Exec("CREATE UNIQUE INDEX IF NOT EXISTS idx_admin_sessions_token_hash ON admin_sessions(token_hash)"); err != nil {
 		return err
 	}
 
@@ -279,25 +304,59 @@ func InitDB(db *sql.DB) error {
 		return err
 	}
 	if count == 0 {
-		// Get initial password from environment variable or use default
-		initialPassword := os.Getenv("ADMIN_PASSWORD")
-		if initialPassword == "" {
-			initialPassword = "admin123"
+		envPassword := strings.TrimSpace(os.Getenv("ADMIN_PASSWORD"))
+		if envPassword != "" {
+			hashedPassword, err := bcrypt.GenerateFromPassword([]byte(envPassword), bcrypt.DefaultCost)
+			if err != nil {
+				log.Printf("Failed to hash initial admin password: %v", err)
+				return err
+			}
+			_, err = db.Exec("INSERT INTO settings (admin_password, admin_password_set, start_port) VALUES (?, ?, ?)", string(hashedPassword), 1, 30001)
+			if err != nil {
+				return err
+			}
+			log.Println("Admin password is managed by ADMIN_PASSWORD (env) and has been hashed")
+		} else {
+			_, err = db.Exec("INSERT INTO settings (admin_password, admin_password_set, start_port) VALUES (?, ?, ?)", "", 0, 30001)
+			if err != nil {
+				return err
+			}
+			log.Println("No admin password configured; setup is required before first login")
 		}
-
-		// Hash the initial password with bcrypt
-		hashedPassword, err := bcrypt.GenerateFromPassword([]byte(initialPassword), bcrypt.DefaultCost)
-		if err != nil {
-			log.Printf("Failed to hash initial password: %v", err)
+	} else {
+		// Self-heal legacy default password and migration state.
+		var settingsID int
+		var adminPassword string
+		var adminPasswordSet int
+		if err := db.QueryRow("SELECT id, admin_password, admin_password_set FROM settings LIMIT 1").Scan(&settingsID, &adminPassword, &adminPasswordSet); err != nil {
 			return err
 		}
 
-		_, err = db.Exec("INSERT INTO settings (admin_password, start_port) VALUES (?, ?)", string(hashedPassword), 30001)
-		if err != nil {
-			return err
+		// If stored admin_password is not a bcrypt hash, force reset.
+		if adminPassword != "" && !strings.HasPrefix(adminPassword, "$2") {
+			if _, err := db.Exec("UPDATE settings SET admin_password = '', admin_password_set = 0, updated_at = CURRENT_TIMESTAMP WHERE id = ?", settingsID); err != nil {
+				return err
+			}
+			log.Println("Admin password storage format is invalid; setup is required")
+		} else if adminPassword != "" {
+			// If the stored hash matches the insecure legacy default, force reset.
+			if err := bcrypt.CompareHashAndPassword([]byte(adminPassword), []byte("admin123")); err == nil {
+				if _, err := db.Exec("UPDATE settings SET admin_password = '', admin_password_set = 0, updated_at = CURRENT_TIMESTAMP WHERE id = ?", settingsID); err != nil {
+					return err
+				}
+				log.Println("Legacy default admin password detected; setup is required")
+			} else if adminPasswordSet == 0 {
+				// Mark as set for existing non-default password.
+				_, _ = db.Exec("UPDATE settings SET admin_password_set = 1 WHERE id = ?", settingsID)
+			}
+		} else if adminPasswordSet != 0 {
+			_, _ = db.Exec("UPDATE settings SET admin_password_set = 0 WHERE id = ?", settingsID)
 		}
-		log.Println("Initial admin password has been set and hashed")
 	}
+
+	// Clean up expired sessions opportunistically.
+	now := time.Now().Unix()
+	_, _ = db.Exec("DELETE FROM admin_sessions WHERE expires_at <= ?", now)
 
 	return nil
 }

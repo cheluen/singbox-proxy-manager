@@ -166,12 +166,11 @@ build-freebsd:
       cat > singbox-proxy-manager-freebsd-amd64/start.sh << 'EOF'
       #!/bin/sh
       cd "$(dirname "$0")"
-      export PATH="$PWD:$PATH"
-      export CONFIG_DIR="$PWD/config"
-      export PORT="${PORT:-30000}"
-      export ADMIN_PASSWORD="${ADMIN_PASSWORD:-admin123}"
-      ./main
-      EOF
+	      export PATH="$PWD:$PATH"
+	      export CONFIG_DIR="$PWD/config"
+	      export PORT="${PORT:-30000}"
+	      ./main
+	      EOF
     - chmod +x singbox-proxy-manager-freebsd-amd64/start.sh
     - tar czf singbox-proxy-manager-freebsd-amd64.tar.gz singbox-proxy-manager-freebsd-amd64/
   artifacts:
@@ -195,11 +194,16 @@ build-linux:
   script:
     - go mod download
     - GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build -o main ./backend
-    # 下载Linux版sing-box
-    - apt-get update && apt-get install -y curl
-    - curl -fLo sing-box.tar.gz "https://github.com/SagerNet/sing-box/releases/download/v${SINGBOX_VERSION}/sing-box-${SINGBOX_VERSION}-linux-amd64.tar.gz"
-    - tar xzf sing-box.tar.gz
-    - mv sing-box-*/sing-box .
+	    # 下载Linux版sing-box
+	    - apt-get update && apt-get install -y --no-install-recommends ca-certificates curl jq
+	    - |
+	      ASSET="sing-box-${SINGBOX_VERSION}-linux-amd64.tar.gz"
+	      curl -fLo "$ASSET" "https://github.com/SagerNet/sing-box/releases/download/v${SINGBOX_VERSION}/$ASSET"
+	      DIGEST="$(curl -fsSL "https://api.github.com/repos/SagerNet/sing-box/releases/tags/v${SINGBOX_VERSION}" | jq -r --arg asset "$ASSET" '.assets[] | select(.name==$asset) | .digest')"
+	      test -n "$DIGEST" && test "$DIGEST" != "null"
+	      echo "${DIGEST#sha256:}  $ASSET" | sha256sum -c -
+	      tar xzf "$ASSET"
+	    - mv sing-box-*/sing-box .
     # 创建发布包
     - mkdir -p singbox-proxy-manager-linux-amd64/frontend
     - mv main singbox-proxy-manager-linux-amd64/
@@ -211,12 +215,11 @@ build-linux:
       cat > singbox-proxy-manager-linux-amd64/start.sh << 'EOF'
       #!/bin/sh
       cd "$(dirname "$0")"
-      export PATH="$PWD:$PATH"
-      export CONFIG_DIR="$PWD/config"
-      export PORT="${PORT:-30000}"
-      export ADMIN_PASSWORD="${ADMIN_PASSWORD:-admin123}"
-      ./main
-      EOF
+	      export PATH="$PWD:$PATH"
+	      export CONFIG_DIR="$PWD/config"
+	      export PORT="${PORT:-30000}"
+	      ./main
+	      EOF
     - chmod +x singbox-proxy-manager-linux-amd64/start.sh
     - tar czf singbox-proxy-manager-linux-amd64.tar.gz singbox-proxy-manager-linux-amd64/
   artifacts:

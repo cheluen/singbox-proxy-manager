@@ -8,6 +8,9 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strconv"
+	"strings"
+	"time"
 
 	"sb-proxy/backend/api"
 	"sb-proxy/backend/models"
@@ -138,32 +141,23 @@ func main() {
 	// Initialize Gin
 	gin.SetMode(gin.ReleaseMode)
 	r := gin.Default()
-
-	// CORS middleware
-	r.Use(func(c *gin.Context) {
-		c.Writer.Header().Set("Access-Control-Allow-Origin", "*")
-		c.Writer.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
-		c.Writer.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization")
-
-		if c.Request.Method == "OPTIONS" {
-			c.AbortWithStatus(204)
-			return
-		}
-
-		c.Next()
-	})
+	r.Use(apiCorsMiddlewareFromEnv())
 
 	// Initialize handler
 	handler := api.NewHandler(db, singBoxService)
 
+	apiGroup := r.Group("/api")
+
 	// Public routes
-	r.GET("/api/version", func(c *gin.Context) {
+	apiGroup.GET("/version", func(c *gin.Context) {
 		c.JSON(http.StatusOK, gin.H{"version": version.Version()})
 	})
-	r.POST("/api/login", handler.Login)
+	apiGroup.GET("/auth/status", handler.AuthStatus)
+	apiGroup.POST("/setup/admin-password", handler.SetupAdminPassword)
+	apiGroup.POST("/login", handler.Login)
 
 	// Protected routes
-	authorized := r.Group("/api")
+	authorized := apiGroup.Group("")
 	authorized.Use(handler.AuthMiddleware())
 	{
 		// Node management
@@ -204,7 +198,105 @@ func main() {
 	}
 
 	log.Printf("Server starting on port %s", port)
-	if err := r.Run(":" + port); err != nil {
+	srv := &http.Server{
+		Addr:              ":" + port,
+		Handler:           r,
+		ReadHeaderTimeout: readDurationEnv("HTTP_READ_HEADER_TIMEOUT", 5*time.Second),
+		ReadTimeout:       readDurationEnv("HTTP_READ_TIMEOUT", 15*time.Second),
+		WriteTimeout:      readDurationEnv("HTTP_WRITE_TIMEOUT", 30*time.Second),
+		IdleTimeout:       readDurationEnv("HTTP_IDLE_TIMEOUT", 60*time.Second),
+		MaxHeaderBytes:    readIntEnv("HTTP_MAX_HEADER_BYTES", 1<<20),
+	}
+	if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 		log.Fatalf("Failed to start server: %v", err)
 	}
+}
+
+func apiCorsMiddlewareFromEnv() gin.HandlerFunc {
+	allowed := parseCommaListEnv("CORS_ALLOWED_ORIGINS")
+	if len(allowed) == 0 {
+		return func(c *gin.Context) {
+			if strings.HasPrefix(c.Request.URL.Path, "/api") && c.Request.Method == http.MethodOptions {
+				c.AbortWithStatus(http.StatusNoContent)
+				return
+			}
+			c.Next()
+		}
+	}
+
+	allowedSet := make(map[string]struct{}, len(allowed))
+	for _, o := range allowed {
+		if o == "*" {
+			log.Printf("CORS_ALLOWED_ORIGINS contains '*', ignoring for safety")
+			continue
+		}
+		allowedSet[o] = struct{}{}
+	}
+
+	return func(c *gin.Context) {
+		if !strings.HasPrefix(c.Request.URL.Path, "/api") {
+			c.Next()
+			return
+		}
+
+		origin := c.GetHeader("Origin")
+		if origin != "" {
+			if _, ok := allowedSet[origin]; ok {
+				c.Writer.Header().Set("Access-Control-Allow-Origin", origin)
+				c.Writer.Header().Add("Vary", "Origin")
+				c.Writer.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
+				c.Writer.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization")
+			}
+		}
+
+		if c.Request.Method == http.MethodOptions {
+			c.AbortWithStatus(http.StatusNoContent)
+			return
+		}
+
+		c.Next()
+	}
+}
+
+func parseCommaListEnv(key string) []string {
+	raw := strings.TrimSpace(os.Getenv(key))
+	if raw == "" {
+		return nil
+	}
+	parts := strings.Split(raw, ",")
+	out := make([]string, 0, len(parts))
+	for _, p := range parts {
+		p = strings.TrimSpace(p)
+		if p == "" {
+			continue
+		}
+		out = append(out, p)
+	}
+	return out
+}
+
+func readDurationEnv(key string, def time.Duration) time.Duration {
+	raw := strings.TrimSpace(os.Getenv(key))
+	if raw == "" {
+		return def
+	}
+	d, err := time.ParseDuration(raw)
+	if err != nil {
+		log.Printf("Invalid %s=%q, using default %s", key, raw, def)
+		return def
+	}
+	return d
+}
+
+func readIntEnv(key string, def int) int {
+	raw := strings.TrimSpace(os.Getenv(key))
+	if raw == "" {
+		return def
+	}
+	n, err := strconv.Atoi(raw)
+	if err != nil {
+		log.Printf("Invalid %s=%q, using default %d", key, raw, def)
+		return def
+	}
+	return n
 }

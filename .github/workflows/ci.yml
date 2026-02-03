@@ -185,8 +185,12 @@ jobs:
 
       - name: Download sing-box
         run: |
-          curl -fLo sing-box.tar.gz "https://github.com/SagerNet/sing-box/releases/download/v${{ env.SINGBOX_VERSION }}/sing-box-${{ env.SINGBOX_VERSION }}-linux-amd64.tar.gz"
-          tar xzf sing-box.tar.gz
+          ASSET="sing-box-${{ env.SINGBOX_VERSION }}-linux-amd64.tar.gz"
+          curl -fLo "$ASSET" "https://github.com/SagerNet/sing-box/releases/download/v${{ env.SINGBOX_VERSION }}/$ASSET"
+          DIGEST="$(curl -fsSL "https://api.github.com/repos/SagerNet/sing-box/releases/tags/v${{ env.SINGBOX_VERSION }}" | jq -r --arg asset "$ASSET" '.assets[] | select(.name==$asset) | .digest')"
+          test -n "$DIGEST" && test "$DIGEST" != "null"
+          echo "${DIGEST#sha256:}  $ASSET" | sha256sum -c -
+          tar xzf "$ASSET"
           mv sing-box-*/sing-box .
 
       - name: Create release package
@@ -202,7 +206,6 @@ jobs:
           export PATH="$PWD:$PATH"
           export CONFIG_DIR="$PWD/config"
           export PORT="${PORT:-30000}"
-          export ADMIN_PASSWORD="${ADMIN_PASSWORD:-admin123}"
           ./main
           EOF
           chmod +x singbox-proxy-manager-linux-amd64/start.sh
@@ -258,7 +261,6 @@ jobs:
           export PATH="$PWD:$PATH"
           export CONFIG_DIR="$PWD/config"
           export PORT="${PORT:-30000}"
-          export ADMIN_PASSWORD="${ADMIN_PASSWORD:-admin123}"
           ./main
           EOF
           chmod +x singbox-proxy-manager-freebsd-amd64/start.sh

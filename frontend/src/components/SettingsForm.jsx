@@ -1,11 +1,12 @@
 import React, { useState, useEffect } from 'react'
-import { Form, Input, InputNumber, Button, message, Divider } from 'antd'
+import { Form, Input, InputNumber, Button, message, Divider, Alert } from 'antd'
 import api from '../utils/api'
 
 function SettingsForm({ onClose }) {
   const [form] = Form.useForm()
   const [loading, setLoading] = useState(false)
   const [loadingData, setLoadingData] = useState(true)
+  const [adminPasswordLocked, setAdminPasswordLocked] = useState(false)
 
   useEffect(() => {
     loadSettings()
@@ -15,6 +16,7 @@ function SettingsForm({ onClose }) {
     try {
       const response = await api.get('/settings')
       form.setFieldsValue(response.data)
+      setAdminPasswordLocked(Boolean(response.data?.admin_password_locked))
     } catch (error) {
       message.error('Failed to load settings')
     } finally {
@@ -29,7 +31,7 @@ function SettingsForm({ onClose }) {
       if (values.start_port !== undefined) {
         updateData.start_port = values.start_port
       }
-      if (values.admin_password) {
+      if (!adminPasswordLocked && values.admin_password) {
         updateData.admin_password = values.admin_password
       }
 
@@ -41,6 +43,10 @@ function SettingsForm({ onClose }) {
     } finally {
       setLoading(false)
     }
+  }
+
+  if (loadingData) {
+    return <div style={{ padding: 16, textAlign: 'center' }}>Loading...</div>
   }
 
   return (
@@ -63,13 +69,24 @@ function SettingsForm({ onClose }) {
 
       <Divider />
 
-      <Form.Item
-        label="New Admin Password"
-        name="admin_password"
-        extra="Leave empty to keep current password"
-      >
-        <Input.Password placeholder="Enter new password (optional)" />
-      </Form.Item>
+      {adminPasswordLocked ? (
+        <Alert
+          type="info"
+          showIcon
+          message="管理员密码由 ADMIN_PASSWORD 环境变量管理"
+          description="当前部署已设置 ADMIN_PASSWORD，面板内无法修改管理员密码。如需修改，请更新部署环境变量后重启服务。"
+          style={{ marginBottom: 16 }}
+        />
+      ) : (
+        <Form.Item
+          label="New Admin Password"
+          name="admin_password"
+          extra="Leave empty to keep current password"
+          rules={[{ min: 8, message: 'Password must be at least 8 characters' }]}
+        >
+          <Input.Password placeholder="Enter new password (optional)" />
+        </Form.Item>
+      )}
 
       <Form.Item>
         <Button type="primary" htmlType="submit" loading={loading} block>

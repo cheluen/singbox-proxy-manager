@@ -1,13 +1,12 @@
 package api
 
 import (
-	"crypto/rand"
 	"database/sql"
-	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"log"
 	"net/http"
+	"os"
 	"strconv"
 	"strings"
 	"sync"
@@ -23,9 +22,8 @@ import (
 type Handler struct {
 	db             *sql.DB
 	singBoxService *services.SingBoxService
-	sessionToken   string
-	sessionExpiry  time.Time
-	sessionMu      sync.RWMutex
+	loginLimiter   *loginRateLimiter
+	nodeWriteMu    sync.Mutex
 	checkProxyIP   func(proxyAddr string, username string, password string) (*services.IPInfo, error)
 }
 
@@ -33,6 +31,7 @@ func NewHandler(db *sql.DB, singBoxService *services.SingBoxService) *Handler {
 	return &Handler{
 		db:             db,
 		singBoxService: singBoxService,
+		loginLimiter:   newLoginRateLimiterFromEnv(),
 		checkProxyIP:   services.CheckProxyIP,
 	}
 }
@@ -126,17 +125,14 @@ func (h *Handler) reorderRemainingNodes() error {
 // Auth middleware
 func (h *Handler) AuthMiddleware() gin.HandlerFunc {
 	return func(c *gin.Context) {
-		token := c.GetHeader("Authorization")
-		if strings.HasPrefix(strings.ToLower(token), "bearer ") {
-			token = strings.TrimSpace(token[len("Bearer "):])
+		token := normalizeAuthToken(c.GetHeader("Authorization"))
+		ok, err := h.isValidAdminSession(token)
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "database error"})
+			c.Abort()
+			return
 		}
-
-		h.sessionMu.RLock()
-		validToken := h.sessionToken
-		expiry := h.sessionExpiry
-		h.sessionMu.RUnlock()
-
-		if token != validToken || time.Now().After(expiry) {
+		if !ok {
 			c.JSON(http.StatusUnauthorized, gin.H{"error": "unauthorized"})
 			c.Abort()
 			return
@@ -157,33 +153,135 @@ func (h *Handler) Login(c *gin.Context) {
 		return
 	}
 
-	var settings models.Settings
-	err := h.db.QueryRow("SELECT id, admin_password FROM settings LIMIT 1").Scan(&settings.ID, &settings.AdminPassword)
+	ip := c.ClientIP()
+	now := time.Now()
+	if h.loginLimiter != nil {
+		if ok, retryAfter := h.loginLimiter.Allow(ip, now); !ok {
+			c.Header("Retry-After", strconv.Itoa(int(retryAfter.Seconds())))
+			c.JSON(http.StatusTooManyRequests, gin.H{"error": "too many login attempts, please try again later"})
+			return
+		}
+	}
+
+	envPassword := strings.TrimSpace(os.Getenv("ADMIN_PASSWORD"))
+	if envPassword != "" {
+		if !constantTimeEqual(envPassword, req.Password) {
+			if h.loginLimiter != nil {
+				h.loginLimiter.OnFailure(ip, now)
+			}
+			c.JSON(http.StatusUnauthorized, gin.H{"error": "invalid password"})
+			return
+		}
+	} else {
+		var settings models.Settings
+		err := h.db.QueryRow("SELECT id, admin_password, admin_password_set FROM settings LIMIT 1").Scan(&settings.ID, &settings.AdminPassword, &settings.AdminPasswordSet)
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "database error"})
+			return
+		}
+		if settings.AdminPasswordSet == 0 || strings.TrimSpace(settings.AdminPassword) == "" {
+			c.JSON(http.StatusPreconditionRequired, gin.H{"error": "admin password not set", "setup_required": true})
+			return
+		}
+
+		// Compare password using bcrypt only (no plaintext fallback for security)
+		if err := bcrypt.CompareHashAndPassword([]byte(settings.AdminPassword), []byte(req.Password)); err != nil {
+			if h.loginLimiter != nil {
+				h.loginLimiter.OnFailure(ip, now)
+			}
+			c.JSON(http.StatusUnauthorized, gin.H{"error": "invalid password"})
+			return
+		}
+	}
+
+	if h.loginLimiter != nil {
+		h.loginLimiter.OnSuccess(ip)
+	}
+
+	token, expiry, err := h.createAdminSession(c)
 	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to create session"})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"token":  token,
+		"expiry": expiry.Unix(),
+	})
+}
+
+// AuthStatus returns whether setup is required and whether admin password is locked by env.
+func (h *Handler) AuthStatus(c *gin.Context) {
+	locked := strings.TrimSpace(os.Getenv("ADMIN_PASSWORD")) != ""
+	setupRequired := false
+
+	if !locked {
+		var set int
+		var hash string
+		err := h.db.QueryRow("SELECT admin_password, admin_password_set FROM settings LIMIT 1").Scan(&hash, &set)
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "database error"})
+			return
+		}
+		setupRequired = set == 0 || strings.TrimSpace(hash) == ""
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"admin_password_locked": locked,
+		"setup_required":        setupRequired,
+	})
+}
+
+// SetupAdminPassword sets the initial admin password when ADMIN_PASSWORD is not set.
+func (h *Handler) SetupAdminPassword(c *gin.Context) {
+	if strings.TrimSpace(os.Getenv("ADMIN_PASSWORD")) != "" {
+		c.JSON(http.StatusConflict, gin.H{"error": "admin password is managed by ADMIN_PASSWORD"})
+		return
+	}
+
+	var req struct {
+		Password string `json:"password"`
+	}
+	if err := c.BindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid request"})
+		return
+	}
+	if strings.TrimSpace(req.Password) == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "password is required"})
+		return
+	}
+	if len([]rune(req.Password)) < 8 {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "password must be at least 8 characters"})
+		return
+	}
+
+	var settingsID int
+	var hash string
+	var set int
+	if err := h.db.QueryRow("SELECT id, admin_password, admin_password_set FROM settings LIMIT 1").Scan(&settingsID, &hash, &set); err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "database error"})
 		return
 	}
-
-	// Compare password using bcrypt only (no plaintext fallback for security)
-	if err := bcrypt.CompareHashAndPassword([]byte(settings.AdminPassword), []byte(req.Password)); err != nil {
-		c.JSON(http.StatusUnauthorized, gin.H{"error": "invalid password"})
+	if set != 0 && strings.TrimSpace(hash) != "" {
+		c.JSON(http.StatusConflict, gin.H{"error": "admin password already set"})
 		return
 	}
 
-	// Generate cryptographically secure session token
-	tokenBytes := make([]byte, 32)
-	if _, err := rand.Read(tokenBytes); err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to generate token"})
+	hashedPassword, err := bcrypt.GenerateFromPassword([]byte(req.Password), bcrypt.DefaultCost)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to hash password"})
+		return
+	}
+	if _, err := h.db.Exec("UPDATE settings SET admin_password = ?, admin_password_set = 1, updated_at = CURRENT_TIMESTAMP WHERE id = ?", string(hashedPassword), settingsID); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to update password"})
 		return
 	}
 
-	h.sessionMu.Lock()
-	h.sessionToken = base64.URLEncoding.EncodeToString(tokenBytes)
-	h.sessionExpiry = time.Now().Add(24 * time.Hour)
-	token := h.sessionToken
-	expiry := h.sessionExpiry
-	h.sessionMu.Unlock()
-
+	token, expiry, err := h.createAdminSession(c)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to create session"})
+		return
+	}
 	c.JSON(http.StatusOK, gin.H{
 		"token":  token,
 		"expiry": expiry.Unix(),
@@ -265,34 +363,57 @@ func (h *Handler) CreateNode(c *gin.Context) {
 		return
 	}
 
-	// Get max sort order
+	// Ensure inbound auth is enabled by default (generate missing credentials).
+	if strings.TrimSpace(req.Username) == "" {
+		username, err := generateRandomString(12)
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to generate username"})
+			return
+		}
+		req.Username = username
+	}
+	if strings.TrimSpace(req.Password) == "" {
+		password, err := generateRandomString(24)
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to generate password"})
+			return
+		}
+		req.Password = password
+	}
+
+	h.nodeWriteMu.Lock()
+	defer h.nodeWriteMu.Unlock()
+
+	// Allocate sort_order / inbound_port in one critical section to avoid races.
+	tx, err := h.db.Begin()
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "database error"})
+		return
+	}
+	defer tx.Rollback()
+
 	var maxOrder int
-	h.db.QueryRow("SELECT COALESCE(MAX(sort_order), -1) FROM proxy_nodes").Scan(&maxOrder)
+	if err := tx.QueryRow("SELECT COALESCE(MAX(sort_order), -1) FROM proxy_nodes").Scan(&maxOrder); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "database error"})
+		return
+	}
 	req.SortOrder = maxOrder + 1
 
-	// Handle inbound port
 	if req.InboundPort == 0 {
-		// Auto-assign based on first node's port
-		var firstNodePort int
-		err := h.db.QueryRow("SELECT inbound_port FROM proxy_nodes ORDER BY sort_order ASC LIMIT 1").Scan(&firstNodePort)
-
-		switch err {
-		case sql.ErrNoRows:
-			// This is the first node, use start_port
-			var startPort int
-			h.db.QueryRow("SELECT start_port FROM settings LIMIT 1").Scan(&startPort)
-			req.InboundPort = startPort
-		case nil:
-			// Calculate based on first node's port and sort order
-			req.InboundPort = firstNodePort + req.SortOrder
-		default:
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to determine port"})
+		var startPort int
+		if err := tx.QueryRow("SELECT start_port FROM settings LIMIT 1").Scan(&startPort); err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "database error"})
+			return
+		}
+		req.InboundPort = startPort + req.SortOrder
+		if req.InboundPort <= 0 || req.InboundPort > 65535 {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "inbound port out of range"})
 			return
 		}
 	}
 
 	// Insert node
-	result, err := h.db.Exec(`
+	result, err := tx.Exec(`
 		INSERT INTO proxy_nodes (name, remark, type, config, inbound_port, username, password, sort_order, latency, enabled)
 		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 	`, req.Name, req.Remark, req.Type, req.Config, req.InboundPort, req.Username, req.Password, req.SortOrder, 0, req.Enabled)
@@ -304,6 +425,11 @@ func (h *Handler) CreateNode(c *gin.Context) {
 
 	id, _ := result.LastInsertId()
 	req.ID = int(id)
+
+	if err := tx.Commit(); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to commit transaction"})
+		return
+	}
 
 	// Regenerate global config and restart sing-box
 	if err := h.regenerateAndRestart(); err != nil {
@@ -334,6 +460,39 @@ func (h *Handler) BatchImportNodes(c *gin.Context) {
 	results := []map[string]interface{}{}
 	successCount := 0
 
+	h.nodeWriteMu.Lock()
+	defer h.nodeWriteMu.Unlock()
+
+	tx, err := h.db.Begin()
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "database error"})
+		return
+	}
+	defer tx.Rollback()
+
+	var startPort int
+	if err := tx.QueryRow("SELECT start_port FROM settings LIMIT 1").Scan(&startPort); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "database error"})
+		return
+	}
+
+	var maxOrder int
+	if err := tx.QueryRow("SELECT COALESCE(MAX(sort_order), -1) FROM proxy_nodes").Scan(&maxOrder); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "database error"})
+		return
+	}
+	nextOrder := maxOrder + 1
+
+	stmt, err := tx.Prepare(`
+		INSERT INTO proxy_nodes (name, remark, type, config, inbound_port, username, password, sort_order, latency, enabled)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+	`)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "database error"})
+		return
+	}
+	defer stmt.Close()
+
 	for _, link := range req.Links {
 		result := map[string]interface{}{
 			"link": link,
@@ -357,37 +516,32 @@ func (h *Handler) BatchImportNodes(c *gin.Context) {
 			continue
 		}
 
-		// Get max sort order
-		var maxOrder int
-		h.db.QueryRow("SELECT COALESCE(MAX(sort_order), -1) FROM proxy_nodes").Scan(&maxOrder)
-		sortOrder := maxOrder + 1
-
-		// Auto-assign inbound port
-		var inboundPort int
-		var firstNodePort int
-		err = h.db.QueryRow("SELECT inbound_port FROM proxy_nodes ORDER BY sort_order ASC LIMIT 1").Scan(&firstNodePort)
-
-		switch err {
-		case sql.ErrNoRows:
-			// This is the first node, use start_port
-			var startPort int
-			h.db.QueryRow("SELECT start_port FROM settings LIMIT 1").Scan(&startPort)
-			inboundPort = startPort
-		case nil:
-			// Calculate based on first node's port and sort order
-			inboundPort = firstNodePort + sortOrder
-		default:
+		sortOrder := nextOrder
+		inboundPort := startPort + sortOrder
+		if inboundPort <= 0 || inboundPort > 65535 {
 			result["success"] = false
-			result["error"] = "failed to determine port"
+			result["error"] = "inbound port out of range"
 			results = append(results, result)
 			continue
 		}
 
 		// Insert node
-		dbResult, err := h.db.Exec(`
-			INSERT INTO proxy_nodes (name, remark, type, config, inbound_port, username, password, sort_order, latency, enabled)
-			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-		`, name, "", proxyType, string(configJSON), inboundPort, "", "", sortOrder, 0, req.Enabled)
+		username, err := generateRandomString(12)
+		if err != nil {
+			result["success"] = false
+			result["error"] = "failed to generate username"
+			results = append(results, result)
+			continue
+		}
+		password, err := generateRandomString(24)
+		if err != nil {
+			result["success"] = false
+			result["error"] = "failed to generate password"
+			results = append(results, result)
+			continue
+		}
+
+		dbResult, err := stmt.Exec(name, "", proxyType, string(configJSON), inboundPort, username, password, sortOrder, 0, req.Enabled)
 
 		if err != nil {
 			result["success"] = false
@@ -402,8 +556,18 @@ func (h *Handler) BatchImportNodes(c *gin.Context) {
 		result["id"] = id
 		result["name"] = name
 		result["port"] = inboundPort
+		result["username"] = username
+		result["password"] = password
 		results = append(results, result)
 		successCount++
+		nextOrder++
+	}
+
+	if successCount > 0 {
+		if err := tx.Commit(); err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to commit transaction"})
+			return
+		}
 	}
 
 	// Regenerate global config and restart sing-box after batch import
@@ -508,6 +672,9 @@ func (h *Handler) DeleteNode(c *gin.Context) {
 		return
 	}
 
+	h.nodeWriteMu.Lock()
+	defer h.nodeWriteMu.Unlock()
+
 	// Delete from database
 	_, err = h.db.Exec("DELETE FROM proxy_nodes WHERE id = ?", id)
 	if err != nil {
@@ -545,6 +712,9 @@ func (h *Handler) BatchDeleteNodes(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "no nodes to delete"})
 		return
 	}
+
+	h.nodeWriteMu.Lock()
+	defer h.nodeWriteMu.Unlock()
 
 	// Begin transaction
 	tx, err := h.db.Begin()
@@ -604,6 +774,9 @@ func (h *Handler) ReorderNodes(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid request"})
 		return
 	}
+
+	h.nodeWriteMu.Lock()
+	defer h.nodeWriteMu.Unlock()
 
 	// Get start port
 	var startPort int
@@ -784,7 +957,8 @@ func (h *Handler) GetSettings(c *gin.Context) {
 	}
 
 	c.JSON(http.StatusOK, gin.H{
-		"start_port": settings.StartPort,
+		"start_port":            settings.StartPort,
+		"admin_password_locked": strings.TrimSpace(os.Getenv("ADMIN_PASSWORD")) != "",
 	})
 }
 
@@ -801,6 +975,19 @@ func (h *Handler) UpdateSettings(c *gin.Context) {
 	}
 
 	if req.AdminPassword != nil {
+		if strings.TrimSpace(os.Getenv("ADMIN_PASSWORD")) != "" {
+			c.JSON(http.StatusConflict, gin.H{"error": "admin password is managed by ADMIN_PASSWORD"})
+			return
+		}
+		if strings.TrimSpace(*req.AdminPassword) == "" {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "password is required"})
+			return
+		}
+		if len([]rune(*req.AdminPassword)) < 8 {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "password must be at least 8 characters"})
+			return
+		}
+
 		// Hash password
 		hashedPassword, err := bcrypt.GenerateFromPassword([]byte(*req.AdminPassword), bcrypt.DefaultCost)
 		if err != nil {
@@ -808,14 +995,19 @@ func (h *Handler) UpdateSettings(c *gin.Context) {
 			return
 		}
 
-		_, err = h.db.Exec("UPDATE settings SET admin_password = ?, updated_at = CURRENT_TIMESTAMP", string(hashedPassword))
+		_, err = h.db.Exec("UPDATE settings SET admin_password = ?, admin_password_set = 1, updated_at = CURRENT_TIMESTAMP", string(hashedPassword))
 		if err != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to update password"})
 			return
 		}
+		// Revoke all sessions after password change.
+		_, _ = h.db.Exec("DELETE FROM admin_sessions")
 	}
 
 	if req.StartPort != nil {
+		h.nodeWriteMu.Lock()
+		defer h.nodeWriteMu.Unlock()
+
 		// Use transaction to ensure atomic update of all ports
 		tx, err := h.db.Begin()
 		if err != nil {

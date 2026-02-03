@@ -20,8 +20,14 @@ ARG SINGBOX_VERSION=1.12.12
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates \
     curl \
-    && curl -Lo /tmp/sing-box.tar.gz "https://github.com/SagerNet/sing-box/releases/download/v${SINGBOX_VERSION}/sing-box-${SINGBOX_VERSION}-linux-amd64.tar.gz" \
-    && tar -xzf /tmp/sing-box.tar.gz -C /tmp \
+    jq \
+    && ASSET="sing-box-${SINGBOX_VERSION}-linux-amd64.tar.gz" \
+    && curl -fL -o "/tmp/${ASSET}" "https://github.com/SagerNet/sing-box/releases/download/v${SINGBOX_VERSION}/${ASSET}" \
+    && DIGEST="$(curl -fsSL "https://api.github.com/repos/SagerNet/sing-box/releases/tags/v${SINGBOX_VERSION}" | jq -r --arg asset "${ASSET}" '.assets[] | select(.name==$asset) | .digest')" \
+    && test -n "$DIGEST" && test "$DIGEST" != "null" \
+    && DIGEST="${DIGEST#sha256:}" \
+    && echo "${DIGEST}  /tmp/${ASSET}" | sha256sum -c - \
+    && tar -xzf "/tmp/${ASSET}" -C /tmp \
     && mv /tmp/sing-box-*/sing-box /usr/local/bin/ \
     && chmod +x /usr/local/bin/sing-box \
     && rm -rf /tmp/sing-box* \
@@ -35,7 +41,7 @@ RUN mkdir -p /app/config
 
 ENV PORT=30000
 ENV CONFIG_DIR=/app/config
-ENV ADMIN_PASSWORD=admin123
+ENV ADMIN_PASSWORD=
 
 EXPOSE 30000
 VOLUME ["/app/config"]
