@@ -14,7 +14,19 @@ import (
 	"github.com/gin-gonic/gin"
 )
 
-const adminSessionDuration = 24 * time.Hour
+const (
+	adminSessionTTLHoursEnvKey     = "ADMIN_SESSION_TTL_HOURS"
+	defaultAdminSessionTTLHours    = 168
+	maxAdminSessionTTLHoursAllowed = 24 * 365
+)
+
+func adminSessionDuration() time.Duration {
+	hours := readEnvInt(adminSessionTTLHoursEnvKey, defaultAdminSessionTTLHours)
+	if hours <= 0 || hours > maxAdminSessionTTLHoursAllowed {
+		hours = defaultAdminSessionTTLHours
+	}
+	return time.Duration(hours) * time.Hour
+}
 
 func normalizeAuthToken(headerValue string) string {
 	token := strings.TrimSpace(headerValue)
@@ -62,7 +74,7 @@ func (h *Handler) isValidAdminSession(token string) (bool, error) {
 }
 
 func (h *Handler) createAdminSession(c *gin.Context) (string, time.Time, error) {
-	expiry := time.Now().Add(adminSessionDuration)
+	expiry := time.Now().Add(adminSessionDuration())
 	userAgent := ""
 	ip := ""
 	if c != nil && c.Request != nil {

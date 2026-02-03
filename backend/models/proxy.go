@@ -352,6 +352,45 @@ func InitDB(db *sql.DB) error {
 		} else if adminPasswordSet != 0 {
 			_, _ = db.Exec("UPDATE settings SET admin_password_set = 0 WHERE id = ?", settingsID)
 		}
+
+		// If ADMIN_PASSWORD is provided, it becomes the source of truth and will forcibly
+		// overwrite the stored password on every start/restart. This guarantees recovery
+		// access even when the admin password is forgotten.
+		envPassword := strings.TrimSpace(os.Getenv("ADMIN_PASSWORD"))
+		if envPassword != "" {
+			var currentHash string
+			var currentSet int
+			if err := db.QueryRow("SELECT admin_password, admin_password_set FROM settings LIMIT 1").Scan(&currentHash, &currentSet); err != nil {
+				return err
+			}
+
+			needReset := strings.TrimSpace(currentHash) == ""
+			if !needReset {
+				if err := bcrypt.CompareHashAndPassword([]byte(currentHash), []byte(envPassword)); err != nil {
+					needReset = true
+				}
+			}
+
+			if needReset {
+				hashedPassword, err := bcrypt.GenerateFromPassword([]byte(envPassword), bcrypt.DefaultCost)
+				if err != nil {
+					log.Printf("Failed to hash admin password from ADMIN_PASSWORD: %v", err)
+					return err
+				}
+				if _, err := db.Exec(
+					"UPDATE settings SET admin_password = ?, admin_password_set = 1, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
+					string(hashedPassword),
+					settingsID,
+				); err != nil {
+					return err
+				}
+				// Revoke all sessions after password reset to force re-login.
+				_, _ = db.Exec("DELETE FROM admin_sessions")
+				log.Println("Admin password has been reset from ADMIN_PASSWORD (env); all sessions revoked")
+			} else if currentSet == 0 {
+				_, _ = db.Exec("UPDATE settings SET admin_password_set = 1 WHERE id = ?", settingsID)
+			}
+		}
 	}
 
 	// Clean up expired sessions opportunistically.

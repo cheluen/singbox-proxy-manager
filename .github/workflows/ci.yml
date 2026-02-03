@@ -187,8 +187,25 @@ jobs:
         run: |
           ASSET="sing-box-${{ env.SINGBOX_VERSION }}-linux-amd64.tar.gz"
           curl -fLo "$ASSET" "https://github.com/SagerNet/sing-box/releases/download/v${{ env.SINGBOX_VERSION }}/$ASSET"
-          DIGEST="$(curl -fsSL "https://api.github.com/repos/SagerNet/sing-box/releases/tags/v${{ env.SINGBOX_VERSION }}" | jq -r --arg asset "$ASSET" '.assets[] | select(.name==$asset) | .digest')"
-          test -n "$DIGEST" && test "$DIGEST" != "null"
+          GH_API_URL="https://api.github.com/repos/SagerNet/sing-box/releases/tags/v${{ env.SINGBOX_VERSION }}"
+          GH_BODY="$(mktemp)"
+          GH_HEADERS="$(mktemp)"
+          GH_STATUS="$(curl -sS -D "$GH_HEADERS" -o "$GH_BODY" -w "%{http_code}" "$GH_API_URL" || true)"
+          if [ "$GH_STATUS" != "200" ]; then
+            echo "::error::failed to fetch sing-box release metadata from GitHub API (api.github.com). URL=$GH_API_URL status=$GH_STATUS"
+            echo "Hint: build environment may block api.github.com or GitHub API rate limit was hit."
+            echo "GitHub rate limit headers:"
+            grep -i '^x-ratelimit' "$GH_HEADERS" || true
+            echo "Response body (first 2000 bytes):"
+            head -c 2000 "$GH_BODY" || true
+            exit 1
+          fi
+          DIGEST="$(jq -r --arg asset "$ASSET" '.assets[] | select(.name==$asset) | .digest' "$GH_BODY")"
+          rm -f "$GH_BODY" "$GH_HEADERS"
+          if [ -z "$DIGEST" ] || [ "$DIGEST" = "null" ]; then
+            echo "::error::failed to find digest for asset '$ASSET' in GitHub release metadata."
+            exit 1
+          fi
           echo "${DIGEST#sha256:}  $ASSET" | sha256sum -c -
           tar xzf "$ASSET"
           mv sing-box-*/sing-box .
