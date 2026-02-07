@@ -83,26 +83,33 @@ docker compose logs -f
 
 > 注意：部分区域/套餐下，同一服务可用的公网 TCP 转发数量可能受限。如果需要大量公网 TCP 端口，建议使用 Zeabur Dedicated Server 或 VPS 部署。
 
-### ClawCloud（Dashboard / App Launchpad）
+### ClawCloud（可导入 Template）
 
-1. 进入 `run.claw.cloud`，打开 **App Launchpad**，点击 **Create App**。
-2. 选择 **Deploy from Docker**，镜像填：`ghcr.io/cheluen/singbox-proxy-manager:latest`。
-3. 在 **Network Configuration** 配置端口：
-   - `30000`：`HTTP`
-   - `30001`：`TCP`
-   - 按需继续添加 `30002+`：`TCP`
-4. 在 **Environment Variables** 配置与 Zeabur 相同的变量（`PORT`、`CONFIG_DIR`、`ADMIN_PASSWORD`、可选 `TURSO_*`）。
-5. 在 **Persistent Storage** 挂载 `/app/config`。
-6. 完成部署后，使用平台分配域名/端口访问，并在面板 settings 校对 `start_port`。
+你可以直接在 ClawCloud 的 Template/YAML 导入入口使用：
 
-> 如果在 ClawCloud 的 YAML 导入入口看到报错 `The first YAML type is not Template`，说明当前入口期望的是“Template 类型 YAML”。本项目提供的 ClawCloud 文件是 Dashboard 参数示例，请按 App Launchpad 页面手动填写。
+- `deploy/clawcloud/app-launchpad-template.yaml`
 
-### 仓库内辅助文件（可选）
+导入后会自动生成应用配置（包含镜像、环境变量、持久化、HTTP 入口、TCP 代理端口）。
+
+导入步骤：
+
+1. 进入 `run.claw.cloud`，打开模板导入入口（会校验 `kind: Template`）。
+2. 粘贴 `deploy/clawcloud/app-launchpad-template.yaml` 内容并导入。
+3. 按提示填写 `admin_password`（必填），可选填写 `turso_database_url` 和 `turso_auth_token`。
+4. 部署完成后，访问分配域名并在面板 settings 中确认 `start_port`（默认 `30001`）。
+
+如果你只想用 Dashboard 手动配置，也可以按以下等价参数创建：
+
+- 镜像：`ghcr.io/cheluen/singbox-proxy-manager:latest`
+- HTTP 端口：`30000`
+- TCP 端口：`30001~30010`
+- 环境变量：`PORT=30000`、`CONFIG_DIR=/app/config`、`ADMIN_PASSWORD=...`、可选 `TURSO_*`
+- 持久化路径：`/app/config`
+
+### 仓库内模板文件
 
 - Zeabur 模板：`deploy/zeabur/template.yaml`
-- ClawCloud 参数示例：`deploy/clawcloud/app-launchpad-values.example.yaml`
-
-如果你更偏向可视化操作，可以直接按上面的 Dashboard 步骤部署，不必使用 CLI。
+- ClawCloud 模板：`deploy/clawcloud/app-launchpad-template.yaml`
 
 ---
 

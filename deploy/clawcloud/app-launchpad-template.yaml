@@ -1,0 +1,241 @@
+apiVersion: app.claw.cloud/v1
+kind: Template
+metadata:
+  name: singbox-proxy-manager
+spec:
+  title: 'SingBox Proxy Manager'
+  type: community
+  author: cheluen
+  author_id: 0
+  date: 2026-02-07
+  url: 'https://github.com/cheluen/singbox-proxy-manager'
+  gitRepo: 'https://github.com/cheluen/singbox-proxy-manager'
+  description: '基于 sing-box 的代理节点管理和转发系统，内置 Web 管理面板。'
+  readme: 'https://raw.githubusercontent.com/cheluen/singbox-proxy-manager/main/README.md'
+  icon: 'https://img.shields.io/badge/sing--box-1.12.12-orange.svg'
+  templateType: inline
+  categories:
+    - Proxy
+    - Networking
+  defaults:
+    app_host:
+      type: string
+      value: ${{ random(8) }}
+    app_name:
+      type: string
+      value: singbox-${{ random(8) }}
+  inputs:
+    admin_password:
+      description: '管理面板管理员密码（至少8位）'
+      type: string
+      default: ''
+      required: true
+    turso_database_url:
+      description: '可选：libsql://...'
+      type: string
+      default: ''
+      required: false
+    turso_auth_token:
+      description: '可选：Turso token'
+      type: string
+      default: ''
+      required: false
+
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: ${{ defaults.app_name }}
+  annotations:
+    originImageName: ghcr.io/cheluen/singbox-proxy-manager:latest
+    deploy.run.claw.cloud/minReplicas: '1'
+    deploy.run.claw.cloud/maxReplicas: '1'
+  labels:
+    run.claw.cloud/app-deploy-manager: ${{ defaults.app_name }}
+    app: ${{ defaults.app_name }}
+spec:
+  replicas: 1
+  revisionHistoryLimit: 1
+  minReadySeconds: 10
+  serviceName: ${{ defaults.app_name }}
+  selector:
+    matchLabels:
+      app: ${{ defaults.app_name }}
+  template:
+    metadata:
+      labels:
+        app: ${{ defaults.app_name }}
+    spec:
+      terminationGracePeriodSeconds: 10
+      automountServiceAccountToken: false
+      containers:
+        - name: ${{ defaults.app_name }}
+          image: ghcr.io/cheluen/singbox-proxy-manager:latest
+          env:
+            - name: PORT
+              value: '30000'
+            - name: CONFIG_DIR
+              value: /app/config
+            - name: ADMIN_PASSWORD
+              value: ${{ inputs.admin_password }}
+            - name: TURSO_DATABASE_URL
+              value: ${{ inputs.turso_database_url }}
+            - name: TURSO_AUTH_TOKEN
+              value: ${{ inputs.turso_auth_token }}
+          resources:
+            requests:
+              cpu: 50m
+              memory: 128Mi
+            limits:
+              cpu: 500m
+              memory: 512Mi
+          command: []
+          args: []
+          ports:
+            - containerPort: 30000
+            - containerPort: 30001
+            - containerPort: 30002
+            - containerPort: 30003
+            - containerPort: 30004
+            - containerPort: 30005
+            - containerPort: 30006
+            - containerPort: 30007
+            - containerPort: 30008
+            - containerPort: 30009
+            - containerPort: 30010
+          imagePullPolicy: IfNotPresent
+          volumeMounts:
+            - name: app-config
+              mountPath: /app/config
+      volumes: []
+  volumeClaimTemplates:
+    - metadata:
+        annotations:
+          path: /app/config
+          value: '1'
+        name: app-config
+      spec:
+        accessModes:
+          - ReadWriteOnce
+        resources:
+          requests:
+            storage: 1Gi
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: ${{ defaults.app_name }}
+  labels:
+    run.claw.cloud/app-deploy-manager: ${{ defaults.app_name }}
+spec:
+  ports:
+    - name: panel
+      port: 30000
+      targetPort: 30000
+  selector:
+    app: ${{ defaults.app_name }}
+
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: ${{ defaults.app_name }}
+  labels:
+    run.claw.cloud/app-deploy-manager: ${{ defaults.app_name }}
+    run.claw.cloud/app-deploy-manager-domain: ${{ defaults.app_host }}
+  annotations:
+    kubernetes.io/ingress.class: nginx
+    nginx.ingress.kubernetes.io/proxy-body-size: 32m
+    nginx.ingress.kubernetes.io/server-snippet: |
+      client_header_buffer_size 64k;
+      large_client_header_buffers 4 128k;
+    nginx.ingress.kubernetes.io/ssl-redirect: 'true'
+    nginx.ingress.kubernetes.io/backend-protocol: HTTP
+    nginx.ingress.kubernetes.io/rewrite-target: /$2
+    nginx.ingress.kubernetes.io/client-body-buffer-size: 64k
+    nginx.ingress.kubernetes.io/proxy-buffer-size: 64k
+spec:
+  rules:
+    - host: ${{ defaults.app_host }}.${{ CLAWCLOUD_CLOUD_DOMAIN }}
+      http:
+        paths:
+          - pathType: Prefix
+            path: /()(.*)
+            backend:
+              service:
+                name: ${{ defaults.app_name }}
+                port:
+                  number: 30000
+  tls:
+    - hosts:
+        - ${{ defaults.app_host }}.${{ CLAWCLOUD_CLOUD_DOMAIN }}
+      secretName: ${{ CLAWCLOUD_CERT_SECRET_NAME }}
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: ${{ defaults.app_name }}-nodeport
+  labels:
+    run.claw.cloud/app-deploy-manager: ${{ defaults.app_name }}
+spec:
+  type: NodePort
+  ports:
+    - protocol: TCP
+      port: 30001
+      targetPort: 30001
+      name: proxy-30001
+    - protocol: TCP
+      port: 30002
+      targetPort: 30002
+      name: proxy-30002
+    - protocol: TCP
+      port: 30003
+      targetPort: 30003
+      name: proxy-30003
+    - protocol: TCP
+      port: 30004
+      targetPort: 30004
+      name: proxy-30004
+    - protocol: TCP
+      port: 30005
+      targetPort: 30005
+      name: proxy-30005
+    - protocol: TCP
+      port: 30006
+      targetPort: 30006
+      name: proxy-30006
+    - protocol: TCP
+      port: 30007
+      targetPort: 30007
+      name: proxy-30007
+    - protocol: TCP
+      port: 30008
+      targetPort: 30008
+      name: proxy-30008
+    - protocol: TCP
+      port: 30009
+      targetPort: 30009
+      name: proxy-30009
+    - protocol: TCP
+      port: 30010
+      targetPort: 30010
+      name: proxy-30010
+  selector:
+    app: ${{ defaults.app_name }}
+
+---
+apiVersion: app.claw.cloud/v1
+kind: App
+metadata:
+  name: ${{ defaults.app_name }}
+  labels:
+    run.claw.cloud/app-deploy-manager: ${{ defaults.app_name }}
+spec:
+  data:
+    url: https://${{ defaults.app_host }}.${{ CLAWCLOUD_CLOUD_DOMAIN }}
+  displayType: normal
+  icon: 'https://img.shields.io/badge/sing--box-1.12.12-orange.svg'
+  name: 'SingBox Proxy Manager'
+  type: link
