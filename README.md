@@ -8,7 +8,7 @@
 
 一个基于 sing-box 的代理节点管理和转发系统，提供简洁易用的 Web 界面。
 
-[功能特性](#-功能特性) • [快速开始](#-快速开始) • [使用说明](#-使用说明) • [配置说明](#-配置说明)
+[功能特性](#-功能特性) • [快速开始](#-快速开始) • [云平台部署](#-云平台部署zeabur--clawcloud) • [使用说明](#-使用说明) • [配置说明](#-配置说明)
 
 </div>
 
@@ -59,6 +59,48 @@ docker compose logs -f
 ```
 
 服务启动后访问：`http://您的服务器IP:30000`
+
+---
+
+## ☁️ 云平台部署（Zeabur / ClawCloud）
+
+### Zeabur（Dashboard 部署，推荐）
+
+1. 进入 `dash.zeabur.com`，创建项目后点击 **Add Service**。
+2. 选择 **Docker Image**，填入镜像：`ghcr.io/cheluen/singbox-proxy-manager:latest`。
+3. 在 **Ports** 配置：
+   - `30000` -> `HTTP`（管理面板）
+   - `30001` -> `TCP`（第一个代理入站）
+   - 按需继续添加 `30002+` 的 `TCP`（更多代理入站）
+4. 在 **Environment Variables** 配置：
+   - `PORT=30000`
+   - `CONFIG_DIR=/app/config`
+   - `ADMIN_PASSWORD=你的强密码`
+   - 可选：`TURSO_DATABASE_URL`、`TURSO_AUTH_TOKEN`
+5. 在 **Volumes** 挂载目录 `/app/config`（用于持久化 `config.json`、日志、SQLite）。
+6. 部署完成后，访问 Zeabur 分配的 HTTP 域名进入面板。
+7. 在面板 settings 中确认 `start_port` 与你实际开放的首个 TCP 端口一致（通常是 `30001`）。
+
+> 注意：部分区域/套餐下，同一服务可用的公网 TCP 转发数量可能受限。如果需要大量公网 TCP 端口，建议使用 Zeabur Dedicated Server 或 VPS 部署。
+
+### ClawCloud（Dashboard / App Launchpad）
+
+1. 进入 `run.claw.cloud`，打开 **App Launchpad**，点击 **Create App**。
+2. 选择 **Deploy from Docker**，镜像填：`ghcr.io/cheluen/singbox-proxy-manager:latest`。
+3. 在 **Network Configuration** 配置端口：
+   - `30000`：`HTTP`
+   - `30001`：`TCP`
+   - 按需继续添加 `30002+`：`TCP`
+4. 在 **Environment Variables** 配置与 Zeabur 相同的变量（`PORT`、`CONFIG_DIR`、`ADMIN_PASSWORD`、可选 `TURSO_*`）。
+5. 在 **Persistent Storage** 挂载 `/app/config`。
+6. 完成部署后，使用平台分配域名/端口访问，并在面板 settings 校对 `start_port`。
+
+### 仓库内模板文件（可选）
+
+- Zeabur 模板：`deploy/zeabur/template.yaml`
+- ClawCloud 参数模板：`deploy/clawcloud/app-launchpad-template.yaml`
+
+如果你更偏向可视化操作，可以直接按上面的 Dashboard 步骤部署，不必使用 CLI。
 
 ---
 

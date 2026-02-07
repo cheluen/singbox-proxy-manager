@@ -1,0 +1,63 @@
+apiVersion: zeabur.com/v1
+kind: Template
+metadata:
+  name: SingBox Proxy Manager
+spec:
+  description: 基于 sing-box 的代理节点管理和转发系统，内置 Web 管理面板。
+  tags:
+    - Proxy
+    - Networking
+    - Tool
+  variables:
+    - key: PUBLIC_DOMAIN
+      type: DOMAIN
+      name: 管理面板域名
+      description: 输入子域名后将自动生成 *.zeabur.app 访问地址
+  readme: |-
+    # SingBox Proxy Manager
+
+    部署完成后请优先完成以下配置：
+
+    1. 在环境变量中设置 `ADMIN_PASSWORD`（强密码）
+    2. 按需设置 `TURSO_DATABASE_URL` 与 `TURSO_AUTH_TOKEN`
+    3. 如需更多代理节点端口，请在 Ports 中继续新增 TCP 端口（30002+）
+
+    本模板默认开放：
+    - HTTP 30000（管理面板）
+    - TCP 30001（第一个代理入站）
+
+  services:
+    - name: SingBox Proxy Manager
+      template: PREBUILT
+      domainKey: PUBLIC_DOMAIN
+      spec:
+        source:
+          image: ghcr.io/cheluen/singbox-proxy-manager:latest
+        ports:
+          - id: panel
+            port: 30000
+            type: HTTP
+          - id: proxy01
+            port: 30001
+            type: TCP
+        volumes:
+          - id: config
+            dir: /app/config
+        env:
+          PORT:
+            default: "30000"
+          CONFIG_DIR:
+            default: /app/config
+          ADMIN_PASSWORD:
+            default: ${PASSWORD}
+          TURSO_DATABASE_URL:
+            default: ""
+          TURSO_AUTH_TOKEN:
+            default: ""
+        instructions:
+          - type: TEXT
+            title: 管理面板地址
+            content: https://${PUBLIC_DOMAIN}
+          - type: TEXT
+            title: 代理端口扩展说明
+            content: 若需要多个节点入口，请在服务 Ports 中新增 TCP 30002+，并在面板 settings 中同步 start_port。

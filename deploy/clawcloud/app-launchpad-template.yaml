@@ -1,0 +1,33 @@
+# ClawCloud App Launchpad 填写模板（参考）
+# 说明：此文件用于帮助在控制台快速填写参数，不是 ClawCloud 自动导入清单。
+
+app:
+  name: singbox-proxy-manager
+  image: ghcr.io/cheluen/singbox-proxy-manager:latest
+
+ports:
+  # 管理面板
+  - name: panel
+    container_port: 30000
+    protocol: HTTP
+
+  # 代理入口（默认先开一个，后续在控制台继续新增）
+  - name: proxy01
+    container_port: 30001
+    protocol: TCP
+
+env:
+  PORT: "30000"
+  CONFIG_DIR: /app/config
+  ADMIN_PASSWORD: "<请改成强密码>"
+  TURSO_DATABASE_URL: "<可选: libsql://...>"
+  TURSO_AUTH_TOKEN: "<可选: Turso token>"
+
+volumes:
+  - name: config
+    mount_path: /app/config
+
+notes:
+  - "如果要支持更多节点，请在 App Launchpad 中继续添加 TCP 30002+ 端口。"
+  - "端口加完后，进入管理面板 settings，把 start_port 调整到你实际开放的起始端口。"
+  - "若使用 Turso，TURSO_DATABASE_URL 和 TURSO_AUTH_TOKEN 需要成对配置。"
