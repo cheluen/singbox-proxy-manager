@@ -1,17 +1,15 @@
-# ClawCloud App Launchpad 填写模板（参考）
-# 说明：此文件用于帮助在控制台快速填写参数，不是 ClawCloud 自动导入清单。
+# ClawCloud App Launchpad 参数示例（仅供参考）
+# 注意：这不是 ClawCloud 的“模板导入文件”，请在 Dashboard 手动填写。
+# 如果在导入 YAML 的入口使用本文件，可能会出现：The first YAML type is not Template
 
 app:
   name: singbox-proxy-manager
   image: ghcr.io/cheluen/singbox-proxy-manager:latest
 
 ports:
-  # 管理面板
   - name: panel
     container_port: 30000
     protocol: HTTP
-
-  # 代理入口（默认先开一个，后续在控制台继续新增）
   - name: proxy01
     container_port: 30001
     protocol: TCP

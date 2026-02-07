@@ -95,10 +95,12 @@ docker compose logs -f
 5. 在 **Persistent Storage** 挂载 `/app/config`。
 6. 完成部署后，使用平台分配域名/端口访问，并在面板 settings 校对 `start_port`。
 
-### 仓库内模板文件（可选）
+> 如果在 ClawCloud 的 YAML 导入入口看到报错 `The first YAML type is not Template`，说明当前入口期望的是“Template 类型 YAML”。本项目提供的 ClawCloud 文件是 Dashboard 参数示例，请按 App Launchpad 页面手动填写。
+
+### 仓库内辅助文件（可选）
 
 - Zeabur 模板：`deploy/zeabur/template.yaml`
-- ClawCloud 参数模板：`deploy/clawcloud/app-launchpad-template.yaml`
+- ClawCloud 参数示例：`deploy/clawcloud/app-launchpad-values.example.yaml`
 
 如果你更偏向可视化操作，可以直接按上面的 Dashboard 步骤部署，不必使用 CLI。
 
