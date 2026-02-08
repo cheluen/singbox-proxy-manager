@@ -76,12 +76,14 @@ docker compose logs -f
    - `PORT=30000`
    - `CONFIG_DIR=/app/config`
    - `ADMIN_PASSWORD=你的强密码`
-   - 可选：`TURSO_DATABASE_URL`、`TURSO_AUTH_TOKEN`
+   - 必填：`TURSO_DATABASE_URL`、`TURSO_AUTH_TOKEN`（云平台部署默认强制使用 Turso）
 5. 在 **Volumes** 挂载目录 `/app/config`（用于持久化 `config.json`、日志、SQLite）。
-6. 部署完成后，访问 Zeabur 分配的 HTTP 域名进入面板。
-7. 在面板 settings 中确认 `start_port` 与你实际开放的首个 TCP 端口一致（通常是 `30001`）。
+6. 资源建议使用默认规格：`0.5 vCPU / 512MB`。
+7. 部署完成后，访问 Zeabur 分配的 HTTP 域名进入面板。
+8. 在面板 settings 中确认 `start_port` 与你实际开放的首个 TCP 端口一致（通常是 `30001`）。
 
 > 注意：部分区域/套餐下，同一服务可用的公网 TCP 转发数量可能受限。如果需要大量公网 TCP 端口，建议使用 Zeabur Dedicated Server 或 VPS 部署。
+> 说明：云平台容器重启可能导致本地 SQLite 数据丢失，因此云平台部署默认要求配置 Turso（`TURSO_DATABASE_URL` + `TURSO_AUTH_TOKEN`）。
 
 ### ClawCloud（可导入 Template）
 
@@ -89,22 +91,27 @@ docker compose logs -f
 
 - `deploy/clawcloud/app-launchpad-template.yaml`
 
-导入后会自动生成应用配置（包含镜像、环境变量、持久化、HTTP 入口、TCP 代理端口）。
+导入后会自动生成应用配置（包含镜像、环境变量、持久化、HTTP 入口、TCP 代理端口）。默认开放：
+
+- HTTP `30000`（管理面板）
+- TCP `30001`（第一个代理入站）
+- 资源规格 `0.5 vCPU / 512MB`
 
 导入步骤：
 
 1. 进入 `run.claw.cloud`，打开模板导入入口（会校验 `kind: Template`）。
 2. 粘贴 `deploy/clawcloud/app-launchpad-template.yaml` 内容并导入。
-3. 按提示填写 `admin_password`（必填），可选填写 `turso_database_url` 和 `turso_auth_token`。
+3. 按提示填写 `admin_password`、`turso_database_url`、`turso_auth_token`（三项均必填）。
 4. 部署完成后，访问分配域名并在面板 settings 中确认 `start_port`（默认 `30001`）。
 
 如果你只想用 Dashboard 手动配置，也可以按以下等价参数创建：
 
 - 镜像：`ghcr.io/cheluen/singbox-proxy-manager:latest`
 - HTTP 端口：`30000`
-- TCP 端口：`30001~30010`
-- 环境变量：`PORT=30000`、`CONFIG_DIR=/app/config`、`ADMIN_PASSWORD=...`、可选 `TURSO_*`
+- TCP 端口：`30001`（默认），按需再加 `30002+`
+- 环境变量：`PORT=30000`、`CONFIG_DIR=/app/config`、`ADMIN_PASSWORD=...`、必填 `TURSO_DATABASE_URL` 与 `TURSO_AUTH_TOKEN`
 - 持久化路径：`/app/config`
+- 资源规格：`0.5 vCPU / 512MB`
 
 ### 仓库内模板文件
 

@@ -6,7 +6,7 @@ spec:
   title: 'SingBox Proxy Manager'
   type: community
   author: cheluen
-  author_id: 0
+  author_id: 101640183
   date: 2026-02-07
   url: 'https://github.com/cheluen/singbox-proxy-manager'
   gitRepo: 'https://github.com/cheluen/singbox-proxy-manager'
@@ -15,8 +15,7 @@ spec:
   icon: 'https://img.shields.io/badge/sing--box-1.12.12-orange.svg'
   templateType: inline
   categories:
-    - Proxy
-    - Networking
+    - tool
   defaults:
     app_host:
       type: string
@@ -31,15 +30,15 @@ spec:
       default: ''
       required: true
     turso_database_url:
-      description: '可选：libsql://...'
+      description: '必填：libsql://your-db-name.turso.io'
       type: string
       default: ''
-      required: false
+      required: true
     turso_auth_token:
-      description: '可选：Turso token'
+      description: '必填：Turso token'
       type: string
       default: ''
-      required: false
+      required: true
 
 ---
 apiVersion: apps/v1
@@ -84,8 +83,8 @@ spec:
               value: ${{ inputs.turso_auth_token }}
           resources:
             requests:
-              cpu: 50m
-              memory: 128Mi
+              cpu: 500m
+              memory: 512Mi
             limits:
               cpu: 500m
               memory: 512Mi
@@ -94,15 +93,6 @@ spec:
           ports:
             - containerPort: 30000
             - containerPort: 30001
-            - containerPort: 30002
-            - containerPort: 30003
-            - containerPort: 30004
-            - containerPort: 30005
-            - containerPort: 30006
-            - containerPort: 30007
-            - containerPort: 30008
-            - containerPort: 30009
-            - containerPort: 30010
           imagePullPolicy: IfNotPresent
           volumeMounts:
             - name: app-config
@@ -186,42 +176,6 @@ spec:
       port: 30001
       targetPort: 30001
       name: proxy-30001
-    - protocol: TCP
-      port: 30002
-      targetPort: 30002
-      name: proxy-30002
-    - protocol: TCP
-      port: 30003
-      targetPort: 30003
-      name: proxy-30003
-    - protocol: TCP
-      port: 30004
-      targetPort: 30004
-      name: proxy-30004
-    - protocol: TCP
-      port: 30005
-      targetPort: 30005
-      name: proxy-30005
-    - protocol: TCP
-      port: 30006
-      targetPort: 30006
-      name: proxy-30006
-    - protocol: TCP
-      port: 30007
-      targetPort: 30007
-      name: proxy-30007
-    - protocol: TCP
-      port: 30008
-      targetPort: 30008
-      name: proxy-30008
-    - protocol: TCP
-      port: 30009
-      targetPort: 30009
-      name: proxy-30009
-    - protocol: TCP
-      port: 30010
-      targetPort: 30010
-      name: proxy-30010
   selector:
     app: ${{ defaults.app_name }}
 

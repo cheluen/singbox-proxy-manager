@@ -8,23 +8,35 @@ spec:
     - Proxy
     - Networking
     - Tool
+  resourceUsage:
+    cpu: 0.5
+    memory: 512
   variables:
     - key: PUBLIC_DOMAIN
       type: DOMAIN
       name: 管理面板域名
       description: 输入子域名后将自动生成 *.zeabur.app 访问地址
+    - key: TURSO_DATABASE_URL
+      type: STRING
+      name: Turso 数据库地址
+      description: 必填，格式示例：libsql://your-db-name.turso.io
+    - key: TURSO_AUTH_TOKEN
+      type: PASSWORD
+      name: Turso 认证 Token
+      description: 必填，填写 Turso 数据库对应的 Auth Token
   readme: |-
     # SingBox Proxy Manager
 
     部署完成后请优先完成以下配置：
 
     1. 在环境变量中设置 `ADMIN_PASSWORD`（强密码）
-    2. 按需设置 `TURSO_DATABASE_URL` 与 `TURSO_AUTH_TOKEN`
+    2. 必须设置 `TURSO_DATABASE_URL` 与 `TURSO_AUTH_TOKEN`（云平台部署默认强制使用 Turso）
     3. 如需更多代理节点端口，请在 Ports 中继续新增 TCP 端口（30002+）
 
     本模板默认开放：
     - HTTP 30000（管理面板）
     - TCP 30001（第一个代理入站）
+    - 资源建议：0.5 vCPU / 512 MiB 内存
 
   services:
     - name: SingBox Proxy Manager
@@ -51,9 +63,9 @@ spec:
           ADMIN_PASSWORD:
             default: ${PASSWORD}
           TURSO_DATABASE_URL:
-            default: ""
+            default: ${TURSO_DATABASE_URL}
           TURSO_AUTH_TOKEN:
-            default: ""
+            default: ${TURSO_AUTH_TOKEN}
         instructions:
           - type: TEXT
             title: 管理面板地址
@@ -61,3 +73,6 @@ spec:
           - type: TEXT
             title: 代理端口扩展说明
             content: 若需要多个节点入口，请在服务 Ports 中新增 TCP 30002+，并在面板 settings 中同步 start_port。
+          - type: TEXT
+            title: Turso 必填说明
+            content: 云平台容器重启可能导致本地数据丢失，模板已强制要求填写 TURSO_DATABASE_URL 与 TURSO_AUTH_TOKEN。
