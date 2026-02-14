@@ -127,10 +127,47 @@ jobs:
         run: npm run test:e2e:dnd
         working-directory: frontend
 
+  # 前端版本刷新回归（自动化端到端）
+  test-frontend-e2e-version-refresh:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '18'
+          cache: 'npm'
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Install dependencies
+        run: npm ci
+        working-directory: frontend
+
+      - name: Resolve browser path
+        run: |
+          if command -v google-chrome >/dev/null 2>&1; then
+            echo "PUPPETEER_EXECUTABLE_PATH=$(command -v google-chrome)" >> "$GITHUB_ENV"
+          elif command -v google-chrome-stable >/dev/null 2>&1; then
+            echo "PUPPETEER_EXECUTABLE_PATH=$(command -v google-chrome-stable)" >> "$GITHUB_ENV"
+          elif command -v chromium-browser >/dev/null 2>&1; then
+            echo "PUPPETEER_EXECUTABLE_PATH=$(command -v chromium-browser)" >> "$GITHUB_ENV"
+          elif command -v chromium >/dev/null 2>&1; then
+            echo "PUPPETEER_EXECUTABLE_PATH=$(command -v chromium)" >> "$GITHUB_ENV"
+          else
+            echo "::error::No Chrome/Chromium executable found on runner."
+            exit 1
+          fi
+
+      - name: Run version refresh regression e2e
+        run: npm run test:e2e:version-refresh
+        working-directory: frontend
+
   # 构建并推送Docker镜像
   build-docker:
     runs-on: ubuntu-latest
-    needs: [test-backend, test-frontend, test-frontend-e2e-dnd]
+    needs: [test-backend, test-frontend, test-frontend-e2e-dnd, test-frontend-e2e-version-refresh]
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     permissions:
       contents: read

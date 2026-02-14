@@ -1,7 +1,7 @@
 {
   "name": "sb-proxy-frontend",
   "private": true,
-  "version": "1.0.0",
+  "version": "1.2.2",
   "type": "module",
   "scripts": {
     "dev": "vite",
@@ -9,7 +9,8 @@
     "preview": "vite preview",
     "lint": "eslint .",
     "lint:fix": "eslint . --fix",
-    "test:e2e:dnd": "node ./scripts/dnd-reorder-regression.mjs"
+    "test:e2e:dnd": "node ./scripts/dnd-reorder-regression.mjs",
+    "test:e2e:version-refresh": "node ./scripts/version-refresh-regression.mjs"
   },
   "dependencies": {
     "react": "^18.2.0",

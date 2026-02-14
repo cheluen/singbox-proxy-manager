@@ -1,8 +1,9 @@
-import React, { useState } from 'react'
+import React, { useEffect, useState } from 'react'
 import { ConfigProvider, theme, message } from 'antd'
 import Login from './components/Login'
 import Dashboard from './components/Dashboard'
 import api from './utils/api'
+import { ensureLatestFrontendBuild } from './utils/version'
 
 function App() {
   const [token, setToken] = useState(() => {
@@ -12,6 +13,27 @@ function App() {
     }
     return savedToken
   })
+
+  useEffect(() => {
+    let cancelled = false
+
+    const checkVersionSkew = async () => {
+      try {
+        const response = await api.get('/version')
+        if (cancelled) {
+          return
+        }
+        ensureLatestFrontendBuild(response.data?.version)
+      } catch {
+        // Ignore transient network failures; normal page flow continues.
+      }
+    }
+
+    checkVersionSkew()
+    return () => {
+      cancelled = true
+    }
+  }, [])
 
   const handleLogin = (newToken) => {
     localStorage.setItem('token', newToken)

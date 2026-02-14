@@ -14,6 +14,8 @@ export default {
   success: '成功',
   error: '错误',
   warning: '警告',
+  frontend_build: '前端构建',
+  frontend_version_mismatch: '检测到版本不一致，后端 {{server}} / 前端 {{client}}。请确认已完成前端发布。',
   
   // Login
   login_title: '管理员登录',

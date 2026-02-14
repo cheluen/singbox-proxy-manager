@@ -9,6 +9,13 @@ import puppeteer from 'puppeteer-core'
 const API_PORT = Number(process.env.E2E_API_PORT || 30000)
 const FRONTEND_PORT = Number(process.env.E2E_FRONTEND_PORT || 5173)
 const FRONTEND_URL = `http://127.0.0.1:${FRONTEND_PORT}`
+const SCRIPT_PATH = fileURLToPath(import.meta.url)
+const SCRIPTS_DIR = path.dirname(SCRIPT_PATH)
+const FRONTEND_ROOT = path.resolve(SCRIPTS_DIR, '..')
+const FRONTEND_PACKAGE = JSON.parse(
+  fs.readFileSync(path.join(FRONTEND_ROOT, 'package.json'), 'utf8')
+)
+const FRONTEND_BUILD_VERSION = FRONTEND_PACKAGE.version
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms))
 
@@ -106,7 +113,7 @@ const createMockApiServer = () => {
 
   const server = http.createServer((req, res) => {
     if (req.method === 'GET' && req.url === '/api/version') {
-      sendJson(res, 200, { version: 'test-version' })
+      sendJson(res, 200, { version: FRONTEND_BUILD_VERSION })
       return
     }
 
@@ -252,13 +259,10 @@ const assert = (condition, message) => {
 }
 
 const run = async () => {
-  const scriptFile = fileURLToPath(import.meta.url)
-  const scriptsDir = path.dirname(scriptFile)
-  const frontendRoot = path.resolve(scriptsDir, '..')
   const mockApi = await startMockApi()
   // Ensure `localhost` can reach the mock API (CI runners often resolve localhost -> ::1).
   await waitForHttpReady(`http://localhost:${API_PORT}/api/version`, 10000)
-  const vite = startVite(frontendRoot)
+  const vite = startVite(FRONTEND_ROOT)
   let browser
 
   try {

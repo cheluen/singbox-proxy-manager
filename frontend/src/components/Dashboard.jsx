@@ -37,6 +37,11 @@ import {
 import { useTranslation } from 'react-i18next'
 import { DragDropContext, Droppable, Draggable } from 'react-beautiful-dnd'
 import api from '../utils/api'
+import {
+  ensureLatestFrontendBuild,
+  frontendBuildFingerprint,
+  frontendBuildVersion,
+} from '../utils/version'
 import NodeForm from './NodeForm'
 import SettingsForm from './SettingsForm'
 import BatchAuthModal from './BatchAuthModal'
@@ -122,7 +127,19 @@ const getCountryName = (location) => {
   const loadVersion = async () => {
     try {
       const response = await api.get('/version')
-      setAppVersion(response.data?.version || '')
+      const serverVersion = response.data?.version || ''
+      const versionCheck = ensureLatestFrontendBuild(serverVersion)
+      if (versionCheck.refreshed) {
+        return
+      }
+      setAppVersion(serverVersion)
+      if (versionCheck.mismatch) {
+        message.warning(
+          t('frontend_version_mismatch')
+            .replace('{{server}}', versionCheck.serverVersion || '-')
+            .replace('{{client}}', versionCheck.frontendVersion || '-')
+        )
+      }
     } catch {
       setAppVersion('')
     }
@@ -936,7 +953,13 @@ const getCountryName = (location) => {
           <Title level={3} style={{ color: 'white', margin: 0 }}>
             {t('app_title')}
           </Title>
-          <Tag color="green">{t('version')} {appVersion || '-'}</Tag>
+          <Tooltip
+            title={`${t('frontend_build')}: ${frontendBuildVersion} (${frontendBuildFingerprint})`}
+          >
+            <Tag color="green">
+              {t('version')} {appVersion || '-'}
+            </Tag>
+          </Tooltip>
         </div>
         <Space>
           <Select

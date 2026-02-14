@@ -14,6 +14,8 @@ export default {
   success: 'Success',
   error: 'Error',
   warning: 'Warning',
+  frontend_build: 'Frontend build',
+  frontend_version_mismatch: 'Version mismatch detected: backend {{server}} / frontend {{client}}. Confirm frontend deployment is complete.',
   
   // Login
   login_title: 'Admin Login',

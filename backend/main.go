@@ -1,8 +1,11 @@
 package main
 
 import (
+	"bytes"
 	"context"
+	"crypto/sha256"
 	"database/sql"
+	"encoding/hex"
 	"fmt"
 	"log"
 	"net/http"
@@ -185,11 +188,9 @@ func main() {
 	}
 
 	// Serve frontend static files
-	r.Static("/assets", "./frontend/dist/assets")
-	r.StaticFile("/", "./frontend/dist/index.html")
-	r.NoRoute(func(c *gin.Context) {
-		c.File("./frontend/dist/index.html")
-	})
+	if err := registerFrontendRoutes(r, "./frontend/dist", version.Version()); err != nil {
+		log.Fatalf("Failed to register frontend routes: %v", err)
+	}
 
 	// Get port from environment or use default
 	port := os.Getenv("PORT")
@@ -210,6 +211,69 @@ func main() {
 	if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 		log.Fatalf("Failed to start server: %v", err)
 	}
+}
+
+const (
+	assetsCacheControlHeader = "public, max-age=31536000, immutable"
+	indexCacheControlHeader  = "no-cache, max-age=0, must-revalidate"
+)
+
+func registerFrontendRoutes(r *gin.Engine, frontendDistDir string, appVersion string) error {
+	indexPath := filepath.Join(frontendDistDir, "index.html")
+	indexContent, err := os.ReadFile(indexPath)
+	if err != nil {
+		return fmt.Errorf("read index.html: %w", err)
+	}
+
+	indexInfo, err := os.Stat(indexPath)
+	if err != nil {
+		return fmt.Errorf("stat index.html: %w", err)
+	}
+
+	indexFingerprint := calcContentFingerprint(indexContent)
+	indexETag := fmt.Sprintf("\"sbpm-%s\"", indexFingerprint)
+
+	serveIndex := func(c *gin.Context) {
+		c.Header("Cache-Control", indexCacheControlHeader)
+		c.Header("Pragma", "no-cache")
+		c.Header("Expires", "0")
+		c.Header("ETag", indexETag)
+		c.Header("X-App-Version", appVersion)
+		c.Header("X-Frontend-Fingerprint", indexFingerprint)
+
+		// Let the stdlib handle conditional requests and 304 responses.
+		http.ServeContent(c.Writer, c.Request, "index.html", indexInfo.ModTime(), bytes.NewReader(indexContent))
+		c.Abort()
+	}
+
+	assetsFileServer := http.StripPrefix("/assets/", http.FileServer(http.Dir(filepath.Join(frontendDistDir, "assets"))))
+	withAssetsHeaders := func(c *gin.Context) {
+		c.Header("Cache-Control", assetsCacheControlHeader)
+		c.Header("X-App-Version", appVersion)
+		c.Header("X-Frontend-Fingerprint", indexFingerprint)
+		c.Next()
+	}
+
+	assetsHandler := gin.WrapH(assetsFileServer)
+	r.GET("/assets/*filepath", withAssetsHeaders, assetsHandler)
+	r.HEAD("/assets/*filepath", withAssetsHeaders, assetsHandler)
+
+	r.GET("/", serveIndex)
+	r.HEAD("/", serveIndex)
+	r.NoRoute(func(c *gin.Context) {
+		if c.Request.URL.Path == "/api" || strings.HasPrefix(c.Request.URL.Path, "/api/") {
+			c.JSON(http.StatusNotFound, gin.H{"error": "not found"})
+			return
+		}
+		serveIndex(c)
+	})
+
+	return nil
+}
+
+func calcContentFingerprint(content []byte) string {
+	sum := sha256.Sum256(content)
+	return hex.EncodeToString(sum[:8])
 }
 
 func apiCorsMiddlewareFromEnv() gin.HandlerFunc {
