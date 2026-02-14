@@ -3,7 +3,7 @@ kind: Template
 metadata:
   name: SingBox Proxy Manager
 spec:
-  description: 基于 sing-box 的代理节点管理和转发系统，内置 Web 管理面板。
+  description: 基于 sing-box 的代理节点管理和转发系统，内置 Web 管理面板（大量节点场景不推荐云平台部署）。
   tags:
     - Proxy
     - Networking
@@ -32,6 +32,10 @@ spec:
     1. 在环境变量中设置 `ADMIN_PASSWORD`（强密码）
     2. 必须设置 `TURSO_DATABASE_URL` 与 `TURSO_AUTH_TOKEN`（云平台部署默认强制使用 Turso）
     3. 如需更多代理节点端口，请在 Ports 中继续新增 TCP 端口（30002+）
+
+    > 重要提示：本项目每个节点都需要独立公网 TCP 端口（30001+）。
+    > 节点数量较多时，云平台端口数量与成本压力明显增加，不推荐在 Zeabur 上做大量节点部署。
+    > 推荐改用 VPS / 独服 / 裸机等可自由开放端口的环境。
 
     本模板默认开放：
     - HTTP 30000（管理面板）
@@ -73,6 +77,9 @@ spec:
           - type: TEXT
             title: 代理端口扩展说明
             content: 若需要多个节点入口，请在服务 Ports 中新增 TCP 30002+，并在面板 settings 中同步 start_port。
+          - type: TEXT
+            title: 成本提示
+            content: 每个节点需独立公网 TCP 端口；节点多时云平台端口成本高，不推荐大量节点部署。
           - type: TEXT
             title: Turso 必填说明
             content: 云平台容器重启可能导致本地数据丢失，模板已强制要求填写 TURSO_DATABASE_URL 与 TURSO_AUTH_TOKEN。

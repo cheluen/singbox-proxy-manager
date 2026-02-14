@@ -2,7 +2,7 @@
 
 <div align="center">
 
-![Version](https://img.shields.io/badge/version-1.2.0-blue.svg)
+![Version](https://img.shields.io/badge/version-1.2.1-blue.svg)
 ![License](https://img.shields.io/badge/license-MIT-green.svg)
 ![SingBox](https://img.shields.io/badge/sing--box-1.12.12-orange.svg)
 
@@ -64,7 +64,11 @@ docker compose logs -f
 
 ## ☁️ 云平台部署（Zeabur / ClawCloud）
 
-### Zeabur（Dashboard 部署，推荐）
+> 重要说明：本项目默认 **每个节点占用一个独立入站端口**（`30001+`，节点越多端口越多）。
+> 在 Zeabur / ClawCloud 这类平台上，公网 TCP 端口往往有数量限制或按端口计费。
+> **当节点数量较多时，成本会显著上升，因此不推荐用于大量节点部署**；更建议使用 VPS/独服/裸机等可自由开放端口的环境。
+
+### Zeabur（Dashboard 部署，不推荐：端口成本高）
 
 1. 进入 `dash.zeabur.com`，创建项目后点击 **Add Service**。
 2. 选择 **Docker Image**，填入镜像：`ghcr.io/cheluen/singbox-proxy-manager:latest`。
@@ -82,10 +86,14 @@ docker compose logs -f
 7. 部署完成后，访问 Zeabur 分配的 HTTP 域名进入面板。
 8. 在面板 settings 中确认 `start_port` 与你实际开放的首个 TCP 端口一致（通常是 `30001`）。
 
-> 注意：部分区域/套餐下，同一服务可用的公网 TCP 转发数量可能受限。如果需要大量公网 TCP 端口，建议使用 Zeabur Dedicated Server 或 VPS 部署。
+> 注意：部分区域/套餐下，同一服务可用的公网 TCP 转发数量可能受限；且当需要开放大量端口时成本很高。
+> 如果需要大量公网 TCP 端口（节点多），建议使用 VPS/独服/裸机部署。
 > 说明：云平台容器重启可能导致本地 SQLite 数据丢失，因此云平台部署默认要求配置 Turso（`TURSO_DATABASE_URL` + `TURSO_AUTH_TOKEN`）。
 
-### ClawCloud（可导入 Template）
+### ClawCloud（可导入 Template，不推荐：端口成本高）
+
+> 注意：节点越多需要开放的公网 TCP 端口越多，在 ClawCloud 上会带来明显的端口资源与成本压力。
+> 大量节点场景建议改用 VPS/独服/裸机部署。
 
 你可以直接在 ClawCloud 的 Template/YAML 导入入口使用：
 

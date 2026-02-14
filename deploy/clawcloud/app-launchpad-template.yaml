@@ -10,7 +10,7 @@ spec:
   date: 2026-02-07
   url: 'https://github.com/cheluen/singbox-proxy-manager'
   gitRepo: 'https://github.com/cheluen/singbox-proxy-manager'
-  description: '基于 sing-box 的代理节点管理和转发系统，内置 Web 管理面板。'
+  description: '基于 sing-box 的代理节点管理和转发系统，内置 Web 管理面板（大量节点场景不推荐云平台部署）。'
   readme: 'https://raw.githubusercontent.com/cheluen/singbox-proxy-manager/main/README.md'
   icon: 'https://img.shields.io/badge/sing--box-1.12.12-orange.svg'
   templateType: inline
@@ -171,6 +171,8 @@ metadata:
     run.claw.cloud/app-deploy-manager: ${{ defaults.app_name }}
 spec:
   type: NodePort
+  # 每个节点都需要独立公网 TCP 端口；节点数量较多时云平台端口成本会快速上升。
+  # 大量节点场景建议改用 VPS / 独服 / 裸机部署。
   ports:
     - protocol: TCP
       port: 30001

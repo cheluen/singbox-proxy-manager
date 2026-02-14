@@ -670,36 +670,36 @@ const getCountryName = (location) => {
       {
         title: '',
         key: 'drag',
-      width: 40,
-      render: () => <HolderOutlined style={{ cursor: 'grab', color: '#999' }} />,
-    },
-    {
-      title: <Checkbox
-        checked={selectedNodeIds.length === nodes.length && nodes.length > 0}
-        indeterminate={selectedNodeIds.length > 0 && selectedNodeIds.length < nodes.length}
-        onChange={(e) => {
-          if (e.target.checked) {
-            setSelectedNodeIds(nodes.map(n => n.id))
-          } else {
-            setSelectedNodeIds([])
-          }
-        }}
-      />,
-      key: 'checkbox',
-      width: 50,
-      render: (_, record) => (
-        <Checkbox
-          checked={selectedNodeIds.includes(record.id)}
+        width: 40,
+        render: () => <HolderOutlined style={{ cursor: 'grab', color: '#999' }} />,
+      },
+      {
+        title: <Checkbox
+          checked={selectedNodeIds.length === nodes.length && nodes.length > 0}
+          indeterminate={selectedNodeIds.length > 0 && selectedNodeIds.length < nodes.length}
           onChange={(e) => {
             if (e.target.checked) {
-              setSelectedNodeIds([...selectedNodeIds, record.id])
+              setSelectedNodeIds(nodes.map(n => n.id))
             } else {
-              setSelectedNodeIds(selectedNodeIds.filter(id => id !== record.id))
+              setSelectedNodeIds([])
             }
           }}
-        />
-      ),
-    },
+        />,
+        key: 'checkbox',
+        width: 50,
+        render: (_, record) => (
+          <Checkbox
+            checked={selectedNodeIds.includes(record.id)}
+            onChange={(e) => {
+              if (e.target.checked) {
+                setSelectedNodeIds([...selectedNodeIds, record.id])
+              } else {
+                setSelectedNodeIds(selectedNodeIds.filter(id => id !== record.id))
+              }
+            }}
+          />
+        ),
+      },
       {
         title: t('node_name'),
         dataIndex: 'name',
@@ -887,39 +887,23 @@ const getCountryName = (location) => {
 
       return (
         <Draggable draggableId={`node-${String(rowKey)}`} index={index}>
-          {(provided, snapshot) => {
-            const children = React.Children.toArray(props.children)
-            const dragCellIndex = children.findIndex(
-              (child) => child?.props?.['data-col-key'] === 'drag'
-            )
-            if (dragCellIndex >= 0) {
-              const dragCell = children[dragCellIndex]
-              children[dragCellIndex] = React.cloneElement(dragCell, {
-                ...dragCell.props,
-                ...provided.dragHandleProps,
-                style: {
-                  ...dragCell.props?.style,
-                  cursor: 'grab',
-                },
-              })
-            }
-
-            return (
-              <tr
-                ref={provided.innerRef}
-                {...restProps}
-                {...provided.draggableProps}
-                className={className}
-                style={{
-                  ...style,
-                  ...provided.draggableProps.style,
-                  background: snapshot.isDragging ? '#e6f7ff' : style?.background,
-                }}
-              >
-                {children}
-              </tr>
-            )
-          }}
+          {(provided, snapshot) => (
+            <tr
+              ref={provided.innerRef}
+              {...restProps}
+              {...provided.draggableProps}
+              {...provided.dragHandleProps}
+              className={className}
+              style={{
+                ...style,
+                ...provided.draggableProps.style,
+                background: snapshot.isDragging ? '#e6f7ff' : style?.background,
+                cursor: 'grab',
+              }}
+            >
+              {props.children}
+            </tr>
+          )}
         </Draggable>
       )
     }
