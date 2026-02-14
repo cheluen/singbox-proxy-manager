@@ -9,7 +9,6 @@ import puppeteer from 'puppeteer-core'
 const API_PORT = Number(process.env.E2E_API_PORT || 30000)
 const FRONTEND_PORT = Number(process.env.E2E_FRONTEND_PORT || 5173)
 const FRONTEND_URL = `http://127.0.0.1:${FRONTEND_PORT}`
-const API_BASE_URL = `http://127.0.0.1:${API_PORT}`
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms))
 
@@ -162,13 +161,30 @@ const createMockApiServer = () => {
   return { server, getState }
 }
 
-const startMockApi = async () => {
-  const { server, getState } = createMockApiServer()
-  await new Promise((resolve, reject) => {
+const tryListen = (server, options) =>
+  new Promise((resolve, reject) => {
     server.once('error', reject)
-    server.listen(API_PORT, '127.0.0.1', resolve)
+    server.listen(options, resolve)
   })
-  return { server, getState }
+
+const startMockApi = async () => {
+  // Prefer binding to IPv6 unspecified (dual-stack) so Vite's `localhost` proxy
+  // (which may resolve to ::1 on CI) can reach the mock server.
+  const primary = createMockApiServer()
+  try {
+    await tryListen(primary.server, { port: API_PORT, host: '::', ipv6Only: false })
+    return primary
+  } catch {
+    try {
+      primary.server.close()
+    } catch {
+      // ignore
+    }
+  }
+
+  const fallback = createMockApiServer()
+  await tryListen(fallback.server, { port: API_PORT, host: '127.0.0.1' })
+  return fallback
 }
 
 const waitForHttpReady = async (url, timeoutMs) => {
@@ -240,6 +256,8 @@ const run = async () => {
   const scriptsDir = path.dirname(scriptFile)
   const frontendRoot = path.resolve(scriptsDir, '..')
   const mockApi = await startMockApi()
+  // Ensure `localhost` can reach the mock API (CI runners often resolve localhost -> ::1).
+  await waitForHttpReady(`http://localhost:${API_PORT}/api/version`, 10000)
   const vite = startVite(frontendRoot)
   let browser
 
