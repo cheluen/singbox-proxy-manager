@@ -112,6 +112,8 @@ jobs:
         run: |
           if command -v google-chrome >/dev/null 2>&1; then
             echo "PUPPETEER_EXECUTABLE_PATH=$(command -v google-chrome)" >> "$GITHUB_ENV"
+          elif command -v google-chrome-stable >/dev/null 2>&1; then
+            echo "PUPPETEER_EXECUTABLE_PATH=$(command -v google-chrome-stable)" >> "$GITHUB_ENV"
           elif command -v chromium-browser >/dev/null 2>&1; then
             echo "PUPPETEER_EXECUTABLE_PATH=$(command -v chromium-browser)" >> "$GITHUB_ENV"
           elif command -v chromium >/dev/null 2>&1; then

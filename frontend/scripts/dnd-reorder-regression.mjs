@@ -1,5 +1,6 @@
 import http from 'node:http'
 import { spawn } from 'node:child_process'
+import fs from 'node:fs'
 import path from 'node:path'
 import process from 'node:process'
 import { fileURLToPath } from 'node:url'
@@ -81,7 +82,22 @@ const sendJson = (res, statusCode, payload) => {
 const getBrowserExecutablePath = () => {
   const fromEnv = process.env.PUPPETEER_EXECUTABLE_PATH
   if (fromEnv) return fromEnv
-  if (process.platform === 'linux') return '/usr/bin/chromium'
+  if (process.platform === 'linux') {
+    const candidates = [
+      '/usr/bin/google-chrome',
+      '/usr/bin/google-chrome-stable',
+      '/usr/bin/chromium-browser',
+      '/usr/bin/chromium',
+    ]
+    for (const candidate of candidates) {
+      try {
+        fs.accessSync(candidate, fs.constants.X_OK)
+        return candidate
+      } catch {
+        // keep searching
+      }
+    }
+  }
   return undefined
 }
 
