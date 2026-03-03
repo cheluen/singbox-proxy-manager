@@ -113,11 +113,13 @@ const getCountryName = (location) => {
   const [replaceVisible, setReplaceVisible] = useState(false)
     const [replaceNode, setReplaceNode] = useState(null)
     const [replaceLink, setReplaceLink] = useState('')
-    const [replaceUpdateName, setReplaceUpdateName] = useState(true)
-    const [replaceLoading, setReplaceLoading] = useState(false)
-    const [autoCheckAfterCreate, setAutoCheckAfterCreate] = useState(false)
-    const [remarkDrafts, setRemarkDrafts] = useState({})
-    const [remarkSaving, setRemarkSaving] = useState({})
+  const [replaceUpdateName, setReplaceUpdateName] = useState(true)
+  const [replaceLoading, setReplaceLoading] = useState(false)
+  const [autoCheckAfterCreate, setAutoCheckAfterCreate] = useState(false)
+  const [expandedRowKeys, setExpandedRowKeys] = useState([])
+  const [remarkDrafts, setRemarkDrafts] = useState({})
+  const [remarkSaving, setRemarkSaving] = useState({})
+  const [remarkPanelKeys, setRemarkPanelKeys] = useState({})
 
   useEffect(() => {
     loadNodes()
@@ -149,7 +151,11 @@ const getCountryName = (location) => {
     setLoading(true)
     try {
       const response = await api.get('/nodes')
-      setNodes(response.data || [])
+      const nextNodes = response.data || []
+      setNodes(nextNodes)
+      setExpandedRowKeys((prev) =>
+        prev.filter((key) => nextNodes.some((n) => String(n.id) === String(key)))
+      )
     } catch (error) {
       message.error(t('network_error'))
     } finally {
@@ -601,6 +607,7 @@ const getCountryName = (location) => {
       const draft = getRemarkDraft(record)
       const original = record.remark ?? ''
       const saving = !!remarkSaving[record.id]
+      const activeKeys = remarkPanelKeys[record.id] ?? []
 
       const statusText =
         record.node_ip && record.latency > 0
@@ -610,6 +617,14 @@ const getCountryName = (location) => {
       return (
         <Collapse
           size="small"
+          activeKey={activeKeys}
+          onChange={(keys) => {
+            const nextKeys = Array.isArray(keys) ? keys : keys ? [keys] : []
+            setRemarkPanelKeys((prev) => ({
+              ...prev,
+              [record.id]: nextKeys,
+            }))
+          }}
           items={[
             {
               key: 'record',
@@ -723,6 +738,21 @@ const getCountryName = (location) => {
         key: 'name',
         ellipsis: true,
         width: 200,
+      },
+      {
+        title: t('remark'),
+        key: 'remark_indicator',
+        width: 80,
+        render: (_, record) => {
+          const remark = (record?.remark ?? '').trim()
+          if (!remark) return null
+          const preview = remark.length > 200 ? `${remark.slice(0, 200)}...` : remark
+          return (
+            <Tooltip title={preview}>
+              <Tag color="gold">{t('remark')}</Tag>
+            </Tooltip>
+          )
+        },
       },
       {
         title: t('node_type'),
@@ -1062,6 +1092,8 @@ const getCountryName = (location) => {
                 rowKey="id"
                 expandable={{
                   expandedRowRender,
+                  expandedRowKeys,
+                  onExpandedRowsChange: (keys) => setExpandedRowKeys(keys),
                 }}
                 loading={loading}
                 pagination={false}

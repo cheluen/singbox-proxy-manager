@@ -37,7 +37,7 @@ func TestRegisterFrontendRoutesServesIndexWithRevalidateHeaders(t *testing.T) {
 	r := gin.New()
 	distDir := writeTestFrontendDist(t)
 
-	if err := registerFrontendRoutes(r, distDir, "1.2.2"); err != nil {
+	if err := registerFrontendRoutes(r, distDir, "1.2.3"); err != nil {
 		t.Fatalf("register frontend routes: %v", err)
 	}
 
@@ -51,7 +51,7 @@ func TestRegisterFrontendRoutesServesIndexWithRevalidateHeaders(t *testing.T) {
 	if got := rec.Header().Get("Cache-Control"); got != indexCacheControlHeader {
 		t.Fatalf("unexpected cache-control: %s", got)
 	}
-	if got := rec.Header().Get("X-App-Version"); got != "1.2.2" {
+	if got := rec.Header().Get("X-App-Version"); got != "1.2.3" {
 		t.Fatalf("unexpected app version header: %s", got)
 	}
 	etag := rec.Header().Get("ETag")
@@ -77,7 +77,7 @@ func TestRegisterFrontendRoutesServesAssetsWithImmutableCache(t *testing.T) {
 	r := gin.New()
 	distDir := writeTestFrontendDist(t)
 
-	if err := registerFrontendRoutes(r, distDir, "1.2.2"); err != nil {
+	if err := registerFrontendRoutes(r, distDir, "1.2.3"); err != nil {
 		t.Fatalf("register frontend routes: %v", err)
 	}
 
@@ -91,7 +91,7 @@ func TestRegisterFrontendRoutesServesAssetsWithImmutableCache(t *testing.T) {
 	if got := rec.Header().Get("Cache-Control"); got != assetsCacheControlHeader {
 		t.Fatalf("unexpected cache-control: %s", got)
 	}
-	if got := rec.Header().Get("X-App-Version"); got != "1.2.2" {
+	if got := rec.Header().Get("X-App-Version"); got != "1.2.3" {
 		t.Fatalf("unexpected app version header: %s", got)
 	}
 }
@@ -101,7 +101,7 @@ func TestRegisterFrontendRoutesNoRouteBehavior(t *testing.T) {
 	r := gin.New()
 	distDir := writeTestFrontendDist(t)
 
-	if err := registerFrontendRoutes(r, distDir, "1.2.2"); err != nil {
+	if err := registerFrontendRoutes(r, distDir, "1.2.3"); err != nil {
 		t.Fatalf("register frontend routes: %v", err)
 	}
 
