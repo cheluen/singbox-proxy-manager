@@ -862,7 +862,7 @@ func (h *Handler) CheckNodeIP(c *gin.Context) {
 		`, id); clearErr != nil {
 			fmt.Printf("[API] Failed to clear node %d status after error: %v\n", id, clearErr)
 		}
-		c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("failed to check IP: %v", err)})
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to check IP"})
 		return
 	}
 
@@ -1092,6 +1092,22 @@ func (h *Handler) UpdateSettings(c *gin.Context) {
 	}
 
 	c.JSON(http.StatusOK, gin.H{"message": "settings updated"})
+}
+
+// Logout revokes the current admin session token.
+func (h *Handler) Logout(c *gin.Context) {
+	token := normalizeAuthToken(c.GetHeader("Authorization"))
+	if token == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "missing token"})
+		return
+	}
+
+	if _, err := h.db.Exec("DELETE FROM admin_sessions WHERE token_hash = ?", hashSessionToken(token)); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "database error"})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{"message": "logged out"})
 }
 
 // ParseShareLink parses a share link and returns the config

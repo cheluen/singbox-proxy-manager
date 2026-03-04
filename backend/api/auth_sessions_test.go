@@ -1,6 +1,8 @@
 package api
 
 import (
+	"net/http"
+	"net/http/httptest"
 	"testing"
 	"time"
 
@@ -63,5 +65,38 @@ func TestCreateAdminSession_InvalidTTLFromEnvFallsBackToDefault(t *testing.T) {
 	dur := time.Until(expiry)
 	if dur > 168*time.Hour || dur < 167*time.Hour {
 		t.Fatalf("expected fallback ttl around 168h, got %v", dur)
+	}
+}
+
+func TestLogoutRevokesCurrentSession(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	h := newTestHandler(t, func(proxyAddr, username, password string) (*services.IPInfo, error) {
+		return nil, nil
+	})
+
+	token, _, err := h.createAdminSession(nil)
+	if err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+
+	rec := httptest.NewRecorder()
+	ctx, _ := gin.CreateTestContext(rec)
+	req := httptest.NewRequest(http.MethodPost, "/api/logout", nil)
+	req.Header.Set("Authorization", token)
+	ctx.Request = req
+
+	h.Logout(ctx)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("unexpected status: %d", rec.Code)
+	}
+
+	ok, err := h.isValidAdminSession(token)
+	if err != nil {
+		t.Fatalf("validate session: %v", err)
+	}
+	if ok {
+		t.Fatalf("expected session to be revoked")
 	}
 }

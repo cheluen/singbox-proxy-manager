@@ -6,6 +6,10 @@ COPY frontend/ ./
 RUN npm run build
 
 FROM golang:1.24 AS backend-builder
+ARG GOPROXY=https://proxy.golang.org,direct
+ARG GOSUMDB=sum.golang.org
+ENV GOPROXY=${GOPROXY}
+ENV GOSUMDB=${GOSUMDB}
 WORKDIR /app
 COPY go.mod go.sum ./
 RUN go mod download

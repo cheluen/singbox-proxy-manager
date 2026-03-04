@@ -286,7 +286,8 @@ const run = async () => {
     await page.click('tr.ant-table-expanded-row .ant-collapse-item:nth-child(2) .ant-collapse-header')
     await page.waitForSelector('tr.ant-table-expanded-row .ant-collapse-item-active textarea', { timeout: 10000 })
 
-    await page.type('tr.ant-table-expanded-row textarea', 'a')
+    const typedRemark = 'remark-abc123'
+    await page.type('tr.ant-table-expanded-row textarea', typedRemark)
     await sleep(300)
 
     // Regression: typing should NOT auto-collapse the remark panel.
@@ -297,14 +298,19 @@ const run = async () => {
     assert(remarkPanelActive, 'Remark panel collapsed unexpectedly after typing')
 
     const textareaValue = await page.$eval('tr.ant-table-expanded-row textarea', (node) => node.value)
-    assert(textareaValue === 'a', `Unexpected textarea value: ${JSON.stringify(textareaValue)}`)
+    assert(textareaValue === typedRemark, `Unexpected textarea value: ${JSON.stringify(textareaValue)}`)
+    const textareaHasFocus = await page.$eval(
+      'tr.ant-table-expanded-row textarea',
+      (node) => node === document.activeElement
+    )
+    assert(textareaHasFocus, 'Remark textarea lost focus while typing')
 
     await page.click('tr.ant-table-expanded-row .ant-collapse-item:nth-child(2) button.ant-btn-primary')
     await sleep(800)
 
     const stateAfterSave = mockApi.getState()
     assert(
-      stateAfterSave.lastRemarkUpdate?.id === 1 && stateAfterSave.lastRemarkUpdate?.remark === 'a',
+      stateAfterSave.lastRemarkUpdate?.id === 1 && stateAfterSave.lastRemarkUpdate?.remark === typedRemark,
       `Unexpected mock remark update: ${JSON.stringify(stateAfterSave.lastRemarkUpdate)}`
     )
 

@@ -2,7 +2,9 @@
 
 <div align="center">
 
-![Version](https://img.shields.io/badge/version-1.2.3-blue.svg)
+<img src="./logo.svg" alt="SingBox Proxy Manager Logo" width="96" />
+
+![Version](https://img.shields.io/badge/version-1.2.4-blue.svg)
 ![License](https://img.shields.io/badge/license-MIT-green.svg)
 ![SingBox](https://img.shields.io/badge/sing--box-1.12.12-orange.svg)
 
@@ -46,15 +48,19 @@
 git clone https://github.com/cheluen/singbox-proxy-manager.git
 cd singbox-proxy-manager
 
-# 2. 可选：设置管理员密码（推荐）
-# 方式 A：通过环境变量 ADMIN_PASSWORD 指定固定管理员密码（面板内将无法修改）
-# 方式 B：不设置 ADMIN_PASSWORD，首次打开面板会要求设置管理员密码（可在面板内修改）
-nano docker-compose.yml
+# 2. 生成部署环境变量文件（所有部署方式建议参考这个变量清单）
+cp .env.example .env
 
-# 3. 启动服务
+# 3. 按需修改 .env（至少建议设置 ADMIN_PASSWORD）
+# 镜像来源切换：
+#   COMPOSE_PROFILES=ghcr  -> 使用 GHCR 预构建镜像（默认）
+#   COMPOSE_PROFILES=local -> 使用本地源码构建镜像
+nano .env
+
+# 4. 启动服务
 docker compose up -d
 
-# 4. 查看日志
+# 5. 查看日志
 docker compose logs -f
 ```
 
@@ -81,6 +87,7 @@ docker compose logs -f
    - `CONFIG_DIR=/app/config`
    - `ADMIN_PASSWORD=你的强密码`
    - 必填：`TURSO_DATABASE_URL`、`TURSO_AUTH_TOKEN`（云平台部署默认强制使用 Turso）
+   - 变量命名建议与仓库根目录 `.env.example` 保持一致，便于迁移和回滚
 5. 在 **Volumes** 挂载目录 `/app/config`（用于持久化 `config.json`、日志、SQLite）。
 6. 资源建议使用默认规格：`0.5 vCPU / 512MB`。
 7. 部署完成后，访问 Zeabur 分配的 HTTP 域名进入面板。
@@ -118,6 +125,7 @@ docker compose logs -f
 - HTTP 端口：`30000`
 - TCP 端口：`30001`（默认），按需再加 `30002+`
 - 环境变量：`PORT=30000`、`CONFIG_DIR=/app/config`、`ADMIN_PASSWORD=...`、必填 `TURSO_DATABASE_URL` 与 `TURSO_AUTH_TOKEN`
+- 建议对照根目录 `.env.example` 填写同名变量，避免多环境配置漂移
 - 持久化路径：`/app/config`
 - 资源规格：`0.5 vCPU / 512MB`
 
@@ -176,25 +184,43 @@ docker compose logs -f
 
 ### 环境变量
 
-在 `docker-compose.yml` 中配置：
+统一在项目根目录 `.env` 中配置（可由 `.env.example` 复制而来）：
 
-```yaml
-environment:
-  - PORT=30000              # 管理界面端口
-  - CONFIG_DIR=/app/config  # 配置文件目录
-  - ADMIN_PASSWORD=          # 可选：管理员密码（不为空则使用该值；面板内无法修改）
-  - CORS_ALLOWED_ORIGINS=    # 可选：管理 API 允许的跨域来源（逗号分隔；默认不启用 CORS）
-  - LOGIN_RATE_LIMIT_WINDOW_SECONDS=60   # 可选：登录限速窗口（秒）
-  - LOGIN_RATE_LIMIT_MAX_ATTEMPTS=10     # 可选：窗口内最大失败次数
-  - LOGIN_RATE_LIMIT_BLOCK_SECONDS=600   # 可选：触发限速后的封禁时间（秒）
-  - HTTP_READ_HEADER_TIMEOUT=5s          # 可选：管理 API 读请求头超时
-  - HTTP_READ_TIMEOUT=15s                # 可选：读请求体超时
-  - HTTP_WRITE_TIMEOUT=30s               # 可选：写响应超时
-  - HTTP_IDLE_TIMEOUT=60s                # 可选：空闲连接超时
-  - HTTP_MAX_HEADER_BYTES=1048576        # 可选：最大请求头大小（字节）
-  - TURSO_DATABASE_URL=${TURSO_DATABASE_URL} # 可选：Turso 远程数据库 URL（需与 TURSO_AUTH_TOKEN 一起设置）
-  - TURSO_AUTH_TOKEN=${TURSO_AUTH_TOKEN}     # 可选：Turso 认证 Token（需与 TURSO_DATABASE_URL 一起设置）
+```bash
+# 镜像来源（关键开关）
+COMPOSE_PROFILES=ghcr            # ghcr 或 local
+GHCR_IMAGE=ghcr.io/cheluen/singbox-proxy-manager:latest
+LOCAL_IMAGE=singbox-proxy-manager:local
+SINGBOX_VERSION=1.12.12
+GO_MODULE_PROXY=https://proxy.golang.org,direct
+GO_SUM_DB=sum.golang.org
+
+# 运行配置
+PORT=30000
+CONFIG_DIR=/app/config
+CONFIG_VOLUME_HOST=./config
+ADMIN_PASSWORD=
+
+# 安全与稳定性
+CORS_ALLOWED_ORIGINS=
+LOGIN_RATE_LIMIT_WINDOW_SECONDS=60
+LOGIN_RATE_LIMIT_MAX_ATTEMPTS=10
+LOGIN_RATE_LIMIT_BLOCK_SECONDS=600
+ADMIN_SESSION_TTL_HOURS=168
+TRUSTED_PROXIES=
+HTTP_READ_HEADER_TIMEOUT=5s
+HTTP_READ_TIMEOUT=15s
+HTTP_WRITE_TIMEOUT=30s
+HTTP_IDLE_TIMEOUT=60s
+HTTP_MAX_HEADER_BYTES=1048576
+API_MAX_BODY_BYTES=1048576
+
+# 可选：Turso
+TURSO_DATABASE_URL=
+TURSO_AUTH_TOKEN=
 ```
+
+> 如本地源码构建遇到 Go 模块下载受限，可改为：`GO_MODULE_PROXY=https://goproxy.cn,direct`，必要时再配合 `GO_SUM_DB=off`。
 
 > 不想用 Turso 可以不设置 `TURSO_DATABASE_URL / TURSO_AUTH_TOKEN`，留空会自动使用本地 SQLite。
 
@@ -238,12 +264,18 @@ environment:
 ### 使用环境变量管理密码
 
 ```bash
-# 创建 .env 文件
-echo "ADMIN_PASSWORD=您的超级安全密码" > .env
+# 编辑 .env
+ADMIN_PASSWORD=您的超级安全密码
+```
 
-# 修改 docker-compose.yml
-environment:
-  - ADMIN_PASSWORD=${ADMIN_PASSWORD}
+### 切换镜像来源（仅改 .env）
+
+```bash
+# 快速启动：使用 GHCR 预构建镜像
+COMPOSE_PROFILES=ghcr
+
+# 环境适配：使用本地源码构建镜像
+COMPOSE_PROFILES=local
 ```
 
 ### 使用 Turso 远程数据库（可选）

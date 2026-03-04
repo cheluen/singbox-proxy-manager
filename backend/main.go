@@ -144,6 +144,12 @@ func main() {
 	// Initialize Gin
 	gin.SetMode(gin.ReleaseMode)
 	r := gin.Default()
+	trustedProxies := parseCommaListEnv("TRUSTED_PROXIES")
+	if err := r.SetTrustedProxies(trustedProxies); err != nil {
+		log.Fatalf("Invalid TRUSTED_PROXIES: %v", err)
+	}
+	r.Use(apiSecurityHeadersMiddleware())
+	r.Use(apiRequestBodyLimitMiddleware(int64(readIntEnv("API_MAX_BODY_BYTES", 1<<20))))
 	r.Use(apiCorsMiddlewareFromEnv())
 
 	// Initialize handler
@@ -185,6 +191,7 @@ func main() {
 		// Settings
 		authorized.GET("/settings", handler.GetSettings)
 		authorized.PUT("/settings", handler.UpdateSettings)
+		authorized.POST("/logout", handler.Logout)
 	}
 
 	// Serve frontend static files
@@ -258,6 +265,30 @@ func registerFrontendRoutes(r *gin.Engine, frontendDistDir string, appVersion st
 	r.GET("/assets/*filepath", withAssetsHeaders, assetsHandler)
 	r.HEAD("/assets/*filepath", withAssetsHeaders, assetsHandler)
 
+	serveStaticFile := func(route string, fileName string) {
+		handler := func(c *gin.Context) {
+			filePath := filepath.Join(frontendDistDir, fileName)
+			if _, err := os.Stat(filePath); err != nil {
+				c.JSON(http.StatusNotFound, gin.H{"error": "not found"})
+				return
+			}
+			c.Header("Cache-Control", assetsCacheControlHeader)
+			c.Header("X-App-Version", appVersion)
+			c.Header("X-Frontend-Fingerprint", indexFingerprint)
+			c.File(filePath)
+		}
+		r.GET(route, handler)
+		r.HEAD(route, handler)
+	}
+
+	serveStaticFile("/logo.svg", "logo.svg")
+	r.GET("/favicon.ico", func(c *gin.Context) {
+		c.Redirect(http.StatusMovedPermanently, "/logo.svg")
+	})
+	r.HEAD("/favicon.ico", func(c *gin.Context) {
+		c.Redirect(http.StatusMovedPermanently, "/logo.svg")
+	})
+
 	r.GET("/", serveIndex)
 	r.HEAD("/", serveIndex)
 	r.NoRoute(func(c *gin.Context) {
@@ -280,7 +311,7 @@ func apiCorsMiddlewareFromEnv() gin.HandlerFunc {
 	allowed := parseCommaListEnv("CORS_ALLOWED_ORIGINS")
 	if len(allowed) == 0 {
 		return func(c *gin.Context) {
-			if strings.HasPrefix(c.Request.URL.Path, "/api") && c.Request.Method == http.MethodOptions {
+			if isAPIRequest(c.Request.URL.Path) && c.Request.Method == http.MethodOptions {
 				c.AbortWithStatus(http.StatusNoContent)
 				return
 			}
@@ -298,7 +329,7 @@ func apiCorsMiddlewareFromEnv() gin.HandlerFunc {
 	}
 
 	return func(c *gin.Context) {
-		if !strings.HasPrefix(c.Request.URL.Path, "/api") {
+		if !isAPIRequest(c.Request.URL.Path) {
 			c.Next()
 			return
 		}
@@ -320,6 +351,46 @@ func apiCorsMiddlewareFromEnv() gin.HandlerFunc {
 
 		c.Next()
 	}
+}
+
+func apiSecurityHeadersMiddleware() gin.HandlerFunc {
+	return func(c *gin.Context) {
+		c.Header("X-Frame-Options", "DENY")
+		c.Header("X-Content-Type-Options", "nosniff")
+		c.Header("Referrer-Policy", "strict-origin-when-cross-origin")
+		c.Header("X-XSS-Protection", "0")
+		c.Header("Permissions-Policy", "camera=(), microphone=(), geolocation=()")
+		c.Header("Cross-Origin-Opener-Policy", "same-origin")
+		c.Header("Cross-Origin-Resource-Policy", "same-origin")
+		c.Header("Content-Security-Policy", "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self' data:; connect-src 'self'; object-src 'none'; base-uri 'self'; frame-ancestors 'none'; form-action 'self'")
+
+		if c.Request.TLS != nil || strings.EqualFold(c.GetHeader("X-Forwarded-Proto"), "https") {
+			c.Header("Strict-Transport-Security", "max-age=31536000; includeSubDomains")
+		}
+
+		c.Next()
+	}
+}
+
+func apiRequestBodyLimitMiddleware(maxBytes int64) gin.HandlerFunc {
+	if maxBytes <= 0 {
+		return func(c *gin.Context) { c.Next() }
+	}
+
+	return func(c *gin.Context) {
+		if isAPIRequest(c.Request.URL.Path) {
+			if c.Request.ContentLength > maxBytes {
+				c.AbortWithStatusJSON(http.StatusRequestEntityTooLarge, gin.H{"error": "request body too large"})
+				return
+			}
+			c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, maxBytes)
+		}
+		c.Next()
+	}
+}
+
+func isAPIRequest(path string) bool {
+	return path == "/api" || strings.HasPrefix(path, "/api/")
 }
 
 func parseCommaListEnv(key string) []string {

@@ -42,7 +42,12 @@ function App() {
     message.success('Login successful!')
   }
 
-  const handleLogout = () => {
+  const handleLogout = async () => {
+    try {
+      await api.post('/logout')
+    } catch {
+      // Even if backend logout fails, clear local session to force re-auth.
+    }
     localStorage.removeItem('token')
     setToken(null)
     api.setToken(null)
@@ -54,7 +59,7 @@ function App() {
       theme={{
         algorithm: theme.defaultAlgorithm,
         token: {
-          colorPrimary: '#667eea',
+          colorPrimary: '#0f766e',
         },
       }}
     >

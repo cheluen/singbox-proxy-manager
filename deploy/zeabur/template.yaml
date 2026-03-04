@@ -16,6 +16,10 @@ spec:
       type: DOMAIN
       name: 管理面板域名
       description: 输入子域名后将自动生成 *.zeabur.app 访问地址
+    - key: ADMIN_PASSWORD
+      type: PASSWORD
+      name: 管理员密码
+      description: 建议使用强密码；变量命名与仓库 .env.example 对齐
     - key: TURSO_DATABASE_URL
       type: STRING
       name: Turso 数据库地址
@@ -29,7 +33,7 @@ spec:
 
     部署完成后请优先完成以下配置：
 
-    1. 在环境变量中设置 `ADMIN_PASSWORD`（强密码）
+    1. 在环境变量中设置 `ADMIN_PASSWORD`（强密码，命名建议参考仓库 `.env.example`）
     2. 必须设置 `TURSO_DATABASE_URL` 与 `TURSO_AUTH_TOKEN`（云平台部署默认强制使用 Turso）
     3. 如需更多代理节点端口，请在 Ports 中继续新增 TCP 端口（30002+）
 
@@ -65,7 +69,31 @@ spec:
           CONFIG_DIR:
             default: /app/config
           ADMIN_PASSWORD:
-            default: ${PASSWORD}
+            default: ${ADMIN_PASSWORD}
+          CORS_ALLOWED_ORIGINS:
+            default: ""
+          LOGIN_RATE_LIMIT_WINDOW_SECONDS:
+            default: "60"
+          LOGIN_RATE_LIMIT_MAX_ATTEMPTS:
+            default: "10"
+          LOGIN_RATE_LIMIT_BLOCK_SECONDS:
+            default: "600"
+          ADMIN_SESSION_TTL_HOURS:
+            default: "168"
+          TRUSTED_PROXIES:
+            default: ""
+          HTTP_READ_HEADER_TIMEOUT:
+            default: "5s"
+          HTTP_READ_TIMEOUT:
+            default: "15s"
+          HTTP_WRITE_TIMEOUT:
+            default: "30s"
+          HTTP_IDLE_TIMEOUT:
+            default: "60s"
+          HTTP_MAX_HEADER_BYTES:
+            default: "1048576"
+          API_MAX_BODY_BYTES:
+            default: "1048576"
           TURSO_DATABASE_URL:
             default: ${TURSO_DATABASE_URL}
           TURSO_AUTH_TOKEN:

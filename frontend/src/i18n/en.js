@@ -30,6 +30,7 @@ export default {
   setup_required: 'First-time setup: please set an admin password',
   setup_success: 'Admin password set successfully',
   setup_failed: 'Setup failed',
+  login_subtitle: 'Manage node configs, auth, and forwarding status in one place',
   admin_password_locked_hint: 'Admin password is managed by ADMIN_PASSWORD environment variable',
   
   // Navigation

@@ -29,6 +29,66 @@ spec:
       type: string
       default: ''
       required: true
+    cors_allowed_origins:
+      description: '可选：允许跨域来源（逗号分隔）'
+      type: string
+      default: ''
+      required: false
+    login_rate_limit_window_seconds:
+      description: '可选：登录限速窗口（秒）'
+      type: string
+      default: '60'
+      required: false
+    login_rate_limit_max_attempts:
+      description: '可选：登录窗口最大失败次数'
+      type: string
+      default: '10'
+      required: false
+    login_rate_limit_block_seconds:
+      description: '可选：触发限速后封禁秒数'
+      type: string
+      default: '600'
+      required: false
+    admin_session_ttl_hours:
+      description: '可选：管理员会话有效期（小时）'
+      type: string
+      default: '168'
+      required: false
+    trusted_proxies:
+      description: '可选：受信任代理 IP/CIDR（逗号分隔）'
+      type: string
+      default: ''
+      required: false
+    http_read_header_timeout:
+      description: '可选：HTTP 读请求头超时'
+      type: string
+      default: '5s'
+      required: false
+    http_read_timeout:
+      description: '可选：HTTP 读请求体超时'
+      type: string
+      default: '15s'
+      required: false
+    http_write_timeout:
+      description: '可选：HTTP 写响应超时'
+      type: string
+      default: '30s'
+      required: false
+    http_idle_timeout:
+      description: '可选：HTTP 空闲超时'
+      type: string
+      default: '60s'
+      required: false
+    http_max_header_bytes:
+      description: '可选：HTTP 请求头最大字节数'
+      type: string
+      default: '1048576'
+      required: false
+    api_max_body_bytes:
+      description: '可选：API 请求体最大字节数'
+      type: string
+      default: '1048576'
+      required: false
     turso_database_url:
       description: '必填：libsql://your-db-name.turso.io'
       type: string
@@ -77,6 +137,30 @@ spec:
               value: /app/config
             - name: ADMIN_PASSWORD
               value: ${{ inputs.admin_password }}
+            - name: CORS_ALLOWED_ORIGINS
+              value: ${{ inputs.cors_allowed_origins }}
+            - name: LOGIN_RATE_LIMIT_WINDOW_SECONDS
+              value: ${{ inputs.login_rate_limit_window_seconds }}
+            - name: LOGIN_RATE_LIMIT_MAX_ATTEMPTS
+              value: ${{ inputs.login_rate_limit_max_attempts }}
+            - name: LOGIN_RATE_LIMIT_BLOCK_SECONDS
+              value: ${{ inputs.login_rate_limit_block_seconds }}
+            - name: ADMIN_SESSION_TTL_HOURS
+              value: ${{ inputs.admin_session_ttl_hours }}
+            - name: TRUSTED_PROXIES
+              value: ${{ inputs.trusted_proxies }}
+            - name: HTTP_READ_HEADER_TIMEOUT
+              value: ${{ inputs.http_read_header_timeout }}
+            - name: HTTP_READ_TIMEOUT
+              value: ${{ inputs.http_read_timeout }}
+            - name: HTTP_WRITE_TIMEOUT
+              value: ${{ inputs.http_write_timeout }}
+            - name: HTTP_IDLE_TIMEOUT
+              value: ${{ inputs.http_idle_timeout }}
+            - name: HTTP_MAX_HEADER_BYTES
+              value: ${{ inputs.http_max_header_bytes }}
+            - name: API_MAX_BODY_BYTES
+              value: ${{ inputs.api_max_body_bytes }}
             - name: TURSO_DATABASE_URL
               value: ${{ inputs.turso_database_url }}
             - name: TURSO_AUTH_TOKEN

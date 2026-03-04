@@ -2,10 +2,12 @@ package main
 
 import (
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/gin-gonic/gin"
@@ -28,6 +30,9 @@ func writeTestFrontendDist(t *testing.T) string {
 	if err := os.WriteFile(filepath.Join(assetsDir, "app-abc123.js"), []byte("console.log('ok')"), 0o644); err != nil {
 		t.Fatalf("write app js: %v", err)
 	}
+	if err := os.WriteFile(filepath.Join(distDir, "logo.svg"), []byte("<svg xmlns=\"http://www.w3.org/2000/svg\"></svg>"), 0o644); err != nil {
+		t.Fatalf("write logo.svg: %v", err)
+	}
 
 	return distDir
 }
@@ -37,7 +42,7 @@ func TestRegisterFrontendRoutesServesIndexWithRevalidateHeaders(t *testing.T) {
 	r := gin.New()
 	distDir := writeTestFrontendDist(t)
 
-	if err := registerFrontendRoutes(r, distDir, "1.2.3"); err != nil {
+	if err := registerFrontendRoutes(r, distDir, "1.2.4"); err != nil {
 		t.Fatalf("register frontend routes: %v", err)
 	}
 
@@ -51,7 +56,7 @@ func TestRegisterFrontendRoutesServesIndexWithRevalidateHeaders(t *testing.T) {
 	if got := rec.Header().Get("Cache-Control"); got != indexCacheControlHeader {
 		t.Fatalf("unexpected cache-control: %s", got)
 	}
-	if got := rec.Header().Get("X-App-Version"); got != "1.2.3" {
+	if got := rec.Header().Get("X-App-Version"); got != "1.2.4" {
 		t.Fatalf("unexpected app version header: %s", got)
 	}
 	etag := rec.Header().Get("ETag")
@@ -77,7 +82,7 @@ func TestRegisterFrontendRoutesServesAssetsWithImmutableCache(t *testing.T) {
 	r := gin.New()
 	distDir := writeTestFrontendDist(t)
 
-	if err := registerFrontendRoutes(r, distDir, "1.2.3"); err != nil {
+	if err := registerFrontendRoutes(r, distDir, "1.2.4"); err != nil {
 		t.Fatalf("register frontend routes: %v", err)
 	}
 
@@ -91,7 +96,7 @@ func TestRegisterFrontendRoutesServesAssetsWithImmutableCache(t *testing.T) {
 	if got := rec.Header().Get("Cache-Control"); got != assetsCacheControlHeader {
 		t.Fatalf("unexpected cache-control: %s", got)
 	}
-	if got := rec.Header().Get("X-App-Version"); got != "1.2.3" {
+	if got := rec.Header().Get("X-App-Version"); got != "1.2.4" {
 		t.Fatalf("unexpected app version header: %s", got)
 	}
 }
@@ -101,7 +106,7 @@ func TestRegisterFrontendRoutesNoRouteBehavior(t *testing.T) {
 	r := gin.New()
 	distDir := writeTestFrontendDist(t)
 
-	if err := registerFrontendRoutes(r, distDir, "1.2.3"); err != nil {
+	if err := registerFrontendRoutes(r, distDir, "1.2.4"); err != nil {
 		t.Fatalf("register frontend routes: %v", err)
 	}
 
@@ -127,5 +132,71 @@ func TestRegisterFrontendRoutesNoRouteBehavior(t *testing.T) {
 	}
 	if body["error"] != "not found" {
 		t.Fatalf("unexpected api error response: %+v", body)
+	}
+}
+
+func TestRegisterFrontendRoutesServesLogoFile(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	r := gin.New()
+	distDir := writeTestFrontendDist(t)
+
+	if err := registerFrontendRoutes(r, distDir, "1.2.4"); err != nil {
+		t.Fatalf("register frontend routes: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/logo.svg", nil)
+	rec := httptest.NewRecorder()
+	r.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("unexpected status: %d", rec.Code)
+	}
+	if got := rec.Header().Get("Cache-Control"); got != assetsCacheControlHeader {
+		t.Fatalf("unexpected cache-control: %s", got)
+	}
+}
+
+func TestAPISecurityHeadersMiddlewareAddsHeaders(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	r := gin.New()
+	r.Use(apiSecurityHeadersMiddleware())
+	r.GET("/ping", func(c *gin.Context) {
+		c.Status(http.StatusNoContent)
+	})
+
+	req := httptest.NewRequest(http.MethodGet, "/ping", nil)
+	rec := httptest.NewRecorder()
+	r.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusNoContent {
+		t.Fatalf("unexpected status: %d", rec.Code)
+	}
+	if got := rec.Header().Get("X-Frame-Options"); got != "DENY" {
+		t.Fatalf("missing security header X-Frame-Options: %q", got)
+	}
+	if got := rec.Header().Get("Content-Security-Policy"); got == "" {
+		t.Fatalf("missing security header Content-Security-Policy")
+	}
+}
+
+func TestAPIRequestBodyLimitMiddlewareRejectsLargePayload(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	r := gin.New()
+	r.Use(apiRequestBodyLimitMiddleware(8))
+	r.POST("/api/echo", func(c *gin.Context) {
+		body, err := io.ReadAll(c.Request.Body)
+		if err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+			return
+		}
+		c.String(http.StatusOK, string(body))
+	})
+
+	req := httptest.NewRequest(http.MethodPost, "/api/echo", strings.NewReader("0123456789"))
+	rec := httptest.NewRecorder()
+	r.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusRequestEntityTooLarge {
+		t.Fatalf("unexpected status: %d", rec.Code)
 	}
 }

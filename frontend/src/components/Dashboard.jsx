@@ -92,6 +92,44 @@ const getCountryName = (location) => {
   return parts.length > 1 ? parts[parts.length - 1] : location
 }
 
+function NodeRemarkEditor({ record, saving, onSave, t }) {
+  const [draft, setDraft] = useState(record.remark ?? '')
+
+  useEffect(() => {
+    setDraft(record.remark ?? '')
+  }, [record.id, record.remark])
+
+  const original = record.remark ?? ''
+  const hasChanged = draft !== original
+
+  return (
+    <Space direction="vertical" style={{ width: '100%' }} size="middle">
+      <TextArea
+        value={draft}
+        rows={3}
+        placeholder={t('remark_placeholder')}
+        onChange={(e) => setDraft(e.target.value)}
+      />
+      <Space>
+        <Button
+          type="primary"
+          onClick={() => onSave(record, draft)}
+          loading={saving}
+          disabled={saving || !hasChanged}
+        >
+          {t('save')}
+        </Button>
+        <Button
+          onClick={() => setDraft(original)}
+          disabled={saving || !hasChanged}
+        >
+          {t('reset')}
+        </Button>
+      </Space>
+    </Space>
+  )
+}
+
   function Dashboard({ onLogout }) {
     const { t, i18n } = useTranslation()
     const [nodes, setNodes] = useState([])
@@ -117,7 +155,6 @@ const getCountryName = (location) => {
   const [replaceLoading, setReplaceLoading] = useState(false)
   const [autoCheckAfterCreate, setAutoCheckAfterCreate] = useState(false)
   const [expandedRowKeys, setExpandedRowKeys] = useState([])
-  const [remarkDrafts, setRemarkDrafts] = useState({})
   const [remarkSaving, setRemarkSaving] = useState({})
   const [remarkPanelKeys, setRemarkPanelKeys] = useState({})
 
@@ -562,30 +599,9 @@ const getCountryName = (location) => {
       }
     }
 
-    const getRemarkDraft = (record) => {
-      if (!record?.id) return ''
-      return remarkDrafts[record.id] ?? record.remark ?? ''
-    }
-
-    const setRemarkDraft = (id, value) => {
-      setRemarkDrafts((prev) => ({
-        ...prev,
-        [id]: value,
-      }))
-    }
-
-    const resetRemarkDraft = (record) => {
-      if (!record?.id) return
-      setRemarkDrafts((prev) => ({
-        ...prev,
-        [record.id]: record.remark ?? '',
-      }))
-    }
-
-    const handleSaveRemark = async (record) => {
+    const handleSaveRemark = async (record, draft) => {
       if (!record?.id) return
 
-      const draft = getRemarkDraft(record)
       const original = record.remark ?? ''
       if (draft === original) return
 
@@ -604,8 +620,6 @@ const getCountryName = (location) => {
     }
 
     const expandedRowRender = (record) => {
-      const draft = getRemarkDraft(record)
-      const original = record.remark ?? ''
       const saving = !!remarkSaving[record.id]
       const activeKeys = remarkPanelKeys[record.id] ?? []
 
@@ -667,30 +681,12 @@ const getCountryName = (location) => {
               key: 'remark',
               label: t('remark'),
               children: (
-                <Space direction="vertical" style={{ width: '100%' }} size="middle">
-                  <TextArea
-                    value={draft}
-                    rows={3}
-                    placeholder={t('remark_placeholder')}
-                    onChange={(e) => setRemarkDraft(record.id, e.target.value)}
-                  />
-                  <Space>
-                    <Button
-                      type="primary"
-                      onClick={() => handleSaveRemark(record)}
-                      loading={saving}
-                      disabled={saving || draft === original}
-                    >
-                      {t('save')}
-                    </Button>
-                    <Button
-                      onClick={() => resetRemarkDraft(record)}
-                      disabled={saving || draft === original}
-                    >
-                      {t('reset')}
-                    </Button>
-                  </Space>
-                </Space>
+                <NodeRemarkEditor
+                  record={record}
+                  saving={saving}
+                  onSave={handleSaveRemark}
+                  t={t}
+                />
               ),
             },
           ]}
@@ -980,6 +976,11 @@ const getCountryName = (location) => {
         alignItems: 'center'
       }}>
         <div style={{ display: 'flex', alignItems: 'center', gap: '16px' }}>
+          <img
+            src="/logo.svg"
+            alt="SingBox Proxy Manager"
+            style={{ width: 32, height: 32, objectFit: 'contain' }}
+          />
           <Title level={3} style={{ color: 'white', margin: 0 }}>
             {t('app_title')}
           </Title>

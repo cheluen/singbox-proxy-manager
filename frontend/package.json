@@ -1,7 +1,7 @@
 {
   "name": "sb-proxy-frontend",
   "private": true,
-  "version": "1.2.3",
+  "version": "1.2.4",
   "type": "module",
   "scripts": {
     "dev": "vite",
@@ -14,13 +14,13 @@
     "test:e2e:version-refresh": "node ./scripts/version-refresh-regression.mjs"
   },
   "dependencies": {
-    "react": "^18.2.0",
-    "react-dom": "^18.2.0",
-    "antd": "^5.11.5",
     "@ant-design/icons": "^5.2.6",
-    "axios": "^1.6.2",
-    "react-beautiful-dnd": "^13.1.1",
+    "antd": "^5.11.5",
+    "axios": "^1.13.6",
     "i18next": "^23.7.6",
+    "react": "^18.2.0",
+    "react-beautiful-dnd": "^13.1.1",
+    "react-dom": "^18.2.0",
     "react-i18next": "^13.5.0"
   },
   "devDependencies": {

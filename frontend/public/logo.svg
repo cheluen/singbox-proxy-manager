@@ -1,0 +1,46 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 320 140" width="100%" height="100%">
+    <defs>
+        <style>
+            /* 固定配色方案，不再跟随系统切换亮暗模式 */
+            :root {
+                --svg-line: #2E4637; /* Anthropic 风格的深苔藓绿 */
+                --svg-proxy: #CC6B52; /* Anthropic 标志性赤陶色 */
+            }
+
+            .svg-net-line { 
+                stroke: var(--svg-line); 
+            }
+            .svg-proxy-line { 
+                stroke: var(--svg-proxy); 
+            }
+        </style>
+
+        <!-- 遮罩 1：用于最底层（从上往下）的线 -->
+        <mask id="mask-bottom">
+            <rect width="100%" height="100%" fill="white" />
+            <path d="M 30,110 L 90,110 C 160,110 160,30 230,30 L 290,30" fill="none" stroke="black" stroke-width="24" stroke-linecap="round"/>
+            <path d="M 30,70 L 290,70" fill="none" stroke="black" stroke-width="24" stroke-linecap="round"/>
+        </mask>
+
+        <!-- 遮罩 2：用于中间层（从下往上）的线 -->
+        <mask id="mask-middle">
+            <rect width="100%" height="100%" fill="white" />
+            <path d="M 30,70 L 290,70" fill="none" stroke="black" stroke-width="24" stroke-linecap="round"/>
+        </mask>
+    </defs>
+
+    <!-- 图形主体 -->
+    <g fill="none" stroke-linecap="round">
+        <!-- 底层：从上向下的网络流，应用双重遮罩 -->
+        <path d="M 30,30 L 90,30 C 160,30 160,110 230,110 L 290,110" 
+              class="svg-net-line" stroke-width="12" mask="url(#mask-bottom)"/>
+
+        <!-- 中层：从下向上的网络流，应用单重遮罩，盖在底层上方 -->
+        <path d="M 30,110 L 90,110 C 160,110 160,30 230,30 L 290,30" 
+              class="svg-net-line" stroke-width="12" mask="url(#mask-middle)"/>
+
+        <!-- 顶层：代理隧道强力穿透主线，位于最上方，不需要遮罩 -->
+        <path d="M 30,70 L 290,70" 
+              class="svg-proxy-line" stroke-width="12"/>
+    </g>
+</svg>

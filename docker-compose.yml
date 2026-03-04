@@ -1,20 +1,49 @@
 version: '3.8'
 
+x-sb-proxy-common: &sb-proxy-common
+  container_name: sb-proxy
+  network_mode: host
+  restart: unless-stopped
+  environment:
+    - PORT=${PORT:-30000}
+    - CONFIG_DIR=${CONFIG_DIR:-/app/config}
+    - ADMIN_PASSWORD=${ADMIN_PASSWORD:-}
+    - CORS_ALLOWED_ORIGINS=${CORS_ALLOWED_ORIGINS:-}
+    - LOGIN_RATE_LIMIT_WINDOW_SECONDS=${LOGIN_RATE_LIMIT_WINDOW_SECONDS:-60}
+    - LOGIN_RATE_LIMIT_MAX_ATTEMPTS=${LOGIN_RATE_LIMIT_MAX_ATTEMPTS:-10}
+    - LOGIN_RATE_LIMIT_BLOCK_SECONDS=${LOGIN_RATE_LIMIT_BLOCK_SECONDS:-600}
+    - HTTP_READ_HEADER_TIMEOUT=${HTTP_READ_HEADER_TIMEOUT:-5s}
+    - HTTP_READ_TIMEOUT=${HTTP_READ_TIMEOUT:-15s}
+    - HTTP_WRITE_TIMEOUT=${HTTP_WRITE_TIMEOUT:-30s}
+    - HTTP_IDLE_TIMEOUT=${HTTP_IDLE_TIMEOUT:-60s}
+    - HTTP_MAX_HEADER_BYTES=${HTTP_MAX_HEADER_BYTES:-1048576}
+    - API_MAX_BODY_BYTES=${API_MAX_BODY_BYTES:-1048576}
+    - ADMIN_SESSION_TTL_HOURS=${ADMIN_SESSION_TTL_HOURS:-168}
+    - TRUSTED_PROXIES=${TRUSTED_PROXIES:-}
+    - TURSO_DATABASE_URL=${TURSO_DATABASE_URL:-}
+    - TURSO_AUTH_TOKEN=${TURSO_AUTH_TOKEN:-}
+  volumes:
+    - ${CONFIG_VOLUME_HOST:-./config}:/app/config
+  logging:
+    driver: "json-file"
+    options:
+      max-size: "10m"
+      max-file: "3"
+
 services:
-  sb-proxy:
-    build: .
-    container_name: sb-proxy
-    network_mode: host
-    restart: unless-stopped
-    environment:
-      - PORT=30000
-      - CONFIG_DIR=/app/config
-      - TURSO_DATABASE_URL=${TURSO_DATABASE_URL}
-      - TURSO_AUTH_TOKEN=${TURSO_AUTH_TOKEN}
-    volumes:
-      - ./config:/app/config
-    logging:
-      driver: "json-file"
-      options:
-        max-size: "10m"
-        max-file: "3"
+  sb-proxy-ghcr:
+    <<: *sb-proxy-common
+    profiles: ["ghcr"]
+    image: ${GHCR_IMAGE:-ghcr.io/cheluen/singbox-proxy-manager:latest}
+    pull_policy: always
+
+  sb-proxy-local:
+    <<: *sb-proxy-common
+    profiles: ["local"]
+    image: ${LOCAL_IMAGE:-singbox-proxy-manager:local}
+    build:
+      context: .
+      args:
+        SINGBOX_VERSION: ${SINGBOX_VERSION:-1.12.12}
+        GOPROXY: ${GO_MODULE_PROXY:-https://proxy.golang.org,direct}
+        GOSUMDB: ${GO_SUM_DB:-sum.golang.org}

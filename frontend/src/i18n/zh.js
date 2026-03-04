@@ -30,6 +30,7 @@ export default {
   setup_required: '首次使用需要先设置管理员密码',
   setup_success: '管理员密码设置成功',
   setup_failed: '设置失败',
+  login_subtitle: '统一管理节点配置、认证和转发状态',
   admin_password_locked_hint: '当前管理员密码由 ADMIN_PASSWORD 环境变量管理',
   
   // Navigation
