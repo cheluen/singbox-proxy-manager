@@ -967,32 +967,28 @@ function NodeRemarkEditor({ record, saving, onSave, t }) {
   )
 
   return (
-    <Layout style={{ minHeight: '100vh' }}>
-      <Header style={{ 
-        background: '#001529', 
-        padding: '0 24px',
-        display: 'flex',
-        justifyContent: 'space-between',
-        alignItems: 'center'
-      }}>
-        <div style={{ display: 'flex', alignItems: 'center', gap: '16px' }}>
-          <img
-            src="/logo.svg"
-            alt="SingBox Proxy Manager"
-            style={{ width: 32, height: 32, objectFit: 'contain' }}
-          />
-          <Title level={3} style={{ color: 'white', margin: 0 }}>
+    <Layout className="dashboard-layout">
+      <Header className="dashboard-header">
+        <div className="dashboard-brand">
+          <span className="dashboard-logo-shell">
+            <img
+              src="/logo.svg"
+              alt="SingBox Proxy Manager"
+              className="dashboard-logo"
+            />
+          </span>
+          <Title level={3} className="dashboard-title">
             {t('app_title')}
           </Title>
           <Tooltip
             title={`${t('frontend_build')}: ${frontendBuildVersion} (${frontendBuildFingerprint})`}
           >
-            <Tag color="green">
+            <Tag color="blue">
               {t('version')} {appVersion || '-'}
             </Tag>
           </Tooltip>
         </div>
-        <Space>
+        <Space className="dashboard-actions">
           <Select
             value={i18n.language}
             onChange={handleLanguageChange}

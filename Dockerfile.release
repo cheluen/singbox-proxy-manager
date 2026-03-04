@@ -1,29 +1,8 @@
-FROM node:18-alpine AS frontend-builder
-WORKDIR /app/frontend
-COPY frontend/package*.json ./
-RUN npm install
-COPY frontend/ ./
-RUN npm run build
-
-FROM golang:1.24 AS backend-builder
-ARG GOPROXY=https://proxy.golang.org,direct
-ARG GOSUMDB=sum.golang.org
-ENV GOPROXY=${GOPROXY}
-ENV GOSUMDB=${GOSUMDB}
-WORKDIR /app
-COPY go.mod go.sum ./
-RUN go mod download
-# Force rebuild by adding timestamp
-RUN echo "Build at $(date)" > /tmp/buildtime
-COPY backend/ ./backend/
-COPY frontend/ ./frontend/
-COPY --from=frontend-builder /app/frontend/dist ./frontend/dist
-COPY internal/ ./internal/
-RUN CGO_ENABLED=0 go build -tags frontend_dist -o singbox-proxy-manager ./backend
-
 FROM debian:bookworm-slim
+
 ARG SINGBOX_VERSION=1.12.12
 ARG TARGETARCH
+
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates \
     curl \
@@ -69,8 +48,20 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
-COPY --from=backend-builder /app/singbox-proxy-manager ./singbox-proxy-manager
-RUN mkdir -p /app/config
+COPY release-binaries/ /app/release-binaries/
+
+RUN ARCH="${TARGETARCH}" \
+    && if [ -z "$ARCH" ]; then ARCH="$(dpkg --print-architecture)"; fi \
+    && case "${ARCH}" in \
+      amd64) BIN="/app/release-binaries/singbox-proxy-manager-linux-amd64" ;; \
+      arm64) BIN="/app/release-binaries/singbox-proxy-manager-linux-arm64" ;; \
+      *) echo "Unsupported TARGETARCH: ${ARCH}" >&2; exit 1 ;; \
+    esac \
+    && test -f "$BIN" \
+    && cp "$BIN" /app/singbox-proxy-manager \
+    && chmod +x /app/singbox-proxy-manager \
+    && rm -rf /app/release-binaries \
+    && mkdir -p /app/config
 
 ENV PORT=30000
 ENV CONFIG_DIR=/app/config
@@ -79,4 +70,4 @@ ENV ADMIN_PASSWORD=
 
 EXPOSE 30000
 VOLUME ["/app/config"]
-CMD ["./singbox-proxy-manager"]
+CMD ["/app/singbox-proxy-manager"]

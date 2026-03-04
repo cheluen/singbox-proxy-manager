@@ -7,7 +7,9 @@ import (
 	"database/sql"
 	"encoding/hex"
 	"fmt"
+	"io/fs"
 	"log"
+	"mime"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -18,11 +20,20 @@ import (
 	"sb-proxy/backend/api"
 	"sb-proxy/backend/models"
 	"sb-proxy/backend/services"
+	frontendassets "sb-proxy/frontend"
 	"sb-proxy/internal/version"
 
 	"github.com/gin-gonic/gin"
+	"github.com/joho/godotenv"
 	"github.com/tursodatabase/libsql-client-go/libsql"
 	sqlite "modernc.org/sqlite"
+)
+
+const (
+	defaultConfigDir            = "./config"
+	defaultPort                 = "30000"
+	defaultTZ                   = "UTC+8"
+	defaultTimezoneLocationName = "Asia/Shanghai"
 )
 
 func openDatabase(configDir string) (*sql.DB, error) {
@@ -76,11 +87,173 @@ func openDatabase(configDir string) (*sql.DB, error) {
 	return db, nil
 }
 
+func loadRuntimeEnvironment() {
+	loadedPaths, err := loadDotEnvFiles(discoverDotEnvPaths())
+	if err != nil {
+		log.Printf("Failed to load .env files: %v", err)
+	} else if len(loadedPaths) > 0 {
+		log.Printf("Loaded environment from: %s", strings.Join(loadedPaths, ", "))
+	}
+
+	locationName := applyTimezoneFromEnv()
+	log.Printf("Using service timezone: %s", locationName)
+}
+
+func discoverDotEnvPaths() []string {
+	candidates := make([]string, 0, 2)
+	seen := map[string]struct{}{}
+	addIfExists := func(path string) {
+		if path == "" {
+			return
+		}
+		absPath, err := filepath.Abs(path)
+		if err != nil {
+			return
+		}
+		if _, ok := seen[absPath]; ok {
+			return
+		}
+		if info, err := os.Stat(absPath); err == nil && !info.IsDir() {
+			seen[absPath] = struct{}{}
+			candidates = append(candidates, absPath)
+		}
+	}
+
+	if executablePath, err := os.Executable(); err == nil {
+		addIfExists(filepath.Join(filepath.Dir(executablePath), ".env"))
+	}
+	if cwd, err := os.Getwd(); err == nil {
+		addIfExists(filepath.Join(cwd, ".env"))
+	}
+
+	return candidates
+}
+
+func loadDotEnvFiles(paths []string) ([]string, error) {
+	if len(paths) == 0 {
+		return nil, nil
+	}
+
+	if err := godotenv.Load(paths...); err != nil {
+		return nil, err
+	}
+
+	return paths, nil
+}
+
+func applyTimezoneFromEnv() string {
+	rawTZ := strings.TrimSpace(os.Getenv("TZ"))
+	if rawTZ == "" {
+		rawTZ = defaultTZ
+		if err := os.Setenv("TZ", rawTZ); err != nil {
+			log.Printf("Failed to set default TZ=%s: %v", rawTZ, err)
+		}
+	}
+
+	loc, canonicalName, err := resolveTimezone(rawTZ)
+	if err != nil {
+		log.Printf("Invalid TZ=%q (%v), fallback to %s", rawTZ, err, defaultTimezoneLocationName)
+		fallbackLoc, fallbackErr := time.LoadLocation(defaultTimezoneLocationName)
+		if fallbackErr != nil {
+			log.Printf("Failed to load fallback timezone %s: %v", defaultTimezoneLocationName, fallbackErr)
+			fallbackLoc = time.FixedZone("UTC+08:00", 8*3600)
+			canonicalName = "UTC+08:00"
+		} else {
+			canonicalName = defaultTimezoneLocationName
+		}
+		loc = fallbackLoc
+	}
+
+	time.Local = loc
+	if err := os.Setenv("TZ", canonicalName); err != nil {
+		log.Printf("Failed to apply canonical TZ=%s: %v", canonicalName, err)
+	}
+
+	return canonicalName
+}
+
+func resolveTimezone(raw string) (*time.Location, string, error) {
+	tz := strings.TrimSpace(raw)
+	if tz == "" {
+		return nil, "", fmt.Errorf("empty timezone")
+	}
+
+	upper := strings.ToUpper(tz)
+	switch upper {
+	case "UTC+8", "UTC+08", "UTC+08:00", "GMT+8", "GMT+08", "GMT+08:00":
+		loc, err := time.LoadLocation(defaultTimezoneLocationName)
+		if err != nil {
+			return nil, "", err
+		}
+		return loc, defaultTimezoneLocationName, nil
+	}
+
+	if strings.HasPrefix(upper, "UTC") || strings.HasPrefix(upper, "GMT") {
+		if loc, canonicalName, ok := parseUTCOffsetLocation(upper); ok {
+			return loc, canonicalName, nil
+		}
+	}
+
+	loc, err := time.LoadLocation(tz)
+	if err != nil {
+		return nil, "", err
+	}
+	return loc, tz, nil
+}
+
+func parseUTCOffsetLocation(raw string) (*time.Location, string, bool) {
+	offset := strings.TrimPrefix(strings.TrimPrefix(raw, "UTC"), "GMT")
+	if offset == "" {
+		return time.UTC, "UTC", true
+	}
+	if len(offset) < 2 {
+		return nil, "", false
+	}
+
+	sign := offset[0]
+	if sign != '+' && sign != '-' {
+		return nil, "", false
+	}
+	number := offset[1:]
+	parts := strings.Split(number, ":")
+	if len(parts) > 2 {
+		return nil, "", false
+	}
+
+	hourPart := parts[0]
+	minutePart := "0"
+	if len(parts) == 2 {
+		minutePart = parts[1]
+	} else if len(number) == 4 {
+		hourPart = number[:2]
+		minutePart = number[2:]
+	}
+
+	hours, err := strconv.Atoi(hourPart)
+	if err != nil || hours < 0 || hours > 14 {
+		return nil, "", false
+	}
+	minutes, err := strconv.Atoi(minutePart)
+	if err != nil || minutes < 0 || minutes >= 60 {
+		return nil, "", false
+	}
+
+	totalSeconds := hours*3600 + minutes*60
+	if sign == '-' {
+		totalSeconds = -totalSeconds
+	}
+
+	canonical := fmt.Sprintf("UTC%c%02d:%02d", sign, hours, minutes)
+	return time.FixedZone(canonical, totalSeconds), canonical, true
+}
+
 func main() {
+	loadRuntimeEnvironment()
+
 	// Get config directory from environment or use default
 	configDir := os.Getenv("CONFIG_DIR")
 	if configDir == "" {
-		configDir = "./config"
+		configDir = defaultConfigDir
 	}
 
 	// Create config directory if not exists
@@ -202,7 +375,7 @@ func main() {
 	// Get port from environment or use default
 	port := os.Getenv("PORT")
 	if port == "" {
-		port = "30000"
+		port = defaultPort
 	}
 
 	log.Printf("Server starting on port %s", port)
@@ -226,19 +399,19 @@ const (
 )
 
 func registerFrontendRoutes(r *gin.Engine, frontendDistDir string, appVersion string) error {
-	indexPath := filepath.Join(frontendDistDir, "index.html")
-	indexContent, err := os.ReadFile(indexPath)
+	assetsFS, sourceName, err := frontendAssetFS(frontendDistDir)
+	if err != nil {
+		return err
+	}
+
+	indexContent, err := fs.ReadFile(assetsFS, "index.html")
 	if err != nil {
 		return fmt.Errorf("read index.html: %w", err)
 	}
 
-	indexInfo, err := os.Stat(indexPath)
-	if err != nil {
-		return fmt.Errorf("stat index.html: %w", err)
-	}
-
 	indexFingerprint := calcContentFingerprint(indexContent)
 	indexETag := fmt.Sprintf("\"sbpm-%s\"", indexFingerprint)
+	log.Printf("Serving frontend assets from %s", sourceName)
 
 	serveIndex := func(c *gin.Context) {
 		c.Header("Cache-Control", indexCacheControlHeader)
@@ -248,12 +421,21 @@ func registerFrontendRoutes(r *gin.Engine, frontendDistDir string, appVersion st
 		c.Header("X-App-Version", appVersion)
 		c.Header("X-Frontend-Fingerprint", indexFingerprint)
 
-		// Let the stdlib handle conditional requests and 304 responses.
-		http.ServeContent(c.Writer, c.Request, "index.html", indexInfo.ModTime(), bytes.NewReader(indexContent))
+		if c.GetHeader("If-None-Match") == indexETag {
+			c.Status(http.StatusNotModified)
+			c.Abort()
+			return
+		}
+
+		http.ServeContent(c.Writer, c.Request, "index.html", time.Time{}, bytes.NewReader(indexContent))
 		c.Abort()
 	}
 
-	assetsFileServer := http.StripPrefix("/assets/", http.FileServer(http.Dir(filepath.Join(frontendDistDir, "assets"))))
+	assetsDirFS, err := fs.Sub(assetsFS, "assets")
+	if err != nil {
+		return fmt.Errorf("read assets dir: %w", err)
+	}
+	assetsFileServer := http.StripPrefix("/assets/", http.FileServer(http.FS(assetsDirFS)))
 	withAssetsHeaders := func(c *gin.Context) {
 		c.Header("Cache-Control", assetsCacheControlHeader)
 		c.Header("X-App-Version", appVersion)
@@ -267,15 +449,21 @@ func registerFrontendRoutes(r *gin.Engine, frontendDistDir string, appVersion st
 
 	serveStaticFile := func(route string, fileName string) {
 		handler := func(c *gin.Context) {
-			filePath := filepath.Join(frontendDistDir, fileName)
-			if _, err := os.Stat(filePath); err != nil {
+			content, readErr := fs.ReadFile(assetsFS, fileName)
+			if readErr != nil {
 				c.JSON(http.StatusNotFound, gin.H{"error": "not found"})
 				return
 			}
+
+			contentType := mime.TypeByExtension(filepath.Ext(fileName))
+			if contentType == "" {
+				contentType = "application/octet-stream"
+			}
+
 			c.Header("Cache-Control", assetsCacheControlHeader)
 			c.Header("X-App-Version", appVersion)
 			c.Header("X-Frontend-Fingerprint", indexFingerprint)
-			c.File(filePath)
+			c.Data(http.StatusOK, contentType, content)
 		}
 		r.GET(route, handler)
 		r.HEAD(route, handler)
@@ -300,6 +488,22 @@ func registerFrontendRoutes(r *gin.Engine, frontendDistDir string, appVersion st
 	})
 
 	return nil
+}
+
+func frontendAssetFS(frontendDistDir string) (fs.FS, string, error) {
+	if info, err := os.Stat(frontendDistDir); err == nil && info.IsDir() {
+		return os.DirFS(frontendDistDir), frontendDistDir, nil
+	}
+
+	if !frontendassets.HasEmbeddedAssets {
+		return nil, "", fmt.Errorf("frontend dist directory %q not found and embedded assets are disabled", frontendDistDir)
+	}
+
+	embeddedDist, err := fs.Sub(frontendassets.DistFS, "dist")
+	if err != nil {
+		return nil, "", fmt.Errorf("frontend dist directory %q not found and embedded assets unavailable: %w", frontendDistDir, err)
+	}
+	return embeddedDist, "embedded:frontend/dist", nil
 }
 
 func calcContentFingerprint(content []byte) string {

@@ -59,7 +59,25 @@ function App() {
       theme={{
         algorithm: theme.defaultAlgorithm,
         token: {
-          colorPrimary: '#0f766e',
+          colorPrimary: '#7d8da6',
+          colorSuccess: '#7da08f',
+          colorWarning: '#c4a77d',
+          colorError: '#be8a7e',
+          colorInfo: '#7d8da6',
+          colorBgLayout: '#f4f1ec',
+          colorBgContainer: '#fbfaf7',
+          colorBorder: '#d7d2c9',
+          borderRadius: 12,
+          fontFamily: '"Noto Sans SC", "Source Han Sans SC", "PingFang SC", "Microsoft YaHei", sans-serif',
+        },
+        components: {
+          Layout: {
+            headerBg: '#6f8198',
+            bodyBg: '#f4f1ec',
+          },
+          Button: {
+            borderRadius: 10,
+          },
         },
       }}
     >

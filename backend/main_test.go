@@ -9,6 +9,9 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
+
+	frontendassets "sb-proxy/frontend"
 
 	"github.com/gin-gonic/gin"
 )
@@ -198,5 +201,91 @@ func TestAPIRequestBodyLimitMiddlewareRejectsLargePayload(t *testing.T) {
 
 	if rec.Code != http.StatusRequestEntityTooLarge {
 		t.Fatalf("unexpected status: %d", rec.Code)
+	}
+}
+
+func TestLoadDotEnvFilesRespectsExistingVariables(t *testing.T) {
+	t.Setenv("TEST_EXISTING_KEY", "from-env")
+	if err := os.Unsetenv("TEST_NEW_KEY"); err != nil {
+		t.Fatalf("unset TEST_NEW_KEY: %v", err)
+	}
+
+	envPath := filepath.Join(t.TempDir(), ".env")
+	content := "TEST_EXISTING_KEY=from-dotenv\nTEST_NEW_KEY=loaded-from-dotenv\n"
+	if err := os.WriteFile(envPath, []byte(content), 0o644); err != nil {
+		t.Fatalf("write .env: %v", err)
+	}
+
+	loaded, err := loadDotEnvFiles([]string{envPath})
+	if err != nil {
+		t.Fatalf("load .env: %v", err)
+	}
+	if len(loaded) != 1 || loaded[0] != envPath {
+		t.Fatalf("unexpected loaded paths: %+v", loaded)
+	}
+
+	if got := os.Getenv("TEST_EXISTING_KEY"); got != "from-env" {
+		t.Fatalf("existing env should take precedence, got %q", got)
+	}
+	if got := os.Getenv("TEST_NEW_KEY"); got != "loaded-from-dotenv" {
+		t.Fatalf("new env should be loaded from .env, got %q", got)
+	}
+}
+
+func TestApplyTimezoneFromEnvDefault(t *testing.T) {
+	previousLocal := time.Local
+	t.Cleanup(func() {
+		time.Local = previousLocal
+	})
+
+	t.Setenv("TZ", "")
+	locationName := applyTimezoneFromEnv()
+
+	if locationName != defaultTimezoneLocationName {
+		t.Fatalf("expected fallback timezone %s, got %s", defaultTimezoneLocationName, locationName)
+	}
+	if got := os.Getenv("TZ"); got != defaultTimezoneLocationName {
+		t.Fatalf("expected canonical TZ=%s, got %s", defaultTimezoneLocationName, got)
+	}
+}
+
+func TestResolveTimezoneParsesUTCOffset(t *testing.T) {
+	loc, canonical, err := resolveTimezone("UTC-05:30")
+	if err != nil {
+		t.Fatalf("resolve timezone: %v", err)
+	}
+	if canonical != "UTC-05:30" {
+		t.Fatalf("unexpected canonical timezone: %s", canonical)
+	}
+	if _, offset := time.Now().In(loc).Zone(); offset != -(5*3600 + 30*60) {
+		t.Fatalf("unexpected offset: %d", offset)
+	}
+}
+
+func TestRegisterFrontendRoutesFallsBackToEmbeddedAssets(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	r := gin.New()
+
+	missingDistDir := filepath.Join(t.TempDir(), "missing-dist")
+	if !frontendassets.HasEmbeddedAssets {
+		if err := registerFrontendRoutes(r, missingDistDir, "1.2.4"); err == nil {
+			t.Fatalf("expected error when embedded assets are disabled")
+		}
+		return
+	}
+
+	if err := registerFrontendRoutes(r, missingDistDir, "1.2.4"); err != nil {
+		t.Fatalf("register frontend routes with embedded fallback: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	rec := httptest.NewRecorder()
+	r.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("unexpected status: %d", rec.Code)
+	}
+	if !strings.Contains(rec.Body.String(), "<div id=\"root\">") {
+		t.Fatalf("embedded index.html seems invalid")
 	}
 }

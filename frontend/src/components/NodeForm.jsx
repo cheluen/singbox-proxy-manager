@@ -1,5 +1,6 @@
 import React, { useState } from 'react'
-import { Form, Input, Select, Button, Switch, Space, Tabs, InputNumber } from 'antd'
+import { Form, Input, Select, Button, Switch, Space, InputNumber } from 'antd'
+import { useTranslation } from 'react-i18next'
 
 const { TextArea } = Input
 const { Option } = Select
@@ -18,9 +19,25 @@ const proxyTypes = [
 ]
 
 function NodeForm({ node, onSave, onCancel }) {
+  const { i18n } = useTranslation()
   const [form] = Form.useForm()
   const [proxyType, setProxyType] = useState(node?.type || 'ss')
   const [loading, setLoading] = useState(false)
+  const isChineseMode = i18n.language?.startsWith('zh')
+
+  const withHint = (label, zhHint) => {
+    if (!isChineseMode || !zhHint) {
+      return label
+    }
+    return `${label}（${zhHint}）`
+  }
+
+  const withExtraHint = (message, zhHint) => {
+    if (!isChineseMode || !zhHint) {
+      return message
+    }
+    return `${message}（${zhHint}）`
+  }
 
   const handleSubmit = async (values) => {
     setLoading(true)
@@ -227,7 +244,7 @@ function NodeForm({ node, onSave, onCancel }) {
   const renderSSFields = () => (
     <>
       <Form.Item
-        label="Method"
+        label={withHint('Method', '加密方式')}
         name="method"
         rules={[{ required: true, message: 'Required' }]}
       >
@@ -240,16 +257,16 @@ function NodeForm({ node, onSave, onCancel }) {
         </Select>
       </Form.Item>
       <Form.Item
-        label="Password"
+        label={withHint('Password', '协议密码')}
         name="ss_password"
         rules={[{ required: true, message: 'Required' }]}
       >
         <Input.Password />
       </Form.Item>
-      <Form.Item label="Plugin" name="plugin">
+      <Form.Item label={withHint('Plugin', '插件类型')} name="plugin">
         <Input placeholder="e.g., obfs-local, v2ray-plugin" />
       </Form.Item>
-      <Form.Item label="Plugin Options" name="plugin_opts">
+      <Form.Item label={withHint('Plugin Options', '插件参数')} name="plugin_opts">
         <Input placeholder="e.g., obfs=http;obfs-host=www.bing.com" />
       </Form.Item>
     </>
@@ -258,19 +275,19 @@ function NodeForm({ node, onSave, onCancel }) {
   const renderVLESSFields = () => (
     <>
       <Form.Item
-        label="UUID"
+        label={withHint('UUID', '节点唯一标识')}
         name="uuid"
         rules={[{ required: true, message: 'Required' }]}
       >
         <Input />
       </Form.Item>
-      <Form.Item label="Flow" name="flow">
+      <Form.Item label={withHint('Flow', 'VLESS 流控')} name="flow">
         <Select allowClear>
           <Option value="">None</Option>
           <Option value="xtls-rprx-vision">xtls-rprx-vision</Option>
         </Select>
       </Form.Item>
-      <Form.Item label="Network" name="network">
+      <Form.Item label={withHint('Network', '传输层协议')} name="network">
         <Select>
           <Option value="tcp">TCP</Option>
           <Option value="ws">WebSocket</Option>
@@ -278,32 +295,32 @@ function NodeForm({ node, onSave, onCancel }) {
           <Option value="quic">QUIC</Option>
         </Select>
       </Form.Item>
-      <Form.Item label="Security" name="security">
+      <Form.Item label={withHint('Security', '安全层类型')} name="security">
         <Select>
           <Option value="none">None</Option>
           <Option value="tls">TLS</Option>
           <Option value="reality">Reality</Option>
         </Select>
       </Form.Item>
-      <Form.Item label="SNI" name="sni">
+      <Form.Item label={withHint('SNI', 'TLS 服务器名称')} name="sni">
         <Input />
       </Form.Item>
-      <Form.Item label="ALPN" name="alpn">
+      <Form.Item label={withHint('ALPN', 'TLS 协议协商列表')} name="alpn">
         <Input placeholder="e.g., h2, http/1.1" />
       </Form.Item>
-      <Form.Item label="Fingerprint" name="fingerprint">
+      <Form.Item label={withHint('Fingerprint', '客户端指纹')} name="fingerprint">
         <Input placeholder="e.g., chrome, firefox, safari" />
       </Form.Item>
-      <Form.Item label="Public Key (Reality)" name="public_key">
+      <Form.Item label={withHint('Public Key (Reality)', 'Reality 公钥')} name="public_key">
         <Input />
       </Form.Item>
-      <Form.Item label="Short ID (Reality)" name="short_id">
+      <Form.Item label={withHint('Short ID (Reality)', 'Reality 短 ID')} name="short_id">
         <Input />
       </Form.Item>
-      <Form.Item label="Path (WS)" name="path">
+      <Form.Item label={withHint('Path (WS)', 'WebSocket 路径')} name="path">
         <Input placeholder="e.g., /path" />
       </Form.Item>
-      <Form.Item label="Service Name (gRPC)" name="service_name">
+      <Form.Item label={withHint('Service Name (gRPC)', 'gRPC 服务名')} name="service_name">
         <Input />
       </Form.Item>
     </>
@@ -312,16 +329,16 @@ function NodeForm({ node, onSave, onCancel }) {
   const renderVMESSFields = () => (
     <>
       <Form.Item
-        label="UUID"
+        label={withHint('UUID', '节点唯一标识')}
         name="uuid"
         rules={[{ required: true, message: 'Required' }]}
       >
         <Input />
       </Form.Item>
-      <Form.Item label="Alter ID" name="alter_id">
+      <Form.Item label={withHint('Alter ID', '额外 ID')} name="alter_id">
         <InputNumber min={0} max={65535} style={{ width: '100%' }} />
       </Form.Item>
-      <Form.Item label="Security" name="vmess_security">
+      <Form.Item label={withHint('Security', '加密策略')} name="vmess_security">
         <Select>
           <Option value="auto">Auto</Option>
           <Option value="aes-128-gcm">aes-128-gcm</Option>
@@ -329,29 +346,29 @@ function NodeForm({ node, onSave, onCancel }) {
           <Option value="none">None</Option>
         </Select>
       </Form.Item>
-      <Form.Item label="Network" name="network">
+      <Form.Item label={withHint('Network', '传输层协议')} name="network">
         <Select>
           <Option value="tcp">TCP</Option>
           <Option value="ws">WebSocket</Option>
           <Option value="grpc">gRPC</Option>
         </Select>
       </Form.Item>
-      <Form.Item label="TLS" name="tls">
+      <Form.Item label={withHint('TLS', '传输安全层')} name="tls">
         <Select>
           <Option value="none">None</Option>
           <Option value="tls">TLS</Option>
         </Select>
       </Form.Item>
-      <Form.Item label="SNI" name="sni">
+      <Form.Item label={withHint('SNI', 'TLS 服务器名称')} name="sni">
         <Input />
       </Form.Item>
-      <Form.Item label="ALPN" name="alpn">
+      <Form.Item label={withHint('ALPN', 'TLS 协议协商列表')} name="alpn">
         <Input placeholder="e.g., h2, http/1.1" />
       </Form.Item>
-      <Form.Item label="Path (WS)" name="path">
+      <Form.Item label={withHint('Path (WS)', 'WebSocket 路径')} name="path">
         <Input placeholder="e.g., /path" />
       </Form.Item>
-      <Form.Item label="Service Name (gRPC)" name="service_name">
+      <Form.Item label={withHint('Service Name (gRPC)', 'gRPC 服务名')} name="service_name">
         <Input />
       </Form.Item>
     </>
@@ -360,34 +377,34 @@ function NodeForm({ node, onSave, onCancel }) {
   const renderHy2Fields = () => (
     <>
       <Form.Item
-        label="Password"
+        label={withHint('Password', '协议密码')}
         name="hy2_password"
         rules={[{ required: true, message: 'Required' }]}
       >
         <Input.Password />
       </Form.Item>
-      <Form.Item label="Upload Speed (Mbps)" name="up_mbps">
+      <Form.Item label={withHint('Upload Speed (Mbps)', '上行带宽限制')} name="up_mbps">
         <InputNumber min={0} style={{ width: '100%' }} />
       </Form.Item>
-      <Form.Item label="Download Speed (Mbps)" name="down_mbps">
+      <Form.Item label={withHint('Download Speed (Mbps)', '下行带宽限制')} name="down_mbps">
         <InputNumber min={0} style={{ width: '100%' }} />
       </Form.Item>
-      <Form.Item label="Obfuscation" name="obfs">
+      <Form.Item label={withHint('Obfuscation', '混淆方式')} name="obfs">
         <Input placeholder="e.g., salamander" />
       </Form.Item>
-      <Form.Item label="Obfs Password" name="obfs_password">
+      <Form.Item label={withHint('Obfs Password', '混淆密码')} name="obfs_password">
         <Input.Password />
       </Form.Item>
-      <Form.Item label="SNI" name="sni">
+      <Form.Item label={withHint('SNI', 'TLS 服务器名称')} name="sni">
         <Input />
       </Form.Item>
-      <Form.Item label="ALPN (comma-separated)" name="alpn">
+      <Form.Item label={withHint('ALPN (comma-separated)', 'ALPN 列表，英文逗号分隔')} name="alpn">
         <Input placeholder="e.g., h3" />
       </Form.Item>
-      <Form.Item label="Fingerprint" name="fingerprint">
+      <Form.Item label={withHint('Fingerprint', '客户端指纹')} name="fingerprint">
         <Input />
       </Form.Item>
-      <Form.Item name="insecure_skip_verify" valuePropName="checked">
+      <Form.Item label={withHint('TLS Verify', '证书校验开关')} name="insecure_skip_verify" valuePropName="checked">
         <Switch checkedChildren="Skip Verify" unCheckedChildren="Verify" />
       </Form.Item>
     </>
@@ -396,45 +413,45 @@ function NodeForm({ node, onSave, onCancel }) {
   const renderTUICFields = () => (
     <>
       <Form.Item
-        label="UUID"
+        label={withHint('UUID', '节点唯一标识')}
         name="uuid"
         rules={[{ required: true, message: 'Required' }]}
       >
         <Input />
       </Form.Item>
       <Form.Item
-        label="Password"
+        label={withHint('Password', '协议密码')}
         name="tuic_password"
         rules={[{ required: true, message: 'Required' }]}
       >
         <Input.Password />
       </Form.Item>
-      <Form.Item label="Congestion Control" name="congestion_control">
+      <Form.Item label={withHint('Congestion Control', '拥塞控制算法')} name="congestion_control">
         <Select>
           <Option value="cubic">Cubic</Option>
           <Option value="new_reno">New Reno</Option>
           <Option value="bbr">BBR</Option>
         </Select>
       </Form.Item>
-      <Form.Item label="UDP Relay Mode" name="udp_relay_mode">
+      <Form.Item label={withHint('UDP Relay Mode', 'UDP 转发模式')} name="udp_relay_mode">
         <Select>
           <Option value="native">Native</Option>
           <Option value="quic">QUIC</Option>
         </Select>
       </Form.Item>
-      <Form.Item label="SNI" name="sni">
+      <Form.Item label={withHint('SNI', 'TLS 服务器名称')} name="sni">
         <Input />
       </Form.Item>
-      <Form.Item label="ALPN (comma-separated)" name="alpn">
+      <Form.Item label={withHint('ALPN (comma-separated)', 'ALPN 列表，英文逗号分隔')} name="alpn">
         <Input placeholder="e.g., h3" />
       </Form.Item>
-      <Form.Item label="Fingerprint" name="fingerprint">
+      <Form.Item label={withHint('Fingerprint', '客户端指纹')} name="fingerprint">
         <Input />
       </Form.Item>
-      <Form.Item name="insecure_skip_verify" valuePropName="checked">
+      <Form.Item label={withHint('TLS Verify', '证书校验开关')} name="insecure_skip_verify" valuePropName="checked">
         <Switch checkedChildren="Skip Verify" unCheckedChildren="Verify" />
       </Form.Item>
-      <Form.Item name="zero_rtt_handshake" valuePropName="checked">
+      <Form.Item label={withHint('0-RTT Handshake', '是否启用 0-RTT')} name="zero_rtt_handshake" valuePropName="checked">
         <Switch checkedChildren="0-RTT" unCheckedChildren="Normal" />
       </Form.Item>
     </>
@@ -443,19 +460,19 @@ function NodeForm({ node, onSave, onCancel }) {
   const renderAnyTLSFields = () => (
     <>
       <Form.Item
-        label="Password"
+        label={withHint('Password', '协议密码')}
         name="anytls_password"
         rules={[{ required: true, message: 'Required' }]}
       >
         <Input.Password />
       </Form.Item>
-      <Form.Item label="SNI" name="sni">
+      <Form.Item label={withHint('SNI', 'TLS 服务器名称')} name="sni">
         <Input placeholder="example.com" />
       </Form.Item>
-      <Form.Item label="ALPN (comma-separated)" name="alpn">
+      <Form.Item label={withHint('ALPN (comma-separated)', 'ALPN 列表，英文逗号分隔')} name="alpn">
         <Input placeholder="h2,http/1.1" />
       </Form.Item>
-      <Form.Item label="Fingerprint" name="fingerprint">
+      <Form.Item label={withHint('Fingerprint', '客户端指纹')} name="fingerprint">
         <Select allowClear>
           <Option value="chrome">Chrome</Option>
           <Option value="firefox">Firefox</Option>
@@ -464,16 +481,16 @@ function NodeForm({ node, onSave, onCancel }) {
           <Option value="random">Random</Option>
         </Select>
       </Form.Item>
-      <Form.Item name="insecure" valuePropName="checked">
+      <Form.Item label={withHint('TLS Verify', '证书校验开关')} name="insecure" valuePropName="checked">
         <Switch checkedChildren="Skip Verify" unCheckedChildren="Verify" />
       </Form.Item>
-      <Form.Item label="Idle Check Interval" name="idle_session_check_interval">
+      <Form.Item label={withHint('Idle Check Interval', '空闲会话检查间隔')} name="idle_session_check_interval">
         <Input placeholder="30s" />
       </Form.Item>
-      <Form.Item label="Idle Timeout" name="idle_session_timeout">
+      <Form.Item label={withHint('Idle Timeout', '空闲会话超时')} name="idle_session_timeout">
         <Input placeholder="10m" />
       </Form.Item>
-      <Form.Item label="Min Idle Sessions" name="min_idle_session">
+      <Form.Item label={withHint('Min Idle Sessions', '最小空闲会话数')} name="min_idle_session">
         <InputNumber min={0} style={{ width: '100%' }} />
       </Form.Item>
     </>
@@ -482,13 +499,13 @@ function NodeForm({ node, onSave, onCancel }) {
   const renderTrojanFields = () => (
     <>
       <Form.Item
-        label="Password"
+        label={withHint('Password', '协议密码')}
         name="trojan_password"
         rules={[{ required: true, message: 'Required' }]}
       >
         <Input.Password />
       </Form.Item>
-      <Form.Item label="Network" name="network">
+      <Form.Item label={withHint('Network', '传输层协议')} name="network">
         <Select>
           <Option value="tcp">TCP</Option>
           <Option value="ws">WebSocket</Option>
@@ -497,28 +514,28 @@ function NodeForm({ node, onSave, onCancel }) {
           <Option value="httpupgrade">HTTPUpgrade</Option>
         </Select>
       </Form.Item>
-      <Form.Item label="SNI" name="sni">
+      <Form.Item label={withHint('SNI', 'TLS 服务器名称')} name="sni">
         <Input />
       </Form.Item>
-      <Form.Item label="ALPN (comma-separated)" name="alpn">
+      <Form.Item label={withHint('ALPN (comma-separated)', 'ALPN 列表，英文逗号分隔')} name="alpn">
         <Input placeholder="e.g., h2, http/1.1" />
       </Form.Item>
-      <Form.Item label="Fingerprint" name="fingerprint">
+      <Form.Item label={withHint('Fingerprint', '客户端指纹')} name="fingerprint">
         <Input placeholder="e.g., chrome, firefox" />
       </Form.Item>
-      <Form.Item label="Host Header" name="host">
+      <Form.Item label={withHint('Host Header', 'HTTP Host 头')} name="host">
         <Input placeholder="e.g., example.com" />
       </Form.Item>
-      <Form.Item label="Path" name="path">
+      <Form.Item label={withHint('Path', '请求路径')} name="path">
         <Input placeholder="e.g., /ws" />
       </Form.Item>
-      <Form.Item label="HTTP Method (for http/h2)" name="http_method">
+      <Form.Item label={withHint('HTTP Method (for http/h2)', 'HTTP 请求方法')} name="http_method">
         <Input placeholder="e.g., GET" />
       </Form.Item>
-      <Form.Item label="Service Name (gRPC)" name="service_name">
+      <Form.Item label={withHint('Service Name (gRPC)', 'gRPC 服务名')} name="service_name">
         <Input />
       </Form.Item>
-      <Form.Item name="insecure" valuePropName="checked">
+      <Form.Item label={withHint('TLS Verify', '证书校验开关')} name="insecure" valuePropName="checked">
         <Switch checkedChildren="Skip Verify" unCheckedChildren="Verify" />
       </Form.Item>
     </>
@@ -526,10 +543,10 @@ function NodeForm({ node, onSave, onCancel }) {
 
   const renderSOCKS5Fields = () => (
     <>
-      <Form.Item label="Proxy Username" name="proxy_username">
+      <Form.Item label={withHint('Proxy Username', '出站用户名')} name="proxy_username">
         <Input />
       </Form.Item>
-      <Form.Item label="Proxy Password" name="proxy_password">
+      <Form.Item label={withHint('Proxy Password', '出站密码')} name="proxy_password">
         <Input.Password />
       </Form.Item>
     </>
@@ -537,19 +554,19 @@ function NodeForm({ node, onSave, onCancel }) {
 
   const renderHTTPProxyFields = () => (
     <>
-      <Form.Item label="Proxy Username" name="proxy_username">
+      <Form.Item label={withHint('Proxy Username', '出站用户名')} name="proxy_username">
         <Input />
       </Form.Item>
-      <Form.Item label="Proxy Password" name="proxy_password">
+      <Form.Item label={withHint('Proxy Password', '出站密码')} name="proxy_password">
         <Input.Password />
       </Form.Item>
-      <Form.Item name="proxy_tls" valuePropName="checked">
+      <Form.Item label={withHint('Transport Type', 'HTTP/HTTPS 开关')} name="proxy_tls" valuePropName="checked">
         <Switch checkedChildren="HTTPS" unCheckedChildren="HTTP" />
       </Form.Item>
-      <Form.Item label="SNI (for HTTPS)" name="proxy_sni">
+      <Form.Item label={withHint('SNI (for HTTPS)', 'HTTPS 的 SNI')} name="proxy_sni">
         <Input placeholder="example.com" />
       </Form.Item>
-      <Form.Item name="proxy_insecure" valuePropName="checked">
+      <Form.Item label={withHint('TLS Verify', '证书校验开关')} name="proxy_insecure" valuePropName="checked">
         <Switch checkedChildren="Skip Verify" unCheckedChildren="Verify" />
       </Form.Item>
     </>
@@ -590,14 +607,14 @@ function NodeForm({ node, onSave, onCancel }) {
       onFinish={handleSubmit}
     >
       <Form.Item
-        label="Node Name"
+        label={withHint('Node Name', '节点名称')}
         name="name"
         rules={[{ required: true, message: 'Please enter node name' }]}
       >
         <Input />
       </Form.Item>
 
-      <Form.Item label="Proxy Type" required>
+      <Form.Item label={withHint('Proxy Type', '代理协议类型')} required>
         <Select value={proxyType} onChange={setProxyType}>
           {proxyTypes.map((type) => (
             <Option key={type.value} value={type.value}>
@@ -608,7 +625,7 @@ function NodeForm({ node, onSave, onCancel }) {
       </Form.Item>
 
       <Form.Item
-        label="Server Address"
+        label={withHint('Server Address', '远端服务器地址')}
         name="server"
         rules={proxyType === 'direct' ? [] : [{ required: true, message: 'Required' }]}
         hidden={proxyType === 'direct'}
@@ -617,7 +634,7 @@ function NodeForm({ node, onSave, onCancel }) {
       </Form.Item>
 
       <Form.Item
-        label="Server Port"
+        label={withHint('Server Port', '远端服务器端口')}
         name="server_port"
         rules={proxyType === 'direct' ? [] : [{ required: true, message: 'Required' }]}
         hidden={proxyType === 'direct'}
@@ -626,27 +643,27 @@ function NodeForm({ node, onSave, onCancel }) {
       </Form.Item>
 
       <Form.Item
-        label="Inbound Port"
+        label={withHint('Inbound Port', '本地监听端口')}
         name="inbound_port"
-        extra="Leave as 0 for auto-assignment based on node order"
+        extra={withExtraHint('Leave as 0 for auto-assignment based on node order', '填 0 按节点顺序自动分配')}
       >
         <InputNumber min={0} max={65535} style={{ width: '100%' }} placeholder="0 (auto)" />
       </Form.Item>
 
       {renderConfigFields()}
 
-      <Form.Item label="Inbound Authentication (Optional)">
+      <Form.Item label={withHint('Inbound Authentication (Optional)', '入站认证（可选）')}>
         <Space.Compact style={{ width: '100%' }}>
           <Form.Item name="username" noStyle>
-            <Input placeholder="Username" style={{ width: '50%' }} />
+            <Input placeholder={withHint('Username', '用户名')} style={{ width: '50%' }} />
           </Form.Item>
           <Form.Item name="password" noStyle>
-            <Input.Password placeholder="Password" style={{ width: '50%' }} />
+            <Input.Password placeholder={withHint('Password', '密码')} style={{ width: '50%' }} />
           </Form.Item>
         </Space.Compact>
       </Form.Item>
 
-      <Form.Item name="enabled" valuePropName="checked">
+      <Form.Item label={withHint('Node Status', '节点启用状态')} name="enabled" valuePropName="checked">
         <Switch checkedChildren="Enabled" unCheckedChildren="Disabled" />
       </Form.Item>
 

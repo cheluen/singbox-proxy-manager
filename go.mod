@@ -6,6 +6,7 @@ toolchain go1.24.12
 
 require (
 	github.com/gin-gonic/gin v1.9.1
+	github.com/joho/godotenv v1.5.1
 	github.com/tursodatabase/libsql-client-go v0.0.0-20251219100830-236aa1ff8acc
 	golang.org/x/crypto v0.36.0
 	golang.org/x/net v0.38.0

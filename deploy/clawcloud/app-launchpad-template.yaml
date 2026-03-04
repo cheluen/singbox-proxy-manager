@@ -29,6 +29,16 @@ spec:
       type: string
       default: ''
       required: true
+    singbox_binary:
+      description: '可选：sing-box 可执行文件路径（通常保持空）'
+      type: string
+      default: ''
+      required: false
+    tz:
+      description: '服务时区（默认 UTC+8，推荐 Asia/Shanghai 或 UTC+8）'
+      type: string
+      default: 'UTC+8'
+      required: false
     cors_allowed_origins:
       description: '可选：允许跨域来源（逗号分隔）'
       type: string
@@ -135,8 +145,12 @@ spec:
               value: '30000'
             - name: CONFIG_DIR
               value: /app/config
+            - name: TZ
+              value: ${{ inputs.tz }}
             - name: ADMIN_PASSWORD
               value: ${{ inputs.admin_password }}
+            - name: SINGBOX_BINARY
+              value: ${{ inputs.singbox_binary }}
             - name: CORS_ALLOWED_ORIGINS
               value: ${{ inputs.cors_allowed_origins }}
             - name: LOGIN_RATE_LIMIT_WINDOW_SECONDS

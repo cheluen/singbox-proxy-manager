@@ -7,10 +7,11 @@ on:
     branches: [main]
 
 env:
+  GO_VERSION: "1.24.x"
+  NODE_VERSION: "18"
   SINGBOX_VERSION: "1.12.12"
 
 jobs:
-  # Go代码lint检查
   lint-backend:
     runs-on: ubuntu-latest
     steps:
@@ -19,16 +20,15 @@ jobs:
       - name: Set up Go
         uses: actions/setup-go@v5
         with:
-          go-version: '1.24.x'
+          go-version: ${{ env.GO_VERSION }}
 
-      - name: golangci-lint
+      - name: Run golangci-lint
         uses: golangci/golangci-lint-action@v8
         with:
           version: v2.8.0
           working-directory: ./
           args: ./backend/...
 
-  # 前端ESLint检查
   lint-frontend:
     runs-on: ubuntu-latest
     steps:
@@ -37,11 +37,11 @@ jobs:
       - name: Set up Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: '18'
-          cache: 'npm'
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
           cache-dependency-path: frontend/package-lock.json
 
-      - name: Install dependencies
+      - name: Install frontend dependencies
         run: npm ci
         working-directory: frontend
 
@@ -49,7 +49,6 @@ jobs:
         run: npm run lint
         working-directory: frontend
 
-  # 后端Go编译测试
   test-backend:
     runs-on: ubuntu-latest
     steps:
@@ -58,19 +57,18 @@ jobs:
       - name: Set up Go
         uses: actions/setup-go@v5
         with:
-          go-version: '1.24.x'
+          go-version: ${{ env.GO_VERSION }}
 
       - name: Download dependencies
         run: go mod download
 
-      - name: Build
-        run: CGO_ENABLED=0 go build -o main ./backend
+      - name: Build backend
+        run: CGO_ENABLED=0 go build -o singbox-proxy-manager ./backend
 
-      - name: Test
+      - name: Run backend tests
         run: go test ./backend/... -v
 
-  # 前端构建测试
-  test-frontend:
+  test-frontend-build:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -78,19 +76,18 @@ jobs:
       - name: Set up Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: '18'
-          cache: 'npm'
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
           cache-dependency-path: frontend/package-lock.json
 
-      - name: Install dependencies
+      - name: Install frontend dependencies
         run: npm ci
         working-directory: frontend
 
-      - name: Build
+      - name: Build frontend
         run: npm run build
         working-directory: frontend
 
-  # 前端拖拽排序回归（自动化端到端）
   test-frontend-e2e-dnd:
     runs-on: ubuntu-latest
     timeout-minutes: 15
@@ -100,11 +97,11 @@ jobs:
       - name: Set up Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: '18'
-          cache: 'npm'
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
           cache-dependency-path: frontend/package-lock.json
 
-      - name: Install dependencies
+      - name: Install frontend dependencies
         run: npm ci
         working-directory: frontend
 
@@ -127,7 +124,6 @@ jobs:
         run: npm run test:e2e:dnd
         working-directory: frontend
 
-  # 前端版本刷新回归（自动化端到端）
   test-frontend-e2e-version-refresh:
     runs-on: ubuntu-latest
     timeout-minutes: 15
@@ -137,11 +133,11 @@ jobs:
       - name: Set up Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: '18'
-          cache: 'npm'
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
           cache-dependency-path: frontend/package-lock.json
 
-      - name: Install dependencies
+      - name: Install frontend dependencies
         run: npm ci
         working-directory: frontend
 
@@ -164,7 +160,6 @@ jobs:
         run: npm run test:e2e:version-refresh
         working-directory: frontend
 
-  # 前端备注回归（自动化端到端）
   test-frontend-e2e-remark:
     runs-on: ubuntu-latest
     timeout-minutes: 15
@@ -174,11 +169,11 @@ jobs:
       - name: Set up Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: '18'
-          cache: 'npm'
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
           cache-dependency-path: frontend/package-lock.json
 
-      - name: Install dependencies
+      - name: Install frontend dependencies
         run: npm ci
         working-directory: frontend
 
@@ -201,10 +196,242 @@ jobs:
         run: npm run test:e2e:remark
         working-directory: frontend
 
-  # 构建并推送Docker镜像
-  build-docker:
+  test-system-local-deploy:
     runs-on: ubuntu-latest
-    needs: [test-backend, test-frontend, test-frontend-e2e-dnd, test-frontend-e2e-version-refresh, test-frontend-e2e-remark]
+    needs:
+      - lint-backend
+      - lint-frontend
+      - test-backend
+      - test-frontend-build
+      - test-frontend-e2e-dnd
+      - test-frontend-e2e-version-refresh
+      - test-frontend-e2e-remark
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Prepare .env for system test
+        run: |
+          cp .env.example .env
+          cat <<'EOT' >> .env
+          COMPOSE_PROFILES=local
+          PORT=38080
+          ADMIN_PASSWORD=system-test-password
+          CONFIG_VOLUME_HOST=./config-ci
+          TZ=UTC+8
+          EOT
+          mkdir -p config-ci
+
+      - name: Start stack with local build
+        run: docker compose --profile local up -d --build
+
+      - name: Wait for API readiness
+        run: |
+          for i in $(seq 1 60); do
+            if curl -fsS http://127.0.0.1:38080/api/version >/dev/null; then
+              exit 0
+            fi
+            sleep 2
+          done
+          echo "Service is not ready in time" >&2
+          docker compose logs
+          exit 1
+
+      - name: Validate login + protected API
+        run: |
+          curl -fsS http://127.0.0.1:38080/api/auth/status | tee /tmp/auth-status.json
+          TOKEN=$(curl -fsS -X POST http://127.0.0.1:38080/api/login \
+            -H 'Content-Type: application/json' \
+            -d '{"password":"system-test-password"}' | jq -r '.token')
+          test -n "$TOKEN" && test "$TOKEN" != "null"
+          curl -fsS -H "Authorization: Bearer $TOKEN" http://127.0.0.1:38080/api/settings >/tmp/settings.json
+
+      - name: Stop stack
+        if: always()
+        run: docker compose --profile local down -v
+
+  test-release-image-build:
+    runs-on: ubuntu-latest
+    needs: [test-system-local-deploy]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Install frontend dependencies
+        run: npm ci
+        working-directory: frontend
+
+      - name: Build frontend dist for embedded binary
+        run: npm run build
+        working-directory: frontend
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+
+      - name: Build linux release binaries for image test
+        run: |
+          mkdir -p release-binaries
+          for GOARCH in amd64 arm64; do
+            GOOS=linux GOARCH="${GOARCH}" CGO_ENABLED=0 \
+              go build -tags frontend_dist -trimpath -ldflags="-s -w" \
+              -o "release-binaries/singbox-proxy-manager-linux-${GOARCH}" ./backend
+          done
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Validate Dockerfile.release multi-arch build
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: Dockerfile.release
+          push: false
+          platforms: linux/amd64,linux/arm64
+          build-args: |
+            SINGBOX_VERSION=${{ env.SINGBOX_VERSION }}
+
+  build-frontend-dist:
+    runs-on: ubuntu-latest
+    needs: [test-release-image-build]
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Install frontend dependencies
+        run: npm ci
+        working-directory: frontend
+
+      - name: Build frontend dist
+        run: npm run build
+        working-directory: frontend
+
+      - name: Upload frontend dist artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: frontend-dist
+          path: frontend/dist
+          retention-days: 1
+
+  build-binaries:
+    runs-on: ubuntu-latest
+    needs: [build-frontend-dist]
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - goos: linux
+            goarch: amd64
+          - goos: linux
+            goarch: arm64
+          - goos: freebsd
+            goarch: amd64
+          - goos: freebsd
+            goarch: arm64
+          - goos: darwin
+            goarch: amd64
+          - goos: darwin
+            goarch: arm64
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+
+      - name: Download frontend dist artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: frontend-dist
+          path: frontend/dist
+
+      - name: Download dependencies
+        run: go mod download
+
+      - name: Build binary
+        run: |
+          mkdir -p release-binaries
+          GOOS=${{ matrix.goos }} GOARCH=${{ matrix.goarch }} CGO_ENABLED=0 \
+            go build -tags frontend_dist -trimpath -ldflags="-s -w" \
+            -o "release-binaries/singbox-proxy-manager-${{ matrix.goos }}-${{ matrix.goarch }}" ./backend
+
+      - name: Upload binary artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: singbox-proxy-manager-${{ matrix.goos }}-${{ matrix.goarch }}
+          path: release-binaries/singbox-proxy-manager-${{ matrix.goos }}-${{ matrix.goarch }}
+          retention-days: 30
+
+  create-release:
+    runs-on: ubuntu-latest
+    needs: [build-binaries]
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    permissions:
+      contents: write
+    outputs:
+      app_version: ${{ steps.app_version.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Read app version
+        id: app_version
+        run: echo "version=$(cat internal/version/version.txt)" >> "$GITHUB_OUTPUT"
+
+      - name: Download all binary artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: singbox-proxy-manager-*
+          path: release-binaries
+          merge-multiple: true
+
+      - name: Prepare checksums
+        run: |
+          chmod +x release-binaries/singbox-proxy-manager-* || true
+          (cd release-binaries && sha256sum singbox-proxy-manager-* > checksums.txt)
+
+      - name: Create or update release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v${{ steps.app_version.outputs.version }}
+          name: v${{ steps.app_version.outputs.version }}
+          body: |
+            ## 自动构建产物
+
+            ### 二进制
+            - Linux: amd64 / arm64
+            - FreeBSD: amd64 / arm64
+            - macOS: amd64 / arm64
+
+            ### 镜像
+            GHCR 多架构镜像在后续作业自动发布（linux/amd64 + linux/arm64），并复用本次 Release 的 Linux 二进制。
+          files: |
+            release-binaries/singbox-proxy-manager-*
+            release-binaries/checksums.txt
+          fail_on_unmatched_files: true
+          draft: false
+          prerelease: false
+
+  build-ghcr:
+    runs-on: ubuntu-latest
+    needs: [create-release]
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     permissions:
       contents: read
@@ -212,9 +439,20 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Read app version
-        id: app_version
-        run: echo "version=$(cat internal/version/version.txt)" >> $GITHUB_OUTPUT
+      - name: Download linux binaries from release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          APP_VERSION: ${{ needs.create-release.outputs.app_version }}
+        run: |
+          mkdir -p release-binaries
+          gh release download "v${APP_VERSION}" \
+            --repo "${GITHUB_REPOSITORY}" \
+            --pattern "singbox-proxy-manager-linux-*" \
+            --dir release-binaries
+          chmod +x release-binaries/singbox-proxy-manager-linux-*
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
@@ -226,240 +464,24 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Build and push
-        uses: docker/build-push-action@v5
+      - name: Build and push multi-arch image
+        uses: docker/build-push-action@v6
         with:
           context: .
+          file: Dockerfile.release
+          push: true
+          platforms: linux/amd64,linux/arm64
           build-args: |
             SINGBOX_VERSION=${{ env.SINGBOX_VERSION }}
-          push: true
           tags: |
             ghcr.io/${{ github.repository }}:${{ github.sha }}
-            ghcr.io/${{ github.repository }}:v${{ steps.app_version.outputs.version }}
+            ghcr.io/${{ github.repository }}:v${{ needs.create-release.outputs.app_version }}
+            ghcr.io/${{ github.repository }}:v${{ needs.create-release.outputs.app_version }}-linux-amd64-arm64
             ghcr.io/${{ github.repository }}:latest
+          labels: |
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+            org.opencontainers.image.version=v${{ needs.create-release.outputs.app_version }}
+            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.description=SingBox Proxy Manager multi-arch image (linux/amd64, linux/arm64)
           cache-from: type=gha
           cache-to: type=gha,mode=max
-
-  # 构建前端dist
-  build-frontend-dist:
-    runs-on: ubuntu-latest
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Set up Node.js
-        uses: actions/setup-node@v4
-        with:
-          node-version: '18'
-          cache: 'npm'
-          cache-dependency-path: frontend/package-lock.json
-
-      - name: Install dependencies
-        run: npm ci
-        working-directory: frontend
-
-      - name: Build
-        run: npm run build
-        working-directory: frontend
-
-      - name: Upload frontend dist
-        uses: actions/upload-artifact@v4
-        with:
-          name: frontend-dist
-          path: frontend/dist/
-          retention-days: 1
-
-  # 构建Linux完整发布包
-  build-linux:
-    runs-on: ubuntu-latest
-    needs: [build-frontend-dist]
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Set up Go
-        uses: actions/setup-go@v5
-        with:
-          go-version: '1.24.x'
-
-      - name: Download frontend dist
-        uses: actions/download-artifact@v4
-        with:
-          name: frontend-dist
-          path: frontend/dist/
-
-      - name: Download dependencies
-        run: go mod download
-
-      - name: Build backend
-        run: GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build -o main ./backend
-
-      - name: Download sing-box
-        run: |
-          ASSET="sing-box-${{ env.SINGBOX_VERSION }}-linux-amd64.tar.gz"
-          curl -fLo "$ASSET" "https://github.com/SagerNet/sing-box/releases/download/v${{ env.SINGBOX_VERSION }}/$ASSET"
-          GH_API_URL="https://api.github.com/repos/SagerNet/sing-box/releases/tags/v${{ env.SINGBOX_VERSION }}"
-          GH_BODY="$(mktemp)"
-          GH_HEADERS="$(mktemp)"
-          GH_STATUS="$(curl -sS -D "$GH_HEADERS" -o "$GH_BODY" -w "%{http_code}" "$GH_API_URL" || true)"
-          if [ "$GH_STATUS" != "200" ]; then
-            echo "::error::failed to fetch sing-box release metadata from GitHub API (api.github.com). URL=$GH_API_URL status=$GH_STATUS"
-            echo "Hint: build environment may block api.github.com or GitHub API rate limit was hit."
-            echo "GitHub rate limit headers:"
-            grep -i '^x-ratelimit' "$GH_HEADERS" || true
-            echo "Response body (first 2000 bytes):"
-            head -c 2000 "$GH_BODY" || true
-            exit 1
-          fi
-          DIGEST="$(jq -r --arg asset "$ASSET" '.assets[] | select(.name==$asset) | .digest' "$GH_BODY")"
-          rm -f "$GH_BODY" "$GH_HEADERS"
-          if [ -z "$DIGEST" ] || [ "$DIGEST" = "null" ]; then
-            echo "::error::failed to find digest for asset '$ASSET' in GitHub release metadata."
-            exit 1
-          fi
-          echo "${DIGEST#sha256:}  $ASSET" | sha256sum -c -
-          tar xzf "$ASSET"
-          mv sing-box-*/sing-box .
-
-      - name: Create release package
-        run: |
-          mkdir -p singbox-proxy-manager-linux-amd64/frontend
-          mv main singbox-proxy-manager-linux-amd64/
-          mv sing-box singbox-proxy-manager-linux-amd64/
-          cp -r frontend/dist singbox-proxy-manager-linux-amd64/frontend/
-          mkdir -p singbox-proxy-manager-linux-amd64/config
-          cat > singbox-proxy-manager-linux-amd64/start.sh << 'EOF'
-          #!/bin/sh
-          cd "$(dirname "$0")"
-          export PATH="$PWD:$PATH"
-          export CONFIG_DIR="$PWD/config"
-          export PORT="${PORT:-30000}"
-          ./main
-          EOF
-          chmod +x singbox-proxy-manager-linux-amd64/start.sh
-          tar czf singbox-proxy-manager-linux-amd64.tar.gz singbox-proxy-manager-linux-amd64/
-
-      - name: Upload artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: singbox-proxy-manager-linux-amd64
-          path: singbox-proxy-manager-linux-amd64.tar.gz
-          retention-days: 30
-
-  # 构建FreeBSD完整发布包
-  build-freebsd:
-    runs-on: ubuntu-latest
-    needs: [build-frontend-dist]
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Set up Go
-        uses: actions/setup-go@v5
-        with:
-          go-version: '1.24.x'
-
-      - name: Download frontend dist
-        uses: actions/download-artifact@v4
-        with:
-          name: frontend-dist
-          path: frontend/dist/
-
-      - name: Download dependencies
-        run: go mod download
-
-      - name: Build backend for FreeBSD
-        run: GOOS=freebsd GOARCH=amd64 CGO_ENABLED=0 go build -o main ./backend
-
-      - name: Build sing-box for FreeBSD
-        run: |
-          git clone --depth 1 --branch v${{ env.SINGBOX_VERSION }} https://github.com/SagerNet/sing-box.git
-          cd sing-box && GOOS=freebsd GOARCH=amd64 CGO_ENABLED=0 go build -o ../sing-box ./cmd/sing-box
-
-      - name: Create release package
-        run: |
-          mkdir -p singbox-proxy-manager-freebsd-amd64/frontend
-          mv main singbox-proxy-manager-freebsd-amd64/
-          mv sing-box singbox-proxy-manager-freebsd-amd64/
-          cp -r frontend/dist singbox-proxy-manager-freebsd-amd64/frontend/
-          mkdir -p singbox-proxy-manager-freebsd-amd64/config
-          cat > singbox-proxy-manager-freebsd-amd64/start.sh << 'EOF'
-          #!/bin/sh
-          cd "$(dirname "$0")"
-          export PATH="$PWD:$PATH"
-          export CONFIG_DIR="$PWD/config"
-          export PORT="${PORT:-30000}"
-          ./main
-          EOF
-          chmod +x singbox-proxy-manager-freebsd-amd64/start.sh
-          tar czf singbox-proxy-manager-freebsd-amd64.tar.gz singbox-proxy-manager-freebsd-amd64/
-
-      - name: Upload artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: singbox-proxy-manager-freebsd-amd64
-          path: singbox-proxy-manager-freebsd-amd64.tar.gz
-          retention-days: 30
-
-  # 自动发布到Releases
-  auto-release:
-    runs-on: ubuntu-latest
-    needs: [build-linux, build-freebsd, build-docker]
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
-    permissions:
-      contents: write
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Download Linux artifact
-        uses: actions/download-artifact@v4
-        with:
-          name: singbox-proxy-manager-linux-amd64
-          path: ./
-
-      - name: Download FreeBSD artifact
-        uses: actions/download-artifact@v4
-        with:
-          name: singbox-proxy-manager-freebsd-amd64
-          path: ./
-
-      - name: Read app version
-        id: app_version
-        run: echo "version=$(cat internal/version/version.txt)" >> $GITHUB_OUTPUT
-
-      - name: Generate version tag
-        id: version
-        run: echo "tag=v${{ steps.app_version.outputs.version }}" >> $GITHUB_OUTPUT
-
-      - name: Create Release
-        uses: softprops/action-gh-release@v2
-        with:
-          tag_name: ${{ steps.version.outputs.tag }}
-          name: "Auto Release ${{ steps.version.outputs.tag }}"
-          body: |
-            ## 自动构建版本 ${{ steps.version.outputs.tag }}
-
-            Commit: ${{ github.sha }}
-
-            ### 完整发布包（开箱即用）
-
-            包含：后端程序 + 前端文件 + sing-box + 启动脚本
-
-            | 平台 | 下载 |
-            |------|------|
-            | Linux (amd64) | singbox-proxy-manager-linux-amd64.tar.gz |
-            | FreeBSD (amd64) | singbox-proxy-manager-freebsd-amd64.tar.gz |
-            | Docker | `docker pull ghcr.io/${{ github.repository }}:latest` |
-
-            ### 使用方法
-            ```bash
-            tar xzf singbox-proxy-manager-linux-amd64.tar.gz
-            cd singbox-proxy-manager-linux-amd64
-            ADMIN_PASSWORD=your_password ./start.sh
-            # 访问 http://localhost:30000
-            ```
-          files: |
-            singbox-proxy-manager-linux-amd64.tar.gz
-            singbox-proxy-manager-freebsd-amd64.tar.gz
-          draft: false
-          prerelease: false

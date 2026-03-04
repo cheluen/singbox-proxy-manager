@@ -1,10 +1,12 @@
 :root {
   --font-ui: "Noto Sans SC", "Source Han Sans SC", "PingFang SC", "Microsoft YaHei", sans-serif;
-  --brand-deep: #0b3b43;
-  --brand-mid: #0f766e;
-  --brand-soft: #13b0a6;
-  --paper: #f6fafc;
-  --ink: #102b34;
+  --brand-deep: #5f6d7f;
+  --brand-mid: #7f93a8;
+  --brand-soft: #aebdcb;
+  --paper: #f7f3ed;
+  --ink: #36404a;
+  --accent-warm: #dbcdb8;
+  --accent-cool: #cad8dd;
 }
 
 * {
@@ -16,7 +18,7 @@ body {
   padding: 0;
   font-family: var(--font-ui);
   color: var(--ink);
-  background: #e8f2f2;
+  background: linear-gradient(165deg, #efe9df 0%, #f7f3ed 56%, #f2f4f6 100%);
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
 }
@@ -33,9 +35,9 @@ body {
   align-items: center;
   padding: 36px 18px;
   background:
-    radial-gradient(circle at 12% 15%, rgba(19, 176, 166, 0.28), transparent 42%),
-    radial-gradient(circle at 90% 8%, rgba(11, 59, 67, 0.16), transparent 35%),
-    linear-gradient(150deg, #edf8f6 0%, #d8ebf1 52%, #f5f7fb 100%);
+    radial-gradient(circle at 14% 18%, rgba(219, 205, 184, 0.46), transparent 40%),
+    radial-gradient(circle at 88% 9%, rgba(168, 188, 204, 0.36), transparent 38%),
+    linear-gradient(145deg, #f8f2e7 0%, #f2efe8 52%, #edf1f4 100%);
   overflow: hidden;
 }
 
@@ -46,19 +48,19 @@ body {
   border-radius: 999px;
   filter: blur(60px);
   pointer-events: none;
-  opacity: 0.35;
+  opacity: 0.42;
 }
 
 .login-aura-left {
   left: -90px;
   bottom: -140px;
-  background: #20b0a6;
+  background: #d6c2aa;
 }
 
 .login-aura-right {
   right: -140px;
   top: -120px;
-  background: #3d6d8a;
+  background: #9fb6c7;
 }
 
 .login-card {
@@ -69,9 +71,9 @@ body {
   overflow: hidden;
   display: grid;
   grid-template-columns: minmax(280px, 1.15fr) minmax(320px, 1fr);
-  background: rgba(255, 255, 255, 0.92);
-  border: 1px solid rgba(11, 59, 67, 0.12);
-  box-shadow: 0 26px 60px rgba(16, 43, 52, 0.18);
+  background: rgba(255, 255, 255, 0.88);
+  border: 1px solid rgba(114, 128, 141, 0.2);
+  box-shadow: 0 28px 54px rgba(78, 88, 101, 0.2);
   animation: login-rise 420ms ease-out;
   backdrop-filter: blur(8px);
 }
@@ -94,9 +96,9 @@ body {
   flex-direction: column;
   justify-content: center;
   gap: 14px;
-  color: #f8ffff;
+  color: #3e4a56;
   background:
-    linear-gradient(160deg, rgba(7, 46, 58, 0.96) 0%, rgba(11, 59, 67, 0.95) 48%, rgba(15, 118, 110, 0.9) 100%);
+    linear-gradient(160deg, rgba(247, 240, 228, 0.96) 0%, rgba(241, 233, 222, 0.95) 42%, rgba(215, 227, 236, 0.9) 100%);
 }
 
 .login-brand::after {
@@ -104,31 +106,35 @@ body {
   position: absolute;
   inset: 0;
   background-image: linear-gradient(
-    115deg,
-    rgba(255, 255, 255, 0.1) 0,
-    rgba(255, 255, 255, 0.02) 30%,
-    transparent 55%
+    120deg,
+    rgba(255, 255, 255, 0.35) 0,
+    rgba(255, 255, 255, 0.08) 34%,
+    transparent 62%
   );
   pointer-events: none;
 }
 
 .login-brand-logo {
-  width: 78px;
-  height: 78px;
+  width: 86px;
+  height: 86px;
   object-fit: contain;
-  filter: drop-shadow(0 8px 18px rgba(0, 0, 0, 0.25));
+  background: rgba(255, 255, 255, 0.78);
+  border-radius: 18px;
+  border: 1px solid rgba(110, 123, 137, 0.2);
+  padding: 10px;
+  box-shadow: 0 12px 24px rgba(98, 108, 121, 0.16);
 }
 
 .login-brand-title.ant-typography {
   margin: 0;
-  color: #f2ffff;
+  color: #3c4a58;
   letter-spacing: 0.04em;
 }
 
 .login-brand-subtitle {
   margin: 0;
   max-width: 360px;
-  color: rgba(240, 255, 255, 0.86);
+  color: rgba(59, 71, 83, 0.88);
   font-size: 15px;
   line-height: 1.7;
 }
@@ -142,9 +148,9 @@ body {
   width: fit-content;
   border-radius: 999px;
   font-size: 13px;
-  color: rgba(241, 255, 255, 0.96);
-  background: rgba(255, 255, 255, 0.14);
-  border: 1px solid rgba(255, 255, 255, 0.24);
+  color: rgba(58, 70, 82, 0.95);
+  background: rgba(255, 255, 255, 0.58);
+  border: 1px solid rgba(131, 146, 162, 0.28);
 }
 
 .login-panel {
@@ -152,7 +158,7 @@ body {
   display: flex;
   flex-direction: column;
   justify-content: center;
-  background: linear-gradient(165deg, #fcffff 0%, var(--paper) 70%, #ecf6fb 100%);
+  background: linear-gradient(168deg, #fffdf8 0%, #f7f3ed 64%, #eff3f6 100%);
 }
 
 .login-toolbar {
@@ -163,7 +169,7 @@ body {
 }
 
 .login-panel-title {
-  color: #215365;
+  color: #5c6d80;
   font-size: 15px;
   letter-spacing: 0.06em;
   text-transform: uppercase;
@@ -172,7 +178,7 @@ body {
 
 .login-loading {
   text-align: center;
-  color: #2d5d6d;
+  color: #657487;
   padding: 24px 0;
 }
 
@@ -180,15 +186,15 @@ body {
   margin-bottom: 16px;
   font-size: 13px;
   line-height: 1.6;
-  color: #2a5d6c;
+  color: #4f6072;
   border-radius: 12px;
-  border: 1px solid #cae3eb;
-  background: #eef8fb;
+  border: 1px solid #d5dde5;
+  background: #eef3f8;
   padding: 10px 12px;
 }
 
 .login-panel .ant-form-item-label > label {
-  color: #23505f;
+  color: #55677a;
   font-weight: 600;
 }
 
@@ -202,12 +208,62 @@ body {
   border-radius: 10px;
   font-weight: 700;
   letter-spacing: 0.04em;
-  background: linear-gradient(140deg, var(--brand-mid), #1587a3);
+  background: linear-gradient(140deg, var(--brand-mid), #9ca9b8);
   border: none;
 }
 
 .login-panel .ant-btn-primary:hover {
-  background: linear-gradient(140deg, #0d6a63, #116f86) !important;
+  background: linear-gradient(140deg, #6f8398, #8f9eb0) !important;
+}
+
+.dashboard-layout {
+  min-height: 100vh;
+  background: linear-gradient(180deg, #f7f3ed 0%, #f3f0ea 46%, #edf1f4 100%);
+}
+
+.dashboard-header {
+  background: linear-gradient(120deg, #6f8298 0%, #7f92a8 68%, #90a2b3 100%) !important;
+  padding: 0 24px;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.18);
+  box-shadow: 0 8px 28px rgba(79, 93, 109, 0.18);
+}
+
+.dashboard-brand {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  min-width: 0;
+}
+
+.dashboard-logo-shell {
+  width: 38px;
+  height: 38px;
+  border-radius: 12px;
+  background: rgba(255, 255, 255, 0.88);
+  border: 1px solid rgba(91, 107, 124, 0.18);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.dashboard-logo {
+  width: 30px;
+  height: 30px;
+  object-fit: contain;
+}
+
+.dashboard-title.ant-typography {
+  color: #f8f8f6 !important;
+  margin: 0 !important;
+  font-size: 22px !important;
+  max-width: 420px;
+}
+
+.dashboard-actions .ant-btn {
+  border-color: rgba(236, 241, 245, 0.42);
 }
 
 @media (max-width: 960px) {
@@ -228,5 +284,17 @@ body {
 
   .login-panel {
     padding: 26px 22px;
+  }
+
+  .dashboard-header {
+    padding: 12px;
+    flex-wrap: wrap;
+    gap: 10px;
+    height: auto;
+  }
+
+  .dashboard-title.ant-typography {
+    font-size: 17px !important;
+    max-width: 200px;
   }
 }

@@ -4,13 +4,13 @@
 
 <img src="./logo.svg" alt="SingBox Proxy Manager Logo" width="96" />
 
-![Version](https://img.shields.io/badge/version-1.2.4-blue.svg)
+![Version](https://img.shields.io/badge/version-1.3.0-blue.svg)
 ![License](https://img.shields.io/badge/license-MIT-green.svg)
 ![SingBox](https://img.shields.io/badge/sing--box-1.12.12-orange.svg)
 
 一个基于 sing-box 的代理节点管理和转发系统，提供简洁易用的 Web 界面。
 
-[功能特性](#-功能特性) • [快速开始](#-快速开始) • [云平台部署](#-云平台部署zeabur--clawcloud) • [使用说明](#-使用说明) • [配置说明](#-配置说明)
+[功能特性](#-功能特性) • [快速开始](#-快速开始) • [二进制部署](#-二进制部署releases) • [云平台部署](#-云平台部署zeabur--clawcloud) • [使用说明](#-使用说明) • [配置说明](#-配置说明)
 
 </div>
 
@@ -68,6 +68,33 @@ docker compose logs -f
 
 ---
 
+## 📦 二进制部署（Releases）
+
+每次 `main` 分支更新后，GitHub Actions 会自动构建并发布多平台二进制到对应版本 Release（标签 `vX.Y.Z`）：
+
+- Linux：`amd64` / `arm64`
+- FreeBSD：`amd64` / `arm64`
+- macOS：`amd64` / `arm64`
+
+二进制会自动读取**同目录** `.env`（若未设置 `TZ`，默认按 `UTC+8` -> `Asia/Shanghai` 处理）。
+
+```bash
+# 1) 下载对应系统架构的二进制
+# 例如 Linux amd64:
+curl -fL -o singbox-proxy-manager https://github.com/cheluen/singbox-proxy-manager/releases/download/v<版本号>/singbox-proxy-manager-linux-amd64
+chmod +x singbox-proxy-manager
+
+# 2) 放置 .env（可直接复制仓库 .env.example）
+cp .env.example .env
+
+# 3) 启动
+./singbox-proxy-manager
+```
+
+> 提示：二进制模式下可通过 `SINGBOX_BINARY=/path/to/sing-box` 指定 sing-box 可执行文件路径；未设置时会按 `PATH`、`CONFIG_DIR`、可执行文件同目录顺序自动查找。
+
+---
+
 ## ☁️ 云平台部署（Zeabur / ClawCloud）
 
 > 重要说明：本项目默认 **每个节点占用一个独立入站端口**（`30001+`，节点越多端口越多）。
@@ -85,6 +112,7 @@ docker compose logs -f
 4. 在 **Environment Variables** 配置：
    - `PORT=30000`
    - `CONFIG_DIR=/app/config`
+   - `TZ=UTC+8`（或 `Asia/Shanghai`）
    - `ADMIN_PASSWORD=你的强密码`
    - 必填：`TURSO_DATABASE_URL`、`TURSO_AUTH_TOKEN`（云平台部署默认强制使用 Turso）
    - 变量命名建议与仓库根目录 `.env.example` 保持一致，便于迁移和回滚
@@ -124,7 +152,7 @@ docker compose logs -f
 - 镜像：`ghcr.io/cheluen/singbox-proxy-manager:latest`
 - HTTP 端口：`30000`
 - TCP 端口：`30001`（默认），按需再加 `30002+`
-- 环境变量：`PORT=30000`、`CONFIG_DIR=/app/config`、`ADMIN_PASSWORD=...`、必填 `TURSO_DATABASE_URL` 与 `TURSO_AUTH_TOKEN`
+- 环境变量：`PORT=30000`、`CONFIG_DIR=/app/config`、`TZ=UTC+8`、`ADMIN_PASSWORD=...`、必填 `TURSO_DATABASE_URL` 与 `TURSO_AUTH_TOKEN`
 - 建议对照根目录 `.env.example` 填写同名变量，避免多环境配置漂移
 - 持久化路径：`/app/config`
 - 资源规格：`0.5 vCPU / 512MB`
@@ -199,7 +227,9 @@ GO_SUM_DB=sum.golang.org
 PORT=30000
 CONFIG_DIR=/app/config
 CONFIG_VOLUME_HOST=./config
+TZ=UTC+8
 ADMIN_PASSWORD=
+SINGBOX_BINARY=
 
 # 安全与稳定性
 CORS_ALLOWED_ORIGINS=
@@ -219,6 +249,10 @@ API_MAX_BODY_BYTES=1048576
 TURSO_DATABASE_URL=
 TURSO_AUTH_TOKEN=
 ```
+
+> `TZ` 会作为全局服务时区参与日志与排障时间显示；默认建议使用 `UTC+8`（自动映射到上海/香港时区）。
+
+> `SINGBOX_BINARY` 可选：用于显式指定 sing-box 可执行文件路径（适合二进制部署）。
 
 > 如本地源码构建遇到 Go 模块下载受限，可改为：`GO_MODULE_PROXY=https://goproxy.cn,direct`，必要时再配合 `GO_SUM_DB=off`。
 
@@ -277,6 +311,16 @@ COMPOSE_PROFILES=ghcr
 # 环境适配：使用本地源码构建镜像
 COMPOSE_PROFILES=local
 ```
+
+### GHCR 多架构镜像标签
+
+CI 会自动发布以下镜像标签到 GHCR，并提供 `linux/amd64` + `linux/arm64` 多架构清单：
+
+- `ghcr.io/cheluen/singbox-proxy-manager:latest`
+- `ghcr.io/cheluen/singbox-proxy-manager:v<版本号>`
+- `ghcr.io/cheluen/singbox-proxy-manager:<commit-sha>`
+
+镜像构建会复用对应版本 Release 中的 Linux 二进制，确保二进制发布与容器发布支持的架构一致。
 
 ### 使用 Turso 远程数据库（可选）
 

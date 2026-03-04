@@ -1,12 +1,29 @@
 import React, { useState, useEffect } from 'react'
 import { Form, Input, InputNumber, Button, message, Divider, Alert } from 'antd'
+import { useTranslation } from 'react-i18next'
 import api from '../utils/api'
 
 function SettingsForm({ onClose }) {
+  const { i18n } = useTranslation()
   const [form] = Form.useForm()
   const [loading, setLoading] = useState(false)
   const [loadingData, setLoadingData] = useState(true)
   const [adminPasswordLocked, setAdminPasswordLocked] = useState(false)
+  const isChineseMode = i18n.language?.startsWith('zh')
+
+  const withHint = (label, zhHint) => {
+    if (!isChineseMode || !zhHint) {
+      return label
+    }
+    return `${label}（${zhHint}）`
+  }
+
+  const withExtraHint = (message, zhHint) => {
+    if (!isChineseMode || !zhHint) {
+      return message
+    }
+    return `${message}（${zhHint}）`
+  }
 
   useEffect(() => {
     loadSettings()
@@ -56,13 +73,13 @@ function SettingsForm({ onClose }) {
       onFinish={handleSubmit}
     >
       <Form.Item
-        label="Start Port"
+        label={withHint('Start Port', '节点起始端口')}
         name="start_port"
         rules={[
           { required: true, message: 'Please enter start port' },
           { type: 'number', min: 1024, max: 65535, message: 'Port must be between 1024 and 65535' },
         ]}
-        extra="The starting port number for inbound connections. Each node will use sequential ports."
+        extra={withExtraHint('The starting port number for inbound connections. Each node will use sequential ports.', '每个节点会从该端口开始顺序分配')}
       >
         <InputNumber style={{ width: '100%' }} />
       </Form.Item>
@@ -79,12 +96,12 @@ function SettingsForm({ onClose }) {
         />
       ) : (
         <Form.Item
-          label="New Admin Password"
+          label={withHint('New Admin Password', '新的管理员密码')}
           name="admin_password"
-          extra="Leave empty to keep current password"
+          extra={withExtraHint('Leave empty to keep current password', '留空表示保持当前密码')}
           rules={[{ min: 8, message: 'Password must be at least 8 characters' }]}
         >
-          <Input.Password placeholder="Enter new password (optional)" />
+          <Input.Password placeholder={withHint('Enter new password (optional)', '输入新密码（可选）')} />
         </Form.Item>
       )}
 

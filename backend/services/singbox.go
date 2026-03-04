@@ -6,6 +6,8 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
+	"strings"
 	"sync"
 
 	"sb-proxy/backend/models"
@@ -16,6 +18,56 @@ type SingBoxService struct {
 	process   *exec.Cmd
 	logFile   *os.File
 	mu        sync.RWMutex
+}
+
+func (s *SingBoxService) resolveSingBoxBinary() (string, error) {
+	if explicit := strings.TrimSpace(os.Getenv("SINGBOX_BINARY")); explicit != "" {
+		if resolved, err := exec.LookPath(explicit); err == nil {
+			return resolved, nil
+		}
+		if strings.Contains(explicit, "/") || strings.ContainsRune(explicit, os.PathSeparator) {
+			info, err := os.Stat(explicit)
+			if err == nil && isExecutableBinary(info) {
+				return explicit, nil
+			}
+			if err == nil {
+				return "", fmt.Errorf("SINGBOX_BINARY=%s exists but is not executable", explicit)
+			}
+		}
+		return "", fmt.Errorf("SINGBOX_BINARY=%s is not found or not executable", explicit)
+	}
+
+	if pathFromEnv, err := exec.LookPath("sing-box"); err == nil {
+		return pathFromEnv, nil
+	}
+
+	candidates := []string{
+		filepath.Join(s.configDir, "sing-box"),
+	}
+	if executablePath, err := os.Executable(); err == nil {
+		candidates = append(candidates, filepath.Join(filepath.Dir(executablePath), "sing-box"))
+	}
+
+	for _, candidate := range candidates {
+		info, err := os.Stat(candidate)
+		if err == nil && isExecutableBinary(info) {
+			return candidate, nil
+		}
+	}
+
+	return "", fmt.Errorf("sing-box binary not found, set SINGBOX_BINARY or place sing-box in PATH, %s, or executable directory", s.configDir)
+}
+
+func isExecutableBinary(info os.FileInfo) bool {
+	if info == nil || info.IsDir() {
+		return false
+	}
+	// Windows executability depends on file extension and launcher behavior;
+	// keep compatibility by only rejecting directories there.
+	if runtime.GOOS == "windows" {
+		return true
+	}
+	return info.Mode().Perm()&0o111 != 0
 }
 
 func NewSingBoxService(configDir string) *SingBoxService {
@@ -904,7 +956,11 @@ func (s *SingBoxService) Start() error {
 		return fmt.Errorf("config file not found: %s", configPath)
 	}
 
-	cmd := exec.Command("sing-box", "run", "-c", configPath)
+	singBoxBinary, err := s.resolveSingBoxBinary()
+	if err != nil {
+		return err
+	}
+	cmd := exec.Command(singBoxBinary, "run", "-c", configPath)
 
 	// Set up logging
 	logPath := filepath.Join(s.configDir, "singbox.log")

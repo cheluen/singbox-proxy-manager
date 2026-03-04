@@ -68,8 +68,12 @@ spec:
             default: "30000"
           CONFIG_DIR:
             default: /app/config
+          TZ:
+            default: UTC+8
           ADMIN_PASSWORD:
             default: ${ADMIN_PASSWORD}
+          SINGBOX_BINARY:
+            default: ""
           CORS_ALLOWED_ORIGINS:
             default: ""
           LOGIN_RATE_LIMIT_WINDOW_SECONDS:
