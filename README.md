@@ -76,16 +76,25 @@ docker compose logs -f
 - FreeBSD：`amd64` / `arm64`
 - macOS：`amd64` / `arm64`
 
+> 前置依赖：需要可用的 `sing-box` 内核可执行文件（不需要 Go/Node/Docker）。
+> 建议和主程序同级放置，或在 `.env` 里设置 `SINGBOX_BINARY=/absolute/path/to/sing-box`。
+
 二进制会自动读取**同目录** `.env`（若未设置 `TZ`，默认按 `UTC+8` -> `Asia/Shanghai` 处理）。
 
 ```bash
-# 1) 下载对应系统架构的二进制
+# 0) 准备 sing-box（示例：放到当前目录）
+#    可从 https://github.com/SagerNet/sing-box/releases 下载对应系统/架构版本
+#    并确保可执行（Linux/macOS/FreeBSD 需要 chmod +x）
+
+# 1) 下载对应系统架构的主程序二进制
 # 例如 Linux amd64:
 curl -fL -o singbox-proxy-manager https://github.com/cheluen/singbox-proxy-manager/releases/download/v<版本号>/singbox-proxy-manager-linux-amd64
 chmod +x singbox-proxy-manager
 
 # 2) 放置 .env（可直接复制仓库 .env.example）
 cp .env.example .env
+#    强烈建议显式指定 sing-box 路径，避免 PATH 差异
+#    SINGBOX_BINARY=/absolute/path/to/sing-box
 
 # 3) 启动
 ./singbox-proxy-manager
@@ -418,6 +427,20 @@ ss -tlnp | grep 30000
 docker compose down
 docker compose up -d --build
 ```
+
+### 二进制启动提示找不到 sing-box
+
+当日志里出现 `sing-box binary not found` 或 `sing-box binary is not executable`：
+
+1. 下载与你系统/CPU 架构一致的 sing-box 可执行文件。
+2. 给执行权限（Linux/macOS/FreeBSD）：`chmod +x /path/to/sing-box`
+3. 在 `.env` 显式指定：
+
+```bash
+SINGBOX_BINARY=/path/to/sing-box
+```
+
+4. 重新启动主程序并确认日志不再提示依赖错误。
 
 ### 代理无法连接
 ```bash

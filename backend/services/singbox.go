@@ -2,6 +2,7 @@ package services
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -20,6 +21,11 @@ type SingBoxService struct {
 	mu        sync.RWMutex
 }
 
+var (
+	ErrSingBoxBinaryNotFound      = errors.New("sing-box binary not found")
+	ErrSingBoxBinaryNotExecutable = errors.New("sing-box binary is not executable")
+)
+
 func (s *SingBoxService) resolveSingBoxBinary() (string, error) {
 	if explicit := strings.TrimSpace(os.Getenv("SINGBOX_BINARY")); explicit != "" {
 		if resolved, err := exec.LookPath(explicit); err == nil {
@@ -31,10 +37,10 @@ func (s *SingBoxService) resolveSingBoxBinary() (string, error) {
 				return explicit, nil
 			}
 			if err == nil {
-				return "", fmt.Errorf("SINGBOX_BINARY=%s exists but is not executable", explicit)
+				return "", fmt.Errorf("%w: SINGBOX_BINARY=%s", ErrSingBoxBinaryNotExecutable, explicit)
 			}
 		}
-		return "", fmt.Errorf("SINGBOX_BINARY=%s is not found or not executable", explicit)
+		return "", fmt.Errorf("%w: SINGBOX_BINARY=%s", ErrSingBoxBinaryNotFound, explicit)
 	}
 
 	if pathFromEnv, err := exec.LookPath("sing-box"); err == nil {
@@ -48,14 +54,30 @@ func (s *SingBoxService) resolveSingBoxBinary() (string, error) {
 		candidates = append(candidates, filepath.Join(filepath.Dir(executablePath), "sing-box"))
 	}
 
+	nonExecutableCandidates := make([]string, 0, len(candidates))
 	for _, candidate := range candidates {
 		info, err := os.Stat(candidate)
 		if err == nil && isExecutableBinary(info) {
 			return candidate, nil
 		}
+		if err == nil {
+			nonExecutableCandidates = append(nonExecutableCandidates, candidate)
+		}
 	}
 
-	return "", fmt.Errorf("sing-box binary not found, set SINGBOX_BINARY or place sing-box in PATH, %s, or executable directory", s.configDir)
+	if len(nonExecutableCandidates) > 0 {
+		return "", fmt.Errorf(
+			"%w: %s",
+			ErrSingBoxBinaryNotExecutable,
+			strings.Join(nonExecutableCandidates, ", "),
+		)
+	}
+
+	return "", fmt.Errorf(
+		"%w: set SINGBOX_BINARY or place sing-box in PATH, %s, or executable directory",
+		ErrSingBoxBinaryNotFound,
+		s.configDir,
+	)
 }
 
 func isExecutableBinary(info os.FileInfo) bool {

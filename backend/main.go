@@ -6,6 +6,7 @@ import (
 	"crypto/sha256"
 	"database/sql"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"io/fs"
 	"log"
@@ -310,6 +311,7 @@ func main() {
 	} else {
 		if err := singBoxService.Start(); err != nil {
 			log.Printf("Failed to start sing-box: %v", err)
+			logSingBoxDependencyGuideIfNeeded(err, configDir)
 		} else {
 			log.Println("Sing-box started successfully")
 		}
@@ -510,6 +512,16 @@ func frontendAssetFS(frontendDistDir string) (fs.FS, string, error) {
 func calcContentFingerprint(content []byte) string {
 	sum := sha256.Sum256(content)
 	return hex.EncodeToString(sum[:8])
+}
+
+func logSingBoxDependencyGuideIfNeeded(err error, configDir string) {
+	if !errors.Is(err, services.ErrSingBoxBinaryNotFound) && !errors.Is(err, services.ErrSingBoxBinaryNotExecutable) {
+		return
+	}
+
+	log.Printf("Binary deploy guide: ensure sing-box is installed for your OS/arch and executable.")
+	log.Printf("Binary deploy guide: set SINGBOX_BINARY=/absolute/path/to/sing-box in .env (recommended).")
+	log.Printf("Binary deploy guide: fallback search order is PATH -> %s/sing-box -> executable directory.", configDir)
 }
 
 func ifNoneMatchMatchesCurrentETag(ifNoneMatch string, currentETag string) bool {
