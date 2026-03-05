@@ -224,6 +224,51 @@ func TestGenerateGlobalConfigRespectsTCPReuseSwitch(t *testing.T) {
 	}
 }
 
+func TestGenerateGlobalConfigSkipsTCPReuseForNodeWithoutInboundAuth(t *testing.T) {
+	configDir := t.TempDir()
+	service := NewSingBoxService(configDir)
+
+	nodes := []models.ProxyNode{
+		{
+			ID:              1,
+			Name:            "node-1",
+			Type:            "direct",
+			Config:          "{}",
+			InboundPort:     30001,
+			Username:        "entry",
+			Password:        "entry-pass",
+			TCPReuseEnabled: true,
+			Enabled:         true,
+		},
+		{
+			ID:              2,
+			Name:            "node-2",
+			Type:            "direct",
+			Config:          "{}",
+			InboundPort:     30005,
+			Username:        "",
+			Password:        "",
+			TCPReuseEnabled: true,
+			Enabled:         true,
+		},
+	}
+
+	if err := service.GenerateGlobalConfig(nodes); err != nil {
+		t.Fatalf("GenerateGlobalConfig failed: %v", err)
+	}
+
+	config := loadGeneratedConfigMap(t, configDir)
+	rules := routeRulesFromConfig(t, config)
+	if idx := findRuleIndexByAuthUser(rules, "node-2+30005"); idx >= 0 {
+		t.Fatalf("did not expect auth_user route for node without inbound auth")
+	}
+
+	users := usersForInboundTag(t, inboundsFromConfig(t, config), "node-1-in")
+	if _, ok := users["node-2+30005"]; ok {
+		t.Fatalf("did not expect shared auth user for node without inbound auth")
+	}
+}
+
 func TestGenerateGlobalConfigRejectsUsernameWithPlus(t *testing.T) {
 	configDir := t.TempDir()
 	service := NewSingBoxService(configDir)

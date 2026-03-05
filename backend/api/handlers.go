@@ -419,7 +419,7 @@ func (h *Handler) CreateNode(c *gin.Context) {
 
 	// Ensure inbound auth is enabled by default (generate missing credentials).
 	if strings.TrimSpace(req.Username) == "" {
-		username, err := generateRandomString(12)
+		username, err := generateRandomUsername(12)
 		if err != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to generate username"})
 			return
@@ -614,7 +614,7 @@ func (h *Handler) BatchImportNodes(c *gin.Context) {
 		}
 
 		// Insert node
-		username, err := generateRandomString(12)
+		username, err := generateRandomUsername(12)
 		if err != nil {
 			result["success"] = false
 			result["error"] = "failed to generate username"

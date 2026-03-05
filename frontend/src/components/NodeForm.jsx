@@ -53,7 +53,6 @@ function NodeForm({ node, onSave, onCancel }) {
         inbound_port: values.inbound_port || 0, // 0 means auto-assign
         username: values.username || '',
         password: values.password || '',
-        tcp_reuse_enabled: values.tcp_reuse_enabled !== false,
         enabled: values.enabled !== false,
       })
     } catch (error) {
@@ -227,7 +226,6 @@ function NodeForm({ node, onSave, onCancel }) {
     inbound_port: node?.inbound_port || 0,
     username: node?.username || '',
     password: node?.password || '',
-    tcp_reuse_enabled: node?.tcp_reuse_enabled !== false,
     server: normalizedConfig.server || '',
     server_port: normalizedConfig.server_port || 443,
     ...normalizedConfig,
@@ -678,18 +676,6 @@ function NodeForm({ node, onSave, onCancel }) {
             <Input.Password placeholder={withHint('Password', '密码')} style={{ width: '50%' }} />
           </Form.Item>
         </Space.Compact>
-      </Form.Item>
-
-      <Form.Item
-        label={withHint('TCP Inbound Port Reuse', 'TCP 入站端口复用')}
-        name="tcp_reuse_enabled"
-        valuePropName="checked"
-        extra={withExtraHint(
-          'Enable username+route-number routing while keeping legacy port routing.',
-          '开启后可使用 用户名+路由号 进行路由，同时保留旧端口路由方式'
-        )}
-      >
-        <Switch checkedChildren={withHint('On', '开')} unCheckedChildren={withHint('Off', '关')} />
       </Form.Item>
 
       <Form.Item label={withHint('Node Status', '节点启用状态')} name="enabled" valuePropName="checked">

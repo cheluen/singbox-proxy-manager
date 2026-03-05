@@ -1,7 +1,7 @@
 {
   "name": "sb-proxy-frontend",
   "private": true,
-  "version": "1.3.2",
+  "version": "1.3.3",
   "type": "module",
   "scripts": {
     "dev": "vite",
@@ -11,6 +11,7 @@
     "lint:fix": "eslint . --fix",
     "test:e2e:dnd": "node ./scripts/dnd-reorder-regression.mjs",
     "test:e2e:remark": "node ./scripts/remark-regression.mjs",
+    "test:e2e:tcp-reuse-ui": "node ./scripts/tcp-reuse-ui-regression.mjs",
     "test:e2e:version-refresh": "node ./scripts/version-refresh-regression.mjs"
   },
   "dependencies": {

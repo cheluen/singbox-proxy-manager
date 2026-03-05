@@ -63,6 +63,9 @@ export default {
   status: 'Status',
   status_healthy: 'Healthy',
   status_unverified: 'Not Tested/Failed',
+  state_controls: 'Switches',
+  tcp_reuse: 'TCP Reuse',
+  tcp_reuse_short: 'Reuse',
   actions: 'Actions',
   export: 'Export',
   copy: 'Copy',
@@ -115,6 +118,7 @@ export default {
   nodes_reordered: 'Nodes reordered',
   ip_check_started: 'IP check started',
   auth_updated: 'Authentication updated',
+  tcp_reuse_auth_required_hint: 'This node has no inbound username/password, so TCP reuse cannot work until auth is configured.',
   
   // Errors
   network_error: 'Network error',

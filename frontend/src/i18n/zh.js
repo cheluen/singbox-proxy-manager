@@ -63,6 +63,9 @@ export default {
   status: '状态',
   status_healthy: '可用',
   status_unverified: '未检测/失效',
+  state_controls: '开关',
+  tcp_reuse: 'TCP复用',
+  tcp_reuse_short: '复用',
   actions: '操作',
   export: '导出',
   copy: '复制',
@@ -115,6 +118,7 @@ export default {
   nodes_reordered: '节点顺序已更新',
   ip_check_started: 'IP检测已开始',
   auth_updated: '认证设置已更新',
+  tcp_reuse_auth_required_hint: '该节点未配置入站用户名/密码，开启 TCP 复用后仍无法复用，请先设置鉴权信息',
   
   // Errors
   network_error: '网络错误',

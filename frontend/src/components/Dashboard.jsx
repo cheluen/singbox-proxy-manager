@@ -50,48 +50,6 @@ const { Header, Content } = Layout
 const { Title } = Typography
 const { TextArea } = Input
 
-// Get country flag emoji from country name or code
-const getCountryFlag = (location) => {
-  if (!location) return ''
-  
-  const countryFlags = {
-    'Japan': '🇯🇵',
-    'United States': '🇺🇸',
-    'USA': '🇺🇸',
-    'China': '🇨🇳',
-    'Hong Kong': '🇭🇰',
-    'Taiwan': '🇨🇳',
-    'Singapore': '🇸🇬',
-    'Korea': '🇰🇷',
-    'South Korea': '🇰🇷',
-    'Germany': '🇩🇪',
-    'United Kingdom': '🇬🇧',
-    'UK': '🇬🇧',
-    'France': '🇫🇷',
-    'Canada': '🇨🇦',
-    'Australia': '🇦🇺',
-    'Russia': '🇷🇺',
-    'Netherlands': '🇳🇱',
-    'Brazil': '🇧🇷',
-    'India': '🇮🇳',
-  }
-
-  for (const [country, flag] of Object.entries(countryFlags)) {
-    if (location.includes(country)) {
-      return flag
-    }
-  }
-  
-  return '🌐'
-}
-
-// Extract country name from location
-const getCountryName = (location) => {
-  if (!location) return ''
-  const parts = location.split(',').map(s => s.trim())
-  return parts.length > 1 ? parts[parts.length - 1] : location
-}
-
 function NodeRemarkEditor({ record, saving, onSave, t }) {
   const [draft, setDraft] = useState(record.remark ?? '')
 
@@ -130,10 +88,10 @@ function NodeRemarkEditor({ record, saving, onSave, t }) {
   )
 }
 
-  function Dashboard({ onLogout }) {
-    const { t, i18n } = useTranslation()
-    const [nodes, setNodes] = useState([])
-    const [loading, setLoading] = useState(false)
+function Dashboard({ onLogout }) {
+  const { t, i18n } = useTranslation()
+  const [nodes, setNodes] = useState([])
+  const [loading, setLoading] = useState(false)
   const [appVersion, setAppVersion] = useState('')
   const [modalVisible, setModalVisible] = useState(false)
   const [settingsVisible, setSettingsVisible] = useState(false)
@@ -562,6 +520,26 @@ function NodeRemarkEditor({ record, saving, onSave, t }) {
     }
   }
 
+  const handleToggleTCPReuse = async (node) => {
+    const nextTCPReuseEnabled = node?.tcp_reuse_enabled === false
+
+    if (nextTCPReuseEnabled && (!node?.username || !node?.password)) {
+      message.warning(t('tcp_reuse_auth_required_hint'))
+    }
+
+    try {
+      await api.put(`/nodes/${node.id}`, {
+        ...node,
+        tcp_reuse_enabled: nextTCPReuseEnabled,
+      })
+      message.success(t('success'))
+      loadNodes()
+    } catch (error) {
+      message.error(error.response?.data?.error || t('server_error'))
+      loadNodes()
+    }
+  }
+
   const handleDragEnd = async (result) => {
     if (!result.destination) return
 
@@ -646,7 +624,7 @@ function NodeRemarkEditor({ record, saving, onSave, t }) {
               children: (
                 <Descriptions
                   size="small"
-                  column={3}
+                  column={2}
                   items={[
                     {
                       key: 'port',
@@ -667,6 +645,24 @@ function NodeRemarkEditor({ record, saving, onSave, t }) {
                       key: 'latency',
                       label: t('latency'),
                       children: record.latency > 0 ? `${record.latency}ms` : '-',
+                    },
+                    {
+                      key: 'username',
+                      label: t('username'),
+                      children: record.username || '-',
+                    },
+                    {
+                      key: 'password',
+                      label: t('password_auth'),
+                      children: record.password || '-',
+                    },
+                    {
+                      key: 'tcp_reuse',
+                      label: t('tcp_reuse'),
+                      children:
+                        record.tcp_reuse_enabled === false
+                          ? t('disabled')
+                          : t('enabled'),
                     },
                     {
                       key: 'status',
@@ -733,7 +729,7 @@ function NodeRemarkEditor({ record, saving, onSave, t }) {
         dataIndex: 'name',
         key: 'name',
         ellipsis: true,
-        width: 200,
+        width: 180,
       },
       {
         title: t('remark'),
@@ -754,121 +750,66 @@ function NodeRemarkEditor({ record, saving, onSave, t }) {
         title: t('node_type'),
         dataIndex: 'type',
         key: 'type',
-      width: 100,
-      render: (type) => <Tag color="blue">{type.toUpperCase()}</Tag>,
-    },
-    {
-      title: t('inbound_port'),
-      dataIndex: 'inbound_port',
-      key: 'inbound_port',
-      width: 100,
-    },
-    {
-      title: t('username'),
-      dataIndex: 'username',
-      key: 'username',
-      width: 120,
-      render: (username) => username || '-',
-    },
-    {
-      title: t('password_auth'),
-      dataIndex: 'password',
-      key: 'password',
-      width: 120,
-      render: (password) => password || '-',
-    },
-    {
-      title: t('node_ip'),
-      dataIndex: 'node_ip',
-      key: 'node_ip',
-      width: 140,
-      render: (ip) => ip || '-',
-    },
-    {
-      title: t('location'),
-      dataIndex: 'location',
-      key: 'location',
-      width: 180,
-      render: (location, record) => {
-        if (!location) return '-'
-        
-        // Get country code from API response (stored in country_code field)
-        const countryCode = record.country_code || ''
-        
-        // Extract city and country from location string
-        // Format examples: "Tokyo, Japan" or "Japan"
-        const parts = location.split(',').map(s => s.trim())
-        let city = ''
-        let country = ''
-        
-        if (parts.length > 1) {
-          city = parts[0]
-          country = parts[parts.length - 1]
-        } else {
-          country = parts[0]
-        }
-        
-        return (
-          <span>
-            {countryCode ? (
-              // Show country code (abbreviation) prominently, then country name and city normally
-              <>
-                <span style={{ fontSize: '15px', fontWeight: 600, color: '#1890ff' }}>{countryCode}</span>
-                {' '}
-                <span style={{ fontSize: '13px', color: '#666' }}>
-                  {country}
-                  {city && `(${city})`}
-                </span>
-              </>
-            ) : (
-              // Fallback: show full location if no code available
-              <span style={{ fontSize: '13px', color: '#666' }}>{location}</span>
-            )}
-          </span>
-        )
+        width: 96,
+        render: (type) => <Tag color="blue">{type.toUpperCase()}</Tag>,
       },
-    },
-    {
-      title: t('latency'),
-      dataIndex: 'latency',
-      key: 'latency',
-      width: 100,
-      render: (latency) => latency > 0 ? `${latency}ms` : '-',
-    },
-    {
-      title: t('status'),
-      key: 'status',
-      width: 120,
-      render: (_, record) => {
-        const healthy = record.node_ip && record.latency > 0
-        return (
-          <Tag color={healthy ? 'green' : 'red'}>
-            {healthy ? t('status_healthy') : t('status_unverified')}
-          </Tag>
-        )
+      {
+        title: t('inbound_port'),
+        dataIndex: 'inbound_port',
+        key: 'inbound_port',
+        width: 96,
       },
-    },
-    {
-      title: t('enabled'),
-      dataIndex: 'enabled',
-      key: 'enabled',
-      width: 80,
-      render: (enabled, record) => (
-        <Switch
-          checked={enabled}
-          onChange={() => handleToggleNode(record)}
-          checkedChildren={<CheckCircleOutlined />}
-          unCheckedChildren={<CloseCircleOutlined />}
-        />
-      ),
-    },
-    {
-      title: t('actions'),
-      key: 'actions',
-      width: 140,
-      fixed: 'right',
-      render: (_, record) => (
-        <Space size="small">
+      {
+        title: t('username'),
+        dataIndex: 'username',
+        key: 'username',
+        width: 120,
+        render: (username) => username || '-',
+      },
+      {
+        title: t('status'),
+        key: 'status',
+        width: 120,
+        render: (_, record) => {
+          const healthy = record.node_ip && record.latency > 0
+          return (
+            <Tag color={healthy ? 'green' : 'red'}>
+              {healthy ? t('status_healthy') : t('status_unverified')}
+            </Tag>
+          )
+        },
+      },
+      {
+        title: t('state_controls'),
+        key: 'state_controls',
+        width: 172,
+        render: (_, record) => (
+          <Space size={8}>
+            <Tooltip title={t('enabled')}>
+              <Switch
+                checked={record.enabled}
+                onChange={() => handleToggleNode(record)}
+                checkedChildren={<CheckCircleOutlined />}
+                unCheckedChildren={<CloseCircleOutlined />}
+              />
+            </Tooltip>
+            <Tooltip title={t('tcp_reuse')}>
+              <Switch
+                checked={record.tcp_reuse_enabled !== false}
+                onChange={() => handleToggleTCPReuse(record)}
+                checkedChildren={t('tcp_reuse_short')}
+                unCheckedChildren={t('tcp_reuse_short')}
+              />
+            </Tooltip>
+          </Space>
+        ),
+      },
+      {
+        title: t('actions'),
+        key: 'actions',
+        width: 124,
+        render: (_, record) => (
+        <Space size={4}>
           <Tooltip title={t('export')}>
             <Button
               type="link"
@@ -904,8 +845,8 @@ function NodeRemarkEditor({ record, saving, onSave, t }) {
           </Popconfirm>
         </Space>
       ),
-    },
-  ]
+      },
+    ]
 
     const DraggableRow = (props) => {
       const rowKey = props['data-row-key']
@@ -1094,7 +1035,6 @@ function NodeRemarkEditor({ record, saving, onSave, t }) {
                 }}
                 loading={loading}
                 pagination={false}
-                scroll={{ x: 1500 }}
                 locale={{
                   emptyText: t('no_nodes')
               }}
