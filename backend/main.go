@@ -11,6 +11,7 @@ import (
 	"log"
 	"mime"
 	"net/http"
+	"net/textproto"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -421,7 +422,7 @@ func registerFrontendRoutes(r *gin.Engine, frontendDistDir string, appVersion st
 		c.Header("X-App-Version", appVersion)
 		c.Header("X-Frontend-Fingerprint", indexFingerprint)
 
-		if c.GetHeader("If-None-Match") == indexETag {
+		if ifNoneMatchMatchesCurrentETag(c.GetHeader("If-None-Match"), indexETag) {
 			c.Status(http.StatusNotModified)
 			c.Abort()
 			return
@@ -509,6 +510,76 @@ func frontendAssetFS(frontendDistDir string) (fs.FS, string, error) {
 func calcContentFingerprint(content []byte) string {
 	sum := sha256.Sum256(content)
 	return hex.EncodeToString(sum[:8])
+}
+
+func ifNoneMatchMatchesCurrentETag(ifNoneMatch string, currentETag string) bool {
+	if ifNoneMatch == "" || currentETag == "" {
+		return false
+	}
+
+	buf := ifNoneMatch
+	for {
+		buf = textproto.TrimString(buf)
+		if len(buf) == 0 {
+			break
+		}
+		if buf[0] == ',' {
+			buf = buf[1:]
+			continue
+		}
+		if buf[0] == '*' {
+			rest := textproto.TrimString(buf[1:])
+			if rest == "" || rest[0] == ',' {
+				return true
+			}
+		}
+
+		etag, remain := scanETagToken(buf)
+		if etag == "" {
+			buf = skipToNextETagToken(buf)
+			continue
+		}
+		if etagWeakMatch(etag, currentETag) {
+			return true
+		}
+		buf = remain
+	}
+
+	return false
+}
+
+func scanETagToken(s string) (etag string, remain string) {
+	s = textproto.TrimString(s)
+	start := 0
+	if strings.HasPrefix(s, "W/") {
+		start = 2
+	}
+	if len(s[start:]) < 2 || s[start] != '"' {
+		return "", ""
+	}
+
+	for i := start + 1; i < len(s); i++ {
+		c := s[i]
+		switch {
+		case c == 0x21 || c >= 0x23 && c <= 0x7E || c >= 0x80:
+		case c == '"':
+			return s[:i+1], s[i+1:]
+		default:
+			return "", ""
+		}
+	}
+	return "", ""
+}
+
+func etagWeakMatch(a string, b string) bool {
+	return strings.TrimPrefix(a, "W/") == strings.TrimPrefix(b, "W/")
+}
+
+func skipToNextETagToken(s string) string {
+	if idx := strings.IndexByte(s, ','); idx >= 0 {
+		return s[idx+1:]
+	}
+	return ""
 }
 
 func apiCorsMiddlewareFromEnv() gin.HandlerFunc {

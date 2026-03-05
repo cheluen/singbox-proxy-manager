@@ -78,6 +78,30 @@ func TestRegisterFrontendRoutesServesIndexWithRevalidateHeaders(t *testing.T) {
 	if conditionalRec.Code != http.StatusNotModified {
 		t.Fatalf("expected 304 for matching etag, got %d", conditionalRec.Code)
 	}
+
+	weakReq := httptest.NewRequest(http.MethodGet, "/", nil)
+	weakReq.Header.Set("If-None-Match", "W/"+etag)
+	weakRec := httptest.NewRecorder()
+	r.ServeHTTP(weakRec, weakReq)
+	if weakRec.Code != http.StatusNotModified {
+		t.Fatalf("expected 304 for weak etag match, got %d", weakRec.Code)
+	}
+
+	multiReq := httptest.NewRequest(http.MethodGet, "/", nil)
+	multiReq.Header.Set("If-None-Match", `"other-tag", W/`+etag)
+	multiRec := httptest.NewRecorder()
+	r.ServeHTTP(multiRec, multiReq)
+	if multiRec.Code != http.StatusNotModified {
+		t.Fatalf("expected 304 for multi-etag match, got %d", multiRec.Code)
+	}
+
+	starReq := httptest.NewRequest(http.MethodGet, "/", nil)
+	starReq.Header.Set("If-None-Match", "*")
+	starRec := httptest.NewRecorder()
+	r.ServeHTTP(starRec, starReq)
+	if starRec.Code != http.StatusNotModified {
+		t.Fatalf("expected 304 for wildcard if-none-match, got %d", starRec.Code)
+	}
 }
 
 func TestRegisterFrontendRoutesServesAssetsWithImmutableCache(t *testing.T) {
@@ -287,5 +311,70 @@ func TestRegisterFrontendRoutesFallsBackToEmbeddedAssets(t *testing.T) {
 	}
 	if !strings.Contains(rec.Body.String(), "<div id=\"root\">") {
 		t.Fatalf("embedded index.html seems invalid")
+	}
+}
+
+func TestIfNoneMatchMatchesCurrentETag(t *testing.T) {
+	currentETag := `"sbpm-1234"`
+	cases := []struct {
+		name        string
+		ifNoneMatch string
+		want        bool
+	}{
+		{
+			name:        "exact",
+			ifNoneMatch: `"sbpm-1234"`,
+			want:        true,
+		},
+		{
+			name:        "weak",
+			ifNoneMatch: `W/"sbpm-1234"`,
+			want:        true,
+		},
+		{
+			name:        "list",
+			ifNoneMatch: `"other", W/"sbpm-1234"`,
+			want:        true,
+		},
+		{
+			name:        "wildcard",
+			ifNoneMatch: `*`,
+			want:        true,
+		},
+		{
+			name:        "wildcard with spaces and list",
+			ifNoneMatch: `* , "other"`,
+			want:        true,
+		},
+		{
+			name:        "invalid wildcard token",
+			ifNoneMatch: `*foo`,
+			want:        false,
+		},
+		{
+			name:        "invalid",
+			ifNoneMatch: `not-an-etag`,
+			want:        false,
+		},
+		{
+			name:        "invalid then valid",
+			ifNoneMatch: `not-an-etag, W/"sbpm-1234"`,
+			want:        true,
+		},
+		{
+			name:        "no-match",
+			ifNoneMatch: `"other"`,
+			want:        false,
+		},
+	}
+
+	for _, tc := range cases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			got := ifNoneMatchMatchesCurrentETag(tc.ifNoneMatch, currentETag)
+			if got != tc.want {
+				t.Fatalf("unexpected result for %q: got %v want %v", tc.ifNoneMatch, got, tc.want)
+			}
+		})
 	}
 }
