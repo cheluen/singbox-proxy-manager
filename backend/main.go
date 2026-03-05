@@ -280,7 +280,7 @@ func main() {
 
 	// Generate global config for all nodes and start sing-box
 	rows, err := db.Query(`
-		SELECT id, name, remark, type, config, inbound_port, username, password, 
+		SELECT id, name, remark, type, config, inbound_port, username, password, tcp_reuse_enabled,
 		       sort_order, node_ip, location, country_code, latency, enabled, created_at, updated_at
 		FROM proxy_nodes
 		ORDER BY sort_order ASC
@@ -295,7 +295,7 @@ func main() {
 			var node models.ProxyNode
 			if err := rows.Scan(
 				&node.ID, &node.Name, &node.Remark, &node.Type, &node.Config, &node.InboundPort,
-				&node.Username, &node.Password, &node.SortOrder, &node.NodeIP, &node.Location,
+				&node.Username, &node.Password, &node.TCPReuseEnabled, &node.SortOrder, &node.NodeIP, &node.Location,
 				&node.CountryCode, &node.Latency, &node.Enabled, &node.CreatedAt, &node.UpdatedAt,
 			); err != nil {
 				log.Printf("Failed to scan proxy node: %v", err)

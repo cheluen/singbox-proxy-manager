@@ -27,6 +27,18 @@ type Handler struct {
 	checkProxyIP   func(proxyAddr string, username string, password string) (*services.IPInfo, error)
 }
 
+type nodeUpsertRequest struct {
+	Name            string `json:"name"`
+	Remark          string `json:"remark"`
+	Type            string `json:"type"`
+	Config          string `json:"config"`
+	InboundPort     int    `json:"inbound_port"`
+	Username        string `json:"username"`
+	Password        string `json:"password"`
+	Enabled         bool   `json:"enabled"`
+	TCPReuseEnabled *bool  `json:"tcp_reuse_enabled"`
+}
+
 func NewHandler(db *sql.DB, singBoxService *services.SingBoxService) *Handler {
 	return &Handler{
 		db:             db,
@@ -36,11 +48,48 @@ func NewHandler(db *sql.DB, singBoxService *services.SingBoxService) *Handler {
 	}
 }
 
+func hasRouteSeparatorInUsername(username string) bool {
+	return strings.Contains(username, "+")
+}
+
+func validateInboundUsername(username string) error {
+	if hasRouteSeparatorInUsername(strings.TrimSpace(username)) {
+		return fmt.Errorf("username must not contain '+'")
+	}
+	return nil
+}
+
+func validateInboundPort(port int) error {
+	if port <= 0 || port > 65535 {
+		return fmt.Errorf("inbound port out of range")
+	}
+	return nil
+}
+
+func nodeFromUpsertRequest(req nodeUpsertRequest) models.ProxyNode {
+	node := models.ProxyNode{
+		Name:        req.Name,
+		Remark:      req.Remark,
+		Type:        req.Type,
+		Config:      req.Config,
+		InboundPort: req.InboundPort,
+		Username:    req.Username,
+		Password:    req.Password,
+		Enabled:     req.Enabled,
+	}
+	if req.TCPReuseEnabled != nil {
+		node.TCPReuseEnabled = *req.TCPReuseEnabled
+	} else {
+		node.TCPReuseEnabled = true
+	}
+	return node
+}
+
 // regenerateAndRestart is a helper function to regenerate sing-box config and restart the service
 func (h *Handler) regenerateAndRestart() error {
 	// Get all nodes from database
 	rows, err := h.db.Query(`
-		SELECT id, name, remark, type, config, inbound_port, username, password,
+		SELECT id, name, remark, type, config, inbound_port, username, password, tcp_reuse_enabled,
 		       sort_order, node_ip, location, country_code, latency, enabled, created_at, updated_at
 		FROM proxy_nodes
 		ORDER BY sort_order ASC
@@ -55,7 +104,7 @@ func (h *Handler) regenerateAndRestart() error {
 		var node models.ProxyNode
 		err := rows.Scan(
 			&node.ID, &node.Name, &node.Remark, &node.Type, &node.Config, &node.InboundPort,
-			&node.Username, &node.Password, &node.SortOrder, &node.NodeIP, &node.Location,
+			&node.Username, &node.Password, &node.TCPReuseEnabled, &node.SortOrder, &node.NodeIP, &node.Location,
 			&node.CountryCode, &node.Latency, &node.Enabled, &node.CreatedAt, &node.UpdatedAt,
 		)
 		if err != nil {
@@ -291,7 +340,7 @@ func (h *Handler) SetupAdminPassword(c *gin.Context) {
 // GetNodes returns all proxy nodes
 func (h *Handler) GetNodes(c *gin.Context) {
 	rows, err := h.db.Query(`
-		SELECT id, name, remark, type, config, inbound_port, username, password, 
+		SELECT id, name, remark, type, config, inbound_port, username, password, tcp_reuse_enabled,
 		       sort_order, node_ip, location, country_code, latency, enabled, created_at, updated_at
 		FROM proxy_nodes
 		ORDER BY sort_order ASC
@@ -307,7 +356,7 @@ func (h *Handler) GetNodes(c *gin.Context) {
 		var node models.ProxyNode
 		err := rows.Scan(
 			&node.ID, &node.Name, &node.Remark, &node.Type, &node.Config, &node.InboundPort,
-			&node.Username, &node.Password, &node.SortOrder, &node.NodeIP,
+			&node.Username, &node.Password, &node.TCPReuseEnabled, &node.SortOrder, &node.NodeIP,
 			&node.Location, &node.CountryCode, &node.Latency, &node.Enabled, &node.CreatedAt, &node.UpdatedAt,
 		)
 		if err != nil {
@@ -329,12 +378,12 @@ func (h *Handler) GetNode(c *gin.Context) {
 
 	var node models.ProxyNode
 	err = h.db.QueryRow(`
-		SELECT id, name, remark, type, config, inbound_port, username, password,
+		SELECT id, name, remark, type, config, inbound_port, username, password, tcp_reuse_enabled,
 		       sort_order, node_ip, location, country_code, latency, enabled, created_at, updated_at
 		FROM proxy_nodes WHERE id = ?
 	`, id).Scan(
 		&node.ID, &node.Name, &node.Remark, &node.Type, &node.Config, &node.InboundPort,
-		&node.Username, &node.Password, &node.SortOrder, &node.NodeIP,
+		&node.Username, &node.Password, &node.TCPReuseEnabled, &node.SortOrder, &node.NodeIP,
 		&node.Location, &node.CountryCode, &node.Latency, &node.Enabled, &node.CreatedAt, &node.UpdatedAt,
 	)
 	if err != nil {
@@ -351,15 +400,20 @@ func (h *Handler) GetNode(c *gin.Context) {
 
 // CreateNode creates a new proxy node
 func (h *Handler) CreateNode(c *gin.Context) {
-	var req models.ProxyNode
-	if err := c.BindJSON(&req); err != nil {
+	var payload nodeUpsertRequest
+	if err := c.BindJSON(&payload); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid request"})
 		return
 	}
+	req := nodeFromUpsertRequest(payload)
 
 	// Validate config JSON
 	if _, err := req.ParseConfig(); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid config format"})
+		return
+	}
+	if err := validateInboundUsername(req.Username); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
 
@@ -379,6 +433,10 @@ func (h *Handler) CreateNode(c *gin.Context) {
 			return
 		}
 		req.Password = password
+	}
+	if err := validateInboundUsername(req.Username); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
 	}
 
 	h.nodeWriteMu.Lock()
@@ -406,17 +464,30 @@ func (h *Handler) CreateNode(c *gin.Context) {
 			return
 		}
 		req.InboundPort = startPort + req.SortOrder
-		if req.InboundPort <= 0 || req.InboundPort > 65535 {
-			c.JSON(http.StatusBadRequest, gin.H{"error": "inbound port out of range"})
-			return
-		}
+	}
+	if err := validateInboundPort(req.InboundPort); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+
+	var inboundPortInUse int
+	if err := tx.QueryRow(
+		"SELECT COUNT(1) FROM proxy_nodes WHERE inbound_port = ?",
+		req.InboundPort,
+	).Scan(&inboundPortInUse); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "database error"})
+		return
+	}
+	if inboundPortInUse > 0 {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "inbound port already in use"})
+		return
 	}
 
 	// Insert node
 	result, err := tx.Exec(`
-		INSERT INTO proxy_nodes (name, remark, type, config, inbound_port, username, password, sort_order, latency, enabled)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-	`, req.Name, req.Remark, req.Type, req.Config, req.InboundPort, req.Username, req.Password, req.SortOrder, 0, req.Enabled)
+		INSERT INTO proxy_nodes (name, remark, type, config, inbound_port, username, password, tcp_reuse_enabled, sort_order, latency, enabled)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+	`, req.Name, req.Remark, req.Type, req.Config, req.InboundPort, req.Username, req.Password, req.TCPReuseEnabled, req.SortOrder, 0, req.Enabled)
 
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to create node"})
@@ -484,8 +555,8 @@ func (h *Handler) BatchImportNodes(c *gin.Context) {
 	nextOrder := maxOrder + 1
 
 	stmt, err := tx.Prepare(`
-		INSERT INTO proxy_nodes (name, remark, type, config, inbound_port, username, password, sort_order, latency, enabled)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		INSERT INTO proxy_nodes (name, remark, type, config, inbound_port, username, password, tcp_reuse_enabled, sort_order, latency, enabled)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 	`)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "database error"})
@@ -518,9 +589,26 @@ func (h *Handler) BatchImportNodes(c *gin.Context) {
 
 		sortOrder := nextOrder
 		inboundPort := startPort + sortOrder
-		if inboundPort <= 0 || inboundPort > 65535 {
+		if err := validateInboundPort(inboundPort); err != nil {
 			result["success"] = false
-			result["error"] = "inbound port out of range"
+			result["error"] = err.Error()
+			results = append(results, result)
+			continue
+		}
+
+		var inboundPortInUse int
+		if err := tx.QueryRow(
+			"SELECT COUNT(1) FROM proxy_nodes WHERE inbound_port = ?",
+			inboundPort,
+		).Scan(&inboundPortInUse); err != nil {
+			result["success"] = false
+			result["error"] = "database error"
+			results = append(results, result)
+			continue
+		}
+		if inboundPortInUse > 0 {
+			result["success"] = false
+			result["error"] = "inbound port already in use"
 			results = append(results, result)
 			continue
 		}
@@ -541,7 +629,7 @@ func (h *Handler) BatchImportNodes(c *gin.Context) {
 			continue
 		}
 
-		dbResult, err := stmt.Exec(name, "", proxyType, string(configJSON), inboundPort, username, password, sortOrder, 0, req.Enabled)
+		dbResult, err := stmt.Exec(name, "", proxyType, string(configJSON), inboundPort, username, password, true, sortOrder, 0, req.Enabled)
 
 		if err != nil {
 			result["success"] = false
@@ -594,30 +682,94 @@ func (h *Handler) UpdateNode(c *gin.Context) {
 		return
 	}
 
-	var req models.ProxyNode
-	if err := c.BindJSON(&req); err != nil {
+	var payload nodeUpsertRequest
+	if err := c.BindJSON(&payload); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid request"})
 		return
 	}
+	req := nodeFromUpsertRequest(payload)
 
 	// Validate config JSON
 	if _, err := req.ParseConfig(); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid config format"})
 		return
 	}
+	if err := validateInboundUsername(req.Username); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
 
 	req.ID = id
 
+	h.nodeWriteMu.Lock()
+	defer h.nodeWriteMu.Unlock()
+
+	tx, err := h.db.Begin()
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "database error"})
+		return
+	}
+	defer tx.Rollback()
+
+	var currentSortOrder int
+	var currentReuseEnabled bool
+	if err := tx.QueryRow(
+		"SELECT sort_order, tcp_reuse_enabled FROM proxy_nodes WHERE id = ?",
+		id,
+	).Scan(&currentSortOrder, &currentReuseEnabled); err != nil {
+		if err == sql.ErrNoRows {
+			c.JSON(http.StatusNotFound, gin.H{"error": "node not found"})
+			return
+		}
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "database error"})
+		return
+	}
+	if payload.TCPReuseEnabled == nil {
+		req.TCPReuseEnabled = currentReuseEnabled
+	}
+	req.SortOrder = currentSortOrder
+
+	if req.InboundPort == 0 {
+		var startPort int
+		if err := tx.QueryRow("SELECT start_port FROM settings LIMIT 1").Scan(&startPort); err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "database error"})
+			return
+		}
+		req.InboundPort = startPort + currentSortOrder
+	}
+	if err := validateInboundPort(req.InboundPort); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+
+	var inboundPortInUse int
+	if err := tx.QueryRow(
+		"SELECT COUNT(1) FROM proxy_nodes WHERE inbound_port = ? AND id <> ?",
+		req.InboundPort,
+		id,
+	).Scan(&inboundPortInUse); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "database error"})
+		return
+	}
+	if inboundPortInUse > 0 {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "inbound port already in use"})
+		return
+	}
+
 	// Update node
-	_, err = h.db.Exec(`
+	_, err = tx.Exec(`
 		UPDATE proxy_nodes 
-		SET name = ?, remark = ?, type = ?, config = ?, username = ?, password = ?, 
+		SET name = ?, remark = ?, type = ?, config = ?, inbound_port = ?, username = ?, password = ?, tcp_reuse_enabled = ?,
 		    enabled = ?, updated_at = CURRENT_TIMESTAMP
 		WHERE id = ?
-	`, req.Name, req.Remark, req.Type, req.Config, req.Username, req.Password, req.Enabled, id)
+	`, req.Name, req.Remark, req.Type, req.Config, req.InboundPort, req.Username, req.Password, req.TCPReuseEnabled, req.Enabled, id)
 
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to update node"})
+		return
+	}
+	if err := tx.Commit(); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to commit transaction"})
 		return
 	}
 
@@ -910,6 +1062,10 @@ func (h *Handler) BatchSetAuth(c *gin.Context) {
 
 	if err := c.BindJSON(&req); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid request"})
+		return
+	}
+	if err := validateInboundUsername(req.Username); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
 
@@ -1300,12 +1456,12 @@ func (h *Handler) ReplaceNode(c *gin.Context) {
 
 	var node models.ProxyNode
 	err = h.db.QueryRow(`
-		SELECT id, name, remark, type, config, inbound_port, username, password,
+		SELECT id, name, remark, type, config, inbound_port, username, password, tcp_reuse_enabled,
 		       sort_order, node_ip, location, country_code, latency, enabled, created_at, updated_at
 		FROM proxy_nodes WHERE id = ?
 	`, id).Scan(
 		&node.ID, &node.Name, &node.Remark, &node.Type, &node.Config, &node.InboundPort,
-		&node.Username, &node.Password, &node.SortOrder, &node.NodeIP,
+		&node.Username, &node.Password, &node.TCPReuseEnabled, &node.SortOrder, &node.NodeIP,
 		&node.Location, &node.CountryCode, &node.Latency, &node.Enabled, &node.CreatedAt, &node.UpdatedAt,
 	)
 	if err != nil {

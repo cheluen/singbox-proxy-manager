@@ -164,6 +164,12 @@ type RouteRule struct {
 	Extra    map[string]interface{} `json:"-"`
 }
 
+type tcpReuseRoute struct {
+	AuthUser    string
+	Password    string
+	OutboundTag string
+}
+
 // GenerateGlobalConfig generates a single sing-box configuration for all enabled nodes
 func (s *SingBoxService) GenerateGlobalConfig(nodes []models.ProxyNode) error {
 	config := SingBoxConfig{
@@ -179,17 +185,42 @@ func (s *SingBoxService) GenerateGlobalConfig(nodes []models.ProxyNode) error {
 		},
 	}
 
-	// Generate inbounds, outbounds, and route rules for each enabled node
+	enabledNodes := make([]*models.ProxyNode, 0, len(nodes))
 	for i := range nodes {
-		node := &nodes[i]
-		if !node.Enabled {
+		if !nodes[i].Enabled {
 			continue
 		}
+		if strings.Contains(nodes[i].Username, "+") {
+			return fmt.Errorf("node %d username must not contain '+'", nodes[i].ID)
+		}
+		enabledNodes = append(enabledNodes, &nodes[i])
+	}
 
+	reuseRoutes := make([]tcpReuseRoute, 0, len(enabledNodes))
+	reuseRouteSet := make(map[string]struct{}, len(enabledNodes))
+	for _, node := range enabledNodes {
+		if !node.TCPReuseEnabled || node.Username == "" || node.Password == "" {
+			continue
+		}
+		authUser := fmt.Sprintf("%s+%d", node.Username, node.InboundPort)
+		if _, exists := reuseRouteSet[authUser]; exists {
+			return fmt.Errorf("duplicate tcp reuse auth user %q", authUser)
+		}
+		reuseRouteSet[authUser] = struct{}{}
+		reuseRoutes = append(reuseRoutes, tcpReuseRoute{
+			AuthUser:    authUser,
+			Password:    node.Password,
+			OutboundTag: fmt.Sprintf("node-%d-out", node.ID),
+		})
+	}
+
+	directInboundRoutes := make([]RouteRule, 0, len(enabledNodes))
+
+	// Generate inbounds and outbounds for each enabled node.
+	for _, node := range enabledNodes {
 		inboundTag := fmt.Sprintf("node-%d-in", node.ID)
 		outboundTag := fmt.Sprintf("node-%d-out", node.ID)
 
-		// Generate inbound
 		inbound := InboundConfig{
 			Type:   "mixed",
 			Tag:    inboundTag,
@@ -201,31 +232,43 @@ func (s *SingBoxService) GenerateGlobalConfig(nodes []models.ProxyNode) error {
 			},
 		}
 
-		// Add authentication if provided
-		if node.Username != "" && node.Password != "" {
-			inbound.Users = []InboundUser{
-				{
-					Username: node.Username,
-					Password: node.Password,
-				},
+		hasInboundAuth := node.Username != "" && node.Password != ""
+		if hasInboundAuth {
+			inbound.Users = append(inbound.Users, InboundUser{
+				Username: node.Username,
+				Password: node.Password,
+			})
+			for _, route := range reuseRoutes {
+				inbound.Users = append(inbound.Users, InboundUser{
+					Username: route.AuthUser,
+					Password: route.Password,
+				})
 			}
 		}
 
 		config.Inbounds = append(config.Inbounds, inbound)
 
-		// Generate outbound
 		outbound, err := s.generateOutbound(node, outboundTag)
 		if err != nil {
 			return fmt.Errorf("failed to generate outbound for node %d: %v", node.ID, err)
 		}
 		config.Outbounds = append(config.Outbounds, outbound)
-
-		// Generate simple route rule: direct inbound to outbound mapping
-		config.Route.Rules = append(config.Route.Rules, RouteRule{
+		directInboundRoutes = append(directInboundRoutes, RouteRule{
 			Inbound:  []string{inboundTag},
 			Outbound: outboundTag,
 		})
 	}
+
+	// Route username+route-number users first so they can override inbound->outbound defaults.
+	for _, route := range reuseRoutes {
+		config.Route.Rules = append(config.Route.Rules, RouteRule{
+			Outbound: route.OutboundTag,
+			Extra: map[string]interface{}{
+				"auth_user": []string{route.AuthUser},
+			},
+		})
+	}
+	config.Route.Rules = append(config.Route.Rules, directInboundRoutes...)
 
 	// Add direct outbound
 	config.Outbounds = append(config.Outbounds, OutboundConfig{

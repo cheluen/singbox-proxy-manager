@@ -133,6 +133,7 @@ export default {
   enter_node_name: '请输入节点名称',
   enter_share_link: '请输入分享链接',
   enter_username: '请输入用户名',
+  username_plus_not_allowed: '用户名不能包含 +',
   select_nodes: '请选择节点',
   no_nodes: '暂无节点',
   

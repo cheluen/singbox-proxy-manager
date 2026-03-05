@@ -34,7 +34,17 @@ function BatchAuthModal({ visible, selectedNodes, onClose, onSave }) {
         <Form.Item
           label={t('username')}
           name="username"
-          rules={[{ required: true, message: t('enter_username') }]}
+          rules={[
+            { required: true, message: t('enter_username') },
+            {
+              validator: (_, value) => {
+                if (!value || !String(value).includes('+')) {
+                  return Promise.resolve()
+                }
+                return Promise.reject(new Error(t('username_plus_not_allowed')))
+              },
+            },
+          ]}
         >
           <Input placeholder={t('enter_username')} />
         </Form.Item>

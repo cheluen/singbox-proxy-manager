@@ -133,6 +133,7 @@ export default {
   enter_node_name: 'Please enter node name',
   enter_share_link: 'Please enter share link',
   enter_username: 'Please enter username',
+  username_plus_not_allowed: 'Username cannot contain +',
   select_nodes: 'Please select nodes',
   no_nodes: 'No nodes yet',
   

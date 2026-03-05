@@ -105,3 +105,32 @@ func TestInitDB_AdminPasswordFromEnvDoesNotRevokeSessionsWhenUnchanged(t *testin
 		t.Fatalf("expected sessions to remain when env password unchanged, got %d", sessionCount)
 	}
 }
+
+func TestInitDBProxyNodeTCPReuseEnabledDefaultsToTrue(t *testing.T) {
+	t.Setenv("ADMIN_PASSWORD", "")
+
+	db, err := sql.Open("sqlite", ":memory:")
+	if err != nil {
+		t.Fatalf("open db: %v", err)
+	}
+	defer db.Close()
+
+	if err := InitDB(db); err != nil {
+		t.Fatalf("init db: %v", err)
+	}
+
+	if _, err := db.Exec(`
+		INSERT INTO proxy_nodes (name, type, config, inbound_port, username, password, sort_order, latency, enabled)
+		VALUES ('node1', 'direct', '{}', 30001, 'u', 'p', 0, 0, 1)
+	`); err != nil {
+		t.Fatalf("insert proxy node: %v", err)
+	}
+
+	var tcpReuseEnabled int
+	if err := db.QueryRow("SELECT tcp_reuse_enabled FROM proxy_nodes LIMIT 1").Scan(&tcpReuseEnabled); err != nil {
+		t.Fatalf("query tcp_reuse_enabled: %v", err)
+	}
+	if tcpReuseEnabled != 1 {
+		t.Fatalf("expected tcp_reuse_enabled default to 1, got %d", tcpReuseEnabled)
+	}
+}

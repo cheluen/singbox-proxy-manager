@@ -14,22 +14,24 @@ import (
 
 // ProxyNode represents a proxy node configuration
 type ProxyNode struct {
-	ID          int       `json:"id"`
-	Name        string    `json:"name"`
-	Remark      string    `json:"remark"`
-	Type        string    `json:"type"`   // ss, vless, vmess, hy2, tuic, trojan, anytls, socks5, http, direct
-	Config      string    `json:"config"` // JSON string of protocol-specific config
-	InboundPort int       `json:"inbound_port"`
-	Username    string    `json:"username"`
-	Password    string    `json:"password"`
-	SortOrder   int       `json:"sort_order"`
-	NodeIP      string    `json:"node_ip"`
-	Location    string    `json:"location"`
-	CountryCode string    `json:"country_code"`
-	Latency     int       `json:"latency"` // in milliseconds
-	Enabled     bool      `json:"enabled"`
-	CreatedAt   time.Time `json:"created_at"`
-	UpdatedAt   time.Time `json:"updated_at"`
+	ID          int    `json:"id"`
+	Name        string `json:"name"`
+	Remark      string `json:"remark"`
+	Type        string `json:"type"`   // ss, vless, vmess, hy2, tuic, trojan, anytls, socks5, http, direct
+	Config      string `json:"config"` // JSON string of protocol-specific config
+	InboundPort int    `json:"inbound_port"`
+	Username    string `json:"username"`
+	Password    string `json:"password"`
+	// TCPReuseEnabled controls whether username+route-number routing can target this node.
+	TCPReuseEnabled bool      `json:"tcp_reuse_enabled"`
+	SortOrder       int       `json:"sort_order"`
+	NodeIP          string    `json:"node_ip"`
+	Location        string    `json:"location"`
+	CountryCode     string    `json:"country_code"`
+	Latency         int       `json:"latency"` // in milliseconds
+	Enabled         bool      `json:"enabled"`
+	CreatedAt       time.Time `json:"created_at"`
+	UpdatedAt       time.Time `json:"updated_at"`
 }
 
 // DirectConfig represents sing-box direct outbound configuration.
@@ -242,6 +244,7 @@ func InitDB(db *sql.DB) error {
 			inbound_port INTEGER NOT NULL,
 			username TEXT DEFAULT '',
 			password TEXT DEFAULT '',
+			tcp_reuse_enabled INTEGER NOT NULL DEFAULT 1,
 			sort_order INTEGER NOT NULL,
 			node_ip TEXT DEFAULT '',
 			location TEXT DEFAULT '',
@@ -257,6 +260,14 @@ func InitDB(db *sql.DB) error {
 	}
 
 	if err := ensureColumn(db, "proxy_nodes", "remark", "ALTER TABLE proxy_nodes ADD COLUMN remark TEXT DEFAULT ''"); err != nil {
+		return err
+	}
+	if err := ensureColumn(
+		db,
+		"proxy_nodes",
+		"tcp_reuse_enabled",
+		"ALTER TABLE proxy_nodes ADD COLUMN tcp_reuse_enabled INTEGER NOT NULL DEFAULT 1",
+	); err != nil {
 		return err
 	}
 
