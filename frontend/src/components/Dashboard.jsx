@@ -47,7 +47,7 @@ import SettingsForm from './SettingsForm'
 import BatchAuthModal from './BatchAuthModal'
 
 const { Header, Content } = Layout
-const { Title } = Typography
+const { Title, Text } = Typography
 const { TextArea } = Input
 
 function NodeRemarkEditor({ record, saving, onSave, t }) {
@@ -107,8 +107,8 @@ function Dashboard({ onLogout }) {
   const [exportText, setExportText] = useState('')
   const [exportLoading, setExportLoading] = useState(false)
   const [replaceVisible, setReplaceVisible] = useState(false)
-    const [replaceNode, setReplaceNode] = useState(null)
-    const [replaceLink, setReplaceLink] = useState('')
+  const [replaceNode, setReplaceNode] = useState(null)
+  const [replaceLink, setReplaceLink] = useState('')
   const [replaceUpdateName, setReplaceUpdateName] = useState(true)
   const [replaceLoading, setReplaceLoading] = useState(false)
   const [autoCheckAfterCreate, setAutoCheckAfterCreate] = useState(false)
@@ -729,12 +729,12 @@ function Dashboard({ onLogout }) {
         dataIndex: 'name',
         key: 'name',
         ellipsis: true,
-        width: 180,
+        width: 160,
       },
       {
         title: t('remark'),
         key: 'remark_indicator',
-        width: 80,
+        width: 70,
         render: (_, record) => {
           const remark = (record?.remark ?? '').trim()
           if (!remark) return null
@@ -750,26 +750,46 @@ function Dashboard({ onLogout }) {
         title: t('node_type'),
         dataIndex: 'type',
         key: 'type',
-        width: 96,
+        width: 88,
         render: (type) => <Tag color="blue">{type.toUpperCase()}</Tag>,
       },
       {
         title: t('inbound_port'),
         dataIndex: 'inbound_port',
         key: 'inbound_port',
-        width: 96,
+        width: 88,
       },
       {
         title: t('username'),
         dataIndex: 'username',
         key: 'username',
-        width: 120,
+        width: 100,
         render: (username) => username || '-',
+      },
+      {
+        title: t('node_record'),
+        key: 'record_summary',
+        width: 190,
+        render: (_, record) => (
+          <Space direction="vertical" size={0}>
+            <Text style={{ fontSize: 12 }}>
+              {record.node_ip || '-'} / {record.latency > 0 ? `${record.latency}ms` : '-'}
+            </Text>
+            <Tooltip title={record.location || '-'}>
+              <Text style={{ maxWidth: 170, fontSize: 12 }} ellipsis>
+                {record.location || '-'}
+              </Text>
+            </Tooltip>
+            <Text type="secondary" style={{ fontSize: 12 }}>
+              {t('password_auth')}: {record.password || '-'}
+            </Text>
+          </Space>
+        ),
       },
       {
         title: t('status'),
         key: 'status',
-        width: 120,
+        width: 108,
         render: (_, record) => {
           const healthy = record.node_ip && record.latency > 0
           return (
@@ -782,58 +802,66 @@ function Dashboard({ onLogout }) {
       {
         title: t('state_controls'),
         key: 'state_controls',
-        width: 172,
+        width: 150,
         render: (_, record) => (
-          <Space size={8}>
-            <Tooltip title={t('enabled')}>
+          <Space direction="vertical" size={2}>
+            <Space size={6}>
+              <Text style={{ fontSize: 12 }}>{t('enabled')}</Text>
               <Switch
                 checked={record.enabled}
                 onChange={() => handleToggleNode(record)}
                 checkedChildren={<CheckCircleOutlined />}
                 unCheckedChildren={<CloseCircleOutlined />}
               />
-            </Tooltip>
-            <Tooltip title={t('tcp_reuse')}>
+            </Space>
+            <Space size={6}>
+              <Text style={{ fontSize: 12 }}>{t('tcp_reuse')}</Text>
               <Switch
                 checked={record.tcp_reuse_enabled !== false}
                 onChange={() => handleToggleTCPReuse(record)}
                 checkedChildren={t('tcp_reuse_short')}
                 unCheckedChildren={t('tcp_reuse_short')}
               />
-            </Tooltip>
+            </Space>
           </Space>
         ),
       },
       {
         title: t('actions'),
         key: 'actions',
-        width: 124,
+        width: 200,
         render: (_, record) => (
-        <Space size={4}>
+        <Space size={[4, 4]} wrap>
           <Tooltip title={t('export')}>
             <Button
-              type="link"
+              type="default"
               size="small"
               icon={<CopyOutlined />}
               loading={exportLoading}
               onClick={() => handleExportNode(record)}
-            />
+            >
+              {t('export')}
+            </Button>
           </Tooltip>
           <Tooltip title={t('replace')}>
             <Button
-              type="link"
+              type="default"
               size="small"
               icon={<SwapOutlined />}
               onClick={() => openReplaceModal(record)}
-            />
+            >
+              {t('replace')}
+            </Button>
           </Tooltip>
           <Tooltip title={t('edit')}>
             <Button
-              type="link"
+              type="default"
               size="small"
               icon={<EditOutlined />}
               onClick={() => handleEditNode(record)}
-            />
+            >
+              {t('edit')}
+            </Button>
           </Tooltip>
           <Popconfirm
             title={t('confirm')}
@@ -841,7 +869,9 @@ function Dashboard({ onLogout }) {
             okText={t('confirm')}
             cancelText={t('cancel')}
           >
-            <Button type="link" size="small" danger icon={<DeleteOutlined />} />
+            <Button type="default" size="small" danger icon={<DeleteOutlined />}>
+              {t('delete')}
+            </Button>
           </Popconfirm>
         </Space>
       ),
@@ -957,8 +987,8 @@ function Dashboard({ onLogout }) {
 
       <Content style={{ padding: '24px' }}>
         <Space direction="vertical" style={{ width: '100%' }} size="large">
-          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-            <Space>
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: 12 }}>
+            <Space wrap>
               <Button
                 type="primary"
                 icon={<PlusOutlined />}
@@ -988,7 +1018,7 @@ function Dashboard({ onLogout }) {
             </Space>
 
             {selectedNodeIds.length > 0 && (
-              <Space>
+              <Space wrap>
                 <Tag color="blue">{t('selected_count').replace('{{count}}', selectedNodeIds.length)}</Tag>
                 <Button
                   icon={<ExportOutlined />}
