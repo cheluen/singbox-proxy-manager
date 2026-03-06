@@ -59,6 +59,7 @@ export default {
   disabled: 'Disabled',
   node_ip: 'Node IP',
   location: 'Location',
+  country_code: 'Region Code',
   latency: 'Latency',
   status: 'Status',
   status_healthy: 'Healthy',

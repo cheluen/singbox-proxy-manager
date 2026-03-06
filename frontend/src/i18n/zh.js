@@ -59,6 +59,7 @@ export default {
   disabled: '禁用',
   node_ip: '节点IP',
   location: '位置',
+  country_code: '地区缩写',
   latency: '延迟',
   status: '状态',
   status_healthy: '可用',

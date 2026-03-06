@@ -88,6 +88,38 @@ function NodeRemarkEditor({ record, saving, onSave, t }) {
   )
 }
 
+const parseCountryName = (location) => {
+  const raw = String(location || '').trim()
+  if (!raw) {
+    return ''
+  }
+  const parts = raw.split(',').map((part) => part.trim()).filter(Boolean)
+  return parts.length > 0 ? parts[parts.length - 1] : raw
+}
+
+const normalizeCountryCode = (countryCode) => {
+  const raw = String(countryCode || '').trim()
+  if (!raw) {
+    return ''
+  }
+  return raw.toLowerCase()
+}
+
+const formatCountryWithCode = (record) => {
+  const code = normalizeCountryCode(record?.country_code)
+  const countryName = parseCountryName(record?.location)
+  if (!code && !countryName) {
+    return '-'
+  }
+  if (!countryName) {
+    return code
+  }
+  if (!code) {
+    return countryName
+  }
+  return `${code} ${countryName}`
+}
+
 function Dashboard({ onLogout }) {
   const { t, i18n } = useTranslation()
   const [nodes, setNodes] = useState([])
@@ -694,7 +726,7 @@ function Dashboard({ onLogout }) {
       {
         title: '',
         key: 'drag',
-        width: 40,
+        width: 34,
         render: () => <HolderOutlined style={{ cursor: 'grab', color: '#999' }} />,
       },
       {
@@ -710,7 +742,7 @@ function Dashboard({ onLogout }) {
           }}
         />,
         key: 'checkbox',
-        width: 50,
+        width: 42,
         render: (_, record) => (
           <Checkbox
             checked={selectedNodeIds.includes(record.id)}
@@ -729,12 +761,12 @@ function Dashboard({ onLogout }) {
         dataIndex: 'name',
         key: 'name',
         ellipsis: true,
-        width: 160,
+        width: 110,
       },
       {
         title: t('remark'),
         key: 'remark_indicator',
-        width: 70,
+        width: 56,
         render: (_, record) => {
           const remark = (record?.remark ?? '').trim()
           if (!remark) return null
@@ -750,46 +782,33 @@ function Dashboard({ onLogout }) {
         title: t('node_type'),
         dataIndex: 'type',
         key: 'type',
-        width: 88,
+        width: 70,
         render: (type) => <Tag color="blue">{type.toUpperCase()}</Tag>,
       },
       {
         title: t('inbound_port'),
         dataIndex: 'inbound_port',
         key: 'inbound_port',
-        width: 88,
+        width: 72,
       },
       {
         title: t('username'),
         dataIndex: 'username',
         key: 'username',
-        width: 100,
+        width: 76,
         render: (username) => username || '-',
       },
       {
-        title: t('node_record'),
-        key: 'record_summary',
-        width: 190,
-        render: (_, record) => (
-          <Space direction="vertical" size={0}>
-            <Text style={{ fontSize: 12 }}>
-              {record.node_ip || '-'} / {record.latency > 0 ? `${record.latency}ms` : '-'}
-            </Text>
-            <Tooltip title={record.location || '-'}>
-              <Text style={{ maxWidth: 170, fontSize: 12 }} ellipsis>
-                {record.location || '-'}
-              </Text>
-            </Tooltip>
-            <Text type="secondary" style={{ fontSize: 12 }}>
-              {t('password_auth')}: {record.password || '-'}
-            </Text>
-          </Space>
-        ),
+        title: t('password_auth'),
+        dataIndex: 'password',
+        key: 'password',
+        width: 76,
+        render: (password) => password || '-',
       },
       {
         title: t('status'),
         key: 'status',
-        width: 108,
+        width: 84,
         render: (_, record) => {
           const healthy = record.node_ip && record.latency > 0
           return (
@@ -800,68 +819,96 @@ function Dashboard({ onLogout }) {
         },
       },
       {
-        title: t('state_controls'),
-        key: 'state_controls',
-        width: 150,
+        title: t('latency'),
+        dataIndex: 'latency',
+        key: 'latency',
+        width: 72,
+        render: (latency) => latency > 0 ? `${latency}ms` : '-',
+      },
+      {
+        title: t('node_ip'),
+        dataIndex: 'node_ip',
+        key: 'node_ip',
+        width: 86,
+        render: (nodeIP) => nodeIP || '-',
+      },
+      {
+        title: t('country_code'),
+        dataIndex: 'country_code',
+        key: 'country_code',
+        width: 60,
+        render: (countryCode) => normalizeCountryCode(countryCode) || '-',
+      },
+      {
+        title: t('location'),
+        dataIndex: 'location',
+        key: 'location',
+        width: 96,
         render: (_, record) => (
-          <Space direction="vertical" size={2}>
-            <Space size={6}>
-              <Text style={{ fontSize: 12 }}>{t('enabled')}</Text>
-              <Switch
-                checked={record.enabled}
-                onChange={() => handleToggleNode(record)}
-                checkedChildren={<CheckCircleOutlined />}
-                unCheckedChildren={<CloseCircleOutlined />}
-              />
-            </Space>
-            <Space size={6}>
-              <Text style={{ fontSize: 12 }}>{t('tcp_reuse')}</Text>
-              <Switch
-                checked={record.tcp_reuse_enabled !== false}
-                onChange={() => handleToggleTCPReuse(record)}
-                checkedChildren={t('tcp_reuse_short')}
-                unCheckedChildren={t('tcp_reuse_short')}
-              />
-            </Space>
-          </Space>
+          <Tooltip title={formatCountryWithCode(record)}>
+            <Text ellipsis style={{ maxWidth: 90 }}>
+              {formatCountryWithCode(record)}
+            </Text>
+          </Tooltip>
+        ),
+      },
+      {
+        title: t('enabled'),
+        dataIndex: 'enabled',
+        key: 'enabled',
+        width: 68,
+        render: (_, record) => (
+          <Switch
+            checked={record.enabled}
+            onChange={() => handleToggleNode(record)}
+            checkedChildren={<CheckCircleOutlined />}
+            unCheckedChildren={<CloseCircleOutlined />}
+          />
+        ),
+      },
+      {
+        title: t('tcp_reuse'),
+        key: 'tcp_reuse',
+        width: 68,
+        render: (_, record) => (
+          <Switch
+            checked={record.tcp_reuse_enabled !== false}
+            onChange={() => handleToggleTCPReuse(record)}
+            checkedChildren={t('tcp_reuse_short')}
+            unCheckedChildren={t('tcp_reuse_short')}
+          />
         ),
       },
       {
         title: t('actions'),
         key: 'actions',
-        width: 200,
+        width: 96,
         render: (_, record) => (
         <Space size={[4, 4]} wrap>
           <Tooltip title={t('export')}>
             <Button
-              type="default"
+              type="link"
               size="small"
               icon={<CopyOutlined />}
               loading={exportLoading}
               onClick={() => handleExportNode(record)}
-            >
-              {t('export')}
-            </Button>
+            />
           </Tooltip>
           <Tooltip title={t('replace')}>
             <Button
-              type="default"
+              type="link"
               size="small"
               icon={<SwapOutlined />}
               onClick={() => openReplaceModal(record)}
-            >
-              {t('replace')}
-            </Button>
+            />
           </Tooltip>
           <Tooltip title={t('edit')}>
             <Button
-              type="default"
+              type="link"
               size="small"
               icon={<EditOutlined />}
               onClick={() => handleEditNode(record)}
-            >
-              {t('edit')}
-            </Button>
+            />
           </Tooltip>
           <Popconfirm
             title={t('confirm')}
@@ -869,9 +916,7 @@ function Dashboard({ onLogout }) {
             okText={t('confirm')}
             cancelText={t('cancel')}
           >
-            <Button type="default" size="small" danger icon={<DeleteOutlined />}>
-              {t('delete')}
-            </Button>
+            <Button type="link" size="small" danger icon={<DeleteOutlined />} />
           </Popconfirm>
         </Space>
       ),
@@ -1058,6 +1103,7 @@ function Dashboard({ onLogout }) {
                 columns={columns}
                 dataSource={nodes}
                 rowKey="id"
+                size="small"
                 expandable={{
                   expandedRowRender,
                   expandedRowKeys,
