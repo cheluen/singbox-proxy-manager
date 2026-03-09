@@ -223,12 +223,13 @@ type HTTPProxyConfig struct {
 
 // Settings represents global settings
 type Settings struct {
-	ID               int       `json:"id"`
-	AdminPassword    string    `json:"admin_password"`
-	AdminPasswordSet int       `json:"admin_password_set"`
-	StartPort        int       `json:"start_port"`
-	CreatedAt        time.Time `json:"created_at"`
-	UpdatedAt        time.Time `json:"updated_at"`
+	ID                   int       `json:"id"`
+	AdminPassword        string    `json:"admin_password"`
+	AdminPasswordSet     int       `json:"admin_password_set"`
+	StartPort            int       `json:"start_port"`
+	PreserveInboundPorts bool      `json:"preserve_inbound_ports"`
+	CreatedAt            time.Time `json:"created_at"`
+	UpdatedAt            time.Time `json:"updated_at"`
 }
 
 // InitDB initializes the database
@@ -278,6 +279,7 @@ func InitDB(db *sql.DB) error {
 			admin_password TEXT NOT NULL,
 			admin_password_set INTEGER DEFAULT 0,
 			start_port INTEGER DEFAULT 10000,
+			preserve_inbound_ports INTEGER NOT NULL DEFAULT 0,
 			created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
 			updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
 		)
@@ -287,6 +289,9 @@ func InitDB(db *sql.DB) error {
 	}
 
 	if err := ensureColumn(db, "settings", "admin_password_set", "ALTER TABLE settings ADD COLUMN admin_password_set INTEGER DEFAULT 0"); err != nil {
+		return err
+	}
+	if err := ensureColumn(db, "settings", "preserve_inbound_ports", "ALTER TABLE settings ADD COLUMN preserve_inbound_ports INTEGER NOT NULL DEFAULT 0"); err != nil {
 		return err
 	}
 
@@ -322,13 +327,13 @@ func InitDB(db *sql.DB) error {
 				log.Printf("Failed to hash initial admin password: %v", err)
 				return err
 			}
-			_, err = db.Exec("INSERT INTO settings (admin_password, admin_password_set, start_port) VALUES (?, ?, ?)", string(hashedPassword), 1, 30001)
+			_, err = db.Exec("INSERT INTO settings (admin_password, admin_password_set, start_port, preserve_inbound_ports) VALUES (?, ?, ?, ?)", string(hashedPassword), 1, 30001, 0)
 			if err != nil {
 				return err
 			}
 			log.Println("Admin password is managed by ADMIN_PASSWORD (env) and has been hashed")
 		} else {
-			_, err = db.Exec("INSERT INTO settings (admin_password, admin_password_set, start_port) VALUES (?, ?, ?)", "", 0, 30001)
+			_, err = db.Exec("INSERT INTO settings (admin_password, admin_password_set, start_port, preserve_inbound_ports) VALUES (?, ?, ?, ?)", "", 0, 30001, 0)
 			if err != nil {
 				return err
 			}

@@ -61,6 +61,19 @@ func insertTestNode(t *testing.T, db *sql.DB) int {
 	return int(id)
 }
 
+func insertTestNodeWithPortAndOrder(t *testing.T, db *sql.DB, name string, inboundPort int, sortOrder int) int {
+	t.Helper()
+	res, err := db.Exec(`
+		INSERT INTO proxy_nodes (name, type, config, inbound_port, username, password, sort_order, latency, enabled)
+		VALUES (?, 'ss', '{"server":"example.com","server_port":443,"method":"aes-128-gcm","password":"p"}', ?, 'user', 'pass', ?, 0, 1)
+	`, name, inboundPort, sortOrder)
+	if err != nil {
+		t.Fatalf("insert node: %v", err)
+	}
+	id, _ := res.LastInsertId()
+	return int(id)
+}
+
 func TestCheckNodeIPSuccessUpdatesNode(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 
@@ -277,7 +290,7 @@ func TestUpdateNodeAppliesInboundPortAndTCPReuseFlag(t *testing.T) {
 	}
 }
 
-func TestUpdateNodeInboundPortZeroUsesStartPortAndSortOrder(t *testing.T) {
+func TestUpdateNodeInboundPortZeroUsesStartPortWhenAvailable(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	handler := newTestHandler(t, func(proxyAddr, username, password string) (*services.IPInfo, error) {
 		return nil, fmt.Errorf("not used")
@@ -318,6 +331,267 @@ func TestUpdateNodeInboundPortZeroUsesStartPortAndSortOrder(t *testing.T) {
 	}
 	if inboundPort != 41000 {
 		t.Fatalf("expected inbound_port=41000, got %d", inboundPort)
+	}
+}
+
+func TestCreateNodeAutoAssignSkipsUsedInboundPorts(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	handler := newTestHandler(t, func(proxyAddr, username, password string) (*services.IPInfo, error) {
+		return nil, fmt.Errorf("not used")
+	})
+
+	if _, err := handler.db.Exec("UPDATE settings SET start_port = 30001"); err != nil {
+		t.Fatalf("set start_port: %v", err)
+	}
+	insertTestNodeWithPortAndOrder(t, handler.db, "node-a", 30001, 0)
+	insertTestNodeWithPortAndOrder(t, handler.db, "node-b", 30005, 1)
+
+	payload := map[string]interface{}{
+		"name":         "node-new",
+		"remark":       "",
+		"type":         "ss",
+		"config":       `{"server":"example.com","server_port":443,"method":"aes-128-gcm","password":"p"}`,
+		"inbound_port": 0,
+		"username":     "",
+		"password":     "",
+		"enabled":      true,
+	}
+	body, _ := json.Marshal(payload)
+
+	rec := httptest.NewRecorder()
+	ctx, _ := gin.CreateTestContext(rec)
+	req, _ := http.NewRequest(http.MethodPost, "/api/nodes", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	ctx.Request = req
+
+	handler.CreateNode(ctx)
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("unexpected status %d body=%s", rec.Code, rec.Body.String())
+	}
+
+	var inboundPort int
+	if err := handler.db.QueryRow("SELECT inbound_port FROM proxy_nodes WHERE name = ?", "node-new").Scan(&inboundPort); err != nil {
+		t.Fatalf("query inbound_port: %v", err)
+	}
+	if inboundPort != 30002 {
+		t.Fatalf("expected inbound_port=30002, got %d", inboundPort)
+	}
+}
+
+func TestBatchImportNodesAutoAssignSkipsUsedInboundPorts(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	handler := newTestHandler(t, func(proxyAddr, username, password string) (*services.IPInfo, error) {
+		return nil, fmt.Errorf("not used")
+	})
+
+	if _, err := handler.db.Exec("UPDATE settings SET start_port = 30001, preserve_inbound_ports = 1"); err != nil {
+		t.Fatalf("set settings: %v", err)
+	}
+	insertTestNodeWithPortAndOrder(t, handler.db, "node-a", 30001, 0)
+	insertTestNodeWithPortAndOrder(t, handler.db, "node-b", 30005, 1)
+
+	payload := map[string]interface{}{
+		"links": []string{
+			"trojan://pass123@example.com:443?type=ws&host=example.com&path=%2Fws&sni=sni.example.com&alpn=h2,http/1.1&insecure=1&fp=firefox#Batch-1",
+			"trojan://pass123@example.com:443?type=ws&host=example.com&path=%2Fws&sni=sni.example.com&alpn=h2,http/1.1&insecure=1&fp=firefox#Batch-2",
+			"trojan://pass123@example.com:443?type=ws&host=example.com&path=%2Fws&sni=sni.example.com&alpn=h2,http/1.1&insecure=1&fp=firefox#Batch-3",
+			"trojan://pass123@example.com:443?type=ws&host=example.com&path=%2Fws&sni=sni.example.com&alpn=h2,http/1.1&insecure=1&fp=firefox#Batch-4",
+			"trojan://pass123@example.com:443?type=ws&host=example.com&path=%2Fws&sni=sni.example.com&alpn=h2,http/1.1&insecure=1&fp=firefox#Batch-5",
+		},
+		"enabled": true,
+	}
+	body, _ := json.Marshal(payload)
+
+	rec := httptest.NewRecorder()
+	ctx, _ := gin.CreateTestContext(rec)
+	req, _ := http.NewRequest(http.MethodPost, "/api/nodes/batch-import", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	ctx.Request = req
+
+	handler.BatchImportNodes(ctx)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("unexpected status %d body=%s", rec.Code, rec.Body.String())
+	}
+
+	rows, err := handler.db.Query("SELECT inbound_port FROM proxy_nodes WHERE name LIKE 'Batch-%' ORDER BY sort_order")
+	if err != nil {
+		t.Fatalf("query imported ports: %v", err)
+	}
+	defer rows.Close()
+
+	var got []int
+	for rows.Next() {
+		var inboundPort int
+		if err := rows.Scan(&inboundPort); err != nil {
+			t.Fatalf("scan imported port: %v", err)
+		}
+		got = append(got, inboundPort)
+	}
+	want := []int{30002, 30003, 30004, 30006, 30007}
+	if fmt.Sprint(got) != fmt.Sprint(want) {
+		t.Fatalf("unexpected imported ports: got=%v want=%v", got, want)
+	}
+}
+
+func TestReorderNodesPreserveInboundPortsKeepsPorts(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	handler := newTestHandler(t, func(proxyAddr, username, password string) (*services.IPInfo, error) {
+		return nil, fmt.Errorf("not used")
+	})
+
+	if _, err := handler.db.Exec("UPDATE settings SET preserve_inbound_ports = 1"); err != nil {
+		t.Fatalf("set preserve_inbound_ports: %v", err)
+	}
+	firstID := insertTestNodeWithPortAndOrder(t, handler.db, "node-a", 30001, 0)
+	secondID := insertTestNodeWithPortAndOrder(t, handler.db, "node-b", 30005, 1)
+
+	payload := map[string]interface{}{
+		"nodes": []map[string]int{
+			{"id": secondID, "sort_order": 0},
+			{"id": firstID, "sort_order": 1},
+		},
+	}
+	body, _ := json.Marshal(payload)
+
+	rec := httptest.NewRecorder()
+	ctx, _ := gin.CreateTestContext(rec)
+	req, _ := http.NewRequest(http.MethodPost, "/api/nodes/reorder", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	ctx.Request = req
+
+	handler.ReorderNodes(ctx)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("unexpected status %d body=%s", rec.Code, rec.Body.String())
+	}
+
+	rows, err := handler.db.Query("SELECT name, inbound_port, sort_order FROM proxy_nodes ORDER BY sort_order")
+	if err != nil {
+		t.Fatalf("query nodes: %v", err)
+	}
+	defer rows.Close()
+
+	type row struct {
+		name        string
+		inboundPort int
+		sortOrder   int
+	}
+	var got []row
+	for rows.Next() {
+		var current row
+		if err := rows.Scan(&current.name, &current.inboundPort, &current.sortOrder); err != nil {
+			t.Fatalf("scan node: %v", err)
+		}
+		got = append(got, current)
+	}
+
+	if len(got) != 2 {
+		t.Fatalf("expected 2 rows, got %d", len(got))
+	}
+	if got[0].name != "node-b" || got[0].inboundPort != 30005 || got[0].sortOrder != 0 {
+		t.Fatalf("unexpected first row: %+v", got[0])
+	}
+	if got[1].name != "node-a" || got[1].inboundPort != 30001 || got[1].sortOrder != 1 {
+		t.Fatalf("unexpected second row: %+v", got[1])
+	}
+}
+
+func TestUpdateSettingsPreserveModeStartPortDoesNotRewritePorts(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	handler := newTestHandler(t, func(proxyAddr, username, password string) (*services.IPInfo, error) {
+		return nil, fmt.Errorf("not used")
+	})
+
+	if _, err := handler.db.Exec("UPDATE settings SET start_port = 30001, preserve_inbound_ports = 1"); err != nil {
+		t.Fatalf("set settings: %v", err)
+	}
+	nodeID := insertTestNodeWithPortAndOrder(t, handler.db, "node-a", 30010, 0)
+
+	payload := map[string]interface{}{
+		"start_port": 35000,
+	}
+	body, _ := json.Marshal(payload)
+
+	rec := httptest.NewRecorder()
+	ctx, _ := gin.CreateTestContext(rec)
+	req, _ := http.NewRequest(http.MethodPut, "/api/settings", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	ctx.Request = req
+
+	handler.UpdateSettings(ctx)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("unexpected status %d body=%s", rec.Code, rec.Body.String())
+	}
+
+	var inboundPort int
+	var startPort int
+	if err := handler.db.QueryRow("SELECT inbound_port FROM proxy_nodes WHERE id = ?", nodeID).Scan(&inboundPort); err != nil {
+		t.Fatalf("query inbound_port: %v", err)
+	}
+	if err := handler.db.QueryRow("SELECT start_port FROM settings LIMIT 1").Scan(&startPort); err != nil {
+		t.Fatalf("query start_port: %v", err)
+	}
+	if inboundPort != 30010 {
+		t.Fatalf("expected inbound_port to stay 30010, got %d", inboundPort)
+	}
+	if startPort != 35000 {
+		t.Fatalf("expected start_port=35000, got %d", startPort)
+	}
+}
+
+func TestUpdateSettingsDisablingPreserveModeRealignsPorts(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	handler := newTestHandler(t, func(proxyAddr, username, password string) (*services.IPInfo, error) {
+		return nil, fmt.Errorf("not used")
+	})
+
+	if _, err := handler.db.Exec("UPDATE settings SET start_port = 30001, preserve_inbound_ports = 1"); err != nil {
+		t.Fatalf("set settings: %v", err)
+	}
+	insertTestNodeWithPortAndOrder(t, handler.db, "node-a", 30010, 0)
+	insertTestNodeWithPortAndOrder(t, handler.db, "node-b", 30050, 1)
+
+	payload := map[string]interface{}{
+		"start_port":             32000,
+		"preserve_inbound_ports": false,
+	}
+	body, _ := json.Marshal(payload)
+
+	rec := httptest.NewRecorder()
+	ctx, _ := gin.CreateTestContext(rec)
+	req, _ := http.NewRequest(http.MethodPut, "/api/settings", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	ctx.Request = req
+
+	handler.UpdateSettings(ctx)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("unexpected status %d body=%s", rec.Code, rec.Body.String())
+	}
+
+	rows, err := handler.db.Query("SELECT name, inbound_port FROM proxy_nodes ORDER BY sort_order")
+	if err != nil {
+		t.Fatalf("query nodes: %v", err)
+	}
+	defer rows.Close()
+
+	got := map[string]int{}
+	for rows.Next() {
+		var name string
+		var inboundPort int
+		if err := rows.Scan(&name, &inboundPort); err != nil {
+			t.Fatalf("scan node: %v", err)
+		}
+		got[name] = inboundPort
+	}
+	if got["node-a"] != 32000 || got["node-b"] != 32001 {
+		t.Fatalf("unexpected realigned ports: %+v", got)
+	}
+
+	var preserveInboundPorts bool
+	if err := handler.db.QueryRow("SELECT preserve_inbound_ports FROM settings LIMIT 1").Scan(&preserveInboundPorts); err != nil {
+		t.Fatalf("query preserve_inbound_ports: %v", err)
+	}
+	if preserveInboundPorts {
+		t.Fatalf("expected preserve_inbound_ports=false after update")
 	}
 }
 

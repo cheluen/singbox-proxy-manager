@@ -66,6 +66,66 @@ func validateInboundPort(port int) error {
 	return nil
 }
 
+func validateStartPort(port int) error {
+	if port < 1024 || port > 65535 {
+		return fmt.Errorf("start port out of range")
+	}
+	return nil
+}
+
+type sqlQueryRower interface {
+	QueryRow(query string, args ...interface{}) *sql.Row
+}
+
+func getPortSettings(rower sqlQueryRower) (int, bool, error) {
+	var startPort int
+	var preserveInboundPorts bool
+	if err := rower.QueryRow("SELECT start_port, preserve_inbound_ports FROM settings LIMIT 1").Scan(&startPort, &preserveInboundPorts); err != nil {
+		return 0, false, err
+	}
+	return startPort, preserveInboundPorts, nil
+}
+
+func collectUsedInboundPortsTx(tx *sql.Tx, excludeNodeID int) (map[int]struct{}, error) {
+	query := "SELECT inbound_port FROM proxy_nodes"
+	args := []interface{}{}
+	if excludeNodeID > 0 {
+		query += " WHERE id <> ?"
+		args = append(args, excludeNodeID)
+	}
+
+	rows, err := tx.Query(query, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	usedPorts := make(map[int]struct{})
+	for rows.Next() {
+		var inboundPort int
+		if err := rows.Scan(&inboundPort); err != nil {
+			return nil, err
+		}
+		usedPorts[inboundPort] = struct{}{}
+	}
+
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+
+	return usedPorts, nil
+}
+
+func nextAvailableInboundPort(startPort int, usedPorts map[int]struct{}) (int, error) {
+	for inboundPort := startPort; inboundPort <= 65535; inboundPort++ {
+		if _, exists := usedPorts[inboundPort]; exists {
+			continue
+		}
+		return inboundPort, nil
+	}
+	return 0, fmt.Errorf("no available inbound port")
+}
+
 func nodeFromUpsertRequest(req nodeUpsertRequest) models.ProxyNode {
 	node := models.ProxyNode{
 		Name:        req.Name,
@@ -124,9 +184,8 @@ func (h *Handler) regenerateAndRestart() error {
 
 // reorderRemainingNodes reorders all remaining nodes and reassigns ports to fill gaps
 func (h *Handler) reorderRemainingNodes() error {
-	// Get start port from settings
-	var startPort int
-	if err := h.db.QueryRow("SELECT start_port FROM settings LIMIT 1").Scan(&startPort); err != nil {
+	startPort, preserveInboundPorts, err := getPortSettings(h.db)
+	if err != nil {
 		return err
 	}
 
@@ -153,9 +212,24 @@ func (h *Handler) reorderRemainingNodes() error {
 	}
 	defer tx.Rollback()
 
-	// Update each node with new sort_order and inbound_port
+	// Update each node with new sort_order and inbound_port when needed
 	for newSortOrder, nodeID := range nodeIDs {
+		if preserveInboundPorts {
+			_, err := tx.Exec(`
+				UPDATE proxy_nodes
+				SET sort_order = ?, updated_at = CURRENT_TIMESTAMP
+				WHERE id = ?
+			`, newSortOrder, nodeID)
+			if err != nil {
+				return err
+			}
+			continue
+		}
+
 		newPort := startPort + newSortOrder
+		if err := validateInboundPort(newPort); err != nil {
+			return err
+		}
 		_, err := tx.Exec(`
 			UPDATE proxy_nodes
 			SET sort_order = ?, inbound_port = ?, updated_at = CURRENT_TIMESTAMP
@@ -457,28 +531,30 @@ func (h *Handler) CreateNode(c *gin.Context) {
 	}
 	req.SortOrder = maxOrder + 1
 
+	startPort, _, err := getPortSettings(tx)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "database error"})
+		return
+	}
+
+	usedInboundPorts, err := collectUsedInboundPortsTx(tx, 0)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "database error"})
+		return
+	}
+
 	if req.InboundPort == 0 {
-		var startPort int
-		if err := tx.QueryRow("SELECT start_port FROM settings LIMIT 1").Scan(&startPort); err != nil {
+		req.InboundPort, err = nextAvailableInboundPort(startPort, usedInboundPorts)
+		if err != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "database error"})
 			return
 		}
-		req.InboundPort = startPort + req.SortOrder
 	}
 	if err := validateInboundPort(req.InboundPort); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
-
-	var inboundPortInUse int
-	if err := tx.QueryRow(
-		"SELECT COUNT(1) FROM proxy_nodes WHERE inbound_port = ?",
-		req.InboundPort,
-	).Scan(&inboundPortInUse); err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "database error"})
-		return
-	}
-	if inboundPortInUse > 0 {
+	if _, exists := usedInboundPorts[req.InboundPort]; exists {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "inbound port already in use"})
 		return
 	}
@@ -541,8 +617,8 @@ func (h *Handler) BatchImportNodes(c *gin.Context) {
 	}
 	defer tx.Rollback()
 
-	var startPort int
-	if err := tx.QueryRow("SELECT start_port FROM settings LIMIT 1").Scan(&startPort); err != nil {
+	startPort, _, err := getPortSettings(tx)
+	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "database error"})
 		return
 	}
@@ -553,6 +629,12 @@ func (h *Handler) BatchImportNodes(c *gin.Context) {
 		return
 	}
 	nextOrder := maxOrder + 1
+
+	usedInboundPorts, err := collectUsedInboundPortsTx(tx, 0)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "database error"})
+		return
+	}
 
 	stmt, err := tx.Prepare(`
 		INSERT INTO proxy_nodes (name, remark, type, config, inbound_port, username, password, tcp_reuse_enabled, sort_order, latency, enabled)
@@ -588,27 +670,10 @@ func (h *Handler) BatchImportNodes(c *gin.Context) {
 		}
 
 		sortOrder := nextOrder
-		inboundPort := startPort + sortOrder
-		if err := validateInboundPort(inboundPort); err != nil {
+		inboundPort, err := nextAvailableInboundPort(startPort, usedInboundPorts)
+		if err != nil {
 			result["success"] = false
 			result["error"] = err.Error()
-			results = append(results, result)
-			continue
-		}
-
-		var inboundPortInUse int
-		if err := tx.QueryRow(
-			"SELECT COUNT(1) FROM proxy_nodes WHERE inbound_port = ?",
-			inboundPort,
-		).Scan(&inboundPortInUse); err != nil {
-			result["success"] = false
-			result["error"] = "database error"
-			results = append(results, result)
-			continue
-		}
-		if inboundPortInUse > 0 {
-			result["success"] = false
-			result["error"] = "inbound port already in use"
 			results = append(results, result)
 			continue
 		}
@@ -649,6 +714,7 @@ func (h *Handler) BatchImportNodes(c *gin.Context) {
 		results = append(results, result)
 		successCount++
 		nextOrder++
+		usedInboundPorts[inboundPort] = struct{}{}
 	}
 
 	if successCount > 0 {
@@ -729,29 +795,30 @@ func (h *Handler) UpdateNode(c *gin.Context) {
 	}
 	req.SortOrder = currentSortOrder
 
+	startPort, _, err := getPortSettings(tx)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "database error"})
+		return
+	}
+
+	usedInboundPorts, err := collectUsedInboundPortsTx(tx, id)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "database error"})
+		return
+	}
+
 	if req.InboundPort == 0 {
-		var startPort int
-		if err := tx.QueryRow("SELECT start_port FROM settings LIMIT 1").Scan(&startPort); err != nil {
+		req.InboundPort, err = nextAvailableInboundPort(startPort, usedInboundPorts)
+		if err != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "database error"})
 			return
 		}
-		req.InboundPort = startPort + currentSortOrder
 	}
 	if err := validateInboundPort(req.InboundPort); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
-
-	var inboundPortInUse int
-	if err := tx.QueryRow(
-		"SELECT COUNT(1) FROM proxy_nodes WHERE inbound_port = ? AND id <> ?",
-		req.InboundPort,
-		id,
-	).Scan(&inboundPortInUse); err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "database error"})
-		return
-	}
-	if inboundPortInUse > 0 {
+	if _, exists := usedInboundPorts[req.InboundPort]; exists {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "inbound port already in use"})
 		return
 	}
@@ -930,9 +997,11 @@ func (h *Handler) ReorderNodes(c *gin.Context) {
 	h.nodeWriteMu.Lock()
 	defer h.nodeWriteMu.Unlock()
 
-	// Get start port
-	var startPort int
-	h.db.QueryRow("SELECT start_port FROM settings LIMIT 1").Scan(&startPort)
+	startPort, preserveInboundPorts, err := getPortSettings(h.db)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "database error"})
+		return
+	}
 
 	// Begin transaction
 	tx, err := h.db.Begin()
@@ -944,7 +1013,25 @@ func (h *Handler) ReorderNodes(c *gin.Context) {
 
 	// Update each node
 	for _, order := range req.Nodes {
+		if preserveInboundPorts {
+			_, err := tx.Exec(`
+				UPDATE proxy_nodes
+				SET sort_order = ?, updated_at = CURRENT_TIMESTAMP
+				WHERE id = ?
+			`, order.SortOrder, order.ID)
+
+			if err != nil {
+				c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to update order"})
+				return
+			}
+			continue
+		}
+
 		newPort := startPort + order.SortOrder
+		if err := validateInboundPort(newPort); err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+			return
+		}
 		_, err := tx.Exec(`
 			UPDATE proxy_nodes 
 			SET sort_order = ?, inbound_port = ?, updated_at = CURRENT_TIMESTAMP
@@ -1106,23 +1193,25 @@ func (h *Handler) BatchSetAuth(c *gin.Context) {
 // GetSettings returns current settings
 func (h *Handler) GetSettings(c *gin.Context) {
 	var settings models.Settings
-	err := h.db.QueryRow("SELECT id, start_port FROM settings LIMIT 1").Scan(&settings.ID, &settings.StartPort)
+	err := h.db.QueryRow("SELECT id, start_port, preserve_inbound_ports FROM settings LIMIT 1").Scan(&settings.ID, &settings.StartPort, &settings.PreserveInboundPorts)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "database error"})
 		return
 	}
 
 	c.JSON(http.StatusOK, gin.H{
-		"start_port":            settings.StartPort,
-		"admin_password_locked": strings.TrimSpace(os.Getenv("ADMIN_PASSWORD")) != "",
+		"start_port":             settings.StartPort,
+		"preserve_inbound_ports": settings.PreserveInboundPorts,
+		"admin_password_locked":  strings.TrimSpace(os.Getenv("ADMIN_PASSWORD")) != "",
 	})
 }
 
 // UpdateSettings updates settings
 func (h *Handler) UpdateSettings(c *gin.Context) {
 	var req struct {
-		StartPort     *int    `json:"start_port,omitempty"`
-		AdminPassword *string `json:"admin_password,omitempty"`
+		StartPort            *int    `json:"start_port,omitempty"`
+		AdminPassword        *string `json:"admin_password,omitempty"`
+		PreserveInboundPorts *bool   `json:"preserve_inbound_ports,omitempty"`
 	}
 
 	if err := c.BindJSON(&req); err != nil {
@@ -1160,87 +1249,112 @@ func (h *Handler) UpdateSettings(c *gin.Context) {
 		_, _ = h.db.Exec("DELETE FROM admin_sessions")
 	}
 
-	if req.StartPort != nil {
+	portsChanged := false
+
+	if req.StartPort != nil || req.PreserveInboundPorts != nil {
+		if req.StartPort != nil {
+			if err := validateStartPort(*req.StartPort); err != nil {
+				c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+				return
+			}
+		}
+
 		h.nodeWriteMu.Lock()
 		defer h.nodeWriteMu.Unlock()
 
-		// Use transaction to ensure atomic update of all ports
 		tx, err := h.db.Begin()
 		if err != nil {
 			log.Printf("Failed to begin transaction: %v", err)
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to start transaction"})
 			return
 		}
+		defer tx.Rollback()
 
-		// Update settings
-		_, err = tx.Exec("UPDATE settings SET start_port = ?, updated_at = CURRENT_TIMESTAMP", *req.StartPort)
+		currentStartPort, currentPreserveInboundPorts, err := getPortSettings(tx)
 		if err != nil {
-			tx.Rollback()
-			log.Printf("Failed to update start_port: %v", err)
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to update start port"})
+			log.Printf("Failed to query settings: %v", err)
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to query settings"})
 			return
 		}
 
-		// Query all node ports
-		rows, err := tx.Query("SELECT id, sort_order, enabled FROM proxy_nodes ORDER BY sort_order")
+		nextStartPort := currentStartPort
+		if req.StartPort != nil {
+			nextStartPort = *req.StartPort
+		}
+
+		nextPreserveInboundPorts := currentPreserveInboundPorts
+		if req.PreserveInboundPorts != nil {
+			nextPreserveInboundPorts = *req.PreserveInboundPorts
+		}
+
+		_, err = tx.Exec("UPDATE settings SET start_port = ?, preserve_inbound_ports = ?, updated_at = CURRENT_TIMESTAMP", nextStartPort, nextPreserveInboundPorts)
 		if err != nil {
-			tx.Rollback()
-			log.Printf("Failed to query nodes: %v", err)
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to query nodes"})
+			log.Printf("Failed to update settings: %v", err)
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to update settings"})
 			return
 		}
 
-		var nodes []struct {
-			ID        int
-			SortOrder int
-			Enabled   bool
-		}
+		shouldReassignInboundPorts := !nextPreserveInboundPorts && (req.StartPort != nil || currentPreserveInboundPorts != nextPreserveInboundPorts)
+		if shouldReassignInboundPorts {
+			rows, err := tx.Query("SELECT id, sort_order FROM proxy_nodes ORDER BY sort_order")
+			if err != nil {
+				log.Printf("Failed to query nodes: %v", err)
+				c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to query nodes"})
+				return
+			}
 
-		for rows.Next() {
-			var node struct {
+			var nodes []struct {
 				ID        int
 				SortOrder int
-				Enabled   bool
 			}
-			if err := rows.Scan(&node.ID, &node.SortOrder, &node.Enabled); err != nil {
-				rows.Close()
-				tx.Rollback()
-				log.Printf("Failed to scan node: %v", err)
-				c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to read node data"})
+
+			for rows.Next() {
+				var node struct {
+					ID        int
+					SortOrder int
+				}
+				if err := rows.Scan(&node.ID, &node.SortOrder); err != nil {
+					rows.Close()
+					log.Printf("Failed to scan node: %v", err)
+					c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to read node data"})
+					return
+				}
+				nodes = append(nodes, node)
+			}
+			rows.Close()
+
+			if err := rows.Err(); err != nil {
+				log.Printf("Error iterating nodes: %v", err)
+				c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to read nodes"})
 				return
 			}
-			nodes = append(nodes, node)
-		}
-		rows.Close()
 
-		// Check for iteration errors
-		if err := rows.Err(); err != nil {
-			tx.Rollback()
-			log.Printf("Error iterating nodes: %v", err)
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to read nodes"})
-			return
-		}
-
-		// Update all node ports within transaction
-		for _, node := range nodes {
-			newPort := *req.StartPort + node.SortOrder
-			_, err := tx.Exec("UPDATE proxy_nodes SET inbound_port = ? WHERE id = ?", newPort, node.ID)
-			if err != nil {
-				tx.Rollback()
-				log.Printf("Failed to update port for node %d: %v", node.ID, err)
-				c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to update node port"})
-				return
+			for _, node := range nodes {
+				newPort := nextStartPort + node.SortOrder
+				if err := validateInboundPort(newPort); err != nil {
+					c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+					return
+				}
+				_, err := tx.Exec("UPDATE proxy_nodes SET inbound_port = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?", newPort, node.ID)
+				if err != nil {
+					log.Printf("Failed to update port for node %d: %v", node.ID, err)
+					c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to update node port"})
+					return
+				}
 			}
+
+			portsChanged = true
 		}
 
-		// Commit transaction
 		if err := tx.Commit(); err != nil {
 			log.Printf("Failed to commit transaction: %v", err)
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to commit changes"})
 			return
 		}
 
-		// Regenerate global config and restart sing-box
+	}
+
+	if portsChanged {
 		if err := h.regenerateAndRestart(); err != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to update sing-box config"})
 			return

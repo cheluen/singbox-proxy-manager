@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react'
-import { Form, Input, InputNumber, Button, message, Divider, Alert } from 'antd'
+import { Form, Input, InputNumber, Button, message, Divider, Alert, Switch } from 'antd'
 import { useTranslation } from 'react-i18next'
 import api from '../utils/api'
 
@@ -48,6 +48,9 @@ function SettingsForm({ onClose }) {
       if (values.start_port !== undefined) {
         updateData.start_port = values.start_port
       }
+      if (values.preserve_inbound_ports !== undefined) {
+        updateData.preserve_inbound_ports = Boolean(values.preserve_inbound_ports)
+      }
       if (!adminPasswordLocked && values.admin_password) {
         updateData.admin_password = values.admin_password
       }
@@ -79,9 +82,18 @@ function SettingsForm({ onClose }) {
           { required: true, message: 'Please enter start port' },
           { type: 'number', min: 1024, max: 65535, message: 'Port must be between 1024 and 65535' },
         ]}
-        extra={withExtraHint('The starting port number for inbound connections. Each node will use sequential ports.', '每个节点会从该端口开始顺序分配')}
+        extra={withExtraHint('The starting port number for inbound connections. Auto-assigned ports will skip occupied ports.', '自动分配时会从该端口开始，并自动跳过已占用端口')}
       >
         <InputNumber style={{ width: '100%' }} />
+      </Form.Item>
+
+      <Form.Item
+        label={withHint('Preserve Inbound Ports', '保留入站端口')}
+        name="preserve_inbound_ports"
+        valuePropName="checked"
+        extra={withExtraHint('When enabled, drag sorting, delete reindexing, and start-port changes will not rewrite existing node ports. Only manual edits change a node port.', '开启后，拖拽排序、删除补位、修改起始端口都不会改写现有节点端口，只有手动编辑节点端口时才会变更')}
+      >
+        <Switch checkedChildren={withHint('Enabled', '开启')} unCheckedChildren={withHint('Default', '默认')} />
       </Form.Item>
 
       <Divider />
