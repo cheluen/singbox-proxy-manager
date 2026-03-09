@@ -595,6 +595,100 @@ func TestUpdateSettingsDisablingPreserveModeRealignsPorts(t *testing.T) {
 	}
 }
 
+func TestDeleteNodePreserveInboundPortsKeepsRemainingPorts(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	handler := newTestHandler(t, func(proxyAddr, username, password string) (*services.IPInfo, error) {
+		return nil, fmt.Errorf("not used")
+	})
+
+	if _, err := handler.db.Exec("UPDATE settings SET preserve_inbound_ports = 1"); err != nil {
+		t.Fatalf("set preserve_inbound_ports: %v", err)
+	}
+	firstID := insertTestNodeWithPortAndOrder(t, handler.db, "node-a", 30001, 0)
+	deleteID := insertTestNodeWithPortAndOrder(t, handler.db, "node-b", 30005, 1)
+	thirdID := insertTestNodeWithPortAndOrder(t, handler.db, "node-c", 30009, 2)
+
+	rec := httptest.NewRecorder()
+	ctx, _ := gin.CreateTestContext(rec)
+	ctx.Params = gin.Params{gin.Param{Key: "id", Value: strconv.Itoa(deleteID)}}
+	ctx.Request, _ = http.NewRequest(http.MethodDelete, "/api/nodes/"+strconv.Itoa(deleteID), nil)
+
+	handler.DeleteNode(ctx)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("unexpected status %d body=%s", rec.Code, rec.Body.String())
+	}
+
+	type row struct {
+		id          int
+		name        string
+		inboundPort int
+		sortOrder   int
+	}
+	rows, err := handler.db.Query("SELECT id, name, inbound_port, sort_order FROM proxy_nodes ORDER BY sort_order")
+	if err != nil {
+		t.Fatalf("query nodes: %v", err)
+	}
+	defer rows.Close()
+
+	var got []row
+	for rows.Next() {
+		var current row
+		if err := rows.Scan(&current.id, &current.name, &current.inboundPort, &current.sortOrder); err != nil {
+			t.Fatalf("scan node: %v", err)
+		}
+		got = append(got, current)
+	}
+
+	if len(got) != 2 {
+		t.Fatalf("expected 2 rows, got %d", len(got))
+	}
+	if got[0].id != firstID || got[0].inboundPort != 30001 || got[0].sortOrder != 0 {
+		t.Fatalf("unexpected first row after delete: %+v", got[0])
+	}
+	if got[1].id != thirdID || got[1].inboundPort != 30009 || got[1].sortOrder != 1 {
+		t.Fatalf("unexpected second row after delete: %+v", got[1])
+	}
+}
+
+func TestBatchDeleteNodesPreserveInboundPortsKeepsRemainingPorts(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	handler := newTestHandler(t, func(proxyAddr, username, password string) (*services.IPInfo, error) {
+		return nil, fmt.Errorf("not used")
+	})
+
+	if _, err := handler.db.Exec("UPDATE settings SET preserve_inbound_ports = 1"); err != nil {
+		t.Fatalf("set preserve_inbound_ports: %v", err)
+	}
+	deleteFirstID := insertTestNodeWithPortAndOrder(t, handler.db, "node-a", 30001, 0)
+	keepID := insertTestNodeWithPortAndOrder(t, handler.db, "node-b", 30005, 1)
+	deleteLastID := insertTestNodeWithPortAndOrder(t, handler.db, "node-c", 30009, 2)
+
+	payload := map[string]interface{}{
+		"ids": []int{deleteFirstID, deleteLastID},
+	}
+	body, _ := json.Marshal(payload)
+
+	rec := httptest.NewRecorder()
+	ctx, _ := gin.CreateTestContext(rec)
+	req, _ := http.NewRequest(http.MethodPost, "/api/nodes/batch-delete", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	ctx.Request = req
+
+	handler.BatchDeleteNodes(ctx)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("unexpected status %d body=%s", rec.Code, rec.Body.String())
+	}
+
+	var inboundPort int
+	var sortOrder int
+	if err := handler.db.QueryRow("SELECT inbound_port, sort_order FROM proxy_nodes WHERE id = ?", keepID).Scan(&inboundPort, &sortOrder); err != nil {
+		t.Fatalf("query kept node: %v", err)
+	}
+	if inboundPort != 30005 || sortOrder != 0 {
+		t.Fatalf("expected kept node to stay on port 30005 with sort_order 0, got port=%d sort=%d", inboundPort, sortOrder)
+	}
+}
+
 func TestCreateNodeRejectsUsernameWithPlus(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	handler := newTestHandler(t, func(proxyAddr, username, password string) (*services.IPInfo, error) {
