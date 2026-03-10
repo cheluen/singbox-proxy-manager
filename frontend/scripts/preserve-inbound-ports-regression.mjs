@@ -310,6 +310,56 @@ const clickSettingsButton = async (page) => {
   })
 }
 
+const waitForModalClosed = async (page) => {
+  await page.waitForFunction(() => {
+    const wraps = Array.from(document.querySelectorAll('.ant-modal-wrap'))
+    return !wraps.some((element) => getComputedStyle(element).display !== 'none')
+  })
+}
+
+const openSettingsModal = async (page) => {
+  await clickSettingsButton(page)
+  await page.waitForSelector('.ant-modal .ant-form', { timeout: 10000 })
+}
+
+const closeSettingsModal = async (page) => {
+  await page.click('.ant-modal-close')
+  await waitForModalClosed(page)
+}
+
+const assertSettingsI18n = async (page, { include = [], exclude = [] }) => {
+  const modalText = await page.$eval('.ant-modal', (element) => element.innerText)
+  for (const fragment of include) {
+    assert(
+      modalText.includes(fragment),
+      `expected modal to include ${JSON.stringify(fragment)}, got: ${JSON.stringify(modalText)}`
+    )
+  }
+  for (const fragment of exclude) {
+    assert(
+      !modalText.includes(fragment),
+      `expected modal to exclude ${JSON.stringify(fragment)}, got: ${JSON.stringify(modalText)}`
+    )
+  }
+}
+
+const assertSettingsPasswordPlaceholder = async (page, { expected, unexpected }) => {
+  const placeholder = await page.$eval(
+    '.ant-modal input[type="password"], .ant-modal input[type="text"]',
+    (element) => element.getAttribute('placeholder') || ''
+  )
+  assert(
+    placeholder === expected,
+    `expected password placeholder ${JSON.stringify(expected)}, got ${JSON.stringify(placeholder)}`
+  )
+  if (unexpected) {
+    assert(
+      placeholder !== unexpected,
+      `expected password placeholder to not be ${JSON.stringify(unexpected)}, got ${JSON.stringify(placeholder)}`
+    )
+  }
+}
+
 const run = async () => {
   const mockApi = await startMockApi()
   await waitForHttpReady(`http://localhost:${API_PORT}/api/version`, 10000)
@@ -340,7 +390,45 @@ const run = async () => {
     await page.goto(FRONTEND_URL, { waitUntil: 'networkidle2' })
     await page.evaluate(() => {
       localStorage.setItem('token', 'preserve-ports-token')
-      localStorage.setItem('i18nextLng', 'en')
+    })
+
+    await page.evaluate(() => {
+      localStorage.setItem('language', 'zh')
+    })
+    await page.reload({ waitUntil: 'networkidle2' })
+    await page.waitForSelector('tbody.ant-table-tbody tr[data-row-key="1"]', { timeout: 30000 })
+
+    await openSettingsModal(page)
+    await assertSettingsI18n(page, {
+      include: [
+        '系统设置',
+        '起始端口',
+        '入站连接使用的起始端口号',
+        '保留入站端口',
+        '开启后，拖拽排序',
+        '新的管理员密码',
+        '留空表示保持当前密码',
+        '保存设置',
+      ],
+      exclude: [
+        'Settings',
+        'Start Port',
+        'The starting port number for inbound connections.',
+        'Preserve Inbound Ports',
+        'When enabled, drag sorting',
+        'New Admin Password',
+        'Leave empty to keep current password',
+        'Save Settings',
+      ],
+    })
+    await assertSettingsPasswordPlaceholder(page, {
+      expected: '输入新密码（可选）',
+      unexpected: 'Enter new password (optional)',
+    })
+    await closeSettingsModal(page)
+
+    await page.evaluate(() => {
+      localStorage.setItem('language', 'en')
     })
     await page.reload({ waitUntil: 'networkidle2' })
     await page.waitForSelector('tbody.ant-table-tbody tr[data-row-key="1"]', { timeout: 30000 })
@@ -348,7 +436,34 @@ const run = async () => {
     const portsBefore = await getRowPorts(page)
     const orderBefore = await getRowNames(page)
 
-    await clickSettingsButton(page)
+    await openSettingsModal(page)
+    await assertSettingsI18n(page, {
+      include: [
+        'Settings',
+        'Start Port',
+        'The starting port number for inbound connections.',
+        'Preserve Inbound Ports',
+        'When enabled, drag sorting',
+        'New Admin Password',
+        'Leave empty to keep current password',
+        'Save Settings',
+      ],
+      exclude: [
+        '系统设置',
+        '起始端口',
+        '入站连接使用的起始端口号',
+        '保留入站端口',
+        '开启后，拖拽排序',
+        '新的管理员密码',
+        '留空表示保持当前密码',
+        '保存设置',
+      ],
+    })
+    await assertSettingsPasswordPlaceholder(page, {
+      expected: 'Enter new password (optional)',
+      unexpected: '输入新密码（可选）',
+    })
+
     await page.waitForSelector('.ant-modal .ant-switch', { timeout: 10000 })
     const switchSelector = '.ant-modal .ant-switch'
     const wasChecked = await page.$eval(switchSelector, (element) => element.getAttribute('aria-checked') === 'true')
@@ -357,10 +472,7 @@ const run = async () => {
     }
     await page.click(switchSelector)
     await page.click('.ant-modal button[type="submit"]')
-    await page.waitForFunction(() => {
-      const wraps = Array.from(document.querySelectorAll('.ant-modal-wrap'))
-      return !wraps.some((element) => getComputedStyle(element).display !== 'none')
-    })
+    await waitForModalClosed(page)
     await sleep(800)
 
     const stateAfterSettings = mockApi.getState()

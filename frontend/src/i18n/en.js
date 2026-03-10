@@ -32,6 +32,7 @@ export default {
   setup_failed: 'Setup failed',
   login_subtitle: 'Manage node configs, auth, and forwarding status in one place',
   admin_password_locked_hint: 'Admin password is managed by ADMIN_PASSWORD environment variable',
+  admin_password_locked_desc: 'ADMIN_PASSWORD is set for this deployment, so the admin password cannot be changed in the panel. Update the environment variable and restart the service to change it.',
   
   // Navigation
   nodes: 'Node Management',
@@ -57,6 +58,7 @@ export default {
   password_auth: 'Password',
   enabled: 'Enabled',
   disabled: 'Disabled',
+  default: 'Default',
   node_ip: 'Node IP',
   location: 'Location',
   country_code: 'Region Code',
@@ -105,11 +107,20 @@ export default {
   // Settings
   admin_password: 'Admin Password',
   start_port: 'Start Port',
+  start_port_desc: 'The starting port number for inbound connections. Auto-assigned ports will skip occupied ports.',
+  start_port_required: 'Please enter start port',
+  start_port_range: 'Port must be between 1024 and 65535',
+  preserve_inbound_ports: 'Preserve Inbound Ports',
+  preserve_inbound_ports_desc: 'When enabled, drag sorting, delete reindexing, and start-port changes will not rewrite existing node ports. Only manual edits change a node port.',
+  new_admin_password: 'New Admin Password',
+  admin_password_placeholder_optional: 'Enter new password (optional)',
+  admin_password_leave_empty: 'Leave empty to keep current password',
+  save_settings: 'Save Settings',
   update_password: 'Update Password',
   new_password: 'New Password',
   confirm_password: 'Confirm Password',
   password_mismatch: 'Passwords do not match',
-  settings_updated: 'Settings updated',
+  settings_updated: 'Settings updated successfully',
   
   // Messages
   node_created: 'Node created',
@@ -129,6 +140,8 @@ export default {
   node_not_found: 'Node not found',
   invalid_config: 'Invalid configuration',
   invalid_link: 'Invalid share link',
+  settings_load_failed: 'Failed to load settings',
+  settings_update_failed: 'Failed to update settings',
   
   // Placeholders
   enter_password: 'Please enter password',

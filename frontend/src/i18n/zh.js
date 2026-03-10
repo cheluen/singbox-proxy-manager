@@ -32,6 +32,7 @@ export default {
   setup_failed: '设置失败',
   login_subtitle: '统一管理节点配置、认证和转发状态',
   admin_password_locked_hint: '当前管理员密码由 ADMIN_PASSWORD 环境变量管理',
+  admin_password_locked_desc: '当前部署已设置 ADMIN_PASSWORD，面板内无法修改管理员密码。如需修改，请更新部署环境变量后重启服务。',
   
   // Navigation
   nodes: '节点管理',
@@ -57,6 +58,7 @@ export default {
   password_auth: '认证密码',
   enabled: '启用',
   disabled: '禁用',
+  default: '默认',
   node_ip: '节点IP',
   location: '位置',
   country_code: '地区缩写',
@@ -105,6 +107,15 @@ export default {
   // Settings
   admin_password: '管理员密码',
   start_port: '起始端口',
+  start_port_desc: '入站连接使用的起始端口号。自动分配端口时会跳过已被占用的端口。',
+  start_port_required: '请输入起始端口',
+  start_port_range: '端口必须在 1024 到 65535 之间',
+  preserve_inbound_ports: '保留入站端口',
+  preserve_inbound_ports_desc: '开启后，拖拽排序、删除补位、修改起始端口都不会改写现有节点端口，只有手动编辑节点端口时才会变更。',
+  new_admin_password: '新的管理员密码',
+  admin_password_placeholder_optional: '输入新密码（可选）',
+  admin_password_leave_empty: '留空表示保持当前密码',
+  save_settings: '保存设置',
   update_password: '更新密码',
   new_password: '新密码',
   confirm_password: '确认密码',
@@ -129,6 +140,8 @@ export default {
   node_not_found: '节点不找到',
   invalid_config: '无效的配置',
   invalid_link: '无效的分享链接',
+  settings_load_failed: '加载设置失败',
+  settings_update_failed: '更新设置失败',
   
   // Placeholders
   enter_password: '请输入密码',
