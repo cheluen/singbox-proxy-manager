@@ -88,8 +88,8 @@ export default {
   
   // Batch Operations
   batch_import_title: 'Batch Import Nodes',
-  batch_import_desc: 'One share link per line. Supports SS, VLESS, VMess, Hysteria2, TUIC',
-  paste_links: 'Paste Links',
+  batch_import_desc: 'Supports: share links (one per line), Base64 subscription, Clash Meta YAML, or subscription URL (http/https). Protocols: SS, VLESS, VMess, Trojan, Hysteria2, TUIC, SOCKS5, HTTP, AnyTLS',
+  paste_links: 'Paste share links / subscription',
   import_success: 'Successfully imported {{count}} nodes',
   import_failed: 'Failed to import {{count}} nodes',
   enable_after_import: 'Enable nodes after import',

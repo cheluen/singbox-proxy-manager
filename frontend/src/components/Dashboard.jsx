@@ -302,9 +302,9 @@ function Dashboard({ onLogout }) {
   }
 
   const handleBatchImport = async () => {
-    const links = batchImportLinks.split('\n').filter((link) => link.trim())
+    const content = (batchImportLinks || '').trim()
 
-    if (links.length === 0) {
+    if (!content) {
       message.error(t('invalid_request'))
       return
     }
@@ -314,7 +314,7 @@ function Dashboard({ onLogout }) {
       message.loading({ content: t('loading'), key: 'batchimport' })
 
       const response = await api.post('/nodes/batch-import', {
-        links,
+        content,
         enabled: enableAfterImport,
       })
 

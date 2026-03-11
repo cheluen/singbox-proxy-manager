@@ -88,8 +88,8 @@ export default {
   
   // Batch Operations
   batch_import_title: '批量导入节点',
-  batch_import_desc: '每行一个分享链接，支持 SS、VLESS、VMess、Hysteria2、TUIC',
-  paste_links: '粘贴链接',
+  batch_import_desc: '支持：每行分享链接 / Base64 订阅 / Clash Meta YAML / 订阅URL（http/https）。协议：SS、VLESS、VMess、Trojan、Hysteria2、TUIC、SOCKS5、HTTP、AnyTLS',
+  paste_links: '粘贴分享链接/订阅内容/订阅URL',
   import_success: '成功导入 {{count}} 个节点',
   import_failed: '{{count}} 个节点导入失败',
   enable_after_import: '导入后启用节点',

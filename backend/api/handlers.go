@@ -591,6 +591,7 @@ func (h *Handler) CreateNode(c *gin.Context) {
 func (h *Handler) BatchImportNodes(c *gin.Context) {
 	var req struct {
 		Links   []string `json:"links"`
+		Content string   `json:"content"`
 		Enabled bool     `json:"enabled"`
 	}
 
@@ -599,13 +600,40 @@ func (h *Handler) BatchImportNodes(c *gin.Context) {
 		return
 	}
 
-	if len(req.Links) == 0 {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "no links provided"})
+	var sources []string
+	if strings.TrimSpace(req.Content) != "" {
+		sources = []string{req.Content}
+	} else {
+		sources = req.Links
+	}
+
+	if len(sources) == 0 {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "no input provided"})
 		return
 	}
 
 	results := []map[string]interface{}{}
 	successCount := 0
+
+	// Expand subscriptions/base64/yaml outside lock/transaction to avoid blocking node ops.
+	items, expandFailures, err := services.ExpandBatchImportSources(c.Request.Context(), sources)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	for _, f := range expandFailures {
+		results = append(results, map[string]interface{}{
+			"success": false,
+			"source":  f.Source,
+			"error":   f.Error,
+		})
+	}
+
+	// If user provided raw content and nothing could be expanded, surface error directly.
+	if strings.TrimSpace(req.Content) != "" && len(items) == 0 && len(expandFailures) > 0 {
+		c.JSON(http.StatusBadRequest, gin.H{"error": expandFailures[0].Error})
+		return
+	}
 
 	h.nodeWriteMu.Lock()
 	defer h.nodeWriteMu.Unlock()
@@ -646,18 +674,29 @@ func (h *Handler) BatchImportNodes(c *gin.Context) {
 	}
 	defer stmt.Close()
 
-	for _, link := range req.Links {
+	for _, item := range items {
 		result := map[string]interface{}{
-			"link": link,
+			"source": item.Source,
 		}
 
-		// Parse share link
-		parsedConfig, proxyType, name, err := services.ParseShareLink(link)
-		if err != nil {
-			result["success"] = false
-			result["error"] = err.Error()
-			results = append(results, result)
-			continue
+		var (
+			parsedConfig any
+			proxyType    string
+			name         string
+		)
+		if item.Link != "" {
+			result["link"] = item.Link
+			parsedConfig, proxyType, name, err = services.ParseShareLink(item.Link)
+			if err != nil {
+				result["success"] = false
+				result["error"] = err.Error()
+				results = append(results, result)
+				continue
+			}
+		} else {
+			parsedConfig = item.Config
+			proxyType = item.Type
+			name = item.Name
 		}
 
 		// Convert to JSON
@@ -733,9 +772,9 @@ func (h *Handler) BatchImportNodes(c *gin.Context) {
 	}
 
 	c.JSON(http.StatusOK, gin.H{
-		"total":   len(req.Links),
+		"total":   len(items) + len(expandFailures),
 		"success": successCount,
-		"failed":  len(req.Links) - successCount,
+		"failed":  len(items) + len(expandFailures) - successCount,
 		"results": results,
 	})
 }
