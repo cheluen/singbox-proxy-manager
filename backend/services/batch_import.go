@@ -288,9 +288,10 @@ func convertClashProxyToImportItem(proxy map[string]any) (ImportItem, error) {
 			cfg.Security = "tls"
 		}
 
-		if cfg.Network == "ws" {
+		switch cfg.Network {
+		case "ws":
 			applyWSOpts(&cfg.Path, &cfg.Headers, &cfg.Host, proxy)
-		} else if cfg.Network == "grpc" {
+		case "grpc":
 			cfg.ServiceName = getGRPCServiceName(proxy)
 		}
 
