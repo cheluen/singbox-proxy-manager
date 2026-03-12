@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react'
+import React, { useMemo, useState, useEffect } from 'react'
 import {
     Layout,
     Typography,
@@ -179,10 +179,42 @@ function Dashboard({ onLogout }) {
   const [remarkSaving, setRemarkSaving] = useState({})
   const [remarkPanelKeys, setRemarkPanelKeys] = useState({})
 
+  const dragSortStorageKey = 'sbpm_drag_sort_enabled'
+  const [dragSortEnabled, setDragSortEnabled] = useState(() => {
+    const saved = localStorage.getItem(dragSortStorageKey)
+    if (saved === null) return true
+    return saved === 'true'
+  })
+  const [dragSortTouched, setDragSortTouched] = useState(() => {
+    return localStorage.getItem(dragSortStorageKey) !== null
+  })
+
+  const selectedNodeIdSet = useMemo(() => new Set(selectedNodeIds), [selectedNodeIds])
+
+  const autoDisableDragSort = !dragSortTouched && nodes.length > 300
+  const effectiveDragSortEnabled = dragSortEnabled && !autoDisableDragSort
+
+  const nodeIndexMap = useMemo(() => {
+    const map = new Map()
+    for (let index = 0; index < nodes.length; index += 1) {
+      const node = nodes[index]
+      map.set(String(node.id), index)
+    }
+    return map
+  }, [nodes])
+
   useEffect(() => {
     loadNodes()
     loadVersion()
   }, [])
+
+  useEffect(() => {
+    if (!autoDisableDragSort) return
+    setDragSortEnabled(false)
+    setDragSortTouched(true)
+    localStorage.setItem(dragSortStorageKey, 'false')
+    message.info(t('drag_sort_auto_disabled'))
+  }, [autoDisableDragSort, dragSortStorageKey, t])
 
   const loadVersion = async () => {
     try {
@@ -891,7 +923,14 @@ function Dashboard({ onLogout }) {
         title: '',
         key: 'drag',
         width: 34,
-        render: () => <HolderOutlined style={{ cursor: 'grab', color: '#999' }} />,
+        render: () => (
+          <HolderOutlined
+            style={{
+              cursor: effectiveDragSortEnabled ? 'grab' : 'not-allowed',
+              color: effectiveDragSortEnabled ? '#999' : '#ccc',
+            }}
+          />
+        ),
       },
       {
         title: <Checkbox
@@ -899,7 +938,7 @@ function Dashboard({ onLogout }) {
           indeterminate={selectedNodeIds.length > 0 && selectedNodeIds.length < nodes.length}
           onChange={(e) => {
             if (e.target.checked) {
-              setSelectedNodeIds(nodes.map(n => n.id))
+              setSelectedNodeIds(nodes.map((node) => node.id))
             } else {
               setSelectedNodeIds([])
             }
@@ -909,13 +948,16 @@ function Dashboard({ onLogout }) {
         width: 42,
         render: (_, record) => (
           <Checkbox
-            checked={selectedNodeIds.includes(record.id)}
+            checked={selectedNodeIdSet.has(record.id)}
             onChange={(e) => {
-              if (e.target.checked) {
-                setSelectedNodeIds([...selectedNodeIds, record.id])
-              } else {
-                setSelectedNodeIds(selectedNodeIds.filter(id => id !== record.id))
-              }
+              const checked = e.target.checked
+              setSelectedNodeIds((prev) => {
+                if (checked) {
+                  if (prev.includes(record.id)) return prev
+                  return [...prev, record.id]
+                }
+                return prev.filter((id) => id !== record.id)
+              })
             }}
           />
         ),
@@ -1008,13 +1050,16 @@ function Dashboard({ onLogout }) {
         dataIndex: 'location',
         key: 'location',
         width: 96,
-        render: (_, record) => (
-          <Tooltip title={formatCountryWithCode(record)}>
-            <Text ellipsis style={{ maxWidth: 90 }}>
-              {formatCountryWithCode(record)}
-            </Text>
-          </Tooltip>
-        ),
+        render: (_, record) => {
+          const label = formatCountryWithCode(record)
+          return (
+            <Tooltip title={label}>
+              <Text ellipsis style={{ maxWidth: 90 }}>
+                {label}
+              </Text>
+            </Tooltip>
+          )
+        },
       },
       {
         title: t('enabled'),
@@ -1048,42 +1093,42 @@ function Dashboard({ onLogout }) {
         key: 'actions',
         width: 96,
         render: (_, record) => (
-        <Space size={[4, 4]} wrap>
-          <Tooltip title={t('export')}>
-            <Button
-              type="link"
-              size="small"
-              icon={<CopyOutlined />}
-              loading={exportLoading}
-              onClick={() => handleExportNode(record)}
-            />
-          </Tooltip>
-          <Tooltip title={t('replace')}>
-            <Button
-              type="link"
-              size="small"
-              icon={<SwapOutlined />}
-              onClick={() => openReplaceModal(record)}
-            />
-          </Tooltip>
-          <Tooltip title={t('edit')}>
-            <Button
-              type="link"
-              size="small"
-              icon={<EditOutlined />}
-              onClick={() => handleEditNode(record)}
-            />
-          </Tooltip>
-          <Popconfirm
-            title={t('confirm')}
-            onConfirm={() => handleDeleteNode(record.id)}
-            okText={t('confirm')}
-            cancelText={t('cancel')}
-          >
-            <Button type="link" size="small" danger icon={<DeleteOutlined />} />
-          </Popconfirm>
-        </Space>
-      ),
+          <Space size={[4, 4]} wrap>
+            <Tooltip title={t('export')}>
+              <Button
+                type="link"
+                size="small"
+                icon={<CopyOutlined />}
+                loading={exportLoading}
+                onClick={() => handleExportNode(record)}
+              />
+            </Tooltip>
+            <Tooltip title={t('replace')}>
+              <Button
+                type="link"
+                size="small"
+                icon={<SwapOutlined />}
+                onClick={() => openReplaceModal(record)}
+              />
+            </Tooltip>
+            <Tooltip title={t('edit')}>
+              <Button
+                type="link"
+                size="small"
+                icon={<EditOutlined />}
+                onClick={() => handleEditNode(record)}
+              />
+            </Tooltip>
+            <Popconfirm
+              title={t('confirm')}
+              onConfirm={() => handleDeleteNode(record.id)}
+              okText={t('confirm')}
+              cancelText={t('cancel')}
+            >
+              <Button type="link" size="small" danger icon={<DeleteOutlined />} />
+            </Popconfirm>
+          </Space>
+        ),
       },
     ]
 
@@ -1099,8 +1144,8 @@ function Dashboard({ onLogout }) {
         )
       }
 
-      const index = nodes.findIndex((item) => String(item.id) === String(rowKey))
-      if (index === -1) {
+      const index = nodeIndexMap.get(String(rowKey))
+      if (index === undefined) {
         return (
           <tr className={className} style={style} {...restProps}>
             {props.children}
@@ -1131,24 +1176,62 @@ function Dashboard({ onLogout }) {
       )
     }
 
-  const DraggableBody = (props) => (
-    <Droppable droppableId="table-body">
-      {(provided) => (
-        <tbody
-          ref={provided.innerRef}
-          {...provided.droppableProps}
-          {...props}
-        >
-          {props.children}
-          {provided.placeholder}
-        </tbody>
-      )}
-    </Droppable>
-  )
+    const DraggableBody = (props) => (
+      <Droppable droppableId="table-body">
+        {(provided) => (
+          <tbody ref={provided.innerRef} {...provided.droppableProps} {...props}>
+            {props.children}
+            {provided.placeholder}
+          </tbody>
+        )}
+      </Droppable>
+    )
 
-  return (
-    <Layout className="dashboard-layout">
-      <Header className="dashboard-header">
+    const virtualTableEnabled = !effectiveDragSortEnabled && nodes.length > 300
+
+    const table = (
+      <Table
+        columns={columns}
+        dataSource={nodes}
+        rowKey="id"
+        size="small"
+        virtual={virtualTableEnabled}
+        listItemHeight={40}
+        scroll={virtualTableEnabled ? { y: 560 } : undefined}
+        expandable={{
+          expandedRowRender,
+          expandedRowKeys,
+          onExpandedRowsChange: (keys) => setExpandedRowKeys(keys),
+        }}
+        loading={loading}
+        pagination={false}
+        locale={{
+          emptyText: t('no_nodes'),
+        }}
+        components={
+          effectiveDragSortEnabled
+            ? {
+                body: {
+                  wrapper: DraggableBody,
+                  row: DraggableRow,
+                },
+              }
+            : undefined
+        }
+      />
+    )
+
+    const tableView = effectiveDragSortEnabled ? (
+      <DragDropContext onDragEnd={handleDragEnd}>
+        {table}
+      </DragDropContext>
+    ) : (
+      table
+    )
+
+    return (
+      <Layout className="dashboard-layout">
+        <Header className="dashboard-header">
         <div className="dashboard-brand">
           <span className="dashboard-logo-shell">
             <img
@@ -1224,6 +1307,19 @@ function Dashboard({ onLogout }) {
               >
                 {t('refresh')}
               </Button>
+              <Tooltip title={t('drag_sort_hint')}>
+                <Space size={6}>
+                  <Text type="secondary">{t('drag_sort')}</Text>
+                  <Switch
+                    checked={effectiveDragSortEnabled}
+                    onChange={(checked) => {
+                      setDragSortTouched(true)
+                      setDragSortEnabled(checked)
+                      localStorage.setItem(dragSortStorageKey, String(checked))
+                    }}
+                  />
+                </Space>
+              </Tooltip>
             </Space>
 
             {selectedNodeIds.length > 0 && (
@@ -1270,30 +1366,7 @@ function Dashboard({ onLogout }) {
             )}
           </div>
 
-            <DragDropContext onDragEnd={handleDragEnd}>
-              <Table
-                columns={columns}
-                dataSource={nodes}
-                rowKey="id"
-                size="small"
-                expandable={{
-                  expandedRowRender,
-                  expandedRowKeys,
-                  onExpandedRowsChange: (keys) => setExpandedRowKeys(keys),
-                }}
-                loading={loading}
-                pagination={false}
-                locale={{
-                  emptyText: t('no_nodes')
-              }}
-              components={{
-                body: {
-                  wrapper: DraggableBody,
-                  row: DraggableRow,
-                },
-              }}
-            />
-          </DragDropContext>
+          {tableView}
         </Space>
       </Content>
 
@@ -1424,7 +1497,7 @@ function Dashboard({ onLogout }) {
 
       <BatchAuthModal
         visible={batchAuthVisible}
-        selectedNodes={nodes.filter(n => selectedNodeIds.includes(n.id))}
+        selectedNodes={nodes.filter((node) => selectedNodeIdSet.has(node.id))}
         onClose={() => setBatchAuthVisible(false)}
         onSave={handleBatchSetAuth}
       />

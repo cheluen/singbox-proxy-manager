@@ -163,5 +163,8 @@ export default {
   // Table
   select_all: 'Select All',
   selected_count: '{{count}} selected',
-  total_count: 'Total {{count}}'
+  total_count: 'Total {{count}}',
+  drag_sort: 'Drag Sort',
+  drag_sort_hint: 'Enable drag-to-reorder. For large lists, keep this off for better performance.',
+  drag_sort_auto_disabled: 'Drag sorting was auto-disabled for performance (you can enable it manually).'
 }
