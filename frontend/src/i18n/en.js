@@ -165,6 +165,5 @@ export default {
   selected_count: '{{count}} selected',
   total_count: 'Total {{count}}',
   drag_sort: 'Drag Sort',
-  drag_sort_hint: 'Enable drag-to-reorder. For large lists, keep this off for better performance.',
-  drag_sort_auto_disabled: 'Drag sorting was auto-disabled for performance (you can enable it manually).'
+  drag_sort_hint: 'Drag the handle to reorder. Large lists automatically enable virtualization for smooth performance.'
 }

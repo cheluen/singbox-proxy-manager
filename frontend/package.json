@@ -10,6 +10,7 @@
     "lint": "eslint .",
     "lint:fix": "eslint . --fix",
     "test:e2e:dnd": "node ./scripts/dnd-reorder-regression.mjs",
+    "test:e2e:dnd-virtual": "node ./scripts/dnd-reorder-virtual-regression.mjs",
     "test:e2e:preserve-ports": "node ./scripts/preserve-inbound-ports-regression.mjs",
     "test:e2e:batch-import": "node ./scripts/batch-import-regression.mjs",
     "test:e2e:batch-check-ip-live": "node ./scripts/batch-check-ip-live-regression.mjs",

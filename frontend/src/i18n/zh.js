@@ -165,6 +165,5 @@ export default {
   selected_count: '已选 {{count}} 项',
   total_count: '共 {{count}} 项',
   drag_sort: '拖拽排序',
-  drag_sort_hint: '开启后可拖拽调整顺序；节点较多时建议关闭以提升性能。',
-  drag_sort_auto_disabled: '节点较多，已自动关闭拖拽排序以提升性能（可手动开启）。'
+  drag_sort_hint: '拖拽左侧手柄即可排序；节点较多时将自动启用虚拟渲染以保持流畅。'
 }

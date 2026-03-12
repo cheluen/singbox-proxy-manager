@@ -1,4 +1,4 @@
-import React, { useMemo, useState, useEffect } from 'react'
+import React, { useMemo, useState, useEffect, useRef, useCallback } from 'react'
 import {
     Layout,
     Typography,
@@ -153,6 +153,7 @@ const stableJSONStringify = (value) => {
 function Dashboard({ onLogout }) {
   const { t, i18n } = useTranslation()
   const [nodes, setNodes] = useState([])
+  const nodesRef = useRef(nodes)
   const [loading, setLoading] = useState(false)
   const [appVersion, setAppVersion] = useState('')
   const [modalVisible, setModalVisible] = useState(false)
@@ -178,21 +179,16 @@ function Dashboard({ onLogout }) {
   const [expandedRowKeys, setExpandedRowKeys] = useState([])
   const [remarkSaving, setRemarkSaving] = useState({})
   const [remarkPanelKeys, setRemarkPanelKeys] = useState({})
-
-  const dragSortStorageKey = 'sbpm_drag_sort_enabled'
-  const [dragSortEnabled, setDragSortEnabled] = useState(() => {
-    const saved = localStorage.getItem(dragSortStorageKey)
-    if (saved === null) return true
-    return saved === 'true'
-  })
-  const [dragSortTouched, setDragSortTouched] = useState(() => {
-    return localStorage.getItem(dragSortStorageKey) !== null
-  })
+  const tableContainerRef = useRef(null)
+  const virtualDragMetaRef = useRef(null)
+  const [virtualDragState, setVirtualDragState] = useState(null)
 
   const selectedNodeIdSet = useMemo(() => new Set(selectedNodeIds), [selectedNodeIds])
 
-  const autoDisableDragSort = !dragSortTouched && nodes.length > 300
-  const effectiveDragSortEnabled = dragSortEnabled && !autoDisableDragSort
+  const dragSortInlineLimit = 300
+  const virtualDragEnabled = nodes.length > dragSortInlineLimit
+  const dragSortInTableEnabled = !virtualDragEnabled
+  const virtualTableEnabled = virtualDragEnabled
 
   const nodeIndexMap = useMemo(() => {
     const map = new Map()
@@ -204,17 +200,283 @@ function Dashboard({ onLogout }) {
   }, [nodes])
 
   useEffect(() => {
+    nodesRef.current = nodes
+  }, [nodes])
+
+  const cleanupVirtualDrag = useCallback(() => {
+    const meta = virtualDragMetaRef.current
+    if (!meta) {
+      setVirtualDragState(null)
+      return
+    }
+
+    if (meta.raf) {
+      cancelAnimationFrame(meta.raf)
+    }
+
+    window.removeEventListener('pointermove', meta.onMove)
+    window.removeEventListener('pointerup', meta.onUp)
+
+    document.body.style.cursor = meta.prevCursor
+    document.body.style.userSelect = meta.prevUserSelect
+
+    virtualDragMetaRef.current = null
+    setVirtualDragState(null)
+  }, [])
+
+  useEffect(() => cleanupVirtualDrag, [cleanupVirtualDrag])
+
+  const reorderNodesByIndex = useCallback(
+    async (sourceIndex, destinationIndex) => {
+      const currentNodes = Array.from(nodesRef.current || [])
+      if (
+        sourceIndex === destinationIndex ||
+        sourceIndex < 0 ||
+        destinationIndex < 0 ||
+        sourceIndex >= currentNodes.length ||
+        destinationIndex >= currentNodes.length
+      ) {
+        return
+      }
+
+      const items = Array.from(currentNodes)
+      const [reordered] = items.splice(sourceIndex, 1)
+      items.splice(destinationIndex, 0, reordered)
+
+      setNodes(items)
+
+      try {
+        const orderMap = items.map((node, index) => ({
+          id: node.id,
+          sort_order: index,
+        }))
+        await api.post('/nodes/reorder', { nodes: orderMap })
+        message.success(t('nodes_reordered'))
+        loadNodes()
+      } catch (error) {
+        message.error(t('server_error'))
+        loadNodes()
+      }
+    },
+    [t]
+  )
+
+  const reorderNodesById = useCallback(
+    async (nodeId, destinationIndex) => {
+      const currentNodes = Array.from(nodesRef.current || [])
+      const sourceIndex = currentNodes.findIndex(
+        (node) => String(node?.id) === String(nodeId)
+      )
+      await reorderNodesByIndex(sourceIndex, destinationIndex)
+    },
+    [reorderNodesByIndex]
+  )
+
+  const resolveTableScrollContainer = useCallback(() => {
+    const root = tableContainerRef.current
+    if (!root) return null
+    const body = root.querySelector('.ant-table-body')
+    if (body) return body
+
+    const content = root.querySelector('.ant-table-content')
+    if (content && content.scrollHeight > content.clientHeight) return content
+
+    const container = root.querySelector('.ant-table-container')
+    if (container && container.scrollHeight > container.clientHeight) return container
+
+    const divs = root.querySelectorAll('div')
+    for (const el of divs) {
+      if (!el || el.scrollHeight <= el.clientHeight) continue
+      try {
+        const style = window.getComputedStyle(el)
+        const overflowY = style?.overflowY
+        if (overflowY === 'auto' || overflowY === 'scroll' || overflowY === 'overlay') {
+          return el
+        }
+      } catch {
+        // ignore and continue
+      }
+    }
+
+    return container || content || null
+  }, [])
+
+  const measureRowHeight = (scrollContainer) => {
+    if (!scrollContainer) return 40
+    const candidate =
+      scrollContainer.querySelector('tr.ant-table-row[data-row-key]') ||
+      scrollContainer.querySelector('.ant-table-row[data-row-key]')
+    if (!candidate?.getBoundingClientRect) return 40
+    const rect = candidate.getBoundingClientRect()
+    const height = rect?.height
+    return Number.isFinite(height) && height > 10 ? height : 40
+  }
+
+  const handleVirtualDragStart = useCallback(
+    (event, recordId) => {
+      if (!virtualDragEnabled) return
+      if (nodesRef.current.length <= 1) return
+      if (typeof event?.button === 'number' && event.button !== 0) return
+
+      event.preventDefault?.()
+      event.stopPropagation?.()
+
+      cleanupVirtualDrag()
+
+      const activeId = String(recordId)
+      const sourceIndex = nodeIndexMap.get(activeId)
+      if (sourceIndex === undefined) return
+
+      const scrollContainer = resolveTableScrollContainer()
+      if (!scrollContainer) {
+        message.warning(t('server_error'))
+        return
+      }
+
+      const rowHeight = measureRowHeight(scrollContainer)
+      const itemCount = nodesRef.current.length
+      const pointerId = typeof event.pointerId === 'number' ? event.pointerId : null
+      const prevCursor = document.body.style.cursor
+      const prevUserSelect = document.body.style.userSelect
+
+      document.body.style.cursor = 'grabbing'
+      document.body.style.userSelect = 'none'
+
+      const meta = {
+        activeId,
+        sourceIndex,
+        overIndex: sourceIndex,
+        pointerId,
+        scrollContainer,
+        rowHeight,
+        itemCount,
+        prevCursor,
+        prevUserSelect,
+        raf: null,
+        lastClientY: event.clientY,
+        onMove: null,
+        onUp: null,
+      }
+
+      const updateOverIndex = () => {
+        const rect = meta.scrollContainer.getBoundingClientRect()
+        const rawY = meta.lastClientY - rect.top
+        const clampedY = Math.min(Math.max(rawY, 0), rect.height)
+
+        const threshold = 44
+        const scrollStep = 18
+        if (clampedY < threshold) {
+          meta.scrollContainer.scrollTop = Math.max(0, meta.scrollContainer.scrollTop - scrollStep)
+        } else if (clampedY > rect.height - threshold) {
+          meta.scrollContainer.scrollTop = Math.min(
+            meta.scrollContainer.scrollHeight,
+            meta.scrollContainer.scrollTop + scrollStep
+          )
+        }
+
+        let nextIndex
+
+        const root = tableContainerRef.current
+        if (root) {
+          const rowNodes = Array.from(
+            root.querySelectorAll('tr.ant-table-row[data-row-key], .ant-table-row[data-row-key]')
+          ).filter(
+            (row) => !String(row?.className || '').includes('ant-table-expanded-row')
+          )
+          let bestIndex = null
+          let bestDistance = Number.POSITIVE_INFINITY
+
+          for (const row of rowNodes) {
+            const rowKey = row?.getAttribute?.('data-row-key')
+            if (!rowKey) continue
+            const index = nodeIndexMap.get(String(rowKey))
+            if (index === undefined) continue
+            const rowRect = row.getBoundingClientRect()
+            const centerY = rowRect.top + rowRect.height / 2
+            const distance = Math.abs(meta.lastClientY - centerY)
+            if (distance < bestDistance) {
+              bestDistance = distance
+              bestIndex = index
+            }
+          }
+
+          if (bestIndex !== null) {
+            nextIndex = bestIndex
+          }
+        }
+
+        if (nextIndex === undefined) {
+          nextIndex = Math.min(
+            meta.itemCount - 1,
+            Math.max(0, Math.floor((meta.scrollContainer.scrollTop + clampedY) / meta.rowHeight))
+          )
+        }
+
+        if (nextIndex === meta.overIndex) return
+        meta.overIndex = nextIndex
+        setVirtualDragState((prev) => {
+          if (!prev || prev.activeId !== meta.activeId) return prev
+          return { ...prev, overIndex: nextIndex }
+        })
+      }
+
+      meta.onMove = (moveEvent) => {
+        if (meta.pointerId !== null && moveEvent.pointerId !== meta.pointerId) return
+        moveEvent.preventDefault?.()
+        meta.lastClientY = moveEvent.clientY
+        if (meta.raf) return
+        meta.raf = requestAnimationFrame(() => {
+          meta.raf = null
+          updateOverIndex()
+        })
+      }
+
+      meta.onUp = async (upEvent) => {
+        if (meta.pointerId !== null && upEvent.pointerId !== meta.pointerId) return
+        upEvent.preventDefault?.()
+        const destinationIndex = meta.overIndex
+        const sourceIndexSnapshot = meta.sourceIndex
+        cleanupVirtualDrag()
+        if (destinationIndex === sourceIndexSnapshot) return
+        await reorderNodesById(meta.activeId, destinationIndex)
+      }
+
+      virtualDragMetaRef.current = meta
+      setVirtualDragState({
+        activeId,
+        sourceIndex,
+        overIndex: sourceIndex,
+      })
+
+      window.addEventListener('pointermove', meta.onMove, { passive: false })
+      window.addEventListener('pointerup', meta.onUp, { passive: false })
+    },
+    [cleanupVirtualDrag, nodeIndexMap, reorderNodesById, resolveTableScrollContainer, t, virtualDragEnabled]
+  )
+
+  useEffect(() => {
+    const root = tableContainerRef.current
+    if (!virtualDragEnabled || !root) return undefined
+
+    const onPointerDown = (event) => {
+      if (virtualDragMetaRef.current) return
+      const target = event?.target
+      const handle = target?.closest?.('[data-node-drag-id]')
+      const nodeId = handle?.getAttribute?.('data-node-drag-id')
+      if (!nodeId) return
+      handleVirtualDragStart(event, nodeId)
+    }
+
+    root.addEventListener('pointerdown', onPointerDown, true)
+    return () => {
+      root.removeEventListener('pointerdown', onPointerDown, true)
+    }
+  }, [handleVirtualDragStart, virtualDragEnabled])
+
+  useEffect(() => {
     loadNodes()
     loadVersion()
   }, [])
-
-  useEffect(() => {
-    if (!autoDisableDragSort) return
-    setDragSortEnabled(false)
-    setDragSortTouched(true)
-    localStorage.setItem(dragSortStorageKey, 'false')
-    message.info(t('drag_sort_auto_disabled'))
-  }, [autoDisableDragSort, dragSortStorageKey, t])
 
   const loadVersion = async () => {
     try {
@@ -770,25 +1032,7 @@ function Dashboard({ onLogout }) {
 
   const handleDragEnd = async (result) => {
     if (!result.destination) return
-
-    const items = Array.from(nodes)
-    const [reordered] = items.splice(result.source.index, 1)
-    items.splice(result.destination.index, 0, reordered)
-
-    setNodes(items)
-
-    try {
-      const orderMap = items.map((node, index) => ({
-        id: node.id,
-        sort_order: index,
-      }))
-      await api.post('/nodes/reorder', { nodes: orderMap })
-      message.success(t('nodes_reordered'))
-      loadNodes()
-    } catch (error) {
-      message.error(t('server_error'))
-      loadNodes()
-    }
+    await reorderNodesByIndex(result.source.index, result.destination.index)
   }
 
     const handleBatchSetAuth = async (auth) => {
@@ -923,14 +1167,37 @@ function Dashboard({ onLogout }) {
         title: '',
         key: 'drag',
         width: 34,
-        render: () => (
-          <HolderOutlined
-            style={{
-              cursor: effectiveDragSortEnabled ? 'grab' : 'not-allowed',
-              color: effectiveDragSortEnabled ? '#999' : '#ccc',
-            }}
-          />
-        ),
+        render: (_, record) => {
+          const disabled = nodes.length <= 1
+          const isDragging = virtualDragState?.activeId === String(record?.id)
+          const cursor = disabled
+            ? 'not-allowed'
+            : isDragging
+              ? 'grabbing'
+              : 'grab'
+          const color = disabled ? '#ccc' : '#999'
+
+          const handle = (
+            <span
+              data-testid={`node-drag-handle-${String(record?.id ?? '')}`}
+              data-node-drag-id={String(record?.id ?? '')}
+              title={t('drag_sort_hint')}
+              style={{
+                display: 'inline-flex',
+                width: '100%',
+                height: '100%',
+                alignItems: 'center',
+                justifyContent: 'center',
+                cursor,
+                color,
+              }}
+            >
+              <HolderOutlined />
+            </span>
+          )
+
+          return handle
+        },
       },
       {
         title: <Checkbox
@@ -1187,41 +1454,56 @@ function Dashboard({ onLogout }) {
       </Droppable>
     )
 
-    const virtualTableEnabled = !effectiveDragSortEnabled && nodes.length > 300
-
     const table = (
-      <Table
-        columns={columns}
-        dataSource={nodes}
-        rowKey="id"
-        size="small"
-        virtual={virtualTableEnabled}
-        listItemHeight={40}
-        scroll={virtualTableEnabled ? { y: 560 } : undefined}
-        expandable={{
-          expandedRowRender,
-          expandedRowKeys,
-          onExpandedRowsChange: (keys) => setExpandedRowKeys(keys),
-        }}
-        loading={loading}
-        pagination={false}
-        locale={{
-          emptyText: t('no_nodes'),
-        }}
-        components={
-          effectiveDragSortEnabled
-            ? {
-                body: {
-                  wrapper: DraggableBody,
-                  row: DraggableRow,
-                },
-              }
-            : undefined
-        }
-      />
+      <div
+        ref={tableContainerRef}
+        data-testid="nodes-table-container"
+      >
+        <Table
+          columns={columns}
+          dataSource={nodes}
+          rowKey="id"
+          size="small"
+          virtual={virtualTableEnabled}
+          listItemHeight={40}
+          scroll={virtualTableEnabled ? { y: 560 } : undefined}
+          expandable={{
+            expandedRowRender,
+            expandedRowKeys,
+            onExpandedRowsChange: (keys) => setExpandedRowKeys(keys),
+          }}
+          rowClassName={(record) => {
+            if (!virtualDragEnabled || !virtualDragState) return ''
+            const recordId = String(record?.id)
+            if (recordId === virtualDragState.activeId) {
+              return 'sbpm-virtual-drag-active'
+            }
+            const index = nodeIndexMap.get(recordId)
+            if (index === virtualDragState.overIndex) {
+              return 'sbpm-virtual-drag-over'
+            }
+            return ''
+          }}
+          loading={loading}
+          pagination={false}
+          locale={{
+            emptyText: t('no_nodes'),
+          }}
+          components={
+            dragSortInTableEnabled
+              ? {
+                  body: {
+                    wrapper: DraggableBody,
+                    row: DraggableRow,
+                  },
+                }
+              : undefined
+          }
+        />
+      </div>
     )
 
-    const tableView = effectiveDragSortEnabled ? (
+    const tableView = dragSortInTableEnabled ? (
       <DragDropContext onDragEnd={handleDragEnd}>
         {table}
       </DragDropContext>
@@ -1307,19 +1589,6 @@ function Dashboard({ onLogout }) {
               >
                 {t('refresh')}
               </Button>
-              <Tooltip title={t('drag_sort_hint')}>
-                <Space size={6}>
-                  <Text type="secondary">{t('drag_sort')}</Text>
-                  <Switch
-                    checked={effectiveDragSortEnabled}
-                    onChange={(checked) => {
-                      setDragSortTouched(true)
-                      setDragSortEnabled(checked)
-                      localStorage.setItem(dragSortStorageKey, String(checked))
-                    }}
-                  />
-                </Space>
-              </Tooltip>
             </Space>
 
             {selectedNodeIds.length > 0 && (
@@ -1373,7 +1642,7 @@ function Dashboard({ onLogout }) {
       <Modal
         title={editingNode?.id ? t('edit') : t('add_node')}
         open={modalVisible}
-        destroyOnClose
+        destroyOnHidden
         onCancel={() => {
           setModalVisible(false)
           setEditingNode(null)

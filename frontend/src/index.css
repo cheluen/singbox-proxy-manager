@@ -298,3 +298,14 @@ body {
     max-width: 200px;
   }
 }
+
+tr.sbpm-virtual-drag-active td,
+.sbpm-virtual-drag-active .ant-table-cell {
+  background: rgba(230, 247, 255, 0.9) !important;
+}
+
+tr.sbpm-virtual-drag-over td,
+.sbpm-virtual-drag-over .ant-table-cell {
+  box-shadow: inset 0 2px 0 rgba(22, 119, 255, 0.75),
+    inset 0 -2px 0 rgba(22, 119, 255, 0.75);
+}
