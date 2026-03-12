@@ -100,6 +100,11 @@ export default {
   
   batch_delete_confirm: 'Confirm delete {{count}} selected nodes?',
   batch_delete_success: 'Successfully deleted {{count}} nodes',
+
+  outbound_dedup: 'Dedup Outbounds',
+  outbound_dedup_confirm: 'This will delete {{count}} duplicate nodes within the selected scope (keeps the first by current order). Continue?',
+  outbound_dedup_no_duplicates: 'No identical outbound duplicates found within the selected scope',
+  outbound_dedup_success: 'Deleted {{count}} duplicate nodes',
   
   batch_check_ip_running: 'Checking {{current}}/{{total}} nodes...',
   batch_check_ip_success: 'Completed IP check for {{count}} nodes',

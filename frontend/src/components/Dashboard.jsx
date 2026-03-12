@@ -33,6 +33,7 @@ import {
   CloseCircleOutlined,
   ThunderboltOutlined,
   HolderOutlined,
+  FilterOutlined,
 } from '@ant-design/icons'
 import { useTranslation } from 'react-i18next'
 import { DragDropContext, Droppable, Draggable } from 'react-beautiful-dnd'
@@ -120,6 +121,35 @@ const formatCountryWithCode = (record) => {
   return `${code} ${countryName}`
 }
 
+const sortObjectKeysDeep = (value) => {
+  if (Array.isArray(value)) {
+    return value.map(sortObjectKeysDeep)
+  }
+  if (!value || typeof value !== 'object') {
+    return value
+  }
+  if (value.constructor !== Object) {
+    return value
+  }
+
+  return Object.keys(value)
+    .sort()
+    .reduce((acc, key) => {
+      acc[key] = sortObjectKeysDeep(value[key])
+      return acc
+    }, {})
+}
+
+const stableJSONStringify = (value) => {
+  try {
+    const sorted = sortObjectKeysDeep(value)
+    const str = JSON.stringify(sorted)
+    return typeof str === 'string' ? str : ''
+  } catch {
+    return ''
+  }
+}
+
 function Dashboard({ onLogout }) {
   const { t, i18n } = useTranslation()
   const [nodes, setNodes] = useState([])
@@ -143,6 +173,7 @@ function Dashboard({ onLogout }) {
   const [replaceLink, setReplaceLink] = useState('')
   const [replaceUpdateName, setReplaceUpdateName] = useState(true)
   const [replaceLoading, setReplaceLoading] = useState(false)
+  const [dedupLoading, setDedupLoading] = useState(false)
   const [autoCheckAfterCreate, setAutoCheckAfterCreate] = useState(false)
   const [expandedRowKeys, setExpandedRowKeys] = useState([])
   const [remarkSaving, setRemarkSaving] = useState({})
@@ -202,6 +233,134 @@ function Dashboard({ onLogout }) {
     setModalVisible(true)
   }
 
+  const getOutboundSignature = (node) => {
+    const proxyType = String(node?.type || '')
+    const rawConfig = node?.config
+
+    if (rawConfig === null || rawConfig === undefined) {
+      return `${proxyType}|null`
+    }
+
+    if (typeof rawConfig !== 'string') {
+      return `${proxyType}|${stableJSONStringify(rawConfig)}`
+    }
+
+    const trimmed = rawConfig.trim()
+    if (!trimmed) {
+      return `${proxyType}|{}`
+    }
+
+    try {
+      const parsed = JSON.parse(trimmed)
+      return `${proxyType}|${stableJSONStringify(parsed)}`
+    } catch {
+      return `${proxyType}|raw:${trimmed}`
+    }
+  }
+
+  const computeDuplicateOutboundNodeIds = (scopeNodeIds) => {
+    const scopeSet = new Set((scopeNodeIds || []).map((id) => String(id)))
+    if (scopeSet.size === 0) {
+      return []
+    }
+
+    const scopeNodes = nodes.filter((node) => scopeSet.has(String(node.id)))
+    const seen = new Map()
+    const duplicates = []
+
+    for (const node of scopeNodes) {
+      const signature = getOutboundSignature(node)
+      if (seen.has(signature)) {
+        duplicates.push(node.id)
+        continue
+      }
+      seen.set(signature, node.id)
+    }
+
+    return duplicates
+  }
+
+  const handleDeduplicateOutbounds = () => {
+    const duplicateIds = computeDuplicateOutboundNodeIds(selectedNodeIds)
+    if (duplicateIds.length === 0) {
+      message.info(t('outbound_dedup_no_duplicates'))
+      return
+    }
+
+    Modal.confirm({
+      title: t('outbound_dedup'),
+      content: t('outbound_dedup_confirm').replace(
+        '{{count}}',
+        duplicateIds.length.toString()
+      ),
+      okText: t('confirm'),
+      cancelText: t('cancel'),
+      okButtonProps: { danger: true },
+      onOk: async () => {
+        setDedupLoading(true)
+        try {
+          await api.post('/nodes/batch-delete', { ids: duplicateIds })
+          message.success(
+            t('outbound_dedup_success').replace(
+              '{{count}}',
+              duplicateIds.length.toString()
+            )
+          )
+          setSelectedNodeIds((prev) =>
+            prev.filter((id) => !duplicateIds.includes(id))
+          )
+          await loadNodes()
+        } catch (error) {
+          message.error(error.response?.data?.error || t('server_error'))
+        } finally {
+          setDedupLoading(false)
+        }
+      },
+    })
+  }
+
+  const applyNodeIPInfo = (id, ipInfo) => {
+    if (id === null || id === undefined) return
+
+    const nodeIP = typeof ipInfo?.ip === 'string' ? ipInfo.ip : ''
+    const location = typeof ipInfo?.location === 'string' ? ipInfo.location : ''
+    const countryCode =
+      typeof ipInfo?.country_code === 'string' ? ipInfo.country_code : ''
+    const latencyRaw = Number(ipInfo?.latency)
+    const latency = Number.isFinite(latencyRaw) ? latencyRaw : 0
+
+    setNodes((prev) =>
+      prev.map((node) =>
+        String(node.id) === String(id)
+          ? {
+              ...node,
+              node_ip: nodeIP,
+              location,
+              country_code: countryCode,
+              latency,
+            }
+          : node
+      )
+    )
+  }
+
+  const clearNodeIPInfo = (id) => {
+    if (id === null || id === undefined) return
+    setNodes((prev) =>
+      prev.map((node) =>
+        String(node.id) === String(id)
+          ? {
+              ...node,
+              node_ip: '',
+              location: '',
+              country_code: '',
+              latency: 0,
+            }
+          : node
+      )
+    )
+  }
+
   const runNodeIPChecks = async (nodeIds, notificationKey) => {
     const ids = Array.from(new Set(nodeIds)).filter(
       (id) => id !== null && id !== undefined
@@ -233,10 +392,15 @@ function Dashboard({ onLogout }) {
 
         const id = ids[currentIndex]
         try {
-          await api.get(`/nodes/${id}/check-ip`)
+          const response = await api.get(`/nodes/${id}/check-ip`)
+          applyNodeIPInfo(id, response.data)
           completed += 1
         } catch (error) {
           failed += 1
+          const statusCode = error?.response?.status
+          if (typeof statusCode === 'number' && statusCode >= 500) {
+            clearNodeIPInfo(id)
+          }
           const msg = error.response?.data?.error || t('server_error')
           message.error(`ID ${id}: ${msg}`)
         } finally {
@@ -1083,6 +1247,14 @@ function Dashboard({ onLogout }) {
                   onClick={() => setBatchAuthVisible(true)}
                 >
                   {t('set_auth')}
+                </Button>
+                <Button
+                  icon={<FilterOutlined />}
+                  onClick={handleDeduplicateOutbounds}
+                  loading={dedupLoading}
+                  disabled={dedupLoading}
+                >
+                  {t('outbound_dedup')}
                 </Button>
                 <Popconfirm
                   title={t('batch_delete_confirm').replace('{{count}}', selectedNodeIds.length)}

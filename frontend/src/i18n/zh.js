@@ -100,6 +100,11 @@ export default {
   
   batch_delete_confirm: '确认删除选中的 {{count}} 个节点？',
   batch_delete_success: '成功删除 {{count}} 个节点',
+
+  outbound_dedup: '出站去重',
+  outbound_dedup_confirm: '将删除选中范围内 {{count}} 个重复节点（按当前排序保留每组第一个）。是否继续？',
+  outbound_dedup_no_duplicates: '选中范围内没有发现完全一致的出站配置重复节点',
+  outbound_dedup_success: '已删除 {{count}} 个重复节点',
   
   batch_check_ip_running: '正在检测 {{current}}/{{total}} 个节点...',
   batch_check_ip_success: '完成 {{count}} 个节点IP检测',
