@@ -218,7 +218,37 @@ body {
 
 .dashboard-layout {
   min-height: 100vh;
+  height: 100vh;
+  height: 100dvh;
+  overflow: hidden;
   background: linear-gradient(180deg, #f7f3ed 0%, #f3f0ea 46%, #edf1f4 100%);
+}
+
+.dashboard-content {
+  padding: 24px;
+  display: flex;
+  flex-direction: column;
+  gap: 24px;
+  overflow: hidden;
+  min-height: 0;
+}
+
+.dashboard-toolbar {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 12px;
+  flex: 0 0 auto;
+}
+
+.dashboard-nodes-viewport {
+  flex: 1 1 auto;
+  min-height: 0;
+}
+
+.dashboard-nodes-table {
+  height: 100%;
 }
 
 .dashboard-header {
@@ -291,6 +321,11 @@ body {
     flex-wrap: wrap;
     gap: 10px;
     height: auto;
+  }
+
+  .dashboard-content {
+    padding: 12px;
+    gap: 16px;
   }
 
   .dashboard-title.ant-typography {

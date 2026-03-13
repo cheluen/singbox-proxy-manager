@@ -1,4 +1,4 @@
-import React, { useMemo, useState, useEffect, useRef, useCallback } from 'react'
+import React, { useMemo, useState, useEffect, useRef, useCallback, useLayoutEffect } from 'react'
 import {
     Layout,
     Typography,
@@ -179,9 +179,11 @@ function Dashboard({ onLogout }) {
   const [expandedRowKeys, setExpandedRowKeys] = useState([])
   const [remarkSaving, setRemarkSaving] = useState({})
   const [remarkPanelKeys, setRemarkPanelKeys] = useState({})
+  const nodesViewportRef = useRef(null)
   const tableContainerRef = useRef(null)
   const virtualDragMetaRef = useRef(null)
   const [virtualDragState, setVirtualDragState] = useState(null)
+  const [tableBodyScrollY, setTableBodyScrollY] = useState(0)
 
   const selectedNodeIdSet = useMemo(() => new Set(selectedNodeIds), [selectedNodeIds])
 
@@ -300,6 +302,65 @@ function Dashboard({ onLogout }) {
 
     return container || content || null
   }, [])
+
+  const recalcTableBodyScrollY = useCallback(() => {
+    const viewport = nodesViewportRef.current
+    const root = tableContainerRef.current
+    if (!viewport || !root) return
+
+    const viewportHeight = viewport.getBoundingClientRect().height
+    if (!viewportHeight || viewportHeight <= 0) return
+
+    const header =
+      root.querySelector('.ant-table-header') ||
+      root.querySelector('.ant-table-thead') ||
+      root.querySelector('thead')
+    const headerHeight = header ? header.getBoundingClientRect().height : 0
+
+    const nextY = Math.max(0, Math.floor(viewportHeight - headerHeight - 2))
+    setTableBodyScrollY((prev) => {
+      if (Math.abs((prev || 0) - nextY) <= 1) return prev
+      return nextY
+    })
+  }, [])
+
+  useLayoutEffect(() => {
+    const viewport = nodesViewportRef.current
+    if (!viewport) return undefined
+
+    let raf = null
+    const schedule = () => {
+      if (raf) cancelAnimationFrame(raf)
+      raf = requestAnimationFrame(() => {
+        raf = null
+        recalcTableBodyScrollY()
+      })
+    }
+
+    recalcTableBodyScrollY()
+
+    let ro = null
+    if (typeof ResizeObserver !== 'undefined') {
+      ro = new ResizeObserver(schedule)
+      ro.observe(viewport)
+
+      const root = tableContainerRef.current
+      const header =
+        root?.querySelector?.('.ant-table-header') ||
+        root?.querySelector?.('.ant-table-thead') ||
+        root?.querySelector?.('thead')
+      if (header) {
+        ro.observe(header)
+      }
+    }
+
+    window.addEventListener('resize', schedule, { passive: true })
+    return () => {
+      window.removeEventListener('resize', schedule)
+      if (raf) cancelAnimationFrame(raf)
+      ro?.disconnect?.()
+    }
+  }, [recalcTableBodyScrollY])
 
   const measureRowHeight = (scrollContainer) => {
     if (!scrollContainer) return 40
@@ -1458,6 +1519,7 @@ function Dashboard({ onLogout }) {
       <div
         ref={tableContainerRef}
         data-testid="nodes-table-container"
+        className="dashboard-nodes-table"
       >
         <Table
           columns={columns}
@@ -1466,7 +1528,7 @@ function Dashboard({ onLogout }) {
           size="small"
           virtual={virtualTableEnabled}
           listItemHeight={40}
-          scroll={virtualTableEnabled ? { y: 560 } : undefined}
+          scroll={{ y: Math.max(0, tableBodyScrollY || 0) }}
           expandable={{
             expandedRowRender,
             expandedRowKeys,
@@ -1511,132 +1573,132 @@ function Dashboard({ onLogout }) {
       table
     )
 
-    return (
-      <Layout className="dashboard-layout">
-        <Header className="dashboard-header">
-        <div className="dashboard-brand">
-          <span className="dashboard-logo-shell">
-            <img
-              src="/logo.svg"
-              alt="SingBox Proxy Manager"
-              className="dashboard-logo"
-            />
-          </span>
-          <Title level={3} className="dashboard-title">
-            {t('app_title')}
-          </Title>
-          <Tooltip
-            title={`${t('frontend_build')}: ${frontendBuildVersion} (${frontendBuildFingerprint})`}
-          >
-            <Tag color="blue">
-              {t('version')} {appVersion || '-'}
-            </Tag>
-          </Tooltip>
-        </div>
-        <Space className="dashboard-actions">
-          <Select
-            value={i18n.language}
-            onChange={handleLanguageChange}
-            style={{ width: 120 }}
-            options={[
-              { value: 'zh', label: '中文' },
-              { value: 'en', label: 'English' },
-            ]}
-          />
-          <Button
-            icon={<SettingOutlined />}
-            onClick={() => setSettingsVisible(true)}
-          >
-            {t('settings')}
-          </Button>
-          <Button
-            icon={<LogoutOutlined />}
-            onClick={onLogout}
-            danger
-          >
-            {t('logout')}
-          </Button>
-        </Space>
-      </Header>
+	    return (
+	      <Layout className="dashboard-layout">
+	        <Header className="dashboard-header">
+	          <div className="dashboard-brand">
+	            <span className="dashboard-logo-shell">
+	              <img
+	                src="/logo.svg"
+	                alt="SingBox Proxy Manager"
+	                className="dashboard-logo"
+	              />
+	            </span>
+	            <Title level={3} className="dashboard-title">
+	              {t('app_title')}
+	            </Title>
+	            <Tooltip
+	              title={`${t('frontend_build')}: ${frontendBuildVersion} (${frontendBuildFingerprint})`}
+	            >
+	              <Tag color="blue">
+	                {t('version')} {appVersion || '-'}
+	              </Tag>
+	            </Tooltip>
+	          </div>
+	          <Space className="dashboard-actions">
+	            <Select
+	              value={i18n.language}
+	              onChange={handleLanguageChange}
+	              style={{ width: 120 }}
+	              options={[
+	                { value: 'zh', label: '中文' },
+	                { value: 'en', label: 'English' },
+	              ]}
+	            />
+	            <Button
+	              icon={<SettingOutlined />}
+	              onClick={() => setSettingsVisible(true)}
+	            >
+	              {t('settings')}
+	            </Button>
+	            <Button
+	              icon={<LogoutOutlined />}
+	              onClick={onLogout}
+	              danger
+	            >
+	              {t('logout')}
+	            </Button>
+	          </Space>
+	        </Header>
 
-      <Content style={{ padding: '24px' }}>
-        <Space direction="vertical" style={{ width: '100%' }} size="large">
-          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: 12 }}>
+      <Content className="dashboard-content">
+        <div className="dashboard-toolbar">
+          <Space wrap>
+            <Button
+              type="primary"
+              icon={<PlusOutlined />}
+              onClick={handleCreateNode}
+            >
+              {t('add_node')}
+            </Button>
+            <Button
+              icon={<ImportOutlined />}
+              onClick={() => setImportLinkVisible(true)}
+            >
+              {t('import_node')}
+            </Button>
+            <Button
+              icon={<ImportOutlined />}
+              onClick={() => setBatchImportVisible(true)}
+            >
+              {t('batch_import')}
+            </Button>
+            <Button
+              icon={<ReloadOutlined />}
+              onClick={loadNodes}
+              loading={loading}
+            >
+              {t('refresh')}
+            </Button>
+          </Space>
+
+          {selectedNodeIds.length > 0 && (
             <Space wrap>
+              <Tag color="blue">{t('selected_count').replace('{{count}}', selectedNodeIds.length)}</Tag>
               <Button
-                type="primary"
-                icon={<PlusOutlined />}
-                onClick={handleCreateNode}
+                icon={<ExportOutlined />}
+                onClick={handleBatchExport}
+                loading={exportLoading}
               >
-                {t('add_node')}
+                {t('batch_export')}
               </Button>
               <Button
-                icon={<ImportOutlined />}
-                onClick={() => setImportLinkVisible(true)}
+                icon={<ThunderboltOutlined />}
+                onClick={handleBatchCheckIP}
+                loading={checkingIP}
               >
-                {t('import_node')}
+                {t('batch_check_ip')}
               </Button>
               <Button
-                icon={<ImportOutlined />}
-                onClick={() => setBatchImportVisible(true)}
+                onClick={() => setBatchAuthVisible(true)}
               >
-                {t('batch_import')}
+                {t('set_auth')}
               </Button>
               <Button
-                icon={<ReloadOutlined />}
-                onClick={loadNodes}
-                loading={loading}
+                icon={<FilterOutlined />}
+                onClick={handleDeduplicateOutbounds}
+                loading={dedupLoading}
+                disabled={dedupLoading}
               >
-                {t('refresh')}
+                {t('outbound_dedup')}
               </Button>
+              <Popconfirm
+                title={t('batch_delete_confirm').replace('{{count}}', selectedNodeIds.length)}
+                onConfirm={handleBatchDelete}
+                okText={t('confirm')}
+                cancelText={t('cancel')}
+              >
+                <Button danger icon={<DeleteOutlined />}>
+                  {t('batch_delete')}
+                </Button>
+              </Popconfirm>
             </Space>
+          )}
+        </div>
 
-            {selectedNodeIds.length > 0 && (
-              <Space wrap>
-                <Tag color="blue">{t('selected_count').replace('{{count}}', selectedNodeIds.length)}</Tag>
-                <Button
-                  icon={<ExportOutlined />}
-                  onClick={handleBatchExport}
-                  loading={exportLoading}
-                >
-                  {t('batch_export')}
-                </Button>
-                <Button
-                  icon={<ThunderboltOutlined />}
-                  onClick={handleBatchCheckIP}
-                  loading={checkingIP}
-                >
-                  {t('batch_check_ip')}
-                </Button>
-                <Button
-                  onClick={() => setBatchAuthVisible(true)}
-                >
-                  {t('set_auth')}
-                </Button>
-                <Button
-                  icon={<FilterOutlined />}
-                  onClick={handleDeduplicateOutbounds}
-                  loading={dedupLoading}
-                  disabled={dedupLoading}
-                >
-                  {t('outbound_dedup')}
-                </Button>
-                <Popconfirm
-                  title={t('batch_delete_confirm').replace('{{count}}', selectedNodeIds.length)}
-                  onConfirm={handleBatchDelete}
-                  okText={t('confirm')}
-                  cancelText={t('cancel')}
-                >
-                  <Button danger icon={<DeleteOutlined />}>
-                    {t('batch_delete')}
-                  </Button>
-                </Popconfirm>
-              </Space>
-            )}
-          </div>
-
+        <div ref={nodesViewportRef} className="dashboard-nodes-viewport">
           {tableView}
-        </Space>
+        </div>
       </Content>
 
       <Modal

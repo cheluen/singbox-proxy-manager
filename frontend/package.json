@@ -17,6 +17,7 @@
     "test:e2e:outbound-dedup": "node ./scripts/outbound-dedup-regression.mjs",
     "test:e2e:remark": "node ./scripts/remark-regression.mjs",
     "test:e2e:tcp-reuse-ui": "node ./scripts/tcp-reuse-ui-regression.mjs",
+    "test:e2e:nodes-viewport": "node ./scripts/nodes-viewport-regression.mjs",
     "test:e2e:version-refresh": "node ./scripts/version-refresh-regression.mjs"
   },
   "dependencies": {
