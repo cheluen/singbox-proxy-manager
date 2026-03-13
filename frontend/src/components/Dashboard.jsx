@@ -179,6 +179,7 @@ function Dashboard({ onLogout }) {
   const [expandedRowKeys, setExpandedRowKeys] = useState([])
   const [remarkSaving, setRemarkSaving] = useState({})
   const [remarkPanelKeys, setRemarkPanelKeys] = useState({})
+  const [nodeUpdating, setNodeUpdating] = useState({})
   const nodesViewportRef = useRef(null)
   const tableContainerRef = useRef(null)
   const virtualDragMetaRef = useRef(null)
@@ -254,10 +255,10 @@ function Dashboard({ onLogout }) {
         }))
         await api.post('/nodes/reorder', { nodes: orderMap })
         message.success(t('nodes_reordered'))
-        loadNodes()
+        await loadNodes({ silent: true })
       } catch (error) {
         message.error(t('server_error'))
-        loadNodes()
+        await loadNodes({ silent: true })
       }
     },
     [t]
@@ -560,19 +561,29 @@ function Dashboard({ onLogout }) {
     }
   }
 
-  const loadNodes = async () => {
-    setLoading(true)
+  const loadNodes = async (options = {}) => {
+    const silent = !!options?.silent
+    if (!silent) {
+      setLoading(true)
+    }
     try {
       const response = await api.get('/nodes')
       const nextNodes = response.data || []
+      const nextIdSet = new Set(nextNodes.map((node) => String(node?.id)))
+
       setNodes(nextNodes)
       setExpandedRowKeys((prev) =>
-        prev.filter((key) => nextNodes.some((n) => String(n.id) === String(key)))
+        prev.filter((key) => nextIdSet.has(String(key)))
+      )
+      setSelectedNodeIds((prev) =>
+        prev.filter((id) => nextIdSet.has(String(id)))
       )
     } catch (error) {
       message.error(t('network_error'))
     } finally {
-      setLoading(false)
+      if (!silent) {
+        setLoading(false)
+      }
     }
   }
 
@@ -664,7 +675,7 @@ function Dashboard({ onLogout }) {
           setSelectedNodeIds((prev) =>
             prev.filter((id) => !duplicateIds.includes(id))
           )
-          await loadNodes()
+          await loadNodes({ silent: true })
         } catch (error) {
           message.error(error.response?.data?.error || t('server_error'))
         } finally {
@@ -789,8 +800,6 @@ function Dashboard({ onLogout }) {
         duration: 4,
       })
     }
-
-    loadNodes()
   }
 
   const handleImportLink = async (link) => {
@@ -860,7 +869,7 @@ function Dashboard({ onLogout }) {
 
       setBatchImportVisible(false)
       setBatchImportLinks('')
-      loadNodes()
+      await loadNodes({ silent: true })
 
       if (enableAfterImport && importedIds.length > 0) {
         setCheckingIP(true)
@@ -888,10 +897,14 @@ function Dashboard({ onLogout }) {
   }
 
   const handleDeleteNode = async (id) => {
+    if (id === null || id === undefined) return
     try {
       await api.delete(`/nodes/${id}`)
       message.success(t('node_deleted'))
-      loadNodes()
+      setNodes((prev) => prev.filter((node) => String(node.id) !== String(id)))
+      setExpandedRowKeys((prev) => prev.filter((key) => String(key) !== String(id)))
+      setSelectedNodeIds((prev) => prev.filter((nodeId) => String(nodeId) !== String(id)))
+      await loadNodes({ silent: true })
     } catch (error) {
       message.error(t('server_error'))
     }
@@ -909,7 +922,7 @@ function Dashboard({ onLogout }) {
       await api.post('/nodes/batch-delete', { ids: selectedNodeIds })
       message.success(t('batch_delete_success').replace('{{count}}', selectedNodeIds.length))
       setSelectedNodeIds([])
-      loadNodes()
+      await loadNodes({ silent: true })
     } catch (error) {
       message.error(t('server_error'))
     } finally {
@@ -1018,7 +1031,7 @@ function Dashboard({ onLogout }) {
       setReplaceVisible(false)
       setReplaceNode(null)
       setReplaceLink('')
-      loadNodes()
+      await loadNodes({ silent: true })
     } catch (error) {
       message.error(error.response?.data?.error || t('server_error'))
     } finally {
@@ -1045,13 +1058,14 @@ function Dashboard({ onLogout }) {
       setModalVisible(false)
       setEditingNode(null)
       setAutoCheckAfterCreate(false)
-      loadNodes()
-
       if (shouldAutoCheck && createdId) {
+        await loadNodes({ silent: true })
         setCheckingIP(true)
         runNodeIPChecks([createdId], `import-check-ip-${createdId}`).finally(() => {
           setCheckingIP(false)
         })
+      } else {
+        loadNodes({ silent: true })
       }
     } catch (error) {
       message.error(error.response?.data?.error || t('server_error'))
@@ -1059,35 +1073,103 @@ function Dashboard({ onLogout }) {
   }
 
   const handleToggleNode = async (node) => {
+    const id = node?.id
+    if (!id) return
+    if (nodeUpdating[id]) return
+
+    const nextEnabled = !node.enabled
+    setNodeUpdating((prev) => ({ ...prev, [id]: true }))
+    setNodes((prev) =>
+      prev.map((n) =>
+        String(n.id) === String(id)
+          ? {
+              ...n,
+              enabled: nextEnabled,
+            }
+          : n
+      )
+    )
+
     try {
       await api.put(`/nodes/${node.id}`, {
-        ...node,
-        enabled: !node.enabled,
+        name: node?.name ?? '',
+        remark: node?.remark ?? '',
+        type: node?.type ?? '',
+        config: typeof node?.config === 'string' ? node.config : stableJSONStringify(node?.config) || '{}',
+        inbound_port: node?.inbound_port ?? 0,
+        username: node?.username ?? '',
+        password: node?.password ?? '',
+        enabled: nextEnabled,
+        tcp_reuse_enabled: node?.tcp_reuse_enabled,
       })
       message.success(t('success'))
-      loadNodes()
     } catch (error) {
       message.error(t('server_error'))
+      setNodes((prev) =>
+        prev.map((n) =>
+          String(n.id) === String(id)
+            ? {
+                ...n,
+                enabled: node.enabled,
+              }
+            : n
+        )
+      )
+    } finally {
+      setNodeUpdating((prev) => ({ ...prev, [id]: false }))
     }
   }
 
   const handleToggleTCPReuse = async (node) => {
+    const id = node?.id
+    if (!id) return
+    if (nodeUpdating[id]) return
+
     const nextTCPReuseEnabled = node?.tcp_reuse_enabled === false
 
     if (nextTCPReuseEnabled && (!node?.username || !node?.password)) {
       message.warning(t('tcp_reuse_auth_required_hint'))
     }
 
+    setNodeUpdating((prev) => ({ ...prev, [id]: true }))
+    setNodes((prev) =>
+      prev.map((n) =>
+        String(n.id) === String(id)
+          ? {
+              ...n,
+              tcp_reuse_enabled: nextTCPReuseEnabled,
+            }
+          : n
+      )
+    )
+
     try {
       await api.put(`/nodes/${node.id}`, {
-        ...node,
+        name: node?.name ?? '',
+        remark: node?.remark ?? '',
+        type: node?.type ?? '',
+        config: typeof node?.config === 'string' ? node.config : stableJSONStringify(node?.config) || '{}',
+        inbound_port: node?.inbound_port ?? 0,
+        username: node?.username ?? '',
+        password: node?.password ?? '',
+        enabled: node?.enabled !== false,
         tcp_reuse_enabled: nextTCPReuseEnabled,
       })
       message.success(t('success'))
-      loadNodes()
     } catch (error) {
       message.error(error.response?.data?.error || t('server_error'))
-      loadNodes()
+      setNodes((prev) =>
+        prev.map((n) =>
+          String(n.id) === String(id)
+            ? {
+                ...n,
+                tcp_reuse_enabled: node?.tcp_reuse_enabled,
+              }
+            : n
+        )
+      )
+    } finally {
+      setNodeUpdating((prev) => ({ ...prev, [id]: false }))
     }
   }
 
@@ -1104,7 +1186,7 @@ function Dashboard({ onLogout }) {
         })
         message.success(t('auth_updated'))
         setBatchAuthVisible(false)
-        loadNodes()
+        await loadNodes({ silent: true })
       } catch (error) {
         message.error(t('server_error'))
       }
@@ -1141,6 +1223,7 @@ function Dashboard({ onLogout }) {
 
       return (
         <Collapse
+          className="sbpm-node-record-collapse"
           size="small"
           activeKey={activeKeys}
           onChange={(keys) => {
@@ -1367,13 +1450,6 @@ function Dashboard({ onLogout }) {
         render: (nodeIP) => nodeIP || '-',
       },
       {
-        title: t('country_code'),
-        dataIndex: 'country_code',
-        key: 'country_code',
-        width: 60,
-        render: (countryCode) => normalizeCountryCode(countryCode) || '-',
-      },
-      {
         title: t('location'),
         dataIndex: 'location',
         key: 'location',
@@ -1394,27 +1470,37 @@ function Dashboard({ onLogout }) {
         dataIndex: 'enabled',
         key: 'enabled',
         width: 68,
-        render: (_, record) => (
-          <Switch
-            checked={record.enabled}
-            onChange={() => handleToggleNode(record)}
-            checkedChildren={<CheckCircleOutlined />}
-            unCheckedChildren={<CloseCircleOutlined />}
-          />
-        ),
+        render: (_, record) => {
+          const updating = !!nodeUpdating[record.id]
+          return (
+            <Switch
+              checked={record.enabled}
+              onChange={() => handleToggleNode(record)}
+              loading={updating}
+              disabled={updating}
+              checkedChildren={<CheckCircleOutlined />}
+              unCheckedChildren={<CloseCircleOutlined />}
+            />
+          )
+        },
       },
       {
         title: t('tcp_reuse'),
         key: 'tcp_reuse',
         width: 68,
-        render: (_, record) => (
-          <Switch
-            checked={record.tcp_reuse_enabled !== false}
-            onChange={() => handleToggleTCPReuse(record)}
-            checkedChildren={t('tcp_reuse_short')}
-            unCheckedChildren={t('tcp_reuse_short')}
-          />
-        ),
+        render: (_, record) => {
+          const updating = !!nodeUpdating[record.id]
+          return (
+            <Switch
+              checked={record.tcp_reuse_enabled !== false}
+              onChange={() => handleToggleTCPReuse(record)}
+              loading={updating}
+              disabled={updating}
+              checkedChildren={t('tcp_reuse_short')}
+              unCheckedChildren={t('tcp_reuse_short')}
+            />
+          )
+        },
       },
       {
         title: t('actions'),
@@ -1645,7 +1731,7 @@ function Dashboard({ onLogout }) {
             </Button>
             <Button
               icon={<ReloadOutlined />}
-              onClick={loadNodes}
+              onClick={() => loadNodes()}
               loading={loading}
             >
               {t('refresh')}

@@ -312,8 +312,20 @@ const clickSettingsButton = async (page) => {
 
 const waitForModalClosed = async (page) => {
   await page.waitForFunction(() => {
-    const wraps = Array.from(document.querySelectorAll('.ant-modal-wrap'))
-    return !wraps.some((element) => getComputedStyle(element).display !== 'none')
+    const modals = Array.from(document.querySelectorAll('.ant-modal'))
+    const isVisible = (element) => {
+      const style = getComputedStyle(element)
+      if (style.display === 'none' || style.visibility === 'hidden') {
+        return false
+      }
+      const opacity = Number(style.opacity || '1')
+      if (!Number.isNaN(opacity) && opacity === 0) {
+        return false
+      }
+      const rect = element.getBoundingClientRect()
+      return rect.width > 0 && rect.height > 0
+    }
+    return !modals.some(isVisible)
   })
 }
 

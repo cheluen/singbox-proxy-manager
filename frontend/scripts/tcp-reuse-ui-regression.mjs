@@ -284,8 +284,22 @@ const run = async () => {
     )
     assert(switchCount === 2, `Expected 2 state switches on row 1, got ${switchCount}`)
 
-    const hasHorizontalOverflow = await page.$eval('.ant-table-content', (node) => node.scrollWidth > node.clientWidth)
+    const hasHorizontalOverflow = await page.evaluate(() => {
+      const candidates = [
+        document.querySelector('.ant-table-content'),
+        document.querySelector('.ant-table-container'),
+        document.querySelector('.ant-table-body'),
+        document.querySelector('.dashboard-nodes-table'),
+      ].filter(Boolean)
+      const node = candidates[0]
+      if (!node) return false
+      return node.scrollWidth > node.clientWidth
+    })
     assert(!hasHorizontalOverflow, 'Table has horizontal overflow at 1366px viewport')
+
+    const headerText = await page.$eval('.ant-table-thead', (node) => (node.textContent || '').trim())
+    const hasRegionCodeColumn = headerText.includes('地区缩写') || headerText.includes('Region Code')
+    assert(!hasRegionCodeColumn, `Region code column should be removed, got header: ${JSON.stringify(headerText)}`)
 
     await page.click('tbody.ant-table-tbody tr[data-row-key="1"] .anticon-edit')
     await page.waitForSelector('.ant-modal .ant-modal-content', { timeout: 10000 })
