@@ -14,6 +14,7 @@ export default {
   success: '成功',
   error: '错误',
   warning: '警告',
+  stop: '停止',
   frontend_build: '前端构建',
   frontend_version_mismatch: '检测到版本不一致，后端 {{server}} / 前端 {{client}}。请确认已完成前端发布。',
   
@@ -108,6 +109,7 @@ export default {
   
   batch_check_ip_running: '正在检测 {{current}}/{{total}} 个节点...',
   batch_check_ip_success: '完成 {{count}} 个节点IP检测',
+  batch_check_ip_stopped: '测速已停止（已完成 {{current}}/{{total}}）',
   
   // Settings
   admin_password: '管理员密码',
@@ -117,6 +119,7 @@ export default {
   start_port_range: '端口必须在 1024 到 65535 之间',
   preserve_inbound_ports: '保留入站端口',
   preserve_inbound_ports_desc: '开启后，拖拽排序、删除补位、修改起始端口都不会改写现有节点端口，只有手动编辑节点端口时才会变更。',
+  preserve_inbound_ports_disable_warning: '关闭后将对所有节点重新按顺序分配入站端口（可能导致端口变化），并重启 sing-box。是否继续？',
   new_admin_password: '新的管理员密码',
   admin_password_placeholder_optional: '输入新密码（可选）',
   admin_password_leave_empty: '留空表示保持当前密码',

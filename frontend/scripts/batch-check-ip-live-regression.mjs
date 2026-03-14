@@ -137,7 +137,9 @@ const createMockApiServer = () => {
               transport: 'http',
             }
 
-      setTimeout(() => {
+      let cancelled = false
+      const timer = setTimeout(() => {
+        if (cancelled) return
         updateNode(id, {
           node_ip: ipInfo.ip,
           location: ipInfo.location,
@@ -147,6 +149,16 @@ const createMockApiServer = () => {
         checkResponses.push({ id, at: Date.now() })
         sendJson(res, 200, ipInfo)
       }, delayMs)
+
+      req.on('aborted', () => {
+        cancelled = true
+        clearTimeout(timer)
+      })
+      res.on('close', () => {
+        if (res.writableEnded) return
+        cancelled = true
+        clearTimeout(timer)
+      })
       return
     }
 
@@ -164,8 +176,20 @@ const createMockApiServer = () => {
     sendJson(res, 404, { error: 'not found', method: req.method, url: req.url })
   })
 
+  const reset = () => {
+    checkCalls.length = 0
+    checkResponses.length = 0
+    for (const node of nodes) {
+      node.node_ip = ''
+      node.location = ''
+      node.country_code = ''
+      node.latency = 0
+      node.updated_at = '2026-01-01T00:00:00Z'
+    }
+  }
+
   const getState = () => ({ nodes, checkCalls, checkResponses })
-  return { server, getState }
+  return { server, getState, reset }
 }
 
 const tryListen = (server, options) =>
@@ -356,6 +380,39 @@ const run = async () => {
     const node2Before = await getCellText(page, node2IPCell)
     assert(node2Before === '-', `Expected node 2 to be pending when node 1 completes, got: ${node2Before}`)
 
+    await clickButtonByText(page, '停止')
+    await page.waitForFunction(
+      () => document.body.innerText.includes('测速已停止'),
+      { timeout: 5000 }
+    )
+    await sleep(2200)
+    const node2AfterStop = await getCellText(page, node2IPCell)
+    assert(
+      node2AfterStop === '-',
+      `Expected node 2 to remain pending after stop, got: ${node2AfterStop}`
+    )
+
+    const stateAfterStop = mockApi.getState()
+    const stopResponses = stateAfterStop.checkResponses.map((item) => item.id)
+    assert(stopResponses.includes(1), `Expected stop scenario to include node 1 response, got: ${JSON.stringify(stopResponses)}`)
+
+    mockApi.reset?.()
+    await page.reload({ waitUntil: 'networkidle2' })
+    await page.waitForSelector('tbody.ant-table-tbody tr[data-row-key="1"]', { timeout: 30000 })
+
+    await page.click(node1Checkbox)
+    await page.click(node2Checkbox)
+    await sleep(300)
+
+    await clickButtonByText(page, '批量测IP')
+
+    await page.waitForFunction(
+      (sel, expected) => (document.querySelector(sel)?.textContent || '').includes(expected),
+      { timeout: 5000 },
+      node1IPCell,
+      '1.1.1.1'
+    )
+
     await page.waitForFunction(
       (sel, expected) => (document.querySelector(sel)?.textContent || '').includes(expected),
       { timeout: 8000 },
@@ -384,6 +441,7 @@ const run = async () => {
           node1IP: node1After,
           node2IP: node2After,
           responseOrder,
+          stopResponses,
         },
         null,
         2

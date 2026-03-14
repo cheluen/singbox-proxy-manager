@@ -1,6 +1,7 @@
-import React, { useState } from 'react'
+import React, { useEffect, useState } from 'react'
 import { Form, Input, Select, Button, Switch, Space, InputNumber } from 'antd'
 import { useTranslation } from 'react-i18next'
+import api from '../utils/api'
 
 const { TextArea } = Input
 const { Option } = Select
@@ -23,7 +24,29 @@ function NodeForm({ node, onSave, onCancel }) {
   const [form] = Form.useForm()
   const [proxyType, setProxyType] = useState(node?.type || 'ss')
   const [loading, setLoading] = useState(false)
+  const [preserveInboundPorts, setPreserveInboundPorts] = useState(false)
   const isChineseMode = i18n.language?.startsWith('zh')
+
+  useEffect(() => {
+    let cancelled = false
+
+    const loadSettings = async () => {
+      try {
+        const response = await api.get('/settings')
+        if (cancelled) return
+        setPreserveInboundPorts(Boolean(response.data?.preserve_inbound_ports))
+      } catch {
+        // If settings cannot be loaded, default to safe mode (disallow edits).
+        if (cancelled) return
+        setPreserveInboundPorts(false)
+      }
+    }
+
+    loadSettings()
+    return () => {
+      cancelled = true
+    }
+  }, [])
 
   const withHint = (label, zhHint) => {
     if (!isChineseMode || !zhHint) {
@@ -645,9 +668,25 @@ function NodeForm({ node, onSave, onCancel }) {
       <Form.Item
         label={withHint('Inbound Port', '本地监听端口')}
         name="inbound_port"
-        extra={withExtraHint('Leave as 0 for auto-assignment based on node order', '填 0 按节点顺序自动分配')}
+        extra={
+          preserveInboundPorts
+            ? withExtraHint(
+                'Leave as 0 for auto-assignment based on node order',
+                '填 0 按节点顺序自动分配'
+              )
+            : withExtraHint(
+                'Managed by system order (enable Preserve Inbound Ports in Settings to edit)',
+                '当前未开启保留入站端口：端口由系统按顺序分配，无法手动修改；如需修改请先在系统设置开启“保留入站端口”'
+              )
+        }
       >
-        <InputNumber min={0} max={65535} style={{ width: '100%' }} placeholder="0 (auto)" />
+        <InputNumber
+          min={0}
+          max={65535}
+          style={{ width: '100%' }}
+          placeholder="0 (auto)"
+          disabled={!preserveInboundPorts}
+        />
       </Form.Item>
 
       {renderConfigFields()}

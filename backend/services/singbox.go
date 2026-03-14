@@ -10,6 +10,7 @@ import (
 	"runtime"
 	"strings"
 	"sync"
+	"time"
 
 	"sb-proxy/backend/models"
 )
@@ -18,6 +19,7 @@ type SingBoxService struct {
 	configDir string
 	process   *exec.Cmd
 	logFile   *os.File
+	waitCh    chan error
 	mu        sync.RWMutex
 }
 
@@ -993,26 +995,12 @@ func (s *SingBoxService) generateHTTPProxyOutbound(config *models.HTTPProxyConfi
 
 // Start starts the single sing-box process
 func (s *SingBoxService) Start() error {
+	if err := s.Stop(); err != nil {
+		return err
+	}
+
 	s.mu.Lock()
 	defer s.mu.Unlock()
-
-	// Stop existing process if any
-	if s.process != nil {
-		if s.process.Process != nil {
-			if err := s.process.Process.Kill(); err != nil {
-				// Log but continue - process may already be dead
-				fmt.Printf("Warning: failed to kill existing process: %v\n", err)
-			}
-			s.process.Wait() // Prevent zombie process, ignore error as process may be already reaped
-		}
-		s.process = nil
-	}
-
-	// Close existing log file handle if any
-	if s.logFile != nil {
-		s.logFile.Close()
-		s.logFile = nil
-	}
 
 	configPath := filepath.Join(s.configDir, "config.json")
 
@@ -1041,34 +1029,57 @@ func (s *SingBoxService) Start() error {
 		return err
 	}
 
+	waitCh := make(chan error, 1)
+	go func() {
+		waitCh <- cmd.Wait()
+	}()
+
+	select {
+	case err := <-waitCh:
+		logFile.Close()
+		return fmt.Errorf("sing-box exited early: %w", err)
+	case <-time.After(300 * time.Millisecond):
+	}
+
 	s.process = cmd
 	s.logFile = logFile // Save log file handle for later cleanup
+	s.waitCh = waitCh
 	return nil
 }
 
 // Stop stops the sing-box process
 func (s *SingBoxService) Stop() error {
 	s.mu.Lock()
-	defer s.mu.Unlock()
+	cmd := s.process
+	waitCh := s.waitCh
+	logFile := s.logFile
+	s.process = nil
+	s.waitCh = nil
+	s.logFile = nil
+	s.mu.Unlock()
 
-	if s.process == nil {
+	if cmd == nil {
+		if logFile != nil {
+			logFile.Close()
+		}
 		return nil
 	}
 
-	if s.process.Process != nil {
-		if err := s.process.Process.Kill(); err != nil {
-			return err
+	if cmd.Process != nil {
+		if err := cmd.Process.Kill(); err != nil {
+			// Log but continue - process may already be dead
+			fmt.Printf("Warning: failed to kill existing process: %v\n", err)
 		}
-		// Wait for process to prevent zombie
-		s.process.Wait()
 	}
 
-	s.process = nil
+	if waitCh != nil {
+		<-waitCh
+	} else {
+		cmd.Wait()
+	}
 
-	// Close log file handle
-	if s.logFile != nil {
-		s.logFile.Close()
-		s.logFile = nil
+	if logFile != nil {
+		logFile.Close()
 	}
 
 	return nil

@@ -1,30 +1,60 @@
 import React, { useState, useEffect } from 'react'
-import { Form, Input, InputNumber, Button, message, Divider, Alert, Switch } from 'antd'
+import { Form, Input, InputNumber, Button, message, Divider, Alert, Switch, Modal } from 'antd'
 import { useTranslation } from 'react-i18next'
 import api from '../utils/api'
 
-function SettingsForm({ onClose }) {
+function SettingsForm({ onClose, onUpdated }) {
   const { t } = useTranslation()
   const [form] = Form.useForm()
   const [loading, setLoading] = useState(false)
   const [loadingData, setLoadingData] = useState(true)
+  const [settingsData, setSettingsData] = useState(null)
   const [adminPasswordLocked, setAdminPasswordLocked] = useState(false)
+  const [initialPreserveInboundPorts, setInitialPreserveInboundPorts] = useState(false)
 
   useEffect(() => {
-    loadSettings()
-  }, [])
+    let cancelled = false
 
-  const loadSettings = async () => {
-    try {
-      const response = await api.get('/settings')
-      form.setFieldsValue(response.data)
-      setAdminPasswordLocked(Boolean(response.data?.admin_password_locked))
-    } catch (error) {
-      message.error(t('settings_load_failed'))
-    } finally {
-      setLoadingData(false)
+    const loadSettings = async () => {
+      try {
+        const response = await api.get('/settings')
+        if (cancelled) return
+        setSettingsData(response.data)
+        setAdminPasswordLocked(Boolean(response.data?.admin_password_locked))
+        setInitialPreserveInboundPorts(Boolean(response.data?.preserve_inbound_ports))
+      } catch (error) {
+        if (cancelled) return
+        message.error(t('settings_load_failed'))
+      } finally {
+        if (cancelled) return
+        setLoadingData(false)
+      }
     }
-  }
+
+    loadSettings()
+
+    return () => {
+      cancelled = true
+    }
+  }, [form, t])
+
+  useEffect(() => {
+    if (loadingData) return
+    if (!settingsData) return
+    form.setFieldsValue(settingsData)
+  }, [form, loadingData, settingsData])
+
+  const confirmDisablePreserveInboundPorts = (values) =>
+    new Promise((resolve) => {
+      Modal.confirm({
+        title: t('warning'),
+        content: t('preserve_inbound_ports_disable_warning'),
+        okText: t('confirm'),
+        cancelText: t('cancel'),
+        onOk: () => resolve(values),
+        onCancel: () => resolve(null),
+      })
+    })
 
   const handleSubmit = async (values) => {
     setLoading(true)
@@ -40,7 +70,21 @@ function SettingsForm({ onClose }) {
         updateData.admin_password = values.admin_password
       }
 
+      if (
+        initialPreserveInboundPorts &&
+        updateData.preserve_inbound_ports === false
+      ) {
+        const confirmed = await confirmDisablePreserveInboundPorts(values)
+        if (!confirmed) {
+          return
+        }
+      }
+
       await api.put('/settings', updateData)
+      if (updateData.preserve_inbound_ports !== undefined) {
+        setInitialPreserveInboundPorts(Boolean(updateData.preserve_inbound_ports))
+      }
+      await onUpdated?.()
       message.success(t('settings_updated'))
       onClose()
     } catch (error) {

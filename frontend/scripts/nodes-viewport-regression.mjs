@@ -210,18 +210,71 @@ const run = async () => {
       consoleErrors.push(`pageerror:${err.message}`)
     })
 
-    await page.goto(FRONTEND_URL, { waitUntil: 'networkidle2' })
-    await page.evaluate(() => {
-      localStorage.setItem('token', 'e2e-token')
-    })
-    await page.reload({ waitUntil: 'networkidle2' })
-    await page.waitForSelector('tbody.ant-table-tbody tr[data-row-key="1"]', { timeout: 30000 })
-    await page.waitForSelector('.dashboard-toolbar', { timeout: 30000 })
-    await page.waitForSelector('.ant-table-body', { timeout: 30000 })
+	    await page.goto(FRONTEND_URL, { waitUntil: 'networkidle2' })
+	    await page.evaluate(() => {
+	      localStorage.setItem('token', 'e2e-token')
+	    })
+	    await page.reload({ waitUntil: 'networkidle2' })
+	    await page.waitForSelector('tbody.ant-table-tbody tr[data-row-key="1"], .ant-table-row[data-row-key="1"]', { timeout: 30000 })
+	    await page.waitForSelector('.dashboard-toolbar', { timeout: 30000 })
+	    await page.waitForFunction(() => {
+	      const root = document.querySelector('[data-testid="nodes-table-container"]')
+	      if (!root) return false
+	      const resolve = () => {
+	        const virtualHolder = root.querySelector('.ant-table-tbody-virtual-holder')
+	        if (virtualHolder) return virtualHolder
+	        const body = root.querySelector('.ant-table-body')
+	        if (body) return body
+	        const content = root.querySelector('.ant-table-content')
+	        if (content && content.scrollHeight > content.clientHeight) return content
+	        const container = root.querySelector('.ant-table-container')
+        if (container && container.scrollHeight > container.clientHeight) return container
+        const divs = root.querySelectorAll('div')
+        for (const el of divs) {
+          if (!el || el.scrollHeight <= el.clientHeight) continue
+          try {
+            const style = window.getComputedStyle(el)
+            const overflowY = style?.overflowY
+            if (overflowY === 'auto' || overflowY === 'scroll' || overflowY === 'overlay') {
+              return el
+            }
+          } catch {
+            // ignore and continue
+          }
+        }
+        return container || content || null
+      }
+      return Boolean(resolve())
+    }, { timeout: 30000 })
 
-    const before = await page.evaluate(() => {
-      const toolbar = document.querySelector('.dashboard-toolbar')
-      const tableBody = document.querySelector('.ant-table-body')
+	    const before = await page.evaluate(() => {
+	      const toolbar = document.querySelector('.dashboard-toolbar')
+	      const root = document.querySelector('[data-testid="nodes-table-container"]')
+	      const resolve = () => {
+	        const virtualHolder = root?.querySelector?.('.ant-table-tbody-virtual-holder')
+	        if (virtualHolder) return virtualHolder
+	        const body = root?.querySelector?.('.ant-table-body')
+	        if (body) return body
+	        const content = root?.querySelector?.('.ant-table-content')
+	        if (content && content.scrollHeight > content.clientHeight) return content
+	        const container = root?.querySelector?.('.ant-table-container')
+        if (container && container.scrollHeight > container.clientHeight) return container
+        const divs = root?.querySelectorAll?.('div') || []
+        for (const el of divs) {
+          if (!el || el.scrollHeight <= el.clientHeight) continue
+          try {
+            const style = window.getComputedStyle(el)
+            const overflowY = style?.overflowY
+            if (overflowY === 'auto' || overflowY === 'scroll' || overflowY === 'overlay') {
+              return el
+            }
+          } catch {
+            // ignore and continue
+          }
+        }
+        return container || content || null
+      }
+      const tableBody = resolve()
       const toolbarRect = toolbar?.getBoundingClientRect?.()
       return {
         windowScrollY: window.scrollY,
@@ -238,32 +291,117 @@ const run = async () => {
       return window.scrollY
     })
 
-    await page.evaluate(() => {
-      const row = document.querySelector('tbody.ant-table-tbody tr[data-row-key="220"]')
-      row?.scrollIntoView?.({ block: 'center' })
-    })
+	    let scrollProbe = null
+	    for (let attempt = 0; attempt < 25; attempt += 1) {
+	      await page.evaluate(() => {
+	        const root = document.querySelector('[data-testid="nodes-table-container"]')
+	        const resolve = () => {
+	          const virtualHolder = root?.querySelector?.('.ant-table-tbody-virtual-holder')
+	          if (virtualHolder) return virtualHolder
+	          const body = root?.querySelector?.('.ant-table-body')
+	          if (body) return body
+	          const content = root?.querySelector?.('.ant-table-content')
+	          if (content && content.scrollHeight > content.clientHeight) return content
+	          const container = root?.querySelector?.('.ant-table-container')
+          if (container && container.scrollHeight > container.clientHeight) return container
+          const divs = root?.querySelectorAll?.('div') || []
+          for (const el of divs) {
+            if (!el || el.scrollHeight <= el.clientHeight) continue
+            try {
+              const style = window.getComputedStyle(el)
+              const overflowY = style?.overflowY
+              if (
+                overflowY === 'auto' ||
+                overflowY === 'scroll' ||
+                overflowY === 'overlay'
+              ) {
+                return el
+              }
+            } catch {
+              // ignore and continue
+            }
+          }
+          return container || content || null
+        }
+        const tableBody = resolve()
+        if (!tableBody) return
+        tableBody.scrollTop = Math.max(0, tableBody.scrollHeight - tableBody.clientHeight)
+        tableBody.dispatchEvent(new Event('scroll', { bubbles: true }))
+      })
+      await sleep(250)
+
+      scrollProbe = await page.evaluate(() => {
+        const renderedRows = Array.from(
+          document.querySelectorAll('tbody.ant-table-tbody tr[data-row-key], .ant-table-row[data-row-key]')
+        )
+        const renderedKeys = renderedRows
+          .map((row) => Number(row.getAttribute('data-row-key')))
+          .filter((n) => Number.isFinite(n))
+        const maxRenderedRowKey = renderedKeys.length > 0 ? Math.max(...renderedKeys) : null
+        const lastKeys = renderedKeys
+          .slice()
+          .sort((a, b) => a - b)
+          .slice(-6)
+        return { maxRenderedRowKey, lastKeys }
+      })
+
+      if (scrollProbe?.maxRenderedRowKey === 220) {
+        break
+      }
+    }
     await sleep(600)
 
-    const after = await page.evaluate(() => {
-      const toolbar = document.querySelector('.dashboard-toolbar')
-      const tableBody = document.querySelector('.ant-table-body')
-      const row = document.querySelector('tbody.ant-table-tbody tr[data-row-key="220"]')
-      const toolbarRect = toolbar?.getBoundingClientRect?.()
-      const bodyRect = tableBody?.getBoundingClientRect?.()
-      const rowRect = row?.getBoundingClientRect?.()
-      const rowVisible = Boolean(
-        bodyRect &&
-          rowRect &&
-          rowRect.bottom > bodyRect.top &&
-          rowRect.top < bodyRect.bottom
+	    const after = await page.evaluate(() => {
+	      const toolbar = document.querySelector('.dashboard-toolbar')
+	      const root = document.querySelector('[data-testid="nodes-table-container"]')
+	      const resolve = () => {
+	        const virtualHolder = root?.querySelector?.('.ant-table-tbody-virtual-holder')
+	        if (virtualHolder) return virtualHolder
+	        const body = root?.querySelector?.('.ant-table-body')
+	        if (body) return body
+	        const content = root?.querySelector?.('.ant-table-content')
+	        if (content && content.scrollHeight > content.clientHeight) return content
+	        const container = root?.querySelector?.('.ant-table-container')
+        if (container && container.scrollHeight > container.clientHeight) return container
+        const divs = root?.querySelectorAll?.('div') || []
+        for (const el of divs) {
+          if (!el || el.scrollHeight <= el.clientHeight) continue
+          try {
+            const style = window.getComputedStyle(el)
+            const overflowY = style?.overflowY
+            if (overflowY === 'auto' || overflowY === 'scroll' || overflowY === 'overlay') {
+              return el
+            }
+          } catch {
+            // ignore and continue
+          }
+        }
+        return container || content || null
+      }
+      const tableBody = resolve()
+      const renderedRows = Array.from(
+        document.querySelectorAll('tbody.ant-table-tbody tr[data-row-key], .ant-table-row[data-row-key]')
       )
-
+      const renderedKeys = renderedRows
+        .map((row) => Number(row.getAttribute('data-row-key')))
+        .filter((n) => Number.isFinite(n))
+      const maxRenderedRowKey = renderedKeys.length > 0 ? Math.max(...renderedKeys) : null
+      const row220 = document.querySelector('tbody.ant-table-tbody tr[data-row-key="220"], .ant-table-row[data-row-key="220"]')
+      const lastKeys = renderedKeys
+        .slice()
+        .sort((a, b) => a - b)
+        .slice(-6)
+      const toolbarRect = toolbar?.getBoundingClientRect?.()
       return {
         windowScrollY: window.scrollY,
         toolbarTop: toolbarRect?.top ?? null,
         toolbarBottom: toolbarRect?.bottom ?? null,
         tableBodyScrollTop: tableBody?.scrollTop ?? null,
-        rowVisible,
+        tableBodyScrollHeight: tableBody?.scrollHeight ?? null,
+        tableBodyClientHeight: tableBody?.clientHeight ?? null,
+        maxRenderedRowKey,
+        hasRow220: Boolean(row220),
+        lastKeys,
       }
     })
 
@@ -273,7 +411,10 @@ const run = async () => {
     assert(windowScrollAfterAttempt === 0, `Expected window scroll to stay at 0, got ${windowScrollAfterAttempt}`)
     assert(after.windowScrollY === 0, `Expected window scroll to stay at 0 after scrolling nodes, got ${after.windowScrollY}`)
     assert(after.tableBodyScrollTop > 0, `Expected table body scrollTop > 0, got ${after.tableBodyScrollTop}`)
-    assert(after.rowVisible, 'Expected last row to be visible after scrolling inside table body')
+    assert(
+      after.hasRow220,
+      `Expected row 220 to be rendered after scrolling, lastKeys=${JSON.stringify(after.lastKeys)} probe=${JSON.stringify(scrollProbe)}`
+    )
     assert(
       before.toolbarTop !== null && after.toolbarTop !== null && Math.abs(before.toolbarTop - after.toolbarTop) <= 1,
       'Expected toolbar position to remain stable while scrolling nodes'
@@ -323,4 +464,3 @@ const run = async () => {
 }
 
 run()
-

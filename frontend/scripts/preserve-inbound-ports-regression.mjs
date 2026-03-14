@@ -139,12 +139,28 @@ const createMockApiServer = () => {
         body += chunk
       })
       req.on('end', () => {
+        const prevSettings = settings
         const payload = JSON.parse(body || '{}')
         settings = {
           ...settings,
           ...payload,
         }
         lastSettingsUpdate = payload
+
+        const nextPreserve = Boolean(settings.preserve_inbound_ports)
+        const prevPreserve = Boolean(prevSettings?.preserve_inbound_ports)
+        const shouldReassignInboundPorts =
+          !nextPreserve &&
+          (payload.start_port !== undefined || prevPreserve !== nextPreserve)
+
+        if (shouldReassignInboundPorts) {
+          nodes = nodes.map((node) => ({
+            ...node,
+            inbound_port: settings.start_port + (node.sort_order || 0),
+            updated_at: new Date().toISOString(),
+          }))
+        }
+
         sendJson(res, 200, { message: 'settings updated' })
       })
       return
@@ -296,6 +312,7 @@ const isIgnorableConsoleError = (line) => {
     'Support for defaultProps will be removed from memo components',
     '[antd: Modal] `destroyOnClose` is deprecated',
     '[antd: message] Static function can not consume context',
+    '[antd: Modal] Static function can not consume context',
   ]
   return patterns.some((pattern) => line.includes(pattern))
 }
@@ -335,8 +352,79 @@ const openSettingsModal = async (page) => {
 }
 
 const closeSettingsModal = async (page) => {
-  await page.click('.ant-modal-close')
+  const clicked = await page.evaluate(() => {
+    const isVisible = (element) => {
+      const style = getComputedStyle(element)
+      if (style.display === 'none' || style.visibility === 'hidden') {
+        return false
+      }
+      const opacity = Number(style.opacity || '1')
+      if (!Number.isNaN(opacity) && opacity === 0) {
+        return false
+      }
+      const rect = element.getBoundingClientRect()
+      return rect.width > 0 && rect.height > 0
+    }
+
+    const buttons = Array.from(document.querySelectorAll('.ant-modal-close'))
+    const visibleButtons = buttons.filter(isVisible)
+    const button = (visibleButtons.length > 0 ? visibleButtons[visibleButtons.length - 1] : buttons[buttons.length - 1]) || null
+    if (!button) return false
+    button.click()
+    return true
+  })
+  if (!clicked) {
+    throw new Error('modal close button not found')
+  }
   await waitForModalClosed(page)
+}
+
+const openNodeEditModal = async (page, nodeId) => {
+  const selector = `tbody.ant-table-tbody tr[data-row-key="${String(nodeId)}"] span.anticon-edit`
+  await page.$eval(selector, (element) => {
+    const button = element.closest('button')
+    if (!button) {
+      throw new Error('edit button not found')
+    }
+    button.click()
+  })
+  await page.waitForSelector('.ant-modal input[placeholder="0 (auto)"]', { timeout: 10000 })
+}
+
+const assertNodeInboundPortEditable = async (page, { expectedDisabled }) => {
+  await page.waitForFunction(
+    (expected) => {
+      const input = document.querySelector('.ant-modal input[placeholder="0 (auto)"]')
+      if (!input) return false
+      return input.disabled === expected
+    },
+    { timeout: 5000 },
+    expectedDisabled
+  )
+}
+
+const confirmModalOk = async (page, { expectedIncludes }) => {
+  await page.waitForSelector('.ant-modal-confirm', { timeout: 10000 })
+  const confirmText = await page.$eval('.ant-modal-confirm', (element) => element.innerText || '')
+  assert(
+    confirmText.includes(expectedIncludes),
+    `expected confirm modal to include ${JSON.stringify(expectedIncludes)}, got: ${JSON.stringify(confirmText)}`
+  )
+  await page.click('.ant-modal-confirm .ant-btn-primary')
+  await page.waitForFunction(() => {
+    const modal = document.querySelector('.ant-modal-confirm')
+    if (!modal) return true
+    const style = getComputedStyle(modal)
+    if (style.display === 'none' || style.visibility === 'hidden') {
+      return true
+    }
+    const opacity = Number(style.opacity || '1')
+    if (!Number.isNaN(opacity) && opacity === 0) {
+      return true
+    }
+    const rect = modal.getBoundingClientRect()
+    return rect.width === 0 || rect.height === 0
+  }, { timeout: 10000 })
 }
 
 const assertSettingsI18n = async (page, { include = [], exclude = [] }) => {
@@ -404,16 +492,20 @@ const run = async () => {
       localStorage.setItem('token', 'preserve-ports-token')
     })
 
-    await page.evaluate(() => {
-      localStorage.setItem('language', 'zh')
-    })
-    await page.reload({ waitUntil: 'networkidle2' })
-    await page.waitForSelector('tbody.ant-table-tbody tr[data-row-key="1"]', { timeout: 30000 })
+	    await page.evaluate(() => {
+	      localStorage.setItem('language', 'zh')
+	    })
+	    await page.reload({ waitUntil: 'networkidle2' })
+	    await page.waitForSelector('tbody.ant-table-tbody tr[data-row-key="1"]', { timeout: 30000 })
 
-    await openSettingsModal(page)
-    await assertSettingsI18n(page, {
-      include: [
-        '系统设置',
+	    await openNodeEditModal(page, 1)
+	    await assertNodeInboundPortEditable(page, { expectedDisabled: true })
+	    await closeSettingsModal(page)
+
+	    await openSettingsModal(page)
+	    await assertSettingsI18n(page, {
+	      include: [
+	        '系统设置',
         '起始端口',
         '入站连接使用的起始端口号',
         '保留入站端口',
@@ -482,16 +574,20 @@ const run = async () => {
     if (wasChecked) {
       throw new Error('preserve switch should be disabled initially')
     }
-    await page.click(switchSelector)
-    await page.click('.ant-modal button[type="submit"]')
-    await waitForModalClosed(page)
-    await sleep(800)
+	    await page.click(switchSelector)
+	    await page.click('.ant-modal button[type="submit"]')
+	    await waitForModalClosed(page)
+	    await sleep(800)
 
-    const stateAfterSettings = mockApi.getState()
-    assert(
-      stateAfterSettings.lastSettingsUpdate?.preserve_inbound_ports === true,
-      `expected settings update payload to enable preserve mode, got ${JSON.stringify(stateAfterSettings.lastSettingsUpdate)}`
-    )
+	    await openNodeEditModal(page, 1)
+	    await assertNodeInboundPortEditable(page, { expectedDisabled: false })
+	    await closeSettingsModal(page)
+
+	    const stateAfterSettings = mockApi.getState()
+	    assert(
+	      stateAfterSettings.lastSettingsUpdate?.preserve_inbound_ports === true,
+	      `expected settings update payload to enable preserve mode, got ${JSON.stringify(stateAfterSettings.lastSettingsUpdate)}`
+	    )
 
     const dragFrom = await getCellCenter(page, 'tbody.ant-table-tbody tr[data-row-key="1"] td:nth-child(2)')
     const dragTo = await getCellCenter(page, 'tbody.ant-table-tbody tr[data-row-key="3"] td:nth-child(2)')
@@ -519,14 +615,49 @@ const run = async () => {
       JSON.stringify(orderAfterDrag) === JSON.stringify(['node-2', 'node-3', 'node-1']),
       `unexpected order after drag: ${JSON.stringify(orderAfterDrag)}`
     )
-    assert(
-      JSON.stringify(portsAfterDrag) === JSON.stringify([30005, 30009, 30001]),
-      `expected ports to stay attached to nodes after drag, got ${JSON.stringify(portsAfterDrag)}`
-    )
-    const blockingConsoleErrors = consoleErrors.filter((line) => !isIgnorableConsoleError(line))
-    assert(
-      blockingConsoleErrors.length === 0,
-      `unexpected console errors: ${blockingConsoleErrors.join(' | ')}`
+	    assert(
+	      JSON.stringify(portsAfterDrag) === JSON.stringify([30005, 30009, 30001]),
+	      `expected ports to stay attached to nodes after drag, got ${JSON.stringify(portsAfterDrag)}`
+	    )
+
+	    await openSettingsModal(page)
+	    await page.waitForSelector('.ant-modal .ant-switch', { timeout: 10000 })
+	    const disableSelector = '.ant-modal .ant-switch'
+	    const preserveEnabled = await page.$eval(
+	      disableSelector,
+	      (element) => element.getAttribute('aria-checked') === 'true'
+	    )
+	    assert(preserveEnabled, 'preserve switch should be enabled before disabling')
+	    await page.click(disableSelector)
+	    await page.click('.ant-modal button[type="submit"]')
+	    await confirmModalOk(page, { expectedIncludes: 'reassign inbound ports' })
+	    await waitForModalClosed(page)
+	    await sleep(800)
+
+	    const stateAfterDisable = mockApi.getState()
+	    assert(
+	      stateAfterDisable.lastSettingsUpdate?.preserve_inbound_ports === false,
+	      `expected settings update payload to disable preserve mode, got ${JSON.stringify(stateAfterDisable.lastSettingsUpdate)}`
+	    )
+
+	    const orderAfterDisable = await getRowNames(page)
+	    const portsAfterDisable = await getRowPorts(page)
+	    assert(
+	      JSON.stringify(orderAfterDisable) === JSON.stringify(orderAfterDrag),
+	      `expected order to stay the same after disabling preserve mode, got ${JSON.stringify(orderAfterDisable)}`
+	    )
+	    assert(
+	      JSON.stringify(portsAfterDisable) === JSON.stringify([30001, 30002, 30003]),
+	      `expected ports to be reassigned sequentially after disabling preserve mode, got ${JSON.stringify(portsAfterDisable)}`
+	    )
+
+	    await openNodeEditModal(page, 1)
+	    await assertNodeInboundPortEditable(page, { expectedDisabled: true })
+	    await closeSettingsModal(page)
+	    const blockingConsoleErrors = consoleErrors.filter((line) => !isIgnorableConsoleError(line))
+	    assert(
+	      blockingConsoleErrors.length === 0,
+	      `unexpected console errors: ${blockingConsoleErrors.join(' | ')}`
     )
 
     console.log(
@@ -534,14 +665,17 @@ const run = async () => {
         {
           success: true,
           orderBefore,
-          portsBefore,
-          orderAfterDrag,
-          portsAfterDrag,
-          lastSettingsUpdate: stateAfterSettings.lastSettingsUpdate,
-          reorderPayload: stateAfterDrag.lastReorder,
-        },
-        null,
-        2,
+	          portsBefore,
+	          orderAfterDrag,
+	          portsAfterDrag,
+	          orderAfterDisable,
+	          portsAfterDisable,
+	          lastSettingsUpdate: stateAfterSettings.lastSettingsUpdate,
+	          lastSettingsDisableUpdate: stateAfterDisable.lastSettingsUpdate,
+	          reorderPayload: stateAfterDrag.lastReorder,
+	        },
+	        null,
+	        2,
       )
     )
   } catch (error) {

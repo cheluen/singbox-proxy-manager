@@ -14,6 +14,7 @@ export default {
   success: 'Success',
   error: 'Error',
   warning: 'Warning',
+  stop: 'Stop',
   frontend_build: 'Frontend build',
   frontend_version_mismatch: 'Version mismatch detected: backend {{server}} / frontend {{client}}. Confirm frontend deployment is complete.',
   
@@ -108,6 +109,7 @@ export default {
   
   batch_check_ip_running: 'Checking {{current}}/{{total}} nodes...',
   batch_check_ip_success: 'Completed IP check for {{count}} nodes',
+  batch_check_ip_stopped: 'Stopped (completed {{current}}/{{total}})',
   
   // Settings
   admin_password: 'Admin Password',
@@ -117,6 +119,7 @@ export default {
   start_port_range: 'Port must be between 1024 and 65535',
   preserve_inbound_ports: 'Preserve Inbound Ports',
   preserve_inbound_ports_desc: 'When enabled, drag sorting, delete reindexing, and start-port changes will not rewrite existing node ports. Only manual edits change a node port.',
+  preserve_inbound_ports_disable_warning: 'Disabling this will reassign inbound ports for all nodes based on order (ports may change) and restart sing-box. Continue?',
   new_admin_password: 'New Admin Password',
   admin_password_placeholder_optional: 'Enter new password (optional)',
   admin_password_leave_empty: 'Leave empty to keep current password',

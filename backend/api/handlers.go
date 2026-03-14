@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"net"
 	"net/http"
 	"os"
 	"strconv"
@@ -63,6 +64,28 @@ func validateInboundPort(port int) error {
 	if port <= 0 || port > 65535 {
 		return fmt.Errorf("inbound port out of range")
 	}
+	return nil
+}
+
+func shouldSkipPortAvailabilityCheck() bool {
+	raw := strings.TrimSpace(os.Getenv("SBPM_SKIP_PORT_AVAILABILITY_CHECK"))
+	if raw == "" {
+		return false
+	}
+	raw = strings.ToLower(raw)
+	return raw != "0" && raw != "false"
+}
+
+func validateInboundPortAvailable(port int) error {
+	if shouldSkipPortAvailabilityCheck() {
+		return nil
+	}
+
+	ln, err := net.Listen("tcp", fmt.Sprintf(":%d", port))
+	if err != nil {
+		return fmt.Errorf("inbound port not available: %w", err)
+	}
+	_ = ln.Close()
 	return nil
 }
 
@@ -531,7 +554,7 @@ func (h *Handler) CreateNode(c *gin.Context) {
 	}
 	req.SortOrder = maxOrder + 1
 
-	startPort, _, err := getPortSettings(tx)
+	startPort, preserveInboundPorts, err := getPortSettings(tx)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "database error"})
 		return
@@ -543,19 +566,28 @@ func (h *Handler) CreateNode(c *gin.Context) {
 		return
 	}
 
-	if req.InboundPort == 0 {
-		req.InboundPort, err = nextAvailableInboundPort(startPort, usedInboundPorts)
-		if err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "database error"})
-			return
+	if preserveInboundPorts {
+		if req.InboundPort == 0 {
+			req.InboundPort, err = nextAvailableInboundPort(startPort, usedInboundPorts)
+			if err != nil {
+				c.JSON(http.StatusInternalServerError, gin.H{"error": "database error"})
+				return
+			}
 		}
+	} else {
+		req.InboundPort = startPort + req.SortOrder
 	}
+
 	if err := validateInboundPort(req.InboundPort); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
 	if _, exists := usedInboundPorts[req.InboundPort]; exists {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "inbound port already in use"})
+		return
+	}
+	if err := validateInboundPortAvailable(req.InboundPort); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
 
@@ -645,7 +677,7 @@ func (h *Handler) BatchImportNodes(c *gin.Context) {
 	}
 	defer tx.Rollback()
 
-	startPort, _, err := getPortSettings(tx)
+	startPort, preserveInboundPorts, err := getPortSettings(tx)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "database error"})
 		return
@@ -709,12 +741,29 @@ func (h *Handler) BatchImportNodes(c *gin.Context) {
 		}
 
 		sortOrder := nextOrder
-		inboundPort, err := nextAvailableInboundPort(startPort, usedInboundPorts)
-		if err != nil {
-			result["success"] = false
-			result["error"] = err.Error()
-			results = append(results, result)
-			continue
+		var inboundPort int
+		if preserveInboundPorts {
+			inboundPort, err = nextAvailableInboundPort(startPort, usedInboundPorts)
+			if err != nil {
+				result["success"] = false
+				result["error"] = err.Error()
+				results = append(results, result)
+				continue
+			}
+		} else {
+			inboundPort = startPort + sortOrder
+			if err := validateInboundPort(inboundPort); err != nil {
+				result["success"] = false
+				result["error"] = err.Error()
+				results = append(results, result)
+				continue
+			}
+			if _, exists := usedInboundPorts[inboundPort]; exists {
+				result["success"] = false
+				result["error"] = "inbound port already in use"
+				results = append(results, result)
+				continue
+			}
 		}
 
 		// Insert node
@@ -818,10 +867,11 @@ func (h *Handler) UpdateNode(c *gin.Context) {
 
 	var currentSortOrder int
 	var currentReuseEnabled bool
+	var currentInboundPort int
 	if err := tx.QueryRow(
-		"SELECT sort_order, tcp_reuse_enabled FROM proxy_nodes WHERE id = ?",
+		"SELECT sort_order, tcp_reuse_enabled, inbound_port FROM proxy_nodes WHERE id = ?",
 		id,
-	).Scan(&currentSortOrder, &currentReuseEnabled); err != nil {
+	).Scan(&currentSortOrder, &currentReuseEnabled, &currentInboundPort); err != nil {
 		if err == sql.ErrNoRows {
 			c.JSON(http.StatusNotFound, gin.H{"error": "node not found"})
 			return
@@ -834,7 +884,7 @@ func (h *Handler) UpdateNode(c *gin.Context) {
 	}
 	req.SortOrder = currentSortOrder
 
-	startPort, _, err := getPortSettings(tx)
+	startPort, preserveInboundPorts, err := getPortSettings(tx)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "database error"})
 		return
@@ -846,13 +896,18 @@ func (h *Handler) UpdateNode(c *gin.Context) {
 		return
 	}
 
-	if req.InboundPort == 0 {
-		req.InboundPort, err = nextAvailableInboundPort(startPort, usedInboundPorts)
-		if err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "database error"})
-			return
+	if preserveInboundPorts {
+		if req.InboundPort == 0 {
+			req.InboundPort, err = nextAvailableInboundPort(startPort, usedInboundPorts)
+			if err != nil {
+				c.JSON(http.StatusInternalServerError, gin.H{"error": "database error"})
+				return
+			}
 		}
+	} else {
+		req.InboundPort = startPort + req.SortOrder
 	}
+
 	if err := validateInboundPort(req.InboundPort); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
@@ -860,6 +915,12 @@ func (h *Handler) UpdateNode(c *gin.Context) {
 	if _, exists := usedInboundPorts[req.InboundPort]; exists {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "inbound port already in use"})
 		return
+	}
+	if req.InboundPort != currentInboundPort {
+		if err := validateInboundPortAvailable(req.InboundPort); err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+			return
+		}
 	}
 
 	// Update node

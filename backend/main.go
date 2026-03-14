@@ -412,6 +412,29 @@ func registerFrontendRoutes(r *gin.Engine, frontendDistDir string, appVersion st
 		return fmt.Errorf("read index.html: %w", err)
 	}
 
+	nodesVirtualThreshold := readIntEnv("SBPM_NODES_VIRTUAL_THRESHOLD", 50)
+	if nodesVirtualThreshold < 0 {
+		log.Printf("Invalid SBPM_NODES_VIRTUAL_THRESHOLD=%d, using default 50", nodesVirtualThreshold)
+		nodesVirtualThreshold = 50
+	}
+	metaName := []byte(`name="sbpm-nodes-virtual-threshold"`)
+	meta := fmt.Sprintf(`    <meta name="sbpm-nodes-virtual-threshold" content="%d" />`, nodesVirtualThreshold)
+	thresholdUpdated := false
+	if idx := bytes.Index(indexContent, metaName); idx >= 0 {
+		start := bytes.LastIndex(indexContent[:idx], []byte("<meta"))
+		if start >= 0 {
+			endRel := bytes.IndexByte(indexContent[idx:], '>')
+			if endRel >= 0 {
+				end := idx + endRel + 1
+				indexContent = append(indexContent[:start], append([]byte(meta), indexContent[end:]...)...)
+				thresholdUpdated = true
+			}
+		}
+	}
+	if !thresholdUpdated && bytes.Contains(indexContent, []byte("</head>")) {
+		indexContent = bytes.Replace(indexContent, []byte("</head>"), []byte(meta+"\n  </head>"), 1)
+	}
+
 	indexFingerprint := calcContentFingerprint(indexContent)
 	indexETag := fmt.Sprintf("\"sbpm-%s\"", indexFingerprint)
 	log.Printf("Serving frontend assets from %s", sourceName)

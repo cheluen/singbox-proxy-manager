@@ -37,6 +37,7 @@ func newTestHandler(t *testing.T, checker func(string, string, string) (*service
 		t.Fatalf("write fake sing-box binary: %v", err)
 	}
 	t.Setenv("SINGBOX_BINARY", fakeBinary)
+	t.Setenv("SBPM_SKIP_PORT_AVAILABILITY_CHECK", "1")
 	svc := services.NewSingBoxService(t.TempDir())
 	h := NewHandler(db, svc)
 	h.checkProxyIP = checker
@@ -242,6 +243,10 @@ func TestUpdateNodeAppliesInboundPortAndTCPReuseFlag(t *testing.T) {
 	})
 	nodeID := insertTestNode(t, handler.db)
 
+	if _, err := handler.db.Exec("UPDATE settings SET preserve_inbound_ports = 1"); err != nil {
+		t.Fatalf("enable preserve_inbound_ports: %v", err)
+	}
+
 	payload := map[string]interface{}{
 		"name":              "node1-updated",
 		"remark":            "remark",
@@ -287,6 +292,48 @@ func TestUpdateNodeAppliesInboundPortAndTCPReuseFlag(t *testing.T) {
 	}
 	if tcpReuseEnabled {
 		t.Fatalf("expected tcp_reuse_enabled=false after update")
+	}
+}
+
+func TestUpdateNodeWhenPreserveDisabledForcesInboundPortToOrder(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	handler := newTestHandler(t, func(proxyAddr, username, password string) (*services.IPInfo, error) {
+		return nil, fmt.Errorf("not used")
+	})
+	nodeID := insertTestNode(t, handler.db)
+
+	// preserve_inbound_ports is disabled by default.
+	payload := map[string]interface{}{
+		"name":         "node1-updated",
+		"remark":       "remark",
+		"type":         "ss",
+		"config":       `{"server":"example.com","server_port":443,"method":"aes-128-gcm","password":"p"}`,
+		"inbound_port": 33055,
+		"username":     "newuser",
+		"password":     "newpass",
+		"enabled":      true,
+	}
+	body, _ := json.Marshal(payload)
+
+	rec := httptest.NewRecorder()
+	ctx, _ := gin.CreateTestContext(rec)
+	ctx.Params = gin.Params{gin.Param{Key: "id", Value: strconv.Itoa(nodeID)}}
+	req, _ := http.NewRequest(http.MethodPut, "/api/nodes/"+strconv.Itoa(nodeID), bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	ctx.Request = req
+
+	handler.UpdateNode(ctx)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("unexpected status %d body=%s", rec.Code, rec.Body.String())
+	}
+
+	var inboundPort int
+	if err := handler.db.QueryRow("SELECT inbound_port FROM proxy_nodes WHERE id = ?", nodeID).Scan(&inboundPort); err != nil {
+		t.Fatalf("query inbound_port: %v", err)
+	}
+	if inboundPort != 30001 {
+		t.Fatalf("expected inbound_port to remain 30001 when preserve disabled, got %d", inboundPort)
 	}
 }
 
@@ -340,7 +387,7 @@ func TestCreateNodeAutoAssignSkipsUsedInboundPorts(t *testing.T) {
 		return nil, fmt.Errorf("not used")
 	})
 
-	if _, err := handler.db.Exec("UPDATE settings SET start_port = 30001"); err != nil {
+	if _, err := handler.db.Exec("UPDATE settings SET start_port = 30001, preserve_inbound_ports = 1"); err != nil {
 		t.Fatalf("set start_port: %v", err)
 	}
 	insertTestNodeWithPortAndOrder(t, handler.db, "node-a", 30001, 0)

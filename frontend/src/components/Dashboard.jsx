@@ -32,6 +32,7 @@ import {
   CheckCircleOutlined,
   CloseCircleOutlined,
   ThunderboltOutlined,
+  StopOutlined,
   HolderOutlined,
   FilterOutlined,
 } from '@ant-design/icons'
@@ -154,6 +155,7 @@ function Dashboard({ onLogout }) {
   const { t, i18n } = useTranslation()
   const [nodes, setNodes] = useState([])
   const nodesRef = useRef(nodes)
+  const nodeIPCheckRunsRef = useRef(new Map())
   const [loading, setLoading] = useState(false)
   const [appVersion, setAppVersion] = useState('')
   const [modalVisible, setModalVisible] = useState(false)
@@ -185,10 +187,25 @@ function Dashboard({ onLogout }) {
   const virtualDragMetaRef = useRef(null)
   const [virtualDragState, setVirtualDragState] = useState(null)
   const [tableBodyScrollY, setTableBodyScrollY] = useState(0)
+  const [virtualListItemHeight, setVirtualListItemHeight] = useState(40)
 
   const selectedNodeIdSet = useMemo(() => new Set(selectedNodeIds), [selectedNodeIds])
 
-  const dragSortInlineLimit = 300
+  const dragSortInlineLimit = useMemo(() => {
+    const metaRaw =
+      typeof document !== 'undefined'
+        ? document
+            .querySelector?.('meta[name="sbpm-nodes-virtual-threshold"]')
+            ?.getAttribute?.('content')
+        : ''
+    const raw =
+      metaRaw ||
+      import.meta.env?.VITE_NODES_VIRTUAL_THRESHOLD ||
+      import.meta.env?.VITE_VIRTUAL_TABLE_THRESHOLD
+    const parsed = Number.parseInt(String(raw || ''), 10)
+    if (Number.isFinite(parsed) && parsed >= 0) return parsed
+    return 50
+  }, [])
   const virtualDragEnabled = nodes.length > dragSortInlineLimit
   const dragSortInTableEnabled = !virtualDragEnabled
   const virtualTableEnabled = virtualDragEnabled
@@ -275,11 +292,15 @@ function Dashboard({ onLogout }) {
     [reorderNodesByIndex]
   )
 
-  const resolveTableScrollContainer = useCallback(() => {
-    const root = tableContainerRef.current
-    if (!root) return null
-    const body = root.querySelector('.ant-table-body')
-    if (body) return body
+	  const resolveTableScrollContainer = useCallback(() => {
+	    const root = tableContainerRef.current
+	    if (!root) return null
+
+	    const virtualHolder = root.querySelector('.ant-table-tbody-virtual-holder')
+	    if (virtualHolder) return virtualHolder
+
+	    const body = root.querySelector('.ant-table-body')
+	    if (body) return body
 
     const content = root.querySelector('.ant-table-content')
     if (content && content.scrollHeight > content.clientHeight) return content
@@ -325,6 +346,26 @@ function Dashboard({ onLogout }) {
     })
   }, [])
 
+  const recalcVirtualListItemHeight = useCallback(() => {
+    if (!virtualTableEnabled) return
+    const root = tableContainerRef.current
+    if (!root) return
+
+    const row =
+      root.querySelector('tbody.ant-table-tbody tr[data-row-key]') ||
+      root.querySelector('.ant-table-row[data-row-key]')
+    if (!row) return
+
+    const height = row.getBoundingClientRect?.().height
+    if (!height || height <= 0) return
+
+    const next = Math.max(24, Math.round(height))
+    setVirtualListItemHeight((prev) => {
+      if (Math.abs((prev || 0) - next) <= 1) return prev
+      return next
+    })
+  }, [virtualTableEnabled])
+
   useLayoutEffect(() => {
     const viewport = nodesViewportRef.current
     if (!viewport) return undefined
@@ -335,10 +376,12 @@ function Dashboard({ onLogout }) {
       raf = requestAnimationFrame(() => {
         raf = null
         recalcTableBodyScrollY()
+        recalcVirtualListItemHeight()
       })
     }
 
     recalcTableBodyScrollY()
+    recalcVirtualListItemHeight()
 
     let ro = null
     if (typeof ResizeObserver !== 'undefined') {
@@ -361,7 +404,7 @@ function Dashboard({ onLogout }) {
       if (raf) cancelAnimationFrame(raf)
       ro?.disconnect?.()
     }
-  }, [recalcTableBodyScrollY])
+  }, [recalcTableBodyScrollY, recalcVirtualListItemHeight])
 
   const measureRowHeight = (scrollContainer) => {
     if (!scrollContainer) return 40
@@ -569,6 +612,43 @@ function Dashboard({ onLogout }) {
     try {
       const response = await api.get('/nodes')
       const nextNodes = response.data || []
+      const prevNodes = Array.isArray(nodesRef.current) ? nodesRef.current : []
+
+      const isSameNode = (prev, next) => {
+        if (!prev || !next) return false
+        if (String(prev?.id) !== String(next?.id)) return false
+        if ((prev?.name ?? '') !== (next?.name ?? '')) return false
+        if ((prev?.remark ?? '') !== (next?.remark ?? '')) return false
+        if ((prev?.type ?? '') !== (next?.type ?? '')) return false
+        if ((prev?.config ?? '') !== (next?.config ?? '')) return false
+        if ((prev?.inbound_port ?? 0) !== (next?.inbound_port ?? 0)) return false
+        if ((prev?.username ?? '') !== (next?.username ?? '')) return false
+        if ((prev?.password ?? '') !== (next?.password ?? '')) return false
+        if ((prev?.tcp_reuse_enabled ?? true) !== (next?.tcp_reuse_enabled ?? true)) return false
+        if ((prev?.sort_order ?? 0) !== (next?.sort_order ?? 0)) return false
+        if ((prev?.node_ip ?? '') !== (next?.node_ip ?? '')) return false
+        if ((prev?.location ?? '') !== (next?.location ?? '')) return false
+        if ((prev?.country_code ?? '') !== (next?.country_code ?? '')) return false
+        if ((prev?.latency ?? 0) !== (next?.latency ?? 0)) return false
+        if ((prev?.enabled ?? true) !== (next?.enabled ?? true)) return false
+        if ((prev?.created_at ?? '') !== (next?.created_at ?? '')) return false
+        if ((prev?.updated_at ?? '') !== (next?.updated_at ?? '')) return false
+        return true
+      }
+
+      const isSameNodeList = (prevList, nextList) => {
+        if (prevList === nextList) return true
+        if (!Array.isArray(prevList) || !Array.isArray(nextList)) return false
+        if (prevList.length !== nextList.length) return false
+        for (let i = 0; i < nextList.length; i += 1) {
+          if (!isSameNode(prevList[i], nextList[i])) return false
+        }
+        return true
+      }
+
+      if (isSameNodeList(prevNodes, nextNodes)) {
+        return
+      }
       const nextIdSet = new Set(nextNodes.map((node) => String(node?.id)))
 
       setNodes(nextNodes)
@@ -727,6 +807,26 @@ function Dashboard({ onLogout }) {
     )
   }
 
+  const cancelNodeIPChecks = useCallback((notificationKey) => {
+    const key = String(notificationKey || '')
+    if (!key) return
+    const run = nodeIPCheckRunsRef.current.get(key)
+    if (!run || run.cancelled) return
+
+    run.cancelled = true
+    const controllers = run.controllers
+    if (controllers && controllers.size > 0) {
+      for (const controller of controllers) {
+        try {
+          controller.abort()
+        } catch {
+          // ignore
+        }
+      }
+      controllers.clear()
+    }
+  }, [])
+
   const runNodeIPChecks = async (nodeIds, notificationKey) => {
     const ids = Array.from(new Set(nodeIds)).filter(
       (id) => id !== null && id !== undefined
@@ -738,11 +838,44 @@ function Dashboard({ onLogout }) {
     const total = ids.length
 
     const key = notificationKey
+    const run = {
+      cancelled: false,
+      controllers: new Set(),
+    }
+    nodeIPCheckRunsRef.current.set(String(key), run)
+
+    const renderProgressMessage = (done) => (
+      <Space size="small">
+        <span>
+          {t('batch_check_ip_running')
+            .replace('{{current}}', String(done))
+            .replace('{{total}}', total.toString())}
+        </span>
+        <Button
+          size="small"
+          danger
+          icon={<StopOutlined />}
+          onClick={() => {
+            cancelNodeIPChecks(key)
+            notification.info({
+              key,
+              message: t('batch_check_ip_stopped')
+                .replace('{{current}}', String(done))
+                .replace('{{total}}', total.toString()),
+              duration: 2,
+              icon: <StopOutlined style={{ color: '#ff4d4f' }} />,
+            })
+          }}
+          disabled={run.cancelled || done >= total}
+        >
+          {t('stop')}
+        </Button>
+      </Space>
+    )
+
     notification.info({
       key,
-      message: t('batch_check_ip_running')
-        .replace('{{current}}', '0')
-        .replace('{{total}}', total.toString()),
+      message: renderProgressMessage(0),
       duration: 0,
       icon: <ThunderboltOutlined style={{ color: '#1890ff' }} />,
     })
@@ -752,16 +885,29 @@ function Dashboard({ onLogout }) {
 
     const runWorker = async () => {
       while (true) {
+        if (run.cancelled) return
         const currentIndex = nextIndex
         nextIndex += 1
         if (currentIndex >= ids.length) return
 
         const id = ids[currentIndex]
+        const controller = new AbortController()
+        run.controllers.add(controller)
         try {
-          const response = await api.get(`/nodes/${id}/check-ip`)
+          const response = await api.get(`/nodes/${id}/check-ip`, {
+            signal: controller.signal,
+          })
           applyNodeIPInfo(id, response.data)
           completed += 1
         } catch (error) {
+          const cancelled =
+            controller.signal.aborted ||
+            error?.code === 'ERR_CANCELED' ||
+            error?.name === 'CanceledError'
+          if (cancelled) {
+            run.cancelled = true
+            return
+          }
           failed += 1
           const statusCode = error?.response?.status
           if (typeof statusCode === 'number' && statusCode >= 500) {
@@ -770,13 +916,12 @@ function Dashboard({ onLogout }) {
           const msg = error.response?.data?.error || t('server_error')
           message.error(`ID ${id}: ${msg}`)
         } finally {
+          run.controllers.delete(controller)
           const done = completed + failed
-          if (done < total) {
+          if (!run.cancelled && done < total) {
             notification.info({
               key,
-              message: t('batch_check_ip_running')
-                .replace('{{current}}', done.toString())
-                .replace('{{total}}', total.toString()),
+              message: renderProgressMessage(done),
               duration: 0,
               icon: <ThunderboltOutlined style={{ color: '#1890ff' }} />,
             })
@@ -788,6 +933,19 @@ function Dashboard({ onLogout }) {
     await Promise.all(Array.from({ length: concurrency }, () => runWorker()))
 
     notification.destroy(key)
+    nodeIPCheckRunsRef.current.delete(String(key))
+
+    if (run.cancelled) {
+      notification.info({
+        message: t('batch_check_ip_stopped')
+          .replace('{{current}}', String(completed + failed))
+          .replace('{{total}}', total.toString()),
+        duration: 3,
+        icon: <StopOutlined style={{ color: '#ff4d4f' }} />,
+      })
+      return
+    }
+
     if (completed > 0) {
       notification.success({
         message: t('batch_check_ip_success').replace('{{count}}', completed.toString()),
@@ -1613,7 +1771,7 @@ function Dashboard({ onLogout }) {
           rowKey="id"
           size="small"
           virtual={virtualTableEnabled}
-          listItemHeight={40}
+          listItemHeight={virtualListItemHeight}
           scroll={{ y: Math.max(0, tableBodyScrollY || 0) }}
           expandable={{
             expandedRowRender,
@@ -1787,15 +1945,15 @@ function Dashboard({ onLogout }) {
         </div>
       </Content>
 
-      <Modal
-        title={editingNode?.id ? t('edit') : t('add_node')}
-        open={modalVisible}
-        destroyOnHidden
-        onCancel={() => {
-          setModalVisible(false)
-          setEditingNode(null)
-          setAutoCheckAfterCreate(false)
-        }}
+	      <Modal
+	        title={editingNode?.id ? t('edit') : t('add_node')}
+	        open={modalVisible}
+	        destroyOnHidden
+	        onCancel={() => {
+	          setModalVisible(false)
+	          setEditingNode(null)
+	          setAutoCheckAfterCreate(false)
+	        }}
         footer={null}
         width={800}
       >
@@ -1902,14 +2060,18 @@ function Dashboard({ onLogout }) {
         </Space>
       </Modal>
 
-      <Modal
-        title={t('settings')}
-        open={settingsVisible}
-        onCancel={() => setSettingsVisible(false)}
-        footer={null}
-        width={600}
-      >
-        <SettingsForm onClose={() => setSettingsVisible(false)} />
+	      <Modal
+	        title={t('settings')}
+	        open={settingsVisible}
+	        destroyOnHidden
+	        onCancel={() => setSettingsVisible(false)}
+	        footer={null}
+	        width={600}
+	      >
+        <SettingsForm
+          onClose={() => setSettingsVisible(false)}
+          onUpdated={() => loadNodes({ silent: true })}
+        />
       </Modal>
 
       <BatchAuthModal
