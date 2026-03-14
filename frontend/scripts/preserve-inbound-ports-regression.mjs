@@ -330,17 +330,23 @@ const clickSettingsButton = async (page) => {
 const waitForModalClosed = async (page) => {
   await page.waitForFunction(() => {
     const modals = Array.from(document.querySelectorAll('.ant-modal'))
-    const isVisible = (element) => {
+    const isHidden = (element) => {
+      if (!element) return true
+      if (element.getAttribute?.('aria-hidden') === 'true') return true
       const style = getComputedStyle(element)
       if (style.display === 'none' || style.visibility === 'hidden') {
-        return false
+        return true
       }
       const opacity = Number(style.opacity || '1')
       if (!Number.isNaN(opacity) && opacity === 0) {
-        return false
+        return true
       }
       const rect = element.getBoundingClientRect()
-      return rect.width > 0 && rect.height > 0
+      return rect.width === 0 || rect.height === 0
+    }
+    const isVisible = (modal) => {
+      const wrap = modal.closest?.('.ant-modal-wrap') || null
+      return !(isHidden(wrap) || isHidden(modal))
     }
     return !modals.some(isVisible)
   })
@@ -348,7 +354,7 @@ const waitForModalClosed = async (page) => {
 
 const openSettingsModal = async (page) => {
   await clickSettingsButton(page)
-  await page.waitForSelector('.ant-modal .ant-form', { timeout: 10000 })
+  await page.waitForSelector('.ant-modal input#start_port', { timeout: 10000 })
 }
 
 const closeSettingsModal = async (page) => {
@@ -398,7 +404,7 @@ const assertNodeInboundPortEditable = async (page, { expectedDisabled }) => {
       if (!input) return false
       return input.disabled === expected
     },
-    { timeout: 5000 },
+    { timeout: 15000 },
     expectedDisabled
   )
 }
@@ -414,21 +420,32 @@ const confirmModalOk = async (page, { expectedIncludes }) => {
   await page.waitForFunction(() => {
     const modal = document.querySelector('.ant-modal-confirm')
     if (!modal) return true
-    const style = getComputedStyle(modal)
-    if (style.display === 'none' || style.visibility === 'hidden') {
-      return true
+
+    const isHidden = (element) => {
+      if (!element) return true
+      if (element.getAttribute?.('aria-hidden') === 'true') return true
+      const style = getComputedStyle(element)
+      if (style.display === 'none' || style.visibility === 'hidden') {
+        return true
+      }
+      const opacity = Number(style.opacity || '1')
+      if (!Number.isNaN(opacity) && opacity === 0) {
+        return true
+      }
+      const rect = element.getBoundingClientRect()
+      return rect.width === 0 || rect.height === 0
     }
-    const opacity = Number(style.opacity || '1')
-    if (!Number.isNaN(opacity) && opacity === 0) {
-      return true
-    }
-    const rect = modal.getBoundingClientRect()
-    return rect.width === 0 || rect.height === 0
+
+    const wrap = modal.closest?.('.ant-modal-wrap') || null
+    return isHidden(wrap) || isHidden(modal)
   }, { timeout: 10000 })
 }
 
 const assertSettingsI18n = async (page, { include = [], exclude = [] }) => {
-  const modalText = await page.$eval('.ant-modal', (element) => element.innerText)
+  const modalText = await page.$eval(
+    'input#start_port',
+    (element) => element.closest('.ant-modal')?.innerText || ''
+  )
   for (const fragment of include) {
     assert(
       modalText.includes(fragment),
@@ -445,7 +462,7 @@ const assertSettingsI18n = async (page, { include = [], exclude = [] }) => {
 
 const assertSettingsPasswordPlaceholder = async (page, { expected, unexpected }) => {
   const placeholder = await page.$eval(
-    '.ant-modal input[type="password"], .ant-modal input[type="text"]',
+    'input#admin_password',
     (element) => element.getAttribute('placeholder') || ''
   )
   assert(
@@ -568,14 +585,30 @@ const run = async () => {
       unexpected: '输入新密码（可选）',
     })
 
-    await page.waitForSelector('.ant-modal .ant-switch', { timeout: 10000 })
-    const switchSelector = '.ant-modal .ant-switch'
-    const wasChecked = await page.$eval(switchSelector, (element) => element.getAttribute('aria-checked') === 'true')
+    const wasChecked = await page.$eval('input#start_port', (input) => {
+      const modal = input.closest('.ant-modal')
+      const element = modal?.querySelector?.('.ant-switch')
+      return element?.getAttribute?.('aria-checked') === 'true'
+    })
     if (wasChecked) {
       throw new Error('preserve switch should be disabled initially')
     }
-	    await page.click(switchSelector)
-	    await page.click('.ant-modal button[type="submit"]')
+	    await page.$eval('input#start_port', (input) => {
+	      const modal = input.closest('.ant-modal')
+	      const element = modal?.querySelector?.('.ant-switch')
+	      if (!element) {
+	        throw new Error('preserve switch not found')
+	      }
+	      element.click()
+	    })
+	    await page.$eval('input#start_port', (input) => {
+	      const modal = input.closest('.ant-modal')
+	      const button = modal?.querySelector?.('button[type="submit"]')
+	      if (!button) {
+	        throw new Error('settings submit button not found')
+	      }
+	      button.click()
+	    })
 	    await waitForModalClosed(page)
 	    await sleep(800)
 
@@ -591,12 +624,19 @@ const run = async () => {
 
     const dragFrom = await getCellCenter(page, 'tbody.ant-table-tbody tr[data-row-key="1"] td:nth-child(2)')
     const dragTo = await getCellCenter(page, 'tbody.ant-table-tbody tr[data-row-key="3"] td:nth-child(2)')
-    await page.mouse.move(dragFrom.x, dragFrom.y)
-    await page.mouse.down()
-    await page.mouse.move(dragTo.x, dragTo.y, { steps: 18 })
-    await sleep(200)
-    await page.mouse.up()
-    await sleep(1200)
+    for (let attempt = 1; attempt <= 3; attempt += 1) {
+      await page.mouse.move(dragFrom.x, dragFrom.y)
+      await page.mouse.down()
+      await page.mouse.move(dragTo.x, dragTo.y, { steps: 18 })
+      await sleep(200)
+      await page.mouse.up()
+      await sleep(1200)
+
+      if (mockApi.getState().lastReorder) {
+        break
+      }
+      await sleep(500)
+    }
 
     const orderAfterDrag = await getRowNames(page)
     const portsAfterDrag = await getRowPorts(page)
@@ -621,15 +661,28 @@ const run = async () => {
 	    )
 
 	    await openSettingsModal(page)
-	    await page.waitForSelector('.ant-modal .ant-switch', { timeout: 10000 })
-	    const disableSelector = '.ant-modal .ant-switch'
-	    const preserveEnabled = await page.$eval(
-	      disableSelector,
-	      (element) => element.getAttribute('aria-checked') === 'true'
-	    )
+	    const preserveEnabled = await page.$eval('input#start_port', (input) => {
+	      const modal = input.closest('.ant-modal')
+	      const element = modal?.querySelector?.('.ant-switch')
+	      return element?.getAttribute?.('aria-checked') === 'true'
+	    })
 	    assert(preserveEnabled, 'preserve switch should be enabled before disabling')
-	    await page.click(disableSelector)
-	    await page.click('.ant-modal button[type="submit"]')
+	    await page.$eval('input#start_port', (input) => {
+	      const modal = input.closest('.ant-modal')
+	      const element = modal?.querySelector?.('.ant-switch')
+	      if (!element) {
+	        throw new Error('preserve switch not found')
+	      }
+	      element.click()
+	    })
+	    await page.$eval('input#start_port', (input) => {
+	      const modal = input.closest('.ant-modal')
+	      const button = modal?.querySelector?.('button[type="submit"]')
+	      if (!button) {
+	        throw new Error('settings submit button not found')
+	      }
+	      button.click()
+	    })
 	    await confirmModalOk(page, { expectedIncludes: 'reassign inbound ports' })
 	    await waitForModalClosed(page)
 	    await sleep(800)

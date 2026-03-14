@@ -44,21 +44,20 @@ function SettingsForm({ onClose, onUpdated }) {
     form.setFieldsValue(settingsData)
   }, [form, loadingData, settingsData])
 
-  const confirmDisablePreserveInboundPorts = (values) =>
+  const confirmDisablePreserveInboundPorts = () =>
     new Promise((resolve) => {
-      let modalRef = null
-      modalRef = Modal.confirm({
+      Modal.confirm({
         title: t('warning'),
         content: t('preserve_inbound_ports_disable_warning'),
         okText: t('confirm'),
         cancelText: t('cancel'),
-        onOk: () => {
-          resolve(values)
-          modalRef?.destroy?.()
+        onOk: (close) => {
+          resolve(true)
+          close()
         },
-        onCancel: () => {
-          resolve(null)
-          modalRef?.destroy?.()
+        onCancel: (close) => {
+          resolve(false)
+          close()
         },
       })
     })
@@ -81,7 +80,7 @@ function SettingsForm({ onClose, onUpdated }) {
         initialPreserveInboundPorts &&
         updateData.preserve_inbound_ports === false
       ) {
-        const confirmed = await confirmDisablePreserveInboundPorts(values)
+        const confirmed = await confirmDisablePreserveInboundPorts()
         if (!confirmed) {
           return
         }
