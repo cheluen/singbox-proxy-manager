@@ -1774,6 +1774,7 @@ function Dashboard({ onLogout }) {
           listItemHeight={virtualListItemHeight}
           scroll={{ y: Math.max(0, tableBodyScrollY || 0) }}
           expandable={{
+            columnWidth: 44,
             expandedRowRender,
             expandedRowKeys,
             onExpandedRowsChange: (keys) => setExpandedRowKeys(keys),
@@ -1945,15 +1946,15 @@ function Dashboard({ onLogout }) {
         </div>
       </Content>
 
-	      <Modal
-	        title={editingNode?.id ? t('edit') : t('add_node')}
-	        open={modalVisible}
-	        destroyOnHidden
-	        onCancel={() => {
-	          setModalVisible(false)
-	          setEditingNode(null)
-	          setAutoCheckAfterCreate(false)
-	        }}
+      <Modal
+        title={editingNode?.id ? t('edit') : t('add_node')}
+        open={modalVisible}
+        destroyOnHidden
+        onCancel={() => {
+          setModalVisible(false)
+          setEditingNode(null)
+          setAutoCheckAfterCreate(false)
+        }}
         footer={null}
         width={800}
       >
@@ -2060,14 +2061,14 @@ function Dashboard({ onLogout }) {
         </Space>
       </Modal>
 
-	      <Modal
-	        title={t('settings')}
-	        open={settingsVisible}
-	        destroyOnHidden
-	        onCancel={() => setSettingsVisible(false)}
-	        footer={null}
-	        width={600}
-	      >
+      <Modal
+        title={t('settings')}
+        open={settingsVisible}
+        destroyOnHidden
+        onCancel={() => setSettingsVisible(false)}
+        footer={null}
+        width={600}
+      >
         <SettingsForm
           onClose={() => setSettingsVisible(false)}
           onUpdated={() => loadNodes({ silent: true })}

@@ -46,13 +46,20 @@ function SettingsForm({ onClose, onUpdated }) {
 
   const confirmDisablePreserveInboundPorts = (values) =>
     new Promise((resolve) => {
-      Modal.confirm({
+      let modalRef = null
+      modalRef = Modal.confirm({
         title: t('warning'),
         content: t('preserve_inbound_ports_disable_warning'),
         okText: t('confirm'),
         cancelText: t('cancel'),
-        onOk: () => resolve(values),
-        onCancel: () => resolve(null),
+        onOk: () => {
+          resolve(values)
+          modalRef?.destroy?.()
+        },
+        onCancel: () => {
+          resolve(null)
+          modalRef?.destroy?.()
+        },
       })
     })
 

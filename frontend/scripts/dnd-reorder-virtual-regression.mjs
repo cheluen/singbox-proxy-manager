@@ -237,6 +237,38 @@ const countVisibleRows = async (page) =>
     return document.querySelectorAll('.ant-table-row[data-row-key]').length
   })
 
+const getExpandIconColumnMetrics = async (page) =>
+  page.evaluate(() => {
+    const root = document.querySelector('[data-testid="nodes-table-container"]')
+    if (!root) return null
+
+    const container =
+      root.querySelector('.ant-table-container') ||
+      root.querySelector('.ant-table-content') ||
+      root
+    const containerWidth = container.getBoundingClientRect().width
+
+    const expandCell =
+      root.querySelector('tbody.ant-table-tbody tr[data-row-key] td.ant-table-row-expand-icon-cell') ||
+      root.querySelector('.ant-table-row[data-row-key] .ant-table-row-expand-icon-cell') ||
+      root.querySelector('.ant-table-row-expand-icon-cell')
+    if (!expandCell) {
+      return {
+        containerWidth,
+        expandCellWidth: 0,
+        ratio: 0,
+      }
+    }
+
+    const expandCellWidth = expandCell.getBoundingClientRect().width
+    const ratio = containerWidth > 0 ? expandCellWidth / containerWidth : 0
+    return {
+      containerWidth,
+      expandCellWidth,
+      ratio,
+    }
+  })
+
 const getCenter = async (page, selector) =>
   page.$eval(selector, (element) => {
     const rect = element.getBoundingClientRect()
@@ -291,6 +323,22 @@ const run = async () => {
     })
     await page.reload({ waitUntil: 'networkidle2' })
     await page.waitForSelector('[data-testid="node-drag-handle-1"]', { timeout: 30000 })
+
+    const expandMetrics = await getExpandIconColumnMetrics(page)
+    assert(expandMetrics, 'Failed to locate nodes table container for expand metrics')
+    assert(
+      expandMetrics.containerWidth > 0,
+      `Invalid nodes table container width: ${expandMetrics.containerWidth}`
+    )
+    assert(
+      expandMetrics.expandCellWidth > 0,
+      `Expand icon column not found or has invalid width: ${expandMetrics.expandCellWidth}`
+    )
+    assert(
+      expandMetrics.ratio < 0.2,
+      `Expand icon column is too wide: ${JSON.stringify(expandMetrics)}`
+    )
+
     const insideContainer = await page.evaluate(() => {
       const handle = document.querySelector('[data-testid="node-drag-handle-1"]')
       return Boolean(handle?.closest?.('[data-testid="nodes-table-container"]'))
