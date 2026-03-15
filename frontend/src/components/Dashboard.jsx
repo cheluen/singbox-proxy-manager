@@ -151,6 +151,51 @@ const stableJSONStringify = (value) => {
   }
 }
 
+const normalizeFilterText = (value) => String(value ?? '').trim().toLowerCase()
+
+const getNodeStatusCode = (node) => {
+  const hasIP = Boolean(String(node?.node_ip || '').trim())
+  const latencyRaw = Number(node?.latency)
+  const latency = Number.isFinite(latencyRaw) ? latencyRaw : 0
+  return hasIP && latency > 0 ? 'healthy' : 'unverified'
+}
+
+const matchNodeFilter = (node, filter) => {
+  const key = String(filter?.key || '').trim()
+  const valueText = normalizeFilterText(filter?.value)
+  if (!key || !valueText) return true
+
+  if (key === 'status') {
+    return getNodeStatusCode(node) === valueText
+  }
+
+  if (key === 'enabled') {
+    const enabled = node?.enabled !== false
+    return (enabled ? 'true' : 'false') === valueText
+  }
+
+  if (key === 'tcp_reuse_enabled') {
+    const enabled = node?.tcp_reuse_enabled !== false
+    return (enabled ? 'true' : 'false') === valueText
+  }
+
+  const candidate = normalizeFilterText(node?.[key])
+  return candidate.includes(valueText)
+}
+
+const applyNodeFilters = (nodes, filters) => {
+  if (!Array.isArray(nodes)) return []
+  if (!Array.isArray(filters) || filters.length === 0) return nodes
+  const normalized = filters
+    .map((filter) => ({
+      key: String(filter?.key || '').trim(),
+      value: String(filter?.value ?? '').trim(),
+    }))
+    .filter((filter) => filter.key && filter.value)
+  if (normalized.length === 0) return nodes
+  return nodes.filter((node) => normalized.every((filter) => matchNodeFilter(node, filter)))
+}
+
 function Dashboard({ onLogout }) {
   const { t, i18n } = useTranslation()
   const [nodes, setNodes] = useState([])
@@ -185,11 +230,17 @@ function Dashboard({ onLogout }) {
   const nodesViewportRef = useRef(null)
   const tableContainerRef = useRef(null)
   const virtualDragMetaRef = useRef(null)
+  const [preserveInboundPorts, setPreserveInboundPorts] = useState(false)
+  const [nodeFilters, setNodeFilters] = useState([])
+  const [filterDraftKey, setFilterDraftKey] = useState('status')
+  const [filterDraftValue, setFilterDraftValue] = useState('')
   const [virtualDragState, setVirtualDragState] = useState(null)
   const [tableBodyScrollY, setTableBodyScrollY] = useState(0)
   const [virtualListItemHeight, setVirtualListItemHeight] = useState(40)
 
   const selectedNodeIdSet = useMemo(() => new Set(selectedNodeIds), [selectedNodeIds])
+  const nodeFiltersRef = useRef(nodeFilters)
+  const preserveInboundPortsRef = useRef(preserveInboundPorts)
 
   const dragSortInlineLimit = useMemo(() => {
     const metaRaw =
@@ -206,22 +257,60 @@ function Dashboard({ onLogout }) {
     if (Number.isFinite(parsed) && parsed >= 0) return parsed
     return 50
   }, [])
-  const virtualDragEnabled = nodes.length > dragSortInlineLimit
+  const displayNodes = useMemo(
+    () => applyNodeFilters(nodes, nodeFilters),
+    [nodes, nodeFilters]
+  )
+  const displayNodesRef = useRef(displayNodes)
+  const displayNodeIdSet = useMemo(
+    () => new Set(displayNodes.map((node) => String(node?.id))),
+    [displayNodes]
+  )
+
+  const filtersActive = nodeFilters.length > 0
+  const dragSortAllowed = !filtersActive || preserveInboundPorts
+
+  const virtualDragEnabled = displayNodes.length > dragSortInlineLimit
   const dragSortInTableEnabled = !virtualDragEnabled
   const virtualTableEnabled = virtualDragEnabled
 
   const nodeIndexMap = useMemo(() => {
     const map = new Map()
-    for (let index = 0; index < nodes.length; index += 1) {
-      const node = nodes[index]
+    for (let index = 0; index < displayNodes.length; index += 1) {
+      const node = displayNodes[index]
       map.set(String(node.id), index)
     }
     return map
-  }, [nodes])
+  }, [displayNodes])
 
   useEffect(() => {
     nodesRef.current = nodes
   }, [nodes])
+
+  useEffect(() => {
+    displayNodesRef.current = displayNodes
+  }, [displayNodes])
+
+  useEffect(() => {
+    nodeFiltersRef.current = nodeFilters
+  }, [nodeFilters])
+
+  useEffect(() => {
+    preserveInboundPortsRef.current = preserveInboundPorts
+  }, [preserveInboundPorts])
+
+  useEffect(() => {
+    setExpandedRowKeys((prev) => {
+      if (!Array.isArray(prev) || prev.length === 0) return prev
+      const next = prev.filter((key) => displayNodeIdSet.has(String(key)))
+      return next.length === prev.length ? prev : next
+    })
+    setSelectedNodeIds((prev) => {
+      if (!Array.isArray(prev) || prev.length === 0) return prev
+      const next = prev.filter((id) => displayNodeIdSet.has(String(id)))
+      return next.length === prev.length ? prev : next
+    })
+  }, [displayNodeIdSet])
 
   const cleanupVirtualDrag = useCallback(() => {
     const meta = virtualDragMetaRef.current
@@ -281,15 +370,75 @@ function Dashboard({ onLogout }) {
     [t]
   )
 
-  const reorderNodesById = useCallback(
+  const reorderNodesByDisplayIndex = useCallback(
+    async (sourceIndex, destinationIndex) => {
+      const currentDisplayNodes = Array.from(displayNodesRef.current || [])
+      if (
+        sourceIndex === destinationIndex ||
+        sourceIndex < 0 ||
+        destinationIndex < 0 ||
+        sourceIndex >= currentDisplayNodes.length ||
+        destinationIndex >= currentDisplayNodes.length
+      ) {
+        return
+      }
+
+      const currentFilters = Array.from(nodeFiltersRef.current || [])
+      const filtersActiveNow = currentFilters.length > 0
+
+      if (filtersActiveNow && !preserveInboundPortsRef.current) {
+        message.warning(t('drag_sort_disabled_filtered'))
+        return
+      }
+
+      if (!filtersActiveNow) {
+        await reorderNodesByIndex(sourceIndex, destinationIndex)
+        return
+      }
+
+      const items = Array.from(currentDisplayNodes)
+      const [reordered] = items.splice(sourceIndex, 1)
+      items.splice(destinationIndex, 0, reordered)
+
+      const fullNodes = Array.from(nodesRef.current || [])
+      const subsetIdSet = new Set(currentDisplayNodes.map((node) => String(node?.id)))
+      let cursor = 0
+      const merged = fullNodes.map((node) => {
+        if (!subsetIdSet.has(String(node?.id))) {
+          return node
+        }
+        const next = items[cursor]
+        cursor += 1
+        return next
+      })
+
+      setNodes(merged)
+
+      try {
+        const orderMap = merged.map((node, index) => ({
+          id: node.id,
+          sort_order: index,
+        }))
+        await api.post('/nodes/reorder', { nodes: orderMap })
+        message.success(t('nodes_reordered'))
+        await loadNodes({ silent: true })
+      } catch (error) {
+        message.error(t('server_error'))
+        await loadNodes({ silent: true })
+      }
+    },
+    [reorderNodesByIndex, t]
+  )
+
+  const reorderNodesByDisplayId = useCallback(
     async (nodeId, destinationIndex) => {
-      const currentNodes = Array.from(nodesRef.current || [])
-      const sourceIndex = currentNodes.findIndex(
+      const currentDisplayNodes = Array.from(displayNodesRef.current || [])
+      const sourceIndex = currentDisplayNodes.findIndex(
         (node) => String(node?.id) === String(nodeId)
       )
-      await reorderNodesByIndex(sourceIndex, destinationIndex)
+      await reorderNodesByDisplayIndex(sourceIndex, destinationIndex)
     },
-    [reorderNodesByIndex]
+    [reorderNodesByDisplayIndex]
   )
 
 	  const resolveTableScrollContainer = useCallback(() => {
@@ -419,8 +568,9 @@ function Dashboard({ onLogout }) {
 
   const handleVirtualDragStart = useCallback(
     (event, recordId) => {
+      if (!dragSortAllowed) return
       if (!virtualDragEnabled) return
-      if (nodesRef.current.length <= 1) return
+      if (displayNodesRef.current.length <= 1) return
       if (typeof event?.button === 'number' && event.button !== 0) return
 
       event.preventDefault?.()
@@ -439,7 +589,7 @@ function Dashboard({ onLogout }) {
       }
 
       const rowHeight = measureRowHeight(scrollContainer)
-      const itemCount = nodesRef.current.length
+      const itemCount = displayNodesRef.current.length
       const pointerId = typeof event.pointerId === 'number' ? event.pointerId : null
       const prevCursor = document.body.style.cursor
       const prevUserSelect = document.body.style.userSelect
@@ -543,7 +693,7 @@ function Dashboard({ onLogout }) {
         const sourceIndexSnapshot = meta.sourceIndex
         cleanupVirtualDrag()
         if (destinationIndex === sourceIndexSnapshot) return
-        await reorderNodesById(meta.activeId, destinationIndex)
+        await reorderNodesByDisplayId(meta.activeId, destinationIndex)
       }
 
       virtualDragMetaRef.current = meta
@@ -556,12 +706,12 @@ function Dashboard({ onLogout }) {
       window.addEventListener('pointermove', meta.onMove, { passive: false })
       window.addEventListener('pointerup', meta.onUp, { passive: false })
     },
-    [cleanupVirtualDrag, nodeIndexMap, reorderNodesById, resolveTableScrollContainer, t, virtualDragEnabled]
+    [cleanupVirtualDrag, dragSortAllowed, nodeIndexMap, reorderNodesByDisplayId, resolveTableScrollContainer, t, virtualDragEnabled]
   )
 
   useEffect(() => {
     const root = tableContainerRef.current
-    if (!virtualDragEnabled || !root) return undefined
+    if (!virtualDragEnabled || !dragSortAllowed || !root) return undefined
 
     const onPointerDown = (event) => {
       if (virtualDragMetaRef.current) return
@@ -576,11 +726,31 @@ function Dashboard({ onLogout }) {
     return () => {
       root.removeEventListener('pointerdown', onPointerDown, true)
     }
-  }, [handleVirtualDragStart, virtualDragEnabled])
+  }, [dragSortAllowed, handleVirtualDragStart, virtualDragEnabled])
+
+  useEffect(() => {
+    if (!dragSortAllowed) {
+      cleanupVirtualDrag()
+    }
+  }, [cleanupVirtualDrag, dragSortAllowed])
+
+  const loadSettings = async (options = {}) => {
+    const silent = !!options?.silent
+    try {
+      const response = await api.get('/settings')
+      setPreserveInboundPorts(Boolean(response.data?.preserve_inbound_ports))
+    } catch {
+      setPreserveInboundPorts(false)
+      if (!silent) {
+        message.error(t('settings_load_failed'))
+      }
+    }
+  }
 
   useEffect(() => {
     loadNodes()
     loadVersion()
+    loadSettings({ silent: true })
   }, [])
 
   const loadVersion = async () => {
@@ -671,6 +841,38 @@ function Dashboard({ onLogout }) {
     i18n.changeLanguage(lang)
     localStorage.setItem('language', lang)
     message.success(t('success'))
+  }
+
+  const handleFilterKeyChange = (nextKey) => {
+    setFilterDraftKey(nextKey)
+    setFilterDraftValue('')
+  }
+
+  const handleAddOrUpdateFilter = () => {
+    const key = String(filterDraftKey || '').trim()
+    const value = String(filterDraftValue ?? '').trim()
+    if (!key || !value) return
+    setNodeFilters((prev) => {
+      const next = Array.isArray(prev) ? [...prev] : []
+      const index = next.findIndex((item) => String(item?.key) === key)
+      if (index >= 0) {
+        next[index] = { key, value }
+        return next
+      }
+      return [...next, { key, value }]
+    })
+  }
+
+  const handleRemoveFilter = (key) => {
+    const normalized = String(key || '').trim()
+    if (!normalized) return
+    setNodeFilters((prev) =>
+      (Array.isArray(prev) ? prev : []).filter((item) => String(item?.key) !== normalized)
+    )
+  }
+
+  const handleClearFilters = () => {
+    setNodeFilters([])
   }
 
   const handleCreateNode = () => {
@@ -1333,7 +1535,7 @@ function Dashboard({ onLogout }) {
 
   const handleDragEnd = async (result) => {
     if (!result.destination) return
-    await reorderNodesByIndex(result.source.index, result.destination.index)
+    await reorderNodesByDisplayIndex(result.source.index, result.destination.index)
   }
 
     const handleBatchSetAuth = async (auth) => {
@@ -1470,7 +1672,7 @@ function Dashboard({ onLogout }) {
         key: 'drag',
         width: 34,
         render: (_, record) => {
-          const disabled = nodes.length <= 1
+          const disabled = !dragSortAllowed || displayNodes.length <= 1
           const isDragging = virtualDragState?.activeId === String(record?.id)
           const cursor = disabled
             ? 'not-allowed'
@@ -1479,11 +1681,15 @@ function Dashboard({ onLogout }) {
               : 'grab'
           const color = disabled ? '#ccc' : '#999'
 
+          const title = !dragSortAllowed
+            ? t('drag_sort_disabled_filtered')
+            : t('drag_sort_hint')
+
           const handle = (
             <span
               data-testid={`node-drag-handle-${String(record?.id ?? '')}`}
               data-node-drag-id={String(record?.id ?? '')}
-              title={t('drag_sort_hint')}
+              title={title}
               style={{
                 display: 'inline-flex',
                 width: '100%',
@@ -1503,11 +1709,12 @@ function Dashboard({ onLogout }) {
       },
       {
         title: <Checkbox
-          checked={selectedNodeIds.length === nodes.length && nodes.length > 0}
-          indeterminate={selectedNodeIds.length > 0 && selectedNodeIds.length < nodes.length}
+          data-testid="nodes-select-all"
+          checked={selectedNodeIds.length === displayNodes.length && displayNodes.length > 0}
+          indeterminate={selectedNodeIds.length > 0 && selectedNodeIds.length < displayNodes.length}
           onChange={(e) => {
             if (e.target.checked) {
-              setSelectedNodeIds(nodes.map((node) => node.id))
+              setSelectedNodeIds(displayNodes.map((node) => node.id))
             } else {
               setSelectedNodeIds([])
             }
@@ -1517,6 +1724,7 @@ function Dashboard({ onLogout }) {
         width: 42,
         render: (_, record) => (
           <Checkbox
+            data-testid={`node-select-${String(record?.id ?? '')}`}
             checked={selectedNodeIdSet.has(record.id)}
             onChange={(e) => {
               const checked = e.target.checked
@@ -1726,7 +1934,11 @@ function Dashboard({ onLogout }) {
       }
 
       return (
-        <Draggable draggableId={`node-${String(rowKey)}`} index={index}>
+        <Draggable
+          draggableId={`node-${String(rowKey)}`}
+          index={index}
+          isDragDisabled={!dragSortAllowed}
+        >
           {(provided, snapshot) => (
             <tr
               ref={provided.innerRef}
@@ -1738,7 +1950,7 @@ function Dashboard({ onLogout }) {
                 ...style,
                 ...provided.draggableProps.style,
                 background: snapshot.isDragging ? '#e6f7ff' : style?.background,
-                cursor: 'grab',
+                cursor: dragSortAllowed ? 'grab' : 'not-allowed',
               }}
             >
               {props.children}
@@ -1767,7 +1979,7 @@ function Dashboard({ onLogout }) {
       >
         <Table
           columns={columns}
-          dataSource={nodes}
+          dataSource={displayNodes}
           rowKey="id"
           size="small"
           virtual={virtualTableEnabled}
@@ -1797,7 +2009,7 @@ function Dashboard({ onLogout }) {
             emptyText: t('no_nodes'),
           }}
           components={
-            dragSortInTableEnabled
+            dragSortInTableEnabled && dragSortAllowed
               ? {
                   body: {
                     wrapper: DraggableBody,
@@ -1810,7 +2022,7 @@ function Dashboard({ onLogout }) {
       </div>
     )
 
-    const tableView = dragSortInTableEnabled ? (
+    const tableView = dragSortInTableEnabled && dragSortAllowed ? (
       <DragDropContext onDragEnd={handleDragEnd}>
         {table}
       </DragDropContext>
@@ -1895,6 +2107,159 @@ function Dashboard({ onLogout }) {
             >
               {t('refresh')}
             </Button>
+            <Space.Compact>
+              <Select
+                data-testid="nodes-filter-key"
+                value={filterDraftKey}
+                onChange={handleFilterKeyChange}
+                style={{ width: 132 }}
+                options={[
+                  { value: 'status', label: t('status') },
+                  { value: 'enabled', label: t('state_controls') },
+                  { value: 'type', label: t('node_type') },
+                  { value: 'inbound_port', label: t('inbound_port') },
+                  { value: 'name', label: t('node_name') },
+                  { value: 'remark', label: t('remark') },
+                  { value: 'node_ip', label: t('node_ip') },
+                  { value: 'location', label: t('location') },
+                  { value: 'country_code', label: t('country_code') },
+                  { value: 'username', label: t('username') },
+                  { value: 'tcp_reuse_enabled', label: t('tcp_reuse') },
+                ]}
+              />
+              {filterDraftKey === 'status' ? (
+                <Select
+                  data-testid="nodes-filter-value"
+                  value={filterDraftValue || undefined}
+                  onChange={(value) => setFilterDraftValue(value)}
+                  placeholder={t('filter_value_placeholder')}
+                  style={{ width: 170 }}
+                  allowClear
+                  options={[
+                    { value: 'healthy', label: t('status_healthy') },
+                    { value: 'unverified', label: t('status_unverified') },
+                  ]}
+                />
+              ) : filterDraftKey === 'enabled' ? (
+                <Select
+                  data-testid="nodes-filter-value"
+                  value={filterDraftValue || undefined}
+                  onChange={(value) => setFilterDraftValue(value)}
+                  placeholder={t('filter_value_placeholder')}
+                  style={{ width: 170 }}
+                  allowClear
+                  options={[
+                    { value: 'true', label: t('enabled') },
+                    { value: 'false', label: t('disabled') },
+                  ]}
+                />
+              ) : filterDraftKey === 'tcp_reuse_enabled' ? (
+                <Select
+                  data-testid="nodes-filter-value"
+                  value={filterDraftValue || undefined}
+                  onChange={(value) => setFilterDraftValue(value)}
+                  placeholder={t('filter_value_placeholder')}
+                  style={{ width: 170 }}
+                  allowClear
+                  options={[
+                    { value: 'true', label: t('enabled') },
+                    { value: 'false', label: t('disabled') },
+                  ]}
+                />
+              ) : (
+                <Input
+                  data-testid="nodes-filter-value"
+                  value={filterDraftValue}
+                  onChange={(e) => setFilterDraftValue(e.target.value)}
+                  onPressEnter={(e) => {
+                    e.preventDefault?.()
+                    handleAddOrUpdateFilter()
+                  }}
+                  placeholder={t('filter_value_placeholder')}
+                  style={{ width: 170 }}
+                  allowClear
+                />
+              )}
+              <Button
+                data-testid="nodes-filter-add"
+                icon={<FilterOutlined />}
+                onClick={handleAddOrUpdateFilter}
+                disabled={!filterDraftKey || !String(filterDraftValue || '').trim()}
+              >
+                {t('add_filter')}
+              </Button>
+              <Button
+                data-testid="nodes-filter-clear"
+                onClick={handleClearFilters}
+                disabled={nodeFilters.length === 0}
+              >
+                {t('clear_filters')}
+              </Button>
+            </Space.Compact>
+            {nodeFilters.length > 0 && (
+              <Space size={[4, 4]} wrap>
+                {nodeFilters.map((filter) => {
+                  const key = String(filter?.key || '').trim()
+                  const value = String(filter?.value ?? '').trim()
+                  const keyLabel =
+                    key === 'status'
+                      ? t('status')
+                      : key === 'enabled'
+                        ? t('state_controls')
+                        : key === 'type'
+                          ? t('node_type')
+                          : key === 'inbound_port'
+                            ? t('inbound_port')
+                            : key === 'name'
+                              ? t('node_name')
+                              : key === 'remark'
+                                ? t('remark')
+                                : key === 'node_ip'
+                                  ? t('node_ip')
+                                  : key === 'location'
+                                    ? t('location')
+                                    : key === 'country_code'
+                                      ? t('country_code')
+                                      : key === 'username'
+                                        ? t('username')
+                                        : key === 'tcp_reuse_enabled'
+                                          ? t('tcp_reuse')
+                                          : key
+                  const valueLabel =
+                    key === 'status'
+                      ? value === 'healthy'
+                        ? t('status_healthy')
+                        : value === 'unverified'
+                          ? t('status_unverified')
+                          : value
+                      : key === 'enabled' || key === 'tcp_reuse_enabled'
+                        ? value === 'true'
+                          ? t('enabled')
+                          : value === 'false'
+                            ? t('disabled')
+                            : value
+                        : value
+
+                  return (
+                    <Tag
+                      key={key}
+                      data-testid={`nodes-filter-tag-${key}`}
+                      closable
+                      onClose={() => handleRemoveFilter(key)}
+                    >
+                      {keyLabel}:{valueLabel}
+                    </Tag>
+                  )
+                })}
+              </Space>
+            )}
+            {!dragSortAllowed && nodeFilters.length > 0 && (
+              <Tooltip title={t('drag_sort_disabled_filtered')}>
+                <Tag color="red" style={{ margin: 0 }}>
+                  {t('drag_sort')}
+                </Tag>
+              </Tooltip>
+            )}
           </Space>
 
           {selectedNodeIds.length > 0 && (
@@ -1933,7 +2298,7 @@ function Dashboard({ onLogout }) {
                 okText={t('confirm')}
                 cancelText={t('cancel')}
               >
-                <Button danger icon={<DeleteOutlined />}>
+                <Button data-testid="nodes-batch-delete" danger icon={<DeleteOutlined />}>
                   {t('batch_delete')}
                 </Button>
               </Popconfirm>
@@ -2071,7 +2436,10 @@ function Dashboard({ onLogout }) {
       >
         <SettingsForm
           onClose={() => setSettingsVisible(false)}
-          onUpdated={() => loadNodes({ silent: true })}
+          onUpdated={async () => {
+            await loadSettings({ silent: true })
+            await loadNodes({ silent: true })
+          }}
         />
       </Modal>
 

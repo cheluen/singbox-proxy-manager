@@ -1,7 +1,7 @@
 {
   "name": "sb-proxy-frontend",
   "private": true,
-  "version": "1.3.11",
+  "version": "1.3.12",
   "type": "module",
   "scripts": {
     "dev": "vite",
@@ -16,6 +16,7 @@
     "test:e2e:batch-check-ip-live": "node ./scripts/batch-check-ip-live-regression.mjs",
     "test:e2e:outbound-dedup": "node ./scripts/outbound-dedup-regression.mjs",
     "test:e2e:remark": "node ./scripts/remark-regression.mjs",
+    "test:e2e:filter": "node ./scripts/filter-selection-regression.mjs",
     "test:e2e:tcp-reuse-ui": "node ./scripts/tcp-reuse-ui-regression.mjs",
     "test:e2e:nodes-viewport": "node ./scripts/nodes-viewport-regression.mjs",
     "test:e2e:version-refresh": "node ./scripts/version-refresh-regression.mjs"

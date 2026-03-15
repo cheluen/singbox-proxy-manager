@@ -159,6 +159,7 @@ export default {
   enter_node_name: '请输入节点名称',
   enter_share_link: '请输入分享链接',
   enter_username: '请输入用户名',
+  filter_value_placeholder: '筛选值',
   username_plus_not_allowed: '用户名不能包含 +',
   select_nodes: '请选择节点',
   no_nodes: '暂无节点',
@@ -168,5 +169,8 @@ export default {
   selected_count: '已选 {{count}} 项',
   total_count: '共 {{count}} 项',
   drag_sort: '拖拽排序',
-  drag_sort_hint: '拖拽左侧手柄即可排序；节点较多时将自动启用虚拟渲染以保持流畅。'
+  drag_sort_hint: '拖拽左侧手柄即可排序；节点较多时将自动启用虚拟渲染以保持流畅。',
+  drag_sort_disabled_filtered: '筛选状态下已禁用拖拽排序（开启“保留入站端口”后可用）',
+  add_filter: '添加筛选',
+  clear_filters: '清空筛选'
 }

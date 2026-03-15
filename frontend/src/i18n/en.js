@@ -159,6 +159,7 @@ export default {
   enter_node_name: 'Please enter node name',
   enter_share_link: 'Please enter share link',
   enter_username: 'Please enter username',
+  filter_value_placeholder: 'Filter value',
   username_plus_not_allowed: 'Username cannot contain +',
   select_nodes: 'Please select nodes',
   no_nodes: 'No nodes yet',
@@ -168,5 +169,8 @@ export default {
   selected_count: '{{count}} selected',
   total_count: 'Total {{count}}',
   drag_sort: 'Drag Sort',
-  drag_sort_hint: 'Drag the handle to reorder. Large lists automatically enable virtualization for smooth performance.'
+  drag_sort_hint: 'Drag the handle to reorder. Large lists automatically enable virtualization for smooth performance.',
+  drag_sort_disabled_filtered: 'Drag sorting is disabled while filters are active (enable \"Preserve Inbound Ports\" to allow drag sorting under filters).',
+  add_filter: 'Add Filter',
+  clear_filters: 'Clear Filters'
 }
