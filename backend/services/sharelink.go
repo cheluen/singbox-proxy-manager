@@ -4,6 +4,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"net"
 	"net/url"
 	"strconv"
 	"strings"
@@ -61,41 +62,75 @@ func parseSSLink(link string) (interface{}, string, string, error) {
 
 	// Split server part
 	atIndex := strings.LastIndex(link, "@")
+	var (
+		method   string
+		password string
+		server   string
+		port     int
+	)
+
 	if atIndex == -1 {
-		return nil, "", "", fmt.Errorf("invalid ss link format")
-	}
+		// SIP002 legacy format: ss://BASE64(method:password@host:port)?plugin=...#name
+		decoded, err := decodeBase64String(link)
+		if err != nil {
+			return nil, "", "", fmt.Errorf("invalid ss link format")
+		}
+		decodedStr := string(decoded)
 
-	// Decode credentials
-	credentials := link[:atIndex]
-	serverPart := link[atIndex+1:]
+		atIndex = strings.LastIndex(decodedStr, "@")
+		if atIndex == -1 {
+			return nil, "", "", fmt.Errorf("invalid ss link format")
+		}
 
-	decoded, err := base64.RawURLEncoding.DecodeString(credentials)
-	if err != nil {
-		decoded, err = base64.StdEncoding.DecodeString(credentials)
+		credPart := decodedStr[:atIndex]
+		serverPart := decodedStr[atIndex+1:]
+
+		// Parse method:password
+		credParts := strings.SplitN(credPart, ":", 2)
+		if len(credParts) != 2 {
+			return nil, "", "", fmt.Errorf("invalid credentials format")
+		}
+		method = credParts[0]
+		password = credParts[1]
+
+		// Parse host:port (supports bracketed IPv6)
+		host, portStr, err := net.SplitHostPort(serverPart)
+		if err != nil {
+			return nil, "", "", fmt.Errorf("invalid server format")
+		}
+		port, err = strconv.Atoi(portStr)
+		if err != nil {
+			return nil, "", "", fmt.Errorf("invalid port")
+		}
+		server = host
+	} else {
+		// Standard format: ss://BASE64(method:password)@host:port?plugin=...#name
+		credentials := link[:atIndex]
+		serverPart := link[atIndex+1:]
+
+		decoded, err := decodeBase64String(credentials)
 		if err != nil {
 			return nil, "", "", fmt.Errorf("failed to decode credentials")
 		}
-	}
 
-	// Parse method:password
-	credParts := strings.SplitN(string(decoded), ":", 2)
-	if len(credParts) != 2 {
-		return nil, "", "", fmt.Errorf("invalid credentials format")
-	}
+		// Parse method:password
+		credParts := strings.SplitN(string(decoded), ":", 2)
+		if len(credParts) != 2 {
+			return nil, "", "", fmt.Errorf("invalid credentials format")
+		}
+		method = credParts[0]
+		password = credParts[1]
 
-	method := credParts[0]
-	password := credParts[1]
-
-	// Parse server:port
-	serverParts := strings.SplitN(serverPart, ":", 2)
-	if len(serverParts) != 2 {
-		return nil, "", "", fmt.Errorf("invalid server format")
-	}
-
-	server := serverParts[0]
-	port, err := strconv.Atoi(serverParts[1])
-	if err != nil {
-		return nil, "", "", fmt.Errorf("invalid port")
+		// Parse host:port (supports bracketed IPv6)
+		host, portStr, err := net.SplitHostPort(serverPart)
+		if err != nil {
+			return nil, "", "", fmt.Errorf("invalid server format")
+		}
+		port, err = strconv.Atoi(portStr)
+		if err != nil {
+			return nil, "", "", fmt.Errorf("invalid port")
+		}
+		server = host
 	}
 
 	config := models.SSConfig{
@@ -113,6 +148,23 @@ func parseSSLink(link string) (interface{}, string, string, error) {
 	}
 
 	return config, "ss", name, nil
+}
+
+func decodeBase64String(raw string) ([]byte, error) {
+	encodings := []*base64.Encoding{
+		base64.RawURLEncoding,
+		base64.URLEncoding,
+		base64.RawStdEncoding,
+		base64.StdEncoding,
+	}
+	for _, enc := range encodings {
+		decoded, err := enc.DecodeString(raw)
+		if err != nil {
+			continue
+		}
+		return decoded, nil
+	}
+	return nil, fmt.Errorf("invalid base64")
 }
 
 // parseVLESSLink parses VLESS share links

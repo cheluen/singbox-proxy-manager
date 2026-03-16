@@ -458,7 +458,9 @@ func (s *SingBoxService) generateVLESSOutbound(config *models.VLESSConfig, tag s
 			tls["server_name"] = config.SNI
 		}
 		if config.ALPN != "" {
-			tls["alpn"] = []string{config.ALPN}
+			if alpn := splitCommaList(config.ALPN); len(alpn) > 0 {
+				tls["alpn"] = alpn
+			}
 		}
 		if config.Fingerprint != "" {
 			tls["utls"] = map[string]interface{}{
@@ -586,7 +588,9 @@ func (s *SingBoxService) generateVMESSOutbound(config *models.VMESSConfig, tag s
 			tls["server_name"] = config.SNI
 		}
 		if config.ALPN != "" {
-			tls["alpn"] = []string{config.ALPN}
+			if alpn := splitCommaList(config.ALPN); len(alpn) > 0 {
+				tls["alpn"] = alpn
+			}
 		}
 		if config.Fingerprint != "" {
 			tls["utls"] = map[string]interface{}{
@@ -665,6 +669,19 @@ func (s *SingBoxService) generateVMESSOutbound(config *models.VMESSConfig, tag s
 	}
 
 	return outbound, nil
+}
+
+func splitCommaList(raw string) []string {
+	parts := strings.Split(raw, ",")
+	out := make([]string, 0, len(parts))
+	for _, part := range parts {
+		part = strings.TrimSpace(part)
+		if part == "" {
+			continue
+		}
+		out = append(out, part)
+	}
+	return out
 }
 
 func (s *SingBoxService) generateHysteria2Outbound(config *models.Hysteria2Config, tag string) (OutboundConfig, error) {

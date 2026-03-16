@@ -8,6 +8,8 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"os"
+	"strings"
 	"time"
 
 	"golang.org/x/net/proxy"
@@ -26,6 +28,57 @@ type IPInfo struct {
 }
 
 const maxIPCheckResponseBytes = 1024 * 1024
+
+func ipCheckServiceURLs() []string {
+	if fromEnv := parseIPCheckServiceURLsFromEnv(); len(fromEnv) > 0 {
+		return fromEnv
+	}
+
+	return []string{
+		"https://api.ip2location.io/?format=json",
+		"http://ip-api.com/json/",
+		"https://api.ip.sb/geoip",
+		"https://ipwho.is/",
+		"https://ipapi.co/json/",
+		"https://api.myip.com",
+		"https://api64.ipify.org?format=json",
+	}
+}
+
+func parseIPCheckServiceURLsFromEnv() []string {
+	raw := strings.TrimSpace(os.Getenv("SBPM_IPCHECK_URLS"))
+	if raw == "" {
+		return nil
+	}
+
+	parts := strings.FieldsFunc(raw, func(r rune) bool {
+		switch r {
+		case ',', '\n', '\r', '\t', ' ':
+			return true
+		default:
+			return false
+		}
+	})
+
+	out := make([]string, 0, len(parts))
+	seen := make(map[string]struct{}, len(parts))
+	for _, part := range parts {
+		part = strings.TrimSpace(part)
+		if part == "" {
+			continue
+		}
+		if !strings.HasPrefix(part, "http://") && !strings.HasPrefix(part, "https://") {
+			continue
+		}
+		if _, ok := seen[part]; ok {
+			continue
+		}
+		seen[part] = struct{}{}
+		out = append(out, part)
+	}
+
+	return out
+}
 
 func waitForTCPReady(addr string, maxWait time.Duration) error {
 	deadline := time.Now().Add(maxWait)
@@ -54,12 +107,11 @@ func waitForTCPReady(addr string, maxWait time.Duration) error {
 func CheckProxyIP(proxyAddr string, username string, password string) (*IPInfo, error) {
 	log.Printf("[IPCheck] Starting IP check for proxy: %s (auth: %v)", proxyAddr, username != "")
 
-	// Measure latency start time
-	startTime := time.Now()
-
 	if err := waitForTCPReady(proxyAddr, 2*time.Second); err != nil {
 		return nil, fmt.Errorf("proxy not ready: %w", err)
 	}
+
+	httpStartTime := time.Now()
 
 	// Build proxy URL with authentication if provided
 	proxyURLStr := "http://"
@@ -88,11 +140,7 @@ func CheckProxyIP(proxyAddr string, username string, password string) (*IPInfo, 
 	}
 	defer transport.CloseIdleConnections()
 
-	// Use ip2location.io API (free tier, no API key needed for basic usage)
-	services := []string{
-		"https://api.ip2location.io/?format=json",
-		"http://ip-api.com/json/",
-	}
+	services := ipCheckServiceURLs()
 
 	var lastErr error
 	var httpErr error
@@ -101,7 +149,7 @@ func CheckProxyIP(proxyAddr string, username string, password string) (*IPInfo, 
 		info, err := checkWithService(client, service)
 		if err == nil && info.IP != "" {
 			// Calculate latency in milliseconds
-			info.Latency = int(time.Since(startTime).Milliseconds())
+			info.Latency = int(time.Since(httpStartTime).Milliseconds())
 			info.Transport = "http"
 			log.Printf("[IPCheck] Success! IP: %s, Location: %s, Latency: %dms", info.IP, info.Location, info.Latency)
 			return info, nil
@@ -115,7 +163,8 @@ func CheckProxyIP(proxyAddr string, username string, password string) (*IPInfo, 
 
 	// Try with SOCKS5 if HTTP fails
 	log.Printf("[IPCheck] HTTP proxy failed (%v), trying SOCKS5...", httpErr)
-	result, err := checkWithSOCKS5(proxyAddr, username, password, services, startTime)
+	socksStartTime := time.Now()
+	result, err := checkWithSOCKS5(proxyAddr, username, password, services, socksStartTime)
 	if err == nil {
 		result.Transport = "socks5"
 		if httpErr != nil {
@@ -178,7 +227,14 @@ func checkWithSOCKS5(proxyAddr string, username string, password string, service
 }
 
 func checkWithService(client *http.Client, serviceURL string) (*IPInfo, error) {
-	resp, err := client.Get(serviceURL)
+	req, err := http.NewRequest(http.MethodGet, serviceURL, nil)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create request: %v", err)
+	}
+	req.Header.Set("User-Agent", "sb-proxy-manager/1.0")
+	req.Header.Set("Accept", "application/json")
+
+	resp, err := client.Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("request failed: %v", err)
 	}
@@ -223,6 +279,8 @@ func checkWithService(client *http.Client, serviceURL string) (*IPInfo, error) {
 	// Extract country code
 	// ip2location.io uses "country_code", ip-api uses "countryCode"
 	if countryCode, ok := result["country_code"].(string); ok {
+		info.CountryCode = countryCode
+	} else if countryCode, ok := result["cc"].(string); ok {
 		info.CountryCode = countryCode
 	} else if countryCode, ok := result["countryCode"].(string); ok {
 		info.CountryCode = countryCode
@@ -277,10 +335,7 @@ func CheckDirectIP() (*IPInfo, error) {
 		Timeout:   10 * time.Second,
 	}
 
-	services := []string{
-		"https://api.ip2location.io/?format=json",
-		"http://ip-api.com/json/",
-	}
+	services := ipCheckServiceURLs()
 
 	var lastErr error
 	for _, service := range services {

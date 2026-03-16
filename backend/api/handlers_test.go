@@ -147,7 +147,7 @@ func TestCheckNodeIPFailureClearsStatus(t *testing.T) {
 
 	handler.CheckNodeIP(ctx)
 
-	if rec.Code != http.StatusInternalServerError {
+	if rec.Code != http.StatusBadGateway {
 		t.Fatalf("unexpected status %d", rec.Code)
 	}
 	var ip, location, countryCode string
@@ -163,16 +163,17 @@ func TestCheckNodeIPFailureClearsStatus(t *testing.T) {
 	}
 }
 
-func TestCheckNodeIPRejectsSocksFallback(t *testing.T) {
+func TestCheckNodeIPAcceptsSocksFallback(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 
 	handler := newTestHandler(t, func(proxyAddr, username, password string) (*services.IPInfo, error) {
 		return &services.IPInfo{
-			IP:        "9.9.9.9",
-			Location:  "Fallback",
-			Latency:   40,
-			Transport: "socks5",
-			HTTPError: "http unavailable",
+			IP:          "9.9.9.9",
+			Location:    "Fallback",
+			CountryCode: "XX",
+			Latency:     40,
+			Transport:   "socks5",
+			HTTPError:   "http unavailable",
 		}, nil
 	})
 
@@ -184,8 +185,8 @@ func TestCheckNodeIPRejectsSocksFallback(t *testing.T) {
 
 	handler.CheckNodeIP(ctx)
 
-	if rec.Code != http.StatusBadGateway {
-		t.Fatalf("expected bad gateway, got %d", rec.Code)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected ok, got %d", rec.Code)
 	}
 	var ip, location, countryCode string
 	var latency int
@@ -195,8 +196,8 @@ func TestCheckNodeIPRejectsSocksFallback(t *testing.T) {
 	`, nodeID).Scan(&ip, &location, &countryCode, &latency); err != nil {
 		t.Fatalf("query node: %v", err)
 	}
-	if ip != "" || location != "" || countryCode != "" || latency != 0 {
-		t.Fatalf("expected cleared status after fallback, got ip=%s location=%s country=%s latency=%d", ip, location, countryCode, latency)
+	if ip != "9.9.9.9" || location != "Fallback" || countryCode != "XX" || latency != 40 {
+		t.Fatalf("expected status updated after fallback, got ip=%s location=%s country=%s latency=%d", ip, location, countryCode, latency)
 	}
 }
 

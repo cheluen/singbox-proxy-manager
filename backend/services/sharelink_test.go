@@ -1,6 +1,7 @@
 package services
 
 import (
+	"encoding/base64"
 	"encoding/json"
 	"testing"
 
@@ -98,5 +99,105 @@ func TestGenerateTrojanOutbound(t *testing.T) {
 		}
 	} else if headers["Host"] != "h.example.com" {
 		t.Fatalf("headers host mismatch: %+v", headers)
+	}
+}
+
+func TestParseSSLink_Base64FullForm(t *testing.T) {
+	decoded := "aes-128-gcm:pwd@example.com:443"
+	encoded := base64.RawURLEncoding.EncodeToString([]byte(decoded))
+	link := "ss://" + encoded + "#SS-Full"
+
+	cfg, typ, name, err := ParseShareLink(link)
+	if err != nil {
+		t.Fatalf("parse failed: %v", err)
+	}
+	if typ != "ss" {
+		t.Fatalf("expected ss type, got %s", typ)
+	}
+	if name != "SS-Full" {
+		t.Fatalf("unexpected name: %s", name)
+	}
+
+	ssCfg, ok := cfg.(models.SSConfig)
+	if !ok {
+		t.Fatalf("unexpected config type %T", cfg)
+	}
+	if ssCfg.Server != "example.com" || ssCfg.ServerPort != 443 {
+		t.Fatalf("server/port mismatch: %+v", ssCfg)
+	}
+	if ssCfg.Method != "aes-128-gcm" || ssCfg.Password != "pwd" {
+		t.Fatalf("method/password mismatch: %+v", ssCfg)
+	}
+}
+
+func TestGenerateVLESSOutboundSplitsALPN(t *testing.T) {
+	rawCfg := models.VLESSConfig{
+		Server:     "node.example.com",
+		ServerPort: 443,
+		UUID:       "00000000-0000-0000-0000-000000000000",
+		Security:   "tls",
+		SNI:        "sni.example.com",
+		ALPN:       "h2,http/1.1",
+	}
+	cfgBytes, _ := json.Marshal(rawCfg)
+	node := models.ProxyNode{
+		ID:          1,
+		Name:        "vless",
+		Type:        "vless",
+		Config:      string(cfgBytes),
+		InboundPort: 30010,
+	}
+
+	svc := &SingBoxService{}
+	out, err := svc.generateOutbound(&node, "vless-out")
+	if err != nil {
+		t.Fatalf("generateOutbound error: %v", err)
+	}
+	tls, ok := out.Extra["tls"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("tls missing: %+v", out.Extra["tls"])
+	}
+	alpn, ok := tls["alpn"].([]string)
+	if !ok {
+		t.Fatalf("unexpected alpn type: %T", tls["alpn"])
+	}
+	if len(alpn) != 2 || alpn[0] != "h2" || alpn[1] != "http/1.1" {
+		t.Fatalf("unexpected alpn value: %+v", alpn)
+	}
+}
+
+func TestGenerateVMessOutboundSplitsALPN(t *testing.T) {
+	rawCfg := models.VMESSConfig{
+		Server:     "node.example.com",
+		ServerPort: 443,
+		UUID:       "00000000-0000-0000-0000-000000000000",
+		TLS:        "tls",
+		SNI:        "sni.example.com",
+		ALPN:       "h2,http/1.1",
+	}
+	cfgBytes, _ := json.Marshal(rawCfg)
+	node := models.ProxyNode{
+		ID:          1,
+		Name:        "vmess",
+		Type:        "vmess",
+		Config:      string(cfgBytes),
+		InboundPort: 30010,
+	}
+
+	svc := &SingBoxService{}
+	out, err := svc.generateOutbound(&node, "vmess-out")
+	if err != nil {
+		t.Fatalf("generateOutbound error: %v", err)
+	}
+	tls, ok := out.Extra["tls"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("tls missing: %+v", out.Extra["tls"])
+	}
+	alpn, ok := tls["alpn"].([]string)
+	if !ok {
+		t.Fatalf("unexpected alpn type: %T", tls["alpn"])
+	}
+	if len(alpn) != 2 || alpn[0] != "h2" || alpn[1] != "http/1.1" {
+		t.Fatalf("unexpected alpn value: %+v", alpn)
 	}
 }

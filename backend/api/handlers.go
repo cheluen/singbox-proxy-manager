@@ -1201,22 +1201,7 @@ func (h *Handler) CheckNodeIP(c *gin.Context) {
 		`, id); clearErr != nil {
 			fmt.Printf("[API] Failed to clear node %d status after error: %v\n", id, clearErr)
 		}
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to check IP"})
-		return
-	}
-
-	// If HTTP path failed but SOCKS5 succeeded, treat it as an error because mixed inbound should serve both.
-	if ipInfo.Transport != "" && ipInfo.Transport != "http" {
-		msg := "http proxy failed while socks5 succeeded"
-		if ipInfo.HTTPError != "" {
-			msg = ipInfo.HTTPError
-		}
-		_, _ = h.db.Exec(`
-			UPDATE proxy_nodes 
-			SET node_ip = '', location = '', country_code = '', latency = 0, updated_at = CURRENT_TIMESTAMP
-			WHERE id = ?
-		`, id)
-		c.JSON(http.StatusBadGateway, gin.H{"error": msg})
+		c.JSON(http.StatusBadGateway, gin.H{"error": err.Error()})
 		return
 	}
 
