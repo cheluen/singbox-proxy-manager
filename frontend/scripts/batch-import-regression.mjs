@@ -248,6 +248,28 @@ const clickButtonByText = async (page, text, timeoutMs = 10000) => {
   throw new Error(`Button not found: ${text}`)
 }
 
+const ensureCheckboxUnchecked = async (
+  page,
+  { inputSelector, clickableSelector },
+  timeoutMs = 10000
+) => {
+  const checked = await page.evaluate(
+    (sel) => Boolean(document.querySelector(sel)?.checked),
+    inputSelector
+  )
+  if (!checked) return
+
+  await page.locator(clickableSelector).click({ timeout: timeoutMs })
+  await page.waitForFunction(
+    (sel) => {
+      const el = document.querySelector(sel)
+      return el ? !el.checked : false
+    },
+    { timeout: timeoutMs },
+    inputSelector
+  )
+}
+
 const run = async () => {
   const mockApi = await startMockApi()
   await waitForHttpReady(`http://localhost:${API_PORT}/api/version`, 10000)
@@ -265,6 +287,7 @@ const run = async () => {
     })
 
     const page = await browser.newPage()
+    await page.setViewport({ width: 1366, height: 900 })
     const consoleErrors = []
     page.on('console', (msg) => {
       if (msg.type() === 'error') {
@@ -290,7 +313,14 @@ const run = async () => {
     await sleep(300)
 
     // Avoid triggering IP check (mock server does not implement it).
-    await page.click('.ant-modal .ant-checkbox-input')
+    await ensureCheckboxUnchecked(
+      page,
+      {
+        inputSelector: '.ant-modal .ant-checkbox-input',
+        clickableSelector: '.ant-modal .ant-checkbox',
+      },
+      10000
+    )
 
     await clickButtonByText(page, 'Confirm', 5000)
     await sleep(800)

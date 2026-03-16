@@ -289,6 +289,19 @@ const clickButtonByText = async (page, text, timeoutMs = 10000) => {
   throw new Error(`Button not found: ${text}`)
 }
 
+const clickNodeCheckbox = async (page, rowKey, timeoutMs = 10000) => {
+  const cellSelector = `tbody.ant-table-tbody tr[data-row-key="${rowKey}"] td:nth-child(3)`
+  const clickableSelector = `${cellSelector} .ant-checkbox`
+  const inputSelector = `${cellSelector} input[type="checkbox"]`
+
+  await page.locator(clickableSelector).click({ timeout: timeoutMs })
+  await page.waitForFunction(
+    (sel) => Boolean(document.querySelector(sel)?.checked),
+    { timeout: timeoutMs },
+    inputSelector
+  )
+}
+
 const getRowNames = async (page) =>
   page.evaluate(() => {
     const rows = Array.from(document.querySelectorAll('tbody.ant-table-tbody tr[data-row-key]'))
@@ -316,6 +329,7 @@ const run = async () => {
     })
 
     const page = await browser.newPage()
+    await page.setViewport({ width: 1366, height: 900 })
     const consoleErrors = []
     page.on('console', (msg) => {
       const type = msg.type()
@@ -337,12 +351,9 @@ const run = async () => {
     await page.reload({ waitUntil: 'networkidle2' })
     await page.waitForSelector('tbody.ant-table-tbody tr[data-row-key="1"]', { timeout: 30000 })
 
-    const node1Checkbox = 'tbody.ant-table-tbody tr[data-row-key="1"] td:nth-child(3) input[type="checkbox"]'
-    const node2Checkbox = 'tbody.ant-table-tbody tr[data-row-key="2"] td:nth-child(3) input[type="checkbox"]'
-    const node3Checkbox = 'tbody.ant-table-tbody tr[data-row-key="3"] td:nth-child(3) input[type="checkbox"]'
-    await page.click(node1Checkbox)
-    await page.click(node2Checkbox)
-    await page.click(node3Checkbox)
+    await clickNodeCheckbox(page, 1)
+    await clickNodeCheckbox(page, 2)
+    await clickNodeCheckbox(page, 3)
     await sleep(300)
 
     const orderBefore = await getRowNames(page)

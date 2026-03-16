@@ -321,6 +321,19 @@ const getCellText = async (page, selector) =>
     return (el?.textContent || '').trim()
   }, selector)
 
+const clickNodeCheckbox = async (page, rowKey, timeoutMs = 10000) => {
+  const cellSelector = `tbody.ant-table-tbody tr[data-row-key="${rowKey}"] td:nth-child(3)`
+  const clickableSelector = `${cellSelector} .ant-checkbox`
+  const inputSelector = `${cellSelector} input[type="checkbox"]`
+
+  await page.locator(clickableSelector).click({ timeout: timeoutMs })
+  await page.waitForFunction(
+    (sel) => Boolean(document.querySelector(sel)?.checked),
+    { timeout: timeoutMs },
+    inputSelector
+  )
+}
+
 const run = async () => {
   const mockApi = await startMockApi()
   const vite = startVite()
@@ -338,6 +351,7 @@ const run = async () => {
     })
 
     const page = await browser.newPage()
+    await page.setViewport({ width: 1366, height: 900 })
     const consoleErrors = []
     page.on('console', (msg) => {
       const type = msg.type()
@@ -359,10 +373,8 @@ const run = async () => {
     await page.reload({ waitUntil: 'networkidle2' })
     await page.waitForSelector('tbody.ant-table-tbody tr[data-row-key="1"]', { timeout: 30000 })
 
-    const node1Checkbox = 'tbody.ant-table-tbody tr[data-row-key="1"] td:nth-child(3) input[type="checkbox"]'
-    const node2Checkbox = 'tbody.ant-table-tbody tr[data-row-key="2"] td:nth-child(3) input[type="checkbox"]'
-    await page.click(node1Checkbox)
-    await page.click(node2Checkbox)
+    await clickNodeCheckbox(page, 1)
+    await clickNodeCheckbox(page, 2)
     await sleep(300)
 
     await clickButtonByText(page, '批量测IP')
@@ -400,8 +412,8 @@ const run = async () => {
     await page.reload({ waitUntil: 'networkidle2' })
     await page.waitForSelector('tbody.ant-table-tbody tr[data-row-key="1"]', { timeout: 30000 })
 
-    await page.click(node1Checkbox)
-    await page.click(node2Checkbox)
+    await clickNodeCheckbox(page, 1)
+    await clickNodeCheckbox(page, 2)
     await sleep(300)
 
     await clickButtonByText(page, '批量测IP')

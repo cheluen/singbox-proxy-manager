@@ -254,6 +254,19 @@ const getCellCenter = async (page, selector) =>
     return { x: rect.x + rect.width / 2, y: rect.y + rect.height / 2 }
   })
 
+const clickNodeCheckbox = async (page, rowKey, timeoutMs = 10000) => {
+  const cellSelector = `tbody.ant-table-tbody tr[data-row-key="${rowKey}"] td:nth-child(3)`
+  const clickableSelector = `${cellSelector} .ant-checkbox`
+  const inputSelector = `${cellSelector} input[type="checkbox"]`
+
+  await page.locator(clickableSelector).click({ timeout: timeoutMs })
+  await page.waitForFunction(
+    (sel) => Boolean(document.querySelector(sel)?.checked),
+    { timeout: timeoutMs },
+    inputSelector
+  )
+}
+
 const assert = (condition, message) => {
   if (!condition) throw new Error(message)
 }
@@ -276,6 +289,7 @@ const run = async () => {
     })
 
     const page = await browser.newPage()
+    await page.setViewport({ width: 1366, height: 900 })
     const consoleErrors = []
     page.on('console', (msg) => {
       if (msg.type() === 'error') {
@@ -294,7 +308,7 @@ const run = async () => {
     await page.waitForSelector('tbody.ant-table-tbody tr[data-row-key="1"]', { timeout: 30000 })
 
     const orderBefore = await getRowNames(page)
-    await page.click('tbody.ant-table-tbody tr[data-row-key="1"] td:nth-child(3) input[type="checkbox"]')
+    await clickNodeCheckbox(page, 1)
     await sleep(600)
     const orderAfterCheckboxClick = await getRowNames(page)
     const stateAfterCheckboxClick = mockApi.getState()
