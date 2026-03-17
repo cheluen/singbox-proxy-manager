@@ -20,12 +20,22 @@ const nodesVirtualThreshold =
     ? nodesVirtualThresholdParsed
     : 50
 
+const batchCheckIPConcurrencyRaw =
+  (process.env.SBPM_BATCH_CHECK_IP_CONCURRENCY ||
+    process.env.VITE_BATCH_CHECK_IP_CONCURRENCY ||
+    '').trim()
+const batchCheckIPConcurrencyParsed = Number.parseInt(batchCheckIPConcurrencyRaw, 10)
+const batchCheckIPConcurrency =
+  Number.isFinite(batchCheckIPConcurrencyParsed) && batchCheckIPConcurrencyParsed > 0
+    ? batchCheckIPConcurrencyParsed
+    : 10
+
 const injectBuildMetaPlugin = () => ({
   name: 'inject-build-meta',
   transformIndexHtml(html) {
     return html.replace(
       '</head>',
-      `    <meta name="sbpm-build-version" content="${appVersion}" />\n    <meta name="sbpm-build-fingerprint" content="${appFingerprint}" />\n    <meta name="sbpm-nodes-virtual-threshold" content="${nodesVirtualThreshold}" />\n  </head>`
+      `    <meta name="sbpm-build-version" content="${appVersion}" />\n    <meta name="sbpm-build-fingerprint" content="${appFingerprint}" />\n    <meta name="sbpm-nodes-virtual-threshold" content="${nodesVirtualThreshold}" />\n    <meta name="sbpm-batch-check-ip-concurrency" content="${batchCheckIPConcurrency}" />\n  </head>`
     )
   },
 })

@@ -1082,7 +1082,30 @@ function Dashboard({ onLogout }) {
       icon: <ThunderboltOutlined style={{ color: '#1890ff' }} />,
     })
 
-    const concurrency = Math.min(5, total)
+    const batchConcurrencyDefault = 10
+    const batchConcurrencyMetaRaw =
+      typeof document !== 'undefined'
+        ? document
+            .querySelector?.('meta[name="sbpm-batch-check-ip-concurrency"]')
+            ?.getAttribute?.('content')
+        : ''
+    const batchConcurrencyRaw =
+      batchConcurrencyMetaRaw ||
+      import.meta.env?.VITE_BATCH_CHECK_IP_CONCURRENCY ||
+      ''
+    const batchConcurrencyParsed = Number.parseInt(
+      String(batchConcurrencyRaw || ''),
+      10
+    )
+    const batchConcurrencyConfigured =
+      Number.isFinite(batchConcurrencyParsed) && batchConcurrencyParsed > 0
+        ? batchConcurrencyParsed
+        : batchConcurrencyDefault
+
+    const concurrency = Math.min(
+      Math.max(1, batchConcurrencyConfigured),
+      total
+    )
     let nextIndex = 0
 
     const runWorker = async () => {

@@ -104,6 +104,33 @@ func TestRegisterFrontendRoutesServesIndexWithRevalidateHeaders(t *testing.T) {
 	}
 }
 
+func TestRegisterFrontendRoutes_InjectsBatchCheckIPConcurrencyMeta(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	r := gin.New()
+	distDir := writeTestFrontendDist(t)
+
+	t.Setenv("SBPM_BATCH_CHECK_IP_CONCURRENCY", "12")
+	if err := registerFrontendRoutes(r, distDir, "1.2.4"); err != nil {
+		t.Fatalf("register frontend routes: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	rec := httptest.NewRecorder()
+	r.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("unexpected status: %d", rec.Code)
+	}
+
+	body := rec.Body.String()
+	if !strings.Contains(body, `name="sbpm-batch-check-ip-concurrency"`) {
+		t.Fatalf("missing batch check ip concurrency meta: %s", body)
+	}
+	if !strings.Contains(body, `content="12"`) {
+		t.Fatalf("missing batch check ip concurrency value: %s", body)
+	}
+}
+
 func TestRegisterFrontendRoutesServesAssetsWithImmutableCache(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	r := gin.New()

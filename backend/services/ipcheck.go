@@ -1,6 +1,7 @@
 package services
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -28,6 +29,13 @@ type IPInfo struct {
 }
 
 const maxIPCheckResponseBytes = 1024 * 1024
+
+const (
+	ipCheckServicesMaxConcurrency = 3
+	ipCheckServiceTimeout         = 4 * time.Second
+	ipCheckTotalDeadline          = 10 * time.Second
+	ipCheckPreferGeoWait          = 600 * time.Millisecond
+)
 
 func ipCheckServiceURLs() []string {
 	if fromEnv := parseIPCheckServiceURLsFromEnv(); len(fromEnv) > 0 {
@@ -111,7 +119,8 @@ func CheckProxyIP(proxyAddr string, username string, password string) (*IPInfo, 
 		return nil, fmt.Errorf("proxy not ready: %w", err)
 	}
 
-	httpStartTime := time.Now()
+	ctx, cancel := context.WithTimeout(context.Background(), ipCheckTotalDeadline)
+	defer cancel()
 
 	// Build proxy URL with authentication if provided
 	proxyURLStr := "http://"
@@ -136,49 +145,34 @@ func CheckProxyIP(proxyAddr string, username string, password string) (*IPInfo, 
 
 	client := &http.Client{
 		Transport: transport,
-		Timeout:   30 * time.Second,
 	}
 	defer transport.CloseIdleConnections()
 
 	services := ipCheckServiceURLs()
 
-	var lastErr error
-	var httpErr error
-	for _, service := range services {
-		log.Printf("[IPCheck] Trying service: %s", service)
-		info, err := checkWithService(client, service)
-		if err == nil && info.IP != "" {
-			// Calculate latency in milliseconds
-			info.Latency = int(time.Since(httpStartTime).Milliseconds())
-			info.Transport = "http"
-			log.Printf("[IPCheck] Success! IP: %s, Location: %s, Latency: %dms", info.IP, info.Location, info.Latency)
-			return info, nil
-		}
-		lastErr = err
-		log.Printf("[IPCheck] Service %s failed: %v", service, err)
+	info, err := checkWithServicesRacing(ctx, client, services)
+	if err == nil && info != nil && info.IP != "" {
+		info.Transport = "http"
+		log.Printf("[IPCheck] Success! IP: %s, Location: %s, Latency: %dms", info.IP, info.Location, info.Latency)
+		return info, nil
 	}
-	if lastErr != nil {
-		httpErr = fmt.Errorf("all HTTP IP check services failed: %v", lastErr)
-	}
+	httpErr := fmt.Errorf("all HTTP IP check services failed: %w", err)
 
 	// Try with SOCKS5 if HTTP fails
 	log.Printf("[IPCheck] HTTP proxy failed (%v), trying SOCKS5...", httpErr)
-	socksStartTime := time.Now()
-	result, err := checkWithSOCKS5(proxyAddr, username, password, services, socksStartTime)
-	if err == nil {
+	result, socksErr := checkWithSOCKS5(ctx, proxyAddr, username, password, services)
+	if socksErr == nil {
 		result.Transport = "socks5"
-		if httpErr != nil {
-			result.HTTPError = httpErr.Error()
-		}
+		result.HTTPError = httpErr.Error()
 		log.Printf("[IPCheck] SOCKS5 success! IP: %s, Location: %s (HTTP failed: %v)", result.IP, result.Location, httpErr)
 		return result, nil
 	}
 
-	log.Printf("[IPCheck] All methods failed. Last error: %v", err)
-	return nil, fmt.Errorf("all IP check methods failed - HTTP error: %v, SOCKS5 error: %v", httpErr, err)
+	log.Printf("[IPCheck] All methods failed. Last error: %v", socksErr)
+	return nil, fmt.Errorf("all IP check methods failed - HTTP error: %v, SOCKS5 error: %v", httpErr, socksErr)
 }
 
-func checkWithSOCKS5(proxyAddr string, username string, password string, services []string, startTime time.Time) (*IPInfo, error) {
+func checkWithSOCKS5(ctx context.Context, proxyAddr string, username string, password string, services []string) (*IPInfo, error) {
 	log.Printf("[IPCheck] Trying SOCKS5 dialer for: %s (auth: %v)", proxyAddr, username != "")
 
 	// Create SOCKS5 auth if username/password provided
@@ -199,35 +193,202 @@ func checkWithSOCKS5(proxyAddr string, username string, password string, service
 	}
 
 	transport := &http.Transport{
-		Dial:              dialer.Dial,
-		DisableKeepAlives: true,
+		DialContext: func(reqCtx context.Context, network string, addr string) (net.Conn, error) {
+			type dialResult struct {
+				conn net.Conn
+				err  error
+			}
+
+			done := make(chan dialResult, 1)
+			go func() {
+				conn, err := dialer.Dial(network, addr)
+				done <- dialResult{conn: conn, err: err}
+			}()
+
+			select {
+			case <-reqCtx.Done():
+				return nil, reqCtx.Err()
+			case res := <-done:
+				if reqCtx.Err() != nil {
+					if res.conn != nil {
+						_ = res.conn.Close()
+					}
+					return nil, reqCtx.Err()
+				}
+				return res.conn, res.err
+			}
+		},
+		DisableKeepAlives:  true,
+		DisableCompression: false,
 	}
 
 	client := &http.Client{
 		Transport: transport,
-		Timeout:   30 * time.Second,
 	}
 
-	var lastErr error
-	for _, service := range services {
-		log.Printf("[IPCheck] SOCKS5 trying service: %s", service)
-		info, err := checkWithService(client, service)
-		if err == nil && info.IP != "" {
-			// Calculate latency in milliseconds
-			info.Latency = int(time.Since(startTime).Milliseconds())
-			transport.CloseIdleConnections()
-			return info, nil
-		}
-		lastErr = err
-		log.Printf("[IPCheck] SOCKS5 service %s failed: %v", service, err)
-	}
-
+	info, err := checkWithServicesRacing(ctx, client, services)
 	transport.CloseIdleConnections()
-	return nil, fmt.Errorf("all SOCKS5 IP check services failed: %v", lastErr)
+	if err != nil {
+		return nil, fmt.Errorf("all SOCKS5 IP check services failed: %w", err)
+	}
+	return info, nil
 }
 
-func checkWithService(client *http.Client, serviceURL string) (*IPInfo, error) {
-	req, err := http.NewRequest(http.MethodGet, serviceURL, nil)
+type ipCheckServiceResult struct {
+	info      *IPInfo
+	err       error
+	service   string
+	latency   time.Duration
+	hasGeo    bool
+	hasIPOnly bool
+}
+
+func hasPreferredGeoInfo(info *IPInfo) bool {
+	if info == nil {
+		return false
+	}
+	if strings.TrimSpace(info.CountryCode) != "" {
+		return true
+	}
+	if strings.TrimSpace(info.Location) != "" {
+		return true
+	}
+	return false
+}
+
+func checkWithServicesRacing(ctx context.Context, client *http.Client, services []string) (*IPInfo, error) {
+	if len(services) == 0 {
+		return nil, fmt.Errorf("no ip check services configured")
+	}
+
+	ctx, cancel := context.WithTimeout(ctx, ipCheckTotalDeadline)
+	defer cancel()
+
+	results := make(chan ipCheckServiceResult, len(services))
+	semaphore := make(chan struct{}, ipCheckServicesMaxConcurrency)
+
+	startService := func(service string) {
+		go func() {
+			select {
+			case semaphore <- struct{}{}:
+			case <-ctx.Done():
+				return
+			}
+			defer func() { <-semaphore }()
+
+			reqCtx, reqCancel := context.WithTimeout(ctx, ipCheckServiceTimeout)
+			startedAt := time.Now()
+			info, err := checkWithService(reqCtx, client, service)
+			latency := time.Since(startedAt)
+			reqCancel()
+
+			res := ipCheckServiceResult{
+				info:    info,
+				err:     err,
+				service: service,
+				latency: latency,
+			}
+			if err == nil && info != nil && info.IP != "" {
+				res.hasGeo = hasPreferredGeoInfo(info)
+				res.hasIPOnly = !res.hasGeo
+			}
+
+			select {
+			case results <- res:
+			case <-ctx.Done():
+			}
+		}()
+	}
+
+	started := 0
+	for started < len(services) && started < ipCheckServicesMaxConcurrency {
+		startService(services[started])
+		started++
+	}
+
+	completed := 0
+	var lastErr error
+	var ipOnlyCandidate *ipCheckServiceResult
+	var ipOnlyTimer *time.Timer
+	var ipOnlyTimerC <-chan time.Time
+
+	stopTimer := func() {
+		if ipOnlyTimer == nil {
+			return
+		}
+		if !ipOnlyTimer.Stop() {
+			select {
+			case <-ipOnlyTimer.C:
+			default:
+			}
+		}
+		ipOnlyTimer = nil
+		ipOnlyTimerC = nil
+	}
+	defer stopTimer()
+
+	for {
+		if completed >= started && started >= len(services) {
+			if ipOnlyCandidate != nil {
+				stopTimer()
+				ipOnlyCandidate.info.Latency = int(ipOnlyCandidate.latency.Milliseconds())
+				return ipOnlyCandidate.info, nil
+			}
+			if lastErr != nil {
+				return nil, lastErr
+			}
+			return nil, fmt.Errorf("all ip check services failed")
+		}
+
+		select {
+		case <-ctx.Done():
+			if ipOnlyCandidate != nil {
+				stopTimer()
+				ipOnlyCandidate.info.Latency = int(ipOnlyCandidate.latency.Milliseconds())
+				return ipOnlyCandidate.info, nil
+			}
+			if lastErr != nil {
+				return nil, fmt.Errorf("%w: %v", ctx.Err(), lastErr)
+			}
+			return nil, ctx.Err()
+		case <-ipOnlyTimerC:
+			if ipOnlyCandidate != nil {
+				stopTimer()
+				ipOnlyCandidate.info.Latency = int(ipOnlyCandidate.latency.Milliseconds())
+				return ipOnlyCandidate.info, nil
+			}
+		case res := <-results:
+			completed++
+
+			if res.err != nil {
+				lastErr = res.err
+			}
+
+			if res.err == nil && res.info != nil && res.info.IP != "" {
+				if res.hasGeo {
+					stopTimer()
+					res.info.Latency = int(res.latency.Milliseconds())
+					return res.info, nil
+				}
+
+				if res.hasIPOnly && ipOnlyCandidate == nil {
+					candidate := res
+					ipOnlyCandidate = &candidate
+					ipOnlyTimer = time.NewTimer(ipCheckPreferGeoWait)
+					ipOnlyTimerC = ipOnlyTimer.C
+				}
+			}
+
+			if started < len(services) {
+				startService(services[started])
+				started++
+			}
+		}
+	}
+}
+
+func checkWithService(ctx context.Context, client *http.Client, serviceURL string) (*IPInfo, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, serviceURL, nil)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create request: %v", err)
 	}
@@ -326,31 +487,25 @@ func checkWithService(client *http.Client, serviceURL string) (*IPInfo, error) {
 func CheckDirectIP() (*IPInfo, error) {
 	log.Printf("[IPCheck] Checking direct IP (no proxy)")
 
+	ctx, cancel := context.WithTimeout(context.Background(), ipCheckTotalDeadline)
+	defer cancel()
+
 	transport := &http.Transport{
 		DisableKeepAlives: true,
 	}
 
 	client := &http.Client{
 		Transport: transport,
-		Timeout:   10 * time.Second,
 	}
 
 	services := ipCheckServiceURLs()
 
-	var lastErr error
-	for _, service := range services {
-		log.Printf("[IPCheck] Direct check trying service: %s", service)
-		info, err := checkWithService(client, service)
-		if err == nil && info.IP != "" {
-			transport.CloseIdleConnections()
-			log.Printf("[IPCheck] Direct check success! IP: %s", info.IP)
-			return info, nil
-		}
-		lastErr = err
-		log.Printf("[IPCheck] Direct check service %s failed: %v", service, err)
-	}
-
+	info, err := checkWithServicesRacing(ctx, client, services)
 	transport.CloseIdleConnections()
-	log.Printf("[IPCheck] Direct check failed completely: %v", lastErr)
-	return nil, fmt.Errorf("all IP check services failed: %v", lastErr)
+	if err != nil {
+		log.Printf("[IPCheck] Direct check failed completely: %v", err)
+		return nil, fmt.Errorf("all IP check services failed: %w", err)
+	}
+	log.Printf("[IPCheck] Direct check success! IP: %s", info.IP)
+	return info, nil
 }

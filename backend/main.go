@@ -401,6 +401,29 @@ const (
 	indexCacheControlHeader  = "no-cache, max-age=0, must-revalidate"
 )
 
+func upsertIndexMetaTag(indexContent []byte, metaName string, metaTag string) []byte {
+	metaMarker := []byte(fmt.Sprintf(`name="%s"`, metaName))
+	updated := false
+
+	if idx := bytes.Index(indexContent, metaMarker); idx >= 0 {
+		start := bytes.LastIndex(indexContent[:idx], []byte("<meta"))
+		if start >= 0 {
+			endRel := bytes.IndexByte(indexContent[idx:], '>')
+			if endRel >= 0 {
+				end := idx + endRel + 1
+				indexContent = append(indexContent[:start], append([]byte(metaTag), indexContent[end:]...)...)
+				updated = true
+			}
+		}
+	}
+
+	if !updated && bytes.Contains(indexContent, []byte("</head>")) {
+		indexContent = bytes.Replace(indexContent, []byte("</head>"), []byte(metaTag+"\n  </head>"), 1)
+	}
+
+	return indexContent
+}
+
 func registerFrontendRoutes(r *gin.Engine, frontendDistDir string, appVersion string) error {
 	assetsFS, sourceName, err := frontendAssetFS(frontendDistDir)
 	if err != nil {
@@ -417,23 +440,22 @@ func registerFrontendRoutes(r *gin.Engine, frontendDistDir string, appVersion st
 		log.Printf("Invalid SBPM_NODES_VIRTUAL_THRESHOLD=%d, using default 50", nodesVirtualThreshold)
 		nodesVirtualThreshold = 50
 	}
-	metaName := []byte(`name="sbpm-nodes-virtual-threshold"`)
-	meta := fmt.Sprintf(`    <meta name="sbpm-nodes-virtual-threshold" content="%d" />`, nodesVirtualThreshold)
-	thresholdUpdated := false
-	if idx := bytes.Index(indexContent, metaName); idx >= 0 {
-		start := bytes.LastIndex(indexContent[:idx], []byte("<meta"))
-		if start >= 0 {
-			endRel := bytes.IndexByte(indexContent[idx:], '>')
-			if endRel >= 0 {
-				end := idx + endRel + 1
-				indexContent = append(indexContent[:start], append([]byte(meta), indexContent[end:]...)...)
-				thresholdUpdated = true
-			}
-		}
+	nodesVirtualThresholdMeta := fmt.Sprintf(
+		`    <meta name="sbpm-nodes-virtual-threshold" content="%d" />`,
+		nodesVirtualThreshold,
+	)
+	indexContent = upsertIndexMetaTag(indexContent, "sbpm-nodes-virtual-threshold", nodesVirtualThresholdMeta)
+
+	batchCheckIPConcurrency := readIntEnv("SBPM_BATCH_CHECK_IP_CONCURRENCY", 10)
+	if batchCheckIPConcurrency < 1 {
+		log.Printf("Invalid SBPM_BATCH_CHECK_IP_CONCURRENCY=%d, using default 10", batchCheckIPConcurrency)
+		batchCheckIPConcurrency = 10
 	}
-	if !thresholdUpdated && bytes.Contains(indexContent, []byte("</head>")) {
-		indexContent = bytes.Replace(indexContent, []byte("</head>"), []byte(meta+"\n  </head>"), 1)
-	}
+	batchCheckIPConcurrencyMeta := fmt.Sprintf(
+		`    <meta name="sbpm-batch-check-ip-concurrency" content="%d" />`,
+		batchCheckIPConcurrency,
+	)
+	indexContent = upsertIndexMetaTag(indexContent, "sbpm-batch-check-ip-concurrency", batchCheckIPConcurrencyMeta)
 
 	indexFingerprint := calcContentFingerprint(indexContent)
 	indexETag := fmt.Sprintf("\"sbpm-%s\"", indexFingerprint)
