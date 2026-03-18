@@ -493,6 +493,8 @@ const run = async () => {
 
     const primaryToolbarRect = await getRect(page, '[data-testid="dashboard-toolbar-primary"]')
     const selectionToolbarRect = await getRect(page, '[data-testid="dashboard-toolbar-selection"]')
+    const addButtonRect = await getRect(page, '[data-testid="nodes-add-node"]')
+    const batchExportRect = await getRect(page, '[data-testid="nodes-batch-export"]')
     assert(
       selectionToolbarRect.top > primaryToolbarRect.top + 4,
       `Expected batch toolbar to render below primary toolbar, got primary=${JSON.stringify(primaryToolbarRect)} selection=${JSON.stringify(selectionToolbarRect)}`
@@ -500,6 +502,10 @@ const run = async () => {
     assert(
       Math.abs(selectionToolbarRect.left - primaryToolbarRect.left) <= 1.5,
       `Expected batch toolbar to align left with primary toolbar, got primary=${JSON.stringify(primaryToolbarRect)} selection=${JSON.stringify(selectionToolbarRect)}`
+    )
+    assert(
+      Math.abs(addButtonRect.left - batchExportRect.left) <= 1.5,
+      `Expected batch export button to align with add button, got add=${JSON.stringify(addButtonRect)} export=${JSON.stringify(batchExportRect)}`
     )
 
     await page.click('[data-testid="nodes-batch-delete"]')

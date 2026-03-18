@@ -257,6 +257,22 @@ body {
   max-width: 100%;
 }
 
+.dashboard-toolbar-row--selection {
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+.dashboard-toolbar-actions--selection.ant-space {
+  flex: 1 1 0;
+  width: auto;
+  min-width: 0;
+}
+
+.dashboard-toolbar-selection-count.ant-tag {
+  margin: 0;
+  align-self: flex-start;
+}
+
 .dashboard-nodes-viewport {
   flex: 1 1 auto;
   min-height: 0;

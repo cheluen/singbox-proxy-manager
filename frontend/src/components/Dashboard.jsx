@@ -2112,6 +2112,7 @@ function Dashboard({ onLogout }) {
                 type="primary"
                 icon={<PlusOutlined />}
                 onClick={handleCreateNode}
+                data-testid="nodes-add-node"
               >
                 {t('add_node')}
               </Button>
@@ -2295,9 +2296,9 @@ function Dashboard({ onLogout }) {
               className="dashboard-toolbar-row dashboard-toolbar-row--selection"
               data-testid="dashboard-toolbar-selection"
             >
-              <Space wrap size={[12, 12]} className="dashboard-toolbar-actions">
-                <Tag color="blue">{t('selected_count').replace('{{count}}', selectedNodeIds.length)}</Tag>
+              <Space wrap size={[12, 12]} className="dashboard-toolbar-actions dashboard-toolbar-actions--selection">
                 <Button
+                  data-testid="nodes-batch-export"
                   icon={<ExportOutlined />}
                   onClick={handleBatchExport}
                   loading={exportLoading}
@@ -2335,6 +2336,13 @@ function Dashboard({ onLogout }) {
                   </Button>
                 </Popconfirm>
               </Space>
+              <Tag
+                data-testid="nodes-selected-count"
+                color="blue"
+                className="dashboard-toolbar-selection-count"
+              >
+                {t('selected_count').replace('{{count}}', selectedNodeIds.length)}
+              </Tag>
             </div>
           )}
         </div>
