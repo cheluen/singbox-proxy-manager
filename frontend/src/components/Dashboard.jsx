@@ -2103,229 +2103,239 @@ function Dashboard({ onLogout }) {
 
       <Content className="dashboard-content">
         <div className="dashboard-toolbar">
-          <Space wrap>
-            <Button
-              type="primary"
-              icon={<PlusOutlined />}
-              onClick={handleCreateNode}
-            >
-              {t('add_node')}
-            </Button>
-            <Button
-              icon={<ImportOutlined />}
-              onClick={() => setImportLinkVisible(true)}
-            >
-              {t('import_node')}
-            </Button>
-            <Button
-              icon={<ImportOutlined />}
-              onClick={() => setBatchImportVisible(true)}
-            >
-              {t('batch_import')}
-            </Button>
-            <Button
-              icon={<ReloadOutlined />}
-              onClick={() => loadNodes()}
-              loading={loading}
-            >
-              {t('refresh')}
-            </Button>
-            <Space.Compact>
-              <Select
-                data-testid="nodes-filter-key"
-                value={filterDraftKey}
-                onChange={handleFilterKeyChange}
-                style={{ width: 132 }}
-                options={[
-                  { value: 'status', label: t('status') },
-                  { value: 'enabled', label: t('state_controls') },
-                  { value: 'type', label: t('node_type') },
-                  { value: 'inbound_port', label: t('inbound_port') },
-                  { value: 'name', label: t('node_name') },
-                  { value: 'remark', label: t('remark') },
-                  { value: 'node_ip', label: t('node_ip') },
-                  { value: 'location', label: t('location') },
-                  { value: 'country_code', label: t('country_code') },
-                  { value: 'username', label: t('username') },
-                  { value: 'tcp_reuse_enabled', label: t('tcp_reuse') },
-                ]}
-              />
-              {filterDraftKey === 'status' ? (
-                <Select
-                  data-testid="nodes-filter-value"
-                  value={filterDraftValue || undefined}
-                  onChange={(value) => setFilterDraftValue(value)}
-                  placeholder={t('filter_value_placeholder')}
-                  style={{ width: 170 }}
-                  allowClear
-                  options={[
-                    { value: 'healthy', label: t('status_healthy') },
-                    { value: 'unverified', label: t('status_unverified') },
-                  ]}
-                />
-              ) : filterDraftKey === 'enabled' ? (
-                <Select
-                  data-testid="nodes-filter-value"
-                  value={filterDraftValue || undefined}
-                  onChange={(value) => setFilterDraftValue(value)}
-                  placeholder={t('filter_value_placeholder')}
-                  style={{ width: 170 }}
-                  allowClear
-                  options={[
-                    { value: 'true', label: t('enabled') },
-                    { value: 'false', label: t('disabled') },
-                  ]}
-                />
-              ) : filterDraftKey === 'tcp_reuse_enabled' ? (
-                <Select
-                  data-testid="nodes-filter-value"
-                  value={filterDraftValue || undefined}
-                  onChange={(value) => setFilterDraftValue(value)}
-                  placeholder={t('filter_value_placeholder')}
-                  style={{ width: 170 }}
-                  allowClear
-                  options={[
-                    { value: 'true', label: t('enabled') },
-                    { value: 'false', label: t('disabled') },
-                  ]}
-                />
-              ) : (
-                <Input
-                  data-testid="nodes-filter-value"
-                  value={filterDraftValue}
-                  onChange={(e) => setFilterDraftValue(e.target.value)}
-                  onPressEnter={(e) => {
-                    e.preventDefault?.()
-                    handleAddOrUpdateFilter()
-                  }}
-                  placeholder={t('filter_value_placeholder')}
-                  style={{ width: 170 }}
-                  allowClear
-                />
-              )}
+          <div
+            className="dashboard-toolbar-row dashboard-toolbar-row--primary"
+            data-testid="dashboard-toolbar-primary"
+          >
+            <Space wrap size={[12, 12]} className="dashboard-toolbar-actions">
               <Button
-                data-testid="nodes-filter-add"
-                icon={<FilterOutlined />}
-                onClick={handleAddOrUpdateFilter}
-                disabled={!filterDraftKey || !String(filterDraftValue || '').trim()}
+                type="primary"
+                icon={<PlusOutlined />}
+                onClick={handleCreateNode}
               >
-                {t('add_filter')}
+                {t('add_node')}
               </Button>
               <Button
-                data-testid="nodes-filter-clear"
-                onClick={handleClearFilters}
-                disabled={nodeFilters.length === 0}
+                icon={<ImportOutlined />}
+                onClick={() => setImportLinkVisible(true)}
               >
-                {t('clear_filters')}
+                {t('import_node')}
               </Button>
-            </Space.Compact>
-            {nodeFilters.length > 0 && (
-              <Space size={[4, 4]} wrap>
-                {nodeFilters.map((filter) => {
-                  const key = String(filter?.key || '').trim()
-                  const value = String(filter?.value ?? '').trim()
-                  const keyLabel =
-                    key === 'status'
-                      ? t('status')
-                      : key === 'enabled'
-                        ? t('state_controls')
-                        : key === 'type'
-                          ? t('node_type')
-                          : key === 'inbound_port'
-                            ? t('inbound_port')
-                            : key === 'name'
-                              ? t('node_name')
-                              : key === 'remark'
-                                ? t('remark')
-                                : key === 'node_ip'
-                                  ? t('node_ip')
-                                  : key === 'location'
-                                    ? t('location')
-                                    : key === 'country_code'
-                                      ? t('country_code')
-                                      : key === 'username'
-                                        ? t('username')
-                                        : key === 'tcp_reuse_enabled'
-                                          ? t('tcp_reuse')
-                                          : key
-                  const valueLabel =
-                    key === 'status'
-                      ? value === 'healthy'
-                        ? t('status_healthy')
-                        : value === 'unverified'
-                          ? t('status_unverified')
-                          : value
-                      : key === 'enabled' || key === 'tcp_reuse_enabled'
-                        ? value === 'true'
-                          ? t('enabled')
-                          : value === 'false'
-                            ? t('disabled')
+              <Button
+                icon={<ImportOutlined />}
+                onClick={() => setBatchImportVisible(true)}
+              >
+                {t('batch_import')}
+              </Button>
+              <Button
+                icon={<ReloadOutlined />}
+                onClick={() => loadNodes()}
+                loading={loading}
+              >
+                {t('refresh')}
+              </Button>
+              <Space.Compact>
+                <Select
+                  data-testid="nodes-filter-key"
+                  value={filterDraftKey}
+                  onChange={handleFilterKeyChange}
+                  style={{ width: 132 }}
+                  options={[
+                    { value: 'status', label: t('status') },
+                    { value: 'enabled', label: t('state_controls') },
+                    { value: 'type', label: t('node_type') },
+                    { value: 'inbound_port', label: t('inbound_port') },
+                    { value: 'name', label: t('node_name') },
+                    { value: 'remark', label: t('remark') },
+                    { value: 'node_ip', label: t('node_ip') },
+                    { value: 'location', label: t('location') },
+                    { value: 'country_code', label: t('country_code') },
+                    { value: 'username', label: t('username') },
+                    { value: 'tcp_reuse_enabled', label: t('tcp_reuse') },
+                  ]}
+                />
+                {filterDraftKey === 'status' ? (
+                  <Select
+                    data-testid="nodes-filter-value"
+                    value={filterDraftValue || undefined}
+                    onChange={(value) => setFilterDraftValue(value)}
+                    placeholder={t('filter_value_placeholder')}
+                    style={{ width: 170 }}
+                    allowClear
+                    options={[
+                      { value: 'healthy', label: t('status_healthy') },
+                      { value: 'unverified', label: t('status_unverified') },
+                    ]}
+                  />
+                ) : filterDraftKey === 'enabled' ? (
+                  <Select
+                    data-testid="nodes-filter-value"
+                    value={filterDraftValue || undefined}
+                    onChange={(value) => setFilterDraftValue(value)}
+                    placeholder={t('filter_value_placeholder')}
+                    style={{ width: 170 }}
+                    allowClear
+                    options={[
+                      { value: 'true', label: t('enabled') },
+                      { value: 'false', label: t('disabled') },
+                    ]}
+                  />
+                ) : filterDraftKey === 'tcp_reuse_enabled' ? (
+                  <Select
+                    data-testid="nodes-filter-value"
+                    value={filterDraftValue || undefined}
+                    onChange={(value) => setFilterDraftValue(value)}
+                    placeholder={t('filter_value_placeholder')}
+                    style={{ width: 170 }}
+                    allowClear
+                    options={[
+                      { value: 'true', label: t('enabled') },
+                      { value: 'false', label: t('disabled') },
+                    ]}
+                  />
+                ) : (
+                  <Input
+                    data-testid="nodes-filter-value"
+                    value={filterDraftValue}
+                    onChange={(e) => setFilterDraftValue(e.target.value)}
+                    onPressEnter={(e) => {
+                      e.preventDefault?.()
+                      handleAddOrUpdateFilter()
+                    }}
+                    placeholder={t('filter_value_placeholder')}
+                    style={{ width: 170 }}
+                    allowClear
+                  />
+                )}
+                <Button
+                  data-testid="nodes-filter-add"
+                  icon={<FilterOutlined />}
+                  onClick={handleAddOrUpdateFilter}
+                  disabled={!filterDraftKey || !String(filterDraftValue || '').trim()}
+                >
+                  {t('add_filter')}
+                </Button>
+                <Button
+                  data-testid="nodes-filter-clear"
+                  onClick={handleClearFilters}
+                  disabled={nodeFilters.length === 0}
+                >
+                  {t('clear_filters')}
+                </Button>
+              </Space.Compact>
+              {nodeFilters.length > 0 && (
+                <Space size={[4, 4]} wrap>
+                  {nodeFilters.map((filter) => {
+                    const key = String(filter?.key || '').trim()
+                    const value = String(filter?.value ?? '').trim()
+                    const keyLabel =
+                      key === 'status'
+                        ? t('status')
+                        : key === 'enabled'
+                          ? t('state_controls')
+                          : key === 'type'
+                            ? t('node_type')
+                            : key === 'inbound_port'
+                              ? t('inbound_port')
+                              : key === 'name'
+                                ? t('node_name')
+                                : key === 'remark'
+                                  ? t('remark')
+                                  : key === 'node_ip'
+                                    ? t('node_ip')
+                                    : key === 'location'
+                                      ? t('location')
+                                      : key === 'country_code'
+                                        ? t('country_code')
+                                        : key === 'username'
+                                          ? t('username')
+                                          : key === 'tcp_reuse_enabled'
+                                            ? t('tcp_reuse')
+                                            : key
+                    const valueLabel =
+                      key === 'status'
+                        ? value === 'healthy'
+                          ? t('status_healthy')
+                          : value === 'unverified'
+                            ? t('status_unverified')
                             : value
-                        : value
+                        : key === 'enabled' || key === 'tcp_reuse_enabled'
+                          ? value === 'true'
+                            ? t('enabled')
+                            : value === 'false'
+                              ? t('disabled')
+                              : value
+                          : value
 
-                  return (
-                    <Tag
-                      key={key}
-                      data-testid={`nodes-filter-tag-${key}`}
-                      closable
-                      onClose={() => handleRemoveFilter(key)}
-                    >
-                      {keyLabel}:{valueLabel}
-                    </Tag>
-                  )
-                })}
-              </Space>
-            )}
-            {!dragSortAllowed && nodeFilters.length > 0 && (
-              <Tooltip title={t('drag_sort_disabled_filtered')}>
-                <Tag color="red" style={{ margin: 0 }}>
-                  {t('drag_sort')}
-                </Tag>
-              </Tooltip>
-            )}
-          </Space>
+                    return (
+                      <Tag
+                        key={key}
+                        data-testid={`nodes-filter-tag-${key}`}
+                        closable
+                        onClose={() => handleRemoveFilter(key)}
+                      >
+                        {keyLabel}:{valueLabel}
+                      </Tag>
+                    )
+                  })}
+                </Space>
+              )}
+              {!dragSortAllowed && nodeFilters.length > 0 && (
+                <Tooltip title={t('drag_sort_disabled_filtered')}>
+                  <Tag color="red" style={{ margin: 0 }}>
+                    {t('drag_sort')}
+                  </Tag>
+                </Tooltip>
+              )}
+            </Space>
+          </div>
 
           {selectedNodeIds.length > 0 && (
-            <Space wrap>
-              <Tag color="blue">{t('selected_count').replace('{{count}}', selectedNodeIds.length)}</Tag>
-              <Button
-                icon={<ExportOutlined />}
-                onClick={handleBatchExport}
-                loading={exportLoading}
-              >
-                {t('batch_export')}
-              </Button>
-              <Button
-                icon={<ThunderboltOutlined />}
-                onClick={handleBatchCheckIP}
-                loading={checkingIP}
-              >
-                {t('batch_check_ip')}
-              </Button>
-              <Button
-                onClick={() => setBatchAuthVisible(true)}
-              >
-                {t('set_auth')}
-              </Button>
-              <Button
-                icon={<FilterOutlined />}
-                onClick={handleDeduplicateOutbounds}
-                loading={dedupLoading}
-                disabled={dedupLoading}
-              >
-                {t('outbound_dedup')}
-              </Button>
-              <Popconfirm
-                title={t('batch_delete_confirm').replace('{{count}}', selectedNodeIds.length)}
-                onConfirm={handleBatchDelete}
-                okText={t('confirm')}
-                cancelText={t('cancel')}
-              >
-                <Button data-testid="nodes-batch-delete" danger icon={<DeleteOutlined />}>
-                  {t('batch_delete')}
+            <div
+              className="dashboard-toolbar-row dashboard-toolbar-row--selection"
+              data-testid="dashboard-toolbar-selection"
+            >
+              <Space wrap size={[12, 12]} className="dashboard-toolbar-actions">
+                <Tag color="blue">{t('selected_count').replace('{{count}}', selectedNodeIds.length)}</Tag>
+                <Button
+                  icon={<ExportOutlined />}
+                  onClick={handleBatchExport}
+                  loading={exportLoading}
+                >
+                  {t('batch_export')}
                 </Button>
-              </Popconfirm>
-            </Space>
+                <Button
+                  icon={<ThunderboltOutlined />}
+                  onClick={handleBatchCheckIP}
+                  loading={checkingIP}
+                >
+                  {t('batch_check_ip')}
+                </Button>
+                <Button
+                  onClick={() => setBatchAuthVisible(true)}
+                >
+                  {t('set_auth')}
+                </Button>
+                <Button
+                  icon={<FilterOutlined />}
+                  onClick={handleDeduplicateOutbounds}
+                  loading={dedupLoading}
+                  disabled={dedupLoading}
+                >
+                  {t('outbound_dedup')}
+                </Button>
+                <Popconfirm
+                  title={t('batch_delete_confirm').replace('{{count}}', selectedNodeIds.length)}
+                  onConfirm={handleBatchDelete}
+                  okText={t('confirm')}
+                  cancelText={t('cancel')}
+                >
+                  <Button data-testid="nodes-batch-delete" danger icon={<DeleteOutlined />}>
+                    {t('batch_delete')}
+                  </Button>
+                </Popconfirm>
+              </Space>
+            </div>
           )}
         </div>
 

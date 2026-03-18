@@ -313,6 +313,17 @@ const assert = (condition, message) => {
   if (!condition) throw new Error(message)
 }
 
+const getRect = async (page, selector) =>
+  page.$eval(selector, (element) => {
+    const rect = element.getBoundingClientRect()
+    return {
+      left: rect.left,
+      top: rect.top,
+      width: rect.width,
+      height: rect.height,
+    }
+  })
+
 const getVisibleRowKeys = async (page) =>
   page.$$eval('tbody.ant-table-tbody tr[data-row-key]', (rows) =>
     rows.map((row) => row.getAttribute('data-row-key') || '')
@@ -395,6 +406,7 @@ const run = async () => {
     })
 
     const page = await browser.newPage()
+    await page.setViewport({ width: 1440, height: 960 })
     const consoleErrors = []
     page.on('console', (msg) => {
       if (msg.type() === 'error') {
@@ -476,9 +488,40 @@ const run = async () => {
     // Select-all should only affect filtered rows, and batch delete should only delete within scope.
     await page.click('[data-testid="nodes-select-all"]')
     await page.waitForSelector('[data-testid="nodes-batch-delete"]', { timeout: 10000 })
+    await page.waitForSelector('[data-testid="dashboard-toolbar-selection"]', { timeout: 10000 })
+    await sleep(300)
+
+    const primaryToolbarRect = await getRect(page, '[data-testid="dashboard-toolbar-primary"]')
+    const selectionToolbarRect = await getRect(page, '[data-testid="dashboard-toolbar-selection"]')
+    assert(
+      selectionToolbarRect.top > primaryToolbarRect.top + 4,
+      `Expected batch toolbar to render below primary toolbar, got primary=${JSON.stringify(primaryToolbarRect)} selection=${JSON.stringify(selectionToolbarRect)}`
+    )
+    assert(
+      Math.abs(selectionToolbarRect.left - primaryToolbarRect.left) <= 1.5,
+      `Expected batch toolbar to align left with primary toolbar, got primary=${JSON.stringify(primaryToolbarRect)} selection=${JSON.stringify(selectionToolbarRect)}`
+    )
+
     await page.click('[data-testid="nodes-batch-delete"]')
     await page.waitForSelector('.ant-popconfirm', { timeout: 10000 })
-    await page.click('.ant-popconfirm-buttons button.ant-btn-primary')
+    await page.waitForSelector('.ant-popconfirm-buttons button.ant-btn-primary:not([disabled])', {
+      timeout: 10000,
+    })
+    await page.evaluate(() => {
+      const confirmButtons = Array.from(
+        document.querySelectorAll('.ant-popconfirm-buttons button.ant-btn-primary:not([disabled])')
+      ).filter((button) => {
+        if (!(button instanceof HTMLElement)) {
+          return false
+        }
+        return button.offsetParent !== null
+      })
+      const target = confirmButtons[confirmButtons.length - 1]
+      if (!target) {
+        throw new Error('popconfirm primary button not found')
+      }
+      target.click()
+    })
     await sleep(1200)
 
     const stateAfterBatchDelete = mockApi.getState()
