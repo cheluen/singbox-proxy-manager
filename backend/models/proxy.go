@@ -17,7 +17,7 @@ type ProxyNode struct {
 	ID          int    `json:"id"`
 	Name        string `json:"name"`
 	Remark      string `json:"remark"`
-	Type        string `json:"type"`   // ss, vless, vmess, hy2, tuic, trojan, anytls, socks5, http, direct
+	Type        string `json:"type"`   // ss, vless, vmess, hy2, tuic, trojan, anytls, socks5, http, wireguard, direct
 	Config      string `json:"config"` // JSON string of protocol-specific config
 	InboundPort int    `json:"inbound_port"`
 	Username    string `json:"username"`
@@ -219,6 +219,43 @@ type HTTPProxyConfig struct {
 	TLS        bool   `json:"tls,omitempty"`
 	Insecure   bool   `json:"insecure,omitempty"`
 	SNI        string `json:"sni,omitempty"`
+}
+
+// WireGuardPeerConfig represents a single peer configuration for WireGuard.
+type WireGuardPeerConfig struct {
+	Server       string   `json:"server,omitempty"`
+	ServerPort   int      `json:"server_port,omitempty"`
+	PublicKey    string   `json:"public_key"`
+	PreSharedKey string   `json:"pre_shared_key,omitempty"`
+	AllowedIPs   []string `json:"allowed_ips,omitempty"`
+	Reserved     []uint8  `json:"reserved,omitempty"`
+}
+
+// WireGuardConfig represents sing-box wireguard outbound configuration.
+// The structure keeps a small set of app-level compatibility fields
+// (allowed_ips, domain_resolver_strategy) that are converted when generating
+// the final sing-box config.
+type WireGuardConfig struct {
+	Server                 string                `json:"server,omitempty"`
+	ServerPort             int                   `json:"server_port,omitempty"`
+	SystemInterface        bool                  `json:"system_interface,omitempty"`
+	InterfaceName          string                `json:"interface_name,omitempty"`
+	LocalAddress           []string              `json:"local_address"`
+	PrivateKey             string                `json:"private_key"`
+	PeerPublicKey          string                `json:"peer_public_key,omitempty"`
+	PreSharedKey           string                `json:"pre_shared_key,omitempty"`
+	AllowedIPs             []string              `json:"allowed_ips,omitempty"`
+	Reserved               []uint8               `json:"reserved,omitempty"`
+	Workers                int                   `json:"workers,omitempty"`
+	MTU                    int                   `json:"mtu,omitempty"`
+	Network                string                `json:"network,omitempty"`
+	Detour                 string                `json:"detour,omitempty"`
+	DomainResolver         string                `json:"domain_resolver,omitempty"`
+	DomainResolverStrategy string                `json:"domain_resolver_strategy,omitempty"`
+	RoutingMark            string                `json:"routing_mark,omitempty"`
+	UDPFragment            *bool                 `json:"udp_fragment,omitempty"`
+	ConnectTimeout         string                `json:"connect_timeout,omitempty"`
+	Peers                  []WireGuardPeerConfig `json:"peers,omitempty"`
 }
 
 // Settings represents global settings
@@ -466,6 +503,8 @@ func (p *ProxyNode) ParseConfig() (interface{}, error) {
 		config = &SOCKS5Config{}
 	case "http":
 		config = &HTTPProxyConfig{}
+	case "wireguard":
+		config = &WireGuardConfig{}
 	default:
 		return nil, nil
 	}

@@ -17,6 +17,7 @@ export default {
   stop: 'Stop',
   frontend_build: 'Frontend build',
   frontend_version_mismatch: 'Version mismatch detected: backend {{server}} / frontend {{client}}. Confirm frontend deployment is complete.',
+  official_repository: 'Official GitHub',
   
   // Login
   login_title: 'Admin Login',
@@ -89,7 +90,7 @@ export default {
   
   // Batch Operations
   batch_import_title: 'Batch Import Nodes',
-  batch_import_desc: 'Supports: share links (one per line), Base64 subscription, Clash Meta YAML, or subscription URL (http/https). Protocols: SS, VLESS, VMess, Trojan, Hysteria2, TUIC, SOCKS5, HTTP, AnyTLS',
+  batch_import_desc: 'Supports: share links (one per line), Base64 subscription, Clash Meta YAML, or subscription URL (http/https). Protocols: SS, VLESS, VMess, Trojan, Hysteria2, TUIC, SOCKS5, HTTP, AnyTLS, Cloudflare WireGuard',
   paste_links: 'Paste share links / subscription',
   import_success: 'Successfully imported {{count}} nodes',
   import_failed: 'Failed to import {{count}} nodes',

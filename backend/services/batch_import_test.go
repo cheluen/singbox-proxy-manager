@@ -173,3 +173,57 @@ func TestExpandBatchImportSources_SubscriptionURL(t *testing.T) {
 		t.Fatalf("expected 2 items, got %d", len(items))
 	}
 }
+
+func TestExpandBatchImportSources_ClashMetaYAMLWireGuard(t *testing.T) {
+	yaml := `
+proxies:
+  - name: "WARP"
+    type: wireguard
+    server: engage.cloudflareclient.com
+    port: 2408
+    ip: 172.16.0.2
+    ipv6: "2606:4700:110:8765::2"
+    private-key: private-key
+    public-key: peer-public-key
+    allowed-ips: ["0.0.0.0/0", "::/0"]
+    reserved: [162, 104, 222]
+    mtu: 1280
+    udp: true
+    dialer-proxy: warp-selector
+`
+
+	items, failures, err := ExpandBatchImportSources(context.Background(), []string{yaml})
+	if err != nil {
+		t.Fatalf("ExpandBatchImportSources: %v", err)
+	}
+	if len(failures) != 0 {
+		t.Fatalf("unexpected failures: %+v", failures)
+	}
+	if len(items) != 1 {
+		t.Fatalf("expected 1 item, got %d", len(items))
+	}
+
+	item := items[0]
+	if item.Type != "wireguard" {
+		t.Fatalf("unexpected type: %+v", item)
+	}
+	cfg, ok := item.Config.(models.WireGuardConfig)
+	if !ok {
+		t.Fatalf("wireguard config type mismatch: %T", item.Config)
+	}
+	if cfg.Server != "engage.cloudflareclient.com" || cfg.ServerPort != 2408 {
+		t.Fatalf("unexpected endpoint: %+v", cfg)
+	}
+	if len(cfg.LocalAddress) != 2 || cfg.LocalAddress[0] != "172.16.0.2/32" {
+		t.Fatalf("unexpected local addresses: %+v", cfg.LocalAddress)
+	}
+	if len(cfg.AllowedIPs) != 2 || cfg.Network != "udp" {
+		t.Fatalf("unexpected wireguard config: %+v", cfg)
+	}
+	if len(cfg.Reserved) != 3 || cfg.Reserved[2] != 222 {
+		t.Fatalf("unexpected reserved bytes: %+v", cfg.Reserved)
+	}
+	if cfg.Detour != "warp-selector" {
+		t.Fatalf("unexpected detour: %+v", cfg)
+	}
+}

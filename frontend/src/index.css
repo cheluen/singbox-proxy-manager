@@ -153,6 +153,23 @@ body {
   border: 1px solid rgba(131, 146, 162, 0.28);
 }
 
+.login-brand-links {
+  margin-top: 6px;
+}
+
+.login-brand-link.ant-typography {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  font-weight: 600;
+  color: #506071;
+}
+
+.login-brand-link-url {
+  font-size: 13px;
+  color: rgba(80, 96, 113, 0.82);
+}
+
 .login-panel {
   padding: 38px 38px 34px;
   display: flex;
@@ -299,6 +316,17 @@ body {
   min-width: 0;
 }
 
+.dashboard-brand-meta {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.dashboard-brand-title-row.ant-space {
+  row-gap: 6px;
+}
+
 .dashboard-logo-shell {
   width: 38px;
   height: 38px;
@@ -323,6 +351,23 @@ body {
   max-width: 420px;
 }
 
+.dashboard-repo-link.ant-typography {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: rgba(249, 251, 252, 0.94) !important;
+  font-weight: 600;
+}
+
+.dashboard-repo-link.ant-typography:hover {
+  color: #ffffff !important;
+}
+
+.dashboard-repo-url.ant-typography {
+  color: rgba(244, 247, 250, 0.78);
+  font-size: 12px;
+}
+
 .dashboard-actions .ant-btn {
   border-color: rgba(236, 241, 245, 0.42);
 }
@@ -341,6 +386,11 @@ body {
 
   .login-brand-subtitle {
     max-width: 100%;
+  }
+
+  .login-brand-link {
+    justify-content: center;
+    flex-wrap: wrap;
   }
 
   .login-panel {
@@ -362,6 +412,10 @@ body {
   .dashboard-title.ant-typography {
     font-size: 17px !important;
     max-width: 200px;
+  }
+
+  .dashboard-brand-meta {
+    width: 100%;
   }
 }
 

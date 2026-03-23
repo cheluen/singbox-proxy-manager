@@ -35,6 +35,7 @@ import {
   StopOutlined,
   HolderOutlined,
   FilterOutlined,
+  GithubOutlined,
 } from '@ant-design/icons'
 import { useTranslation } from 'react-i18next'
 import { DragDropContext, Droppable, Draggable } from 'react-beautiful-dnd'
@@ -47,6 +48,7 @@ import {
 import NodeForm from './NodeForm'
 import SettingsForm from './SettingsForm'
 import BatchAuthModal from './BatchAuthModal'
+import { OFFICIAL_GITHUB_URL } from '../constants/project'
 
 const { Header, Content } = Layout
 const { Title, Text } = Typography
@@ -2064,16 +2066,32 @@ function Dashboard({ onLogout }) {
 	                className="dashboard-logo"
 	              />
 	            </span>
-	            <Title level={3} className="dashboard-title">
-	              {t('app_title')}
-	            </Title>
-	            <Tooltip
-	              title={`${t('frontend_build')}: ${frontendBuildVersion} (${frontendBuildFingerprint})`}
-	            >
-	              <Tag color="blue">
-	                {t('version')} {appVersion || '-'}
-	              </Tag>
-	            </Tooltip>
+	            <div className="dashboard-brand-meta">
+	              <Space size={[8, 8]} wrap className="dashboard-brand-title-row">
+	                <Title level={3} className="dashboard-title">
+	                  {t('app_title')}
+	                </Title>
+	                <Typography.Link
+	                  href={OFFICIAL_GITHUB_URL}
+	                  target="_blank"
+	                  rel="noreferrer"
+	                  className="dashboard-repo-link"
+	                >
+	                  <GithubOutlined />
+	                  <span>{t('official_repository')}</span>
+	                </Typography.Link>
+	                <Tooltip
+	                  title={`${t('frontend_build')}: ${frontendBuildVersion} (${frontendBuildFingerprint})`}
+	                >
+	                  <Tag color="blue">
+	                    {t('version')} {appVersion || '-'}
+	                  </Tag>
+	                </Tooltip>
+	              </Space>
+	              <Text className="dashboard-repo-url">
+	                github.com/cheluen/singbox-proxy-manager
+	              </Text>
+	            </div>
 	          </div>
 	          <Space className="dashboard-actions">
 	            <Select

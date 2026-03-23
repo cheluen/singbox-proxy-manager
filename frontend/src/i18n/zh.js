@@ -17,6 +17,7 @@ export default {
   stop: '停止',
   frontend_build: '前端构建',
   frontend_version_mismatch: '检测到版本不一致，后端 {{server}} / 前端 {{client}}。请确认已完成前端发布。',
+  official_repository: '官方 GitHub',
   
   // Login
   login_title: '管理员登录',
@@ -89,7 +90,7 @@ export default {
   
   // Batch Operations
   batch_import_title: '批量导入节点',
-  batch_import_desc: '支持：每行分享链接 / Base64 订阅 / Clash Meta YAML / 订阅URL（http/https）。协议：SS、VLESS、VMess、Trojan、Hysteria2、TUIC、SOCKS5、HTTP、AnyTLS',
+  batch_import_desc: '支持：每行分享链接 / Base64 订阅 / Clash Meta YAML / 订阅URL（http/https）。协议：SS、VLESS、VMess、Trojan、Hysteria2、TUIC、SOCKS5、HTTP、AnyTLS、Cloudflare WireGuard',
   paste_links: '粘贴分享链接/订阅内容/订阅URL',
   import_success: '成功导入 {{count}} 个节点',
   import_failed: '{{count}} 个节点导入失败',

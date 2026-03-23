@@ -1,8 +1,9 @@
 import React, { useEffect, useState } from 'react'
 import { Form, Input, Button, Typography, message, Select } from 'antd'
-import { LockOutlined } from '@ant-design/icons'
+import { GithubOutlined, LockOutlined } from '@ant-design/icons'
 import { useTranslation } from 'react-i18next'
 import api from '../utils/api'
+import { OFFICIAL_GITHUB_URL } from '../constants/project'
 
 const { Title } = Typography
 
@@ -92,6 +93,18 @@ function Login({ onLogin }) {
             <span>{t('settings')}</span>
             <span>•</span>
             <span>{t('batch_check_ip')}</span>
+          </div>
+          <div className="login-brand-links">
+            <Typography.Link
+              href={OFFICIAL_GITHUB_URL}
+              target="_blank"
+              rel="noreferrer"
+              className="login-brand-link"
+            >
+              <GithubOutlined />
+              <span>{t('official_repository')}</span>
+              <span className="login-brand-link-url">github.com/cheluen/singbox-proxy-manager</span>
+            </Typography.Link>
           </div>
         </div>
         <div className="login-panel">

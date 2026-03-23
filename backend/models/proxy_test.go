@@ -2,6 +2,7 @@ package models
 
 import (
 	"database/sql"
+	"encoding/json"
 	"testing"
 	"time"
 
@@ -132,5 +133,46 @@ func TestInitDBProxyNodeTCPReuseEnabledDefaultsToTrue(t *testing.T) {
 	}
 	if tcpReuseEnabled != 1 {
 		t.Fatalf("expected tcp_reuse_enabled default to 1, got %d", tcpReuseEnabled)
+	}
+}
+
+func TestProxyNodeParseConfigWireGuard(t *testing.T) {
+	rawConfig := WireGuardConfig{
+		Server:         "engage.cloudflareclient.com",
+		ServerPort:     2408,
+		LocalAddress:   []string{"172.16.0.2/32", "2606:4700:110:8765::2/128"},
+		PrivateKey:     "private-key",
+		PeerPublicKey:  "peer-public-key",
+		AllowedIPs:     []string{"0.0.0.0/0", "::/0"},
+		Reserved:       []uint8{162, 104, 222},
+		DomainResolver: "local",
+	}
+	configJSON, err := json.Marshal(rawConfig)
+	if err != nil {
+		t.Fatalf("marshal config: %v", err)
+	}
+
+	node := ProxyNode{
+		Type:   "wireguard",
+		Config: string(configJSON),
+	}
+
+	parsed, err := node.ParseConfig()
+	if err != nil {
+		t.Fatalf("ParseConfig failed: %v", err)
+	}
+
+	cfg, ok := parsed.(*WireGuardConfig)
+	if !ok {
+		t.Fatalf("unexpected config type: %T", parsed)
+	}
+	if cfg.Server != rawConfig.Server || cfg.ServerPort != rawConfig.ServerPort {
+		t.Fatalf("unexpected endpoint: %+v", cfg)
+	}
+	if len(cfg.LocalAddress) != 2 || cfg.LocalAddress[0] != "172.16.0.2/32" {
+		t.Fatalf("unexpected local addresses: %+v", cfg.LocalAddress)
+	}
+	if len(cfg.Reserved) != 3 || cfg.Reserved[0] != 162 || cfg.Reserved[2] != 222 {
+		t.Fatalf("unexpected reserved: %+v", cfg.Reserved)
 	}
 }

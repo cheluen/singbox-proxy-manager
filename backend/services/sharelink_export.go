@@ -40,6 +40,8 @@ func BuildShareLink(node models.ProxyNode) (string, error) {
 		return buildSOCKS5ShareLink(node.Name, parsedConfig.(*models.SOCKS5Config))
 	case "http":
 		return buildHTTPProxyShareLink(node.Name, parsedConfig.(*models.HTTPProxyConfig))
+	case "wireguard":
+		return buildWireGuardShareLink(node.Name, parsedConfig.(*models.WireGuardConfig))
 	default:
 		return "", fmt.Errorf("unsupported proxy type: %s", node.Type)
 	}
@@ -426,6 +428,106 @@ func buildHTTPProxyShareLink(name string, cfg *models.HTTPProxyConfig) (string, 
 	}
 	u.RawQuery = q.Encode()
 
+	u.Fragment = strings.TrimSpace(name)
+	return u.String(), nil
+}
+
+func buildWireGuardShareLink(name string, cfg *models.WireGuardConfig) (string, error) {
+	peer, ok := wireGuardSinglePeerFromConfig(cfg)
+	if !ok {
+		return "", fmt.Errorf("wireguard export requires a single peer")
+	}
+
+	u := &url.URL{
+		Scheme: "wireguard",
+		Host:   net.JoinHostPort(peer.Server, strconv.Itoa(peer.ServerPort)),
+		User:   url.User(cfg.PrivateKey),
+	}
+
+	params := url.Values{}
+	params.Set("publickey", peer.PublicKey)
+	if peer.PreSharedKey != "" {
+		params.Set("presharedkey", peer.PreSharedKey)
+	}
+
+	var ipv4Addresses []string
+	var ipv6Addresses []string
+	for _, address := range cfg.LocalAddress {
+		trimmed := strings.TrimSpace(address)
+		switch {
+		case strings.Contains(trimmed, ":"):
+			ipv6Addresses = append(ipv6Addresses, trimmed)
+		default:
+			ipv4Addresses = append(ipv4Addresses, trimmed)
+		}
+	}
+
+	switch {
+	case len(ipv4Addresses) == 1:
+		params.Set("ip", ipv4Addresses[0])
+	case len(ipv4Addresses) > 1:
+		params.Set("address", strings.Join(ipv4Addresses, ","))
+	}
+	switch {
+	case len(ipv6Addresses) == 1:
+		params.Set("ipv6", ipv6Addresses[0])
+	case len(ipv6Addresses) > 1:
+		existing := params.Get("address")
+		combined := append([]string{}, ipv6Addresses...)
+		if existing != "" {
+			combined = append(parseWireGuardList(existing), combined...)
+		}
+		params.Set("address", strings.Join(combined, ","))
+	}
+	if params.Get("address") == "" && len(cfg.LocalAddress) > 0 {
+		params.Set("address", strings.Join(cfg.LocalAddress, ","))
+	}
+
+	if len(peer.AllowedIPs) > 0 {
+		params.Set("allowedips", strings.Join(peer.AllowedIPs, ","))
+	}
+	if reserved := formatWireGuardReserved(peer.Reserved); reserved != "" {
+		params.Set("reserved", reserved)
+	}
+	if cfg.MTU > 0 {
+		params.Set("mtu", strconv.Itoa(cfg.MTU))
+	}
+	if cfg.Workers > 0 {
+		params.Set("workers", strconv.Itoa(cfg.Workers))
+	}
+	if cfg.Network != "" {
+		params.Set("network", cfg.Network)
+	}
+	if cfg.SystemInterface {
+		params.Set("system_interface", "1")
+	}
+	if cfg.InterfaceName != "" {
+		params.Set("interface_name", cfg.InterfaceName)
+	}
+	if cfg.Detour != "" {
+		params.Set("detour", cfg.Detour)
+	}
+	if cfg.DomainResolver != "" {
+		params.Set("domain_resolver", cfg.DomainResolver)
+	}
+	if cfg.DomainResolverStrategy != "" {
+		params.Set("domain_resolver_strategy", cfg.DomainResolverStrategy)
+	}
+	if cfg.RoutingMark != "" {
+		params.Set("routing_mark", cfg.RoutingMark)
+	}
+	if cfg.UDPFragment != nil {
+		if *cfg.UDPFragment {
+			params.Set("udp_fragment", "1")
+		} else {
+			params.Set("udp_fragment", "0")
+		}
+	}
+	if cfg.ConnectTimeout != "" {
+		params.Set("connect_timeout", cfg.ConnectTimeout)
+	}
+
+	u.RawQuery = params.Encode()
 	u.Fragment = strings.TrimSpace(name)
 	return u.String(), nil
 }

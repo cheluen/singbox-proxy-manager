@@ -457,6 +457,120 @@ func convertClashProxyToImportItem(proxy map[string]any) (ImportItem, error) {
 
 		return ImportItem{Source: "clash:" + name, Type: "anytls", Name: name, Config: cfg}, nil
 
+	case "wireguard", "wg":
+		privateKey := firstNonEmpty(
+			getString(proxy, "private-key"),
+			getString(proxy, "private_key"),
+			getString(proxy, "secret-key"),
+			getString(proxy, "secret_key"),
+		)
+		if privateKey == "" {
+			return ImportItem{}, fmt.Errorf("missing private-key")
+		}
+
+		localAddresses := normalizeWireGuardAddresses(append(
+			append(
+				append([]string{}, getStringSlice(proxy, "ip")...),
+				getStringSlice(proxy, "ipv6")...,
+			),
+			append(getStringSlice(proxy, "address"), getStringSlice(proxy, "local-address")...)...,
+		))
+		if len(localAddresses) == 0 {
+			return ImportItem{}, fmt.Errorf("missing local address")
+		}
+
+		cfg := models.WireGuardConfig{
+			Server:          server,
+			ServerPort:      port,
+			LocalAddress:    localAddresses,
+			PrivateKey:      privateKey,
+			PeerPublicKey:   firstNonEmpty(getString(proxy, "public-key"), getString(proxy, "public_key")),
+			PreSharedKey:    firstNonEmpty(getString(proxy, "pre-shared-key"), getString(proxy, "pre_shared_key")),
+			AllowedIPs:      firstNonEmptyStringSlice(getStringSlice(proxy, "allowed-ips"), getStringSlice(proxy, "allowed_ips")),
+			InterfaceName:   firstNonEmpty(getString(proxy, "interface-name"), getString(proxy, "interface_name"), getString(proxy, "name")),
+			Network:         getString(proxy, "network"),
+			Detour:          firstNonEmpty(getString(proxy, "dialer-proxy"), getString(proxy, "dialer_proxy")),
+			ConnectTimeout:  secondsToDurationString(proxy["connect-timeout"]),
+			RoutingMark:     getString(proxy, "routing-mark"),
+			SystemInterface: getBool(proxy, "system-interface") || getBool(proxy, "system_interface"),
+		}
+
+		if reserved, err := parseWireGuardReservedAny(proxy["reserved"]); err != nil {
+			return ImportItem{}, err
+		} else {
+			cfg.Reserved = reserved
+		}
+		if mtu := getInt(proxy, "mtu"); mtu > 0 {
+			cfg.MTU = mtu
+		}
+		if workers := getInt(proxy, "workers"); workers > 0 {
+			cfg.Workers = workers
+		}
+		if strings.TrimSpace(cfg.Network) == "" && getBool(proxy, "udp") {
+			cfg.Network = "udp"
+		}
+		if udpFragment := getBool(proxy, "udp-fragment") || getBool(proxy, "udp_fragment"); udpFragment {
+			cfg.UDPFragment = &udpFragment
+		}
+
+		if rawPeers, ok := proxy["peers"].([]any); ok && len(rawPeers) > 0 {
+			peers := make([]models.WireGuardPeerConfig, 0, len(rawPeers))
+			for _, rawPeer := range rawPeers {
+				peerMap, ok := rawPeer.(map[string]any)
+				if !ok {
+					continue
+				}
+				peerReserved, err := parseWireGuardReservedAny(peerMap["reserved"])
+				if err != nil {
+					return ImportItem{}, err
+				}
+				peer := models.WireGuardPeerConfig{
+					Server:       firstNonEmpty(getString(peerMap, "server"), getString(peerMap, "address")),
+					ServerPort:   getInt(peerMap, "port"),
+					PublicKey:    firstNonEmpty(getString(peerMap, "public-key"), getString(peerMap, "public_key")),
+					PreSharedKey: firstNonEmpty(getString(peerMap, "pre-shared-key"), getString(peerMap, "pre_shared_key")),
+					AllowedIPs:   firstNonEmptyStringSlice(getStringSlice(peerMap, "allowed-ips"), getStringSlice(peerMap, "allowed_ips")),
+					Reserved:     peerReserved,
+				}
+				peers = append(peers, peer)
+			}
+
+			switch len(peers) {
+			case 0:
+				// ignore malformed empty peers block
+			case 1:
+				peer := peers[0]
+				if cfg.Server == "" {
+					cfg.Server = peer.Server
+				}
+				if cfg.ServerPort <= 0 {
+					cfg.ServerPort = peer.ServerPort
+				}
+				if cfg.PeerPublicKey == "" {
+					cfg.PeerPublicKey = peer.PublicKey
+				}
+				if cfg.PreSharedKey == "" {
+					cfg.PreSharedKey = peer.PreSharedKey
+				}
+				if len(cfg.AllowedIPs) == 0 {
+					cfg.AllowedIPs = peer.AllowedIPs
+				}
+				if len(cfg.Reserved) == 0 {
+					cfg.Reserved = peer.Reserved
+				}
+			default:
+				cfg.Peers = peers
+			}
+		}
+
+		if len(cfg.Peers) == 0 {
+			if cfg.Server == "" || cfg.ServerPort <= 0 || cfg.PeerPublicKey == "" {
+				return ImportItem{}, fmt.Errorf("missing server/port/public-key")
+			}
+		}
+
+		return ImportItem{Source: "clash:" + name, Type: "wireguard", Name: name, Config: cfg}, nil
+
 	case "socks5", "socks":
 		cfg := models.SOCKS5Config{
 			Server:     server,
@@ -716,6 +830,20 @@ func getStringSlice(m map[string]any, key string) []string {
 		return nil
 	}
 	switch vv := v.(type) {
+	case string:
+		parts := strings.FieldsFunc(vv, func(r rune) bool {
+			return r == ',' || r == ';' || r == '\n' || r == '\r'
+		})
+		out := make([]string, 0, len(parts))
+		for _, item := range parts {
+			item = strings.TrimSpace(item)
+			if item != "" {
+				out = append(out, item)
+			}
+		}
+		return out
+	case fmt.Stringer:
+		return getStringSlice(map[string]any{key: vv.String()}, key)
 	case []any:
 		out := make([]string, 0, len(vv))
 		for _, item := range vv {
@@ -775,6 +903,25 @@ func firstNonEmpty(values ...string) string {
 		}
 	}
 	return ""
+}
+
+func firstNonEmptyStringSlice(values ...[]string) []string {
+	for _, value := range values {
+		if len(value) == 0 {
+			continue
+		}
+		out := make([]string, 0, len(value))
+		for _, item := range value {
+			item = strings.TrimSpace(item)
+			if item != "" {
+				out = append(out, item)
+			}
+		}
+		if len(out) > 0 {
+			return out
+		}
+	}
+	return nil
 }
 
 func stringifyPluginOpts(plugin string, v any) string {

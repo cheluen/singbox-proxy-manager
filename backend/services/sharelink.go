@@ -32,6 +32,8 @@ func ParseShareLink(link string) (interface{}, string, string, error) {
 		return parseAnyTLSLink(link)
 	} else if strings.HasPrefix(link, "socks5://") || strings.HasPrefix(link, "socks://") {
 		return parseSOCKS5Link(link)
+	} else if strings.HasPrefix(link, "wireguard://") || strings.HasPrefix(link, "wg://") {
+		return parseWireGuardLink(link)
 	} else if strings.HasPrefix(link, "http://") || strings.HasPrefix(link, "https://") {
 		return parseHTTPProxyLink(link)
 	}
@@ -804,4 +806,94 @@ func parseHTTPProxyLink(link string) (interface{}, string, string, error) {
 	}
 
 	return cfg, "http", name, nil
+}
+
+func parseWireGuardLink(link string) (interface{}, string, string, error) {
+	normalizedLink := strings.Replace(link, "wg://", "wireguard://", 1)
+	parsed, err := url.Parse(normalizedLink)
+	if err != nil {
+		return nil, "", "", fmt.Errorf("invalid wireguard link: %v", err)
+	}
+
+	name := "Cloudflare WireGuard"
+	if parsed.Fragment != "" {
+		name, _ = url.QueryUnescape(parsed.Fragment)
+	}
+
+	portStr := parsed.Port()
+	if portStr == "" {
+		return nil, "", "", fmt.Errorf("missing port")
+	}
+	port, err := strconv.Atoi(portStr)
+	if err != nil {
+		return nil, "", "", fmt.Errorf("invalid port")
+	}
+
+	query := parsed.Query()
+	privateKey := ""
+	if parsed.User != nil {
+		privateKey = parsed.User.Username()
+	}
+	if privateKey == "" {
+		privateKey = firstQueryValue(query, "privatekey", "private-key", "private_key", "secretkey", "secret-key")
+	}
+	if privateKey == "" {
+		return nil, "", "", fmt.Errorf("missing private key")
+	}
+
+	cfg := models.WireGuardConfig{
+		Server:         parsed.Hostname(),
+		ServerPort:     port,
+		LocalAddress:   collectWireGuardAddressesFromQuery(query),
+		PrivateKey:     privateKey,
+		PeerPublicKey:  firstQueryValue(query, "publickey", "public-key", "public_key", "peer", "peer_public_key"),
+		PreSharedKey:   firstQueryValue(query, "presharedkey", "pre-shared-key", "pre_shared_key", "psk"),
+		AllowedIPs:     parseWireGuardList(firstQueryValue(query, "allowedips", "allowed-ips", "allowed_ips")),
+		InterfaceName:  firstQueryValue(query, "interface_name", "interface-name", "name"),
+		Network:        firstQueryValue(query, "network"),
+		Detour:         firstQueryValue(query, "detour", "dialer-proxy", "dialer_proxy"),
+		DomainResolver: firstQueryValue(query, "domain_resolver", "domain-resolver"),
+		ConnectTimeout: firstQueryValue(query, "connect_timeout", "connect-timeout"),
+		RoutingMark:    firstQueryValue(query, "routing_mark", "routing-mark"),
+	}
+
+	if len(cfg.LocalAddress) == 0 {
+		return nil, "", "", fmt.Errorf("missing local address")
+	}
+	if cfg.PeerPublicKey == "" {
+		return nil, "", "", fmt.Errorf("missing peer public key")
+	}
+
+	if reserved, err := parseWireGuardReservedString(firstQueryValue(query, "reserved")); err != nil {
+		return nil, "", "", err
+	} else {
+		cfg.Reserved = reserved
+	}
+
+	if systemInterface, ok := parseWireGuardBool(firstQueryValue(query, "system_interface", "system-interface")); ok {
+		cfg.SystemInterface = *systemInterface
+	}
+	if udpFragment, ok := parseWireGuardBool(firstQueryValue(query, "udp_fragment", "udp-fragment")); ok {
+		cfg.UDPFragment = udpFragment
+	}
+	if mtu, ok := parseWireGuardInt(firstQueryValue(query, "mtu")); ok {
+		cfg.MTU = mtu
+	}
+	if workers, ok := parseWireGuardInt(firstQueryValue(query, "workers")); ok {
+		cfg.Workers = workers
+	}
+	if strings.TrimSpace(cfg.Network) == "" {
+		if udp, ok := parseWireGuardBool(firstQueryValue(query, "udp")); ok {
+			if *udp {
+				cfg.Network = "udp"
+			} else {
+				cfg.Network = "tcp"
+			}
+		}
+	}
+	if strategy := firstQueryValue(query, "domain_resolver_strategy", "domain-resolver-strategy", "resolver_strategy"); strategy != "" {
+		cfg.DomainResolverStrategy = strategy
+	}
+
+	return cfg, "wireguard", name, nil
 }

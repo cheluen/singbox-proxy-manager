@@ -1,5 +1,5 @@
 import React, { useEffect, useState } from 'react'
-import { Form, Input, Select, Button, Switch, Space, InputNumber } from 'antd'
+import { Form, Input, Select, Button, Switch, Space, InputNumber, message } from 'antd'
 import { useTranslation } from 'react-i18next'
 import api from '../utils/api'
 
@@ -17,10 +17,67 @@ const proxyTypes = [
   { value: 'anytls', label: 'AnyTLS' },
   { value: 'socks5', label: 'SOCKS5' },
   { value: 'http', label: 'HTTP Proxy' },
+  { value: 'wireguard', label: 'Cloudflare WireGuard' },
 ]
 
+const splitMultilineList = (rawValue) => {
+  if (typeof rawValue !== 'string') {
+    return []
+  }
+  return rawValue
+    .split(/[\n,;]+/)
+    .map((item) => item.trim())
+    .filter(Boolean)
+}
+
+const formatMultilineList = (items) =>
+  Array.isArray(items) && items.length > 0 ? items.join('\n') : ''
+
+const parseReservedInput = (rawValue) => {
+  if (typeof rawValue !== 'string' || rawValue.trim() === '') {
+    return []
+  }
+
+  const trimmed = rawValue.trim()
+  if (trimmed.startsWith('[')) {
+    const parsed = JSON.parse(trimmed)
+    if (!Array.isArray(parsed)) {
+      throw new Error('Reserved bytes must be an array')
+    }
+    return parsed.map((value) => {
+      const numeric = Number.parseInt(String(value), 10)
+      if (!Number.isInteger(numeric) || numeric < 0 || numeric > 255) {
+        throw new Error('Reserved bytes must be integers between 0 and 255')
+      }
+      return numeric
+    })
+  }
+
+  return splitMultilineList(trimmed).map((value) => {
+    const numeric = Number.parseInt(String(value), 10)
+    if (!Number.isInteger(numeric) || numeric < 0 || numeric > 255) {
+      throw new Error('Reserved bytes must be integers between 0 and 255')
+    }
+    return numeric
+  })
+}
+
+const formatReservedInput = (items) =>
+  Array.isArray(items) && items.length > 0 ? items.join(',') : ''
+
+const parsePeersJSON = (rawValue) => {
+  if (typeof rawValue !== 'string' || rawValue.trim() === '') {
+    return []
+  }
+  const parsed = JSON.parse(rawValue)
+  if (!Array.isArray(parsed)) {
+    throw new Error('Peers JSON must be an array')
+  }
+  return parsed
+}
+
 function NodeForm({ node, onSave, onCancel }) {
-  const { i18n } = useTranslation()
+  const { t, i18n } = useTranslation()
   const [form] = Form.useForm()
   const [proxyType, setProxyType] = useState(node?.type || 'ss')
   const [loading, setLoading] = useState(false)
@@ -79,10 +136,20 @@ function NodeForm({ node, onSave, onCancel }) {
         enabled: values.enabled !== false,
       })
     } catch (error) {
-      console.error(error)
+      message.error(error?.message || t('invalid_config'))
     } finally {
       setLoading(false)
     }
+  }
+
+  const handleProxyTypeChange = (nextType) => {
+    const currentPort = Number(form.getFieldValue('server_port') || 0)
+    if (nextType === 'wireguard' && (!currentPort || currentPort === 443)) {
+      form.setFieldsValue({ server_port: 2408 })
+    } else if (proxyType === 'wireguard' && nextType !== 'wireguard' && currentPort === 2408) {
+      form.setFieldsValue({ server_port: 443 })
+    }
+    setProxyType(nextType)
   }
 
   const buildConfig = (type, values) => {
@@ -207,6 +274,38 @@ function NodeForm({ node, onSave, onCancel }) {
           sni: values.proxy_sni || '',
           insecure: values.proxy_insecure || false,
         }
+
+      case 'wireguard': {
+        const peers = parsePeersJSON(values.wireguard_peers_json)
+        const reserved = parseReservedInput(values.wireguard_reserved)
+        return {
+          ...config,
+          local_address: splitMultilineList(values.wireguard_local_address),
+          private_key: values.wireguard_private_key,
+          peer_public_key: values.wireguard_peer_public_key || '',
+          pre_shared_key: values.wireguard_pre_shared_key || '',
+          allowed_ips: splitMultilineList(values.wireguard_allowed_ips),
+          reserved,
+          system_interface: values.wireguard_system_interface || false,
+          interface_name: values.wireguard_interface_name || '',
+          mtu: values.wireguard_mtu || 0,
+          workers: values.wireguard_workers || 0,
+          network:
+            values.wireguard_network && values.wireguard_network !== 'both'
+              ? values.wireguard_network
+              : '',
+          detour: values.wireguard_detour || '',
+          domain_resolver: values.wireguard_domain_resolver || '',
+          domain_resolver_strategy: values.wireguard_domain_resolver_strategy || '',
+          routing_mark: values.wireguard_routing_mark || '',
+          udp_fragment:
+            typeof values.wireguard_udp_fragment === 'boolean'
+              ? values.wireguard_udp_fragment
+              : undefined,
+          connect_timeout: values.wireguard_connect_timeout || '',
+          peers,
+        }
+      }
       
       default:
         return config
@@ -226,6 +325,34 @@ function NodeForm({ node, onSave, onCancel }) {
   const normalizedConfig = { ...initialConfig }
   if (Array.isArray(initialConfig.alpn)) {
     normalizedConfig.alpn = initialConfig.alpn.join(',')
+  }
+  if (node?.type === 'wireguard') {
+    const wireguardPeers = Array.isArray(initialConfig.peers) ? initialConfig.peers : []
+    const primaryPeer = wireguardPeers.length > 0 ? wireguardPeers[0] : null
+
+    if (!normalizedConfig.server && primaryPeer?.server) {
+      normalizedConfig.server = primaryPeer.server
+    }
+    if (!normalizedConfig.server_port && primaryPeer?.server_port) {
+      normalizedConfig.server_port = primaryPeer.server_port
+    }
+    if (!normalizedConfig.peer_public_key && primaryPeer?.public_key) {
+      normalizedConfig.peer_public_key = primaryPeer.public_key
+    }
+    if (!normalizedConfig.pre_shared_key && primaryPeer?.pre_shared_key) {
+      normalizedConfig.pre_shared_key = primaryPeer.pre_shared_key
+    }
+    if ((!Array.isArray(normalizedConfig.allowed_ips) || normalizedConfig.allowed_ips.length === 0) && Array.isArray(primaryPeer?.allowed_ips)) {
+      normalizedConfig.allowed_ips = primaryPeer.allowed_ips
+    }
+    if ((!Array.isArray(normalizedConfig.reserved) || normalizedConfig.reserved.length === 0) && Array.isArray(primaryPeer?.reserved)) {
+      normalizedConfig.reserved = primaryPeer.reserved
+    }
+    normalizedConfig.wireguard_local_address = formatMultilineList(initialConfig.local_address)
+    normalizedConfig.wireguard_allowed_ips = formatMultilineList(normalizedConfig.allowed_ips)
+    normalizedConfig.wireguard_reserved = formatReservedInput(normalizedConfig.reserved)
+    normalizedConfig.wireguard_peers_json =
+      wireguardPeers.length > 1 ? JSON.stringify(wireguardPeers, null, 2) : ''
   }
 
   const protocolUsername = normalizedConfig.username
@@ -262,6 +389,31 @@ function NodeForm({ node, onSave, onCancel }) {
     proxy_tls: proxyTLS,
     proxy_sni: proxySNI,
     proxy_insecure: proxyInsecure,
+    wireguard_private_key: node?.type === 'wireguard' ? normalizedConfig.private_key || '' : '',
+    wireguard_peer_public_key: node?.type === 'wireguard' ? normalizedConfig.peer_public_key || '' : '',
+    wireguard_pre_shared_key: node?.type === 'wireguard' ? normalizedConfig.pre_shared_key || '' : '',
+    wireguard_local_address: node?.type === 'wireguard' ? normalizedConfig.wireguard_local_address || '' : '',
+    wireguard_allowed_ips: node?.type === 'wireguard' ? normalizedConfig.wireguard_allowed_ips || '' : '',
+    wireguard_reserved: node?.type === 'wireguard' ? normalizedConfig.wireguard_reserved || '' : '',
+    wireguard_system_interface: node?.type === 'wireguard' ? Boolean(normalizedConfig.system_interface) : false,
+    wireguard_interface_name: node?.type === 'wireguard' ? normalizedConfig.interface_name || '' : '',
+    wireguard_mtu: node?.type === 'wireguard' ? normalizedConfig.mtu || 0 : 0,
+    wireguard_workers: node?.type === 'wireguard' ? normalizedConfig.workers || 0 : 0,
+    wireguard_network:
+      node?.type === 'wireguard'
+        ? normalizedConfig.network || 'both'
+        : 'both',
+    wireguard_detour: node?.type === 'wireguard' ? normalizedConfig.detour || '' : '',
+    wireguard_domain_resolver: node?.type === 'wireguard' ? normalizedConfig.domain_resolver || '' : '',
+    wireguard_domain_resolver_strategy:
+      node?.type === 'wireguard' ? normalizedConfig.domain_resolver_strategy || '' : '',
+    wireguard_routing_mark: node?.type === 'wireguard' ? normalizedConfig.routing_mark || '' : '',
+    wireguard_udp_fragment:
+      node?.type === 'wireguard'
+        ? Boolean(normalizedConfig.udp_fragment)
+        : false,
+    wireguard_connect_timeout: node?.type === 'wireguard' ? normalizedConfig.connect_timeout || '' : '',
+    wireguard_peers_json: node?.type === 'wireguard' ? normalizedConfig.wireguard_peers_json || '' : '',
   }
 
   const renderSSFields = () => (
@@ -595,6 +747,110 @@ function NodeForm({ node, onSave, onCancel }) {
     </>
   )
 
+  const renderWireGuardFields = () => (
+    <>
+      <Form.Item
+        label={withHint('Local Address (one per line)', '本地 WireGuard 地址，每行一个 CIDR')}
+        name="wireguard_local_address"
+        rules={[{ required: true, message: 'Required' }]}
+      >
+        <TextArea rows={3} placeholder={'172.16.0.2/32\n2606:4700:110:8765::2/128'} />
+      </Form.Item>
+      <Form.Item
+        label={withHint('Private Key', '本地私钥')}
+        name="wireguard_private_key"
+        rules={[{ required: true, message: 'Required' }]}
+      >
+        <Input.Password />
+      </Form.Item>
+      <Form.Item
+        label={withHint('Peer Public Key', '对端公钥')}
+        name="wireguard_peer_public_key"
+        rules={[
+          {
+            validator: (_, value) => {
+              if (String(form.getFieldValue('wireguard_peers_json') || '').trim() || String(value || '').trim()) {
+                return Promise.resolve()
+              }
+              return Promise.reject(new Error('Required'))
+            },
+          },
+        ]}
+      >
+        <Input />
+      </Form.Item>
+      <Form.Item label={withHint('Pre-shared Key', '预共享密钥')} name="wireguard_pre_shared_key">
+        <Input.Password />
+      </Form.Item>
+      <Form.Item label={withHint('Allowed IPs (one per line)', 'Allowed IPs，每行一个 CIDR')} name="wireguard_allowed_ips">
+        <TextArea rows={3} placeholder={'0.0.0.0/0\n::/0'} />
+      </Form.Item>
+      <Form.Item label={withHint('Reserved Bytes', 'Cloudflare 保留字节，逗号分隔')} name="wireguard_reserved">
+        <Input placeholder="162,104,222" />
+      </Form.Item>
+      <Form.Item label={withHint('System Interface', '是否使用系统网卡')} name="wireguard_system_interface" valuePropName="checked">
+        <Switch checkedChildren="System" unCheckedChildren="Userspace" />
+      </Form.Item>
+      <Form.Item label={withHint('Interface Name', '系统网卡名称')} name="wireguard_interface_name">
+        <Input placeholder="wgcf" />
+      </Form.Item>
+      <Form.Item label={withHint('MTU', 'MTU')} name="wireguard_mtu">
+        <InputNumber min={0} max={65535} style={{ width: '100%' }} />
+      </Form.Item>
+      <Form.Item label={withHint('Workers', '工作线程数')} name="wireguard_workers">
+        <InputNumber min={0} max={128} style={{ width: '100%' }} />
+      </Form.Item>
+      <Form.Item label={withHint('Network', '启用的底层网络')} name="wireguard_network">
+        <Select>
+          <Option value="both">Both (Default)</Option>
+          <Option value="udp">UDP</Option>
+          <Option value="tcp">TCP</Option>
+        </Select>
+      </Form.Item>
+      <Form.Item label={withHint('Detour', '拨号绕行出站标签')} name="wireguard_detour">
+        <Input placeholder="selector" />
+      </Form.Item>
+      <Form.Item label={withHint('Domain Resolver', '域名解析器标签')} name="wireguard_domain_resolver">
+        <Input placeholder="local" />
+      </Form.Item>
+      <Form.Item label={withHint('Resolver Strategy', '域名解析策略')} name="wireguard_domain_resolver_strategy">
+        <Select allowClear>
+          <Option value="prefer_ipv4">prefer_ipv4</Option>
+          <Option value="prefer_ipv6">prefer_ipv6</Option>
+          <Option value="ipv4_only">ipv4_only</Option>
+          <Option value="ipv6_only">ipv6_only</Option>
+        </Select>
+      </Form.Item>
+      <Form.Item label={withHint('Routing Mark', '路由标记')} name="wireguard_routing_mark">
+        <Input placeholder="0x10" />
+      </Form.Item>
+      <Form.Item label={withHint('UDP Fragment', '是否启用 UDP 分片')} name="wireguard_udp_fragment" valuePropName="checked">
+        <Switch checkedChildren="On" unCheckedChildren="Off" />
+      </Form.Item>
+      <Form.Item label={withHint('Connect Timeout', '连接超时')} name="wireguard_connect_timeout">
+        <Input placeholder="5s" />
+      </Form.Item>
+      <Form.Item
+        label={withHint('Peers JSON (Advanced)', '多 Peer 高级 JSON 配置')}
+        name="wireguard_peers_json"
+        extra={withExtraHint('When provided, peers JSON takes precedence over the single-peer fields above', '填写后将优先使用该 JSON 中的 peers 配置')}
+      >
+        <TextArea
+          rows={6}
+          placeholder={`[
+  {
+    "server": "engage.cloudflareclient.com",
+    "server_port": 2408,
+    "public_key": "peer-public-key",
+    "allowed_ips": ["0.0.0.0/0", "::/0"],
+    "reserved": [162, 104, 222]
+  }
+]`}
+        />
+      </Form.Item>
+    </>
+  )
+
   const renderConfigFields = () => {
     switch (proxyType) {
       case 'direct':
@@ -617,6 +873,8 @@ function NodeForm({ node, onSave, onCancel }) {
         return renderSOCKS5Fields()
       case 'http':
         return renderHTTPProxyFields()
+      case 'wireguard':
+        return renderWireGuardFields()
       default:
         return null
     }
@@ -638,7 +896,7 @@ function NodeForm({ node, onSave, onCancel }) {
       </Form.Item>
 
       <Form.Item label={withHint('Proxy Type', '代理协议类型')} required>
-        <Select value={proxyType} onChange={setProxyType}>
+        <Select value={proxyType} onChange={handleProxyTypeChange}>
           {proxyTypes.map((type) => (
             <Option key={type.value} value={type.value}>
               {type.label}

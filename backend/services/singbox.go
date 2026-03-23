@@ -375,6 +375,8 @@ func (s *SingBoxService) generateOutbound(node *models.ProxyNode, tag string) (O
 		return s.generateSOCKS5Outbound(parsedConfig.(*models.SOCKS5Config), tag)
 	case "http":
 		return s.generateHTTPProxyOutbound(parsedConfig.(*models.HTTPProxyConfig), tag)
+	case "wireguard":
+		return s.generateWireGuardOutbound(parsedConfig.(*models.WireGuardConfig), tag)
 	default:
 		return OutboundConfig{}, fmt.Errorf("unsupported proxy type: %s", node.Type)
 	}
@@ -1005,6 +1007,115 @@ func (s *SingBoxService) generateHTTPProxyOutbound(config *models.HTTPProxyConfi
 			tls["insecure"] = true
 		}
 		outbound.Extra["tls"] = tls
+	}
+
+	return outbound, nil
+}
+
+func (s *SingBoxService) generateWireGuardOutbound(config *models.WireGuardConfig, tag string) (OutboundConfig, error) {
+	if len(config.LocalAddress) == 0 {
+		return OutboundConfig{}, fmt.Errorf("wireguard local_address is required")
+	}
+	if strings.TrimSpace(config.PrivateKey) == "" {
+		return OutboundConfig{}, fmt.Errorf("wireguard private_key is required")
+	}
+
+	outbound := OutboundConfig{
+		Type:  "wireguard",
+		Tag:   tag,
+		Extra: map[string]interface{}{},
+	}
+
+	outbound.Extra["local_address"] = config.LocalAddress
+	outbound.Extra["private_key"] = config.PrivateKey
+	if config.SystemInterface {
+		outbound.Extra["system_interface"] = true
+	}
+	if config.InterfaceName != "" {
+		outbound.Extra["interface_name"] = config.InterfaceName
+	}
+	if config.Workers > 0 {
+		outbound.Extra["workers"] = config.Workers
+	}
+	if config.MTU > 0 {
+		outbound.Extra["mtu"] = config.MTU
+	}
+	if config.Network != "" && config.Network != "both" {
+		outbound.Extra["network"] = config.Network
+	}
+	if config.Detour != "" {
+		outbound.Extra["detour"] = config.Detour
+	}
+	if config.DomainResolver != "" {
+		if config.DomainResolverStrategy != "" {
+			outbound.Extra["domain_resolver"] = map[string]interface{}{
+				"server":   config.DomainResolver,
+				"strategy": config.DomainResolverStrategy,
+			}
+		} else {
+			outbound.Extra["domain_resolver"] = config.DomainResolver
+		}
+	}
+	if config.UDPFragment != nil {
+		outbound.Extra["udp_fragment"] = *config.UDPFragment
+	}
+	if config.ConnectTimeout != "" {
+		outbound.Extra["connect_timeout"] = config.ConnectTimeout
+	}
+	if routingMark := parseWireGuardRoutingMark(config.RoutingMark); routingMark != nil {
+		outbound.Extra["routing_mark"] = routingMark
+	}
+
+	usePeers := len(config.Peers) > 0 || len(config.AllowedIPs) > 0
+	if usePeers {
+		peers := config.Peers
+		if len(peers) == 0 {
+			peer, ok := wireGuardSinglePeerFromConfig(config)
+			if !ok {
+				return OutboundConfig{}, fmt.Errorf("wireguard server, server_port and peer_public_key are required")
+			}
+			peers = []models.WireGuardPeerConfig{peer}
+		}
+
+		peerConfigs := make([]map[string]interface{}, 0, len(peers))
+		for _, peer := range peers {
+			if strings.TrimSpace(peer.Server) == "" || peer.ServerPort <= 0 || strings.TrimSpace(peer.PublicKey) == "" {
+				return OutboundConfig{}, fmt.Errorf("wireguard peer requires server, server_port and public_key")
+			}
+
+			peerConfig := map[string]interface{}{
+				"server":      peer.Server,
+				"server_port": peer.ServerPort,
+				"public_key":  peer.PublicKey,
+			}
+			if peer.PreSharedKey != "" {
+				peerConfig["pre_shared_key"] = peer.PreSharedKey
+			}
+			if len(peer.AllowedIPs) > 0 {
+				peerConfig["allowed_ips"] = peer.AllowedIPs
+			}
+			if len(peer.Reserved) > 0 {
+				peerConfig["reserved"] = peer.Reserved
+			}
+			peerConfigs = append(peerConfigs, peerConfig)
+		}
+
+		outbound.Extra["peers"] = peerConfigs
+		return outbound, nil
+	}
+
+	if strings.TrimSpace(config.Server) == "" || config.ServerPort <= 0 || strings.TrimSpace(config.PeerPublicKey) == "" {
+		return OutboundConfig{}, fmt.Errorf("wireguard server, server_port and peer_public_key are required")
+	}
+
+	outbound.Server = config.Server
+	outbound.Port = config.ServerPort
+	outbound.Extra["peer_public_key"] = config.PeerPublicKey
+	if config.PreSharedKey != "" {
+		outbound.Extra["pre_shared_key"] = config.PreSharedKey
+	}
+	if len(config.Reserved) > 0 {
+		outbound.Extra["reserved"] = config.Reserved
 	}
 
 	return outbound, nil

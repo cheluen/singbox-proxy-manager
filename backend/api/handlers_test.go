@@ -481,6 +481,252 @@ func TestBatchImportNodesAutoAssignSkipsUsedInboundPorts(t *testing.T) {
 	}
 }
 
+func TestCreateNodeWireGuardPersistsConfig(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	handler := newTestHandler(t, func(proxyAddr, username, password string) (*services.IPInfo, error) {
+		return nil, fmt.Errorf("not used")
+	})
+
+	payload := map[string]interface{}{
+		"name":    "warp-node",
+		"remark":  "cf",
+		"type":    "wireguard",
+		"enabled": true,
+		"config": `{
+			"server":"engage.cloudflareclient.com",
+			"server_port":2408,
+			"local_address":["172.16.0.2/32","2606:4700:110:8765::2/128"],
+			"private_key":"private-key",
+			"peer_public_key":"peer-public-key",
+			"allowed_ips":["0.0.0.0/0","::/0"],
+			"reserved":[162,104,222],
+			"detour":"warp-selector",
+			"domain_resolver":"local",
+			"domain_resolver_strategy":"prefer_ipv4",
+			"udp_fragment":true,
+			"connect_timeout":"5s"
+		}`,
+	}
+	body, _ := json.Marshal(payload)
+
+	rec := httptest.NewRecorder()
+	ctx, _ := gin.CreateTestContext(rec)
+	req, _ := http.NewRequest(http.MethodPost, "/api/nodes", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	ctx.Request = req
+
+	handler.CreateNode(ctx)
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("unexpected status %d body=%s", rec.Code, rec.Body.String())
+	}
+
+	var (
+		nodeType   string
+		configJSON string
+	)
+	if err := handler.db.QueryRow(
+		"SELECT type, config FROM proxy_nodes WHERE name = ?",
+		"warp-node",
+	).Scan(&nodeType, &configJSON); err != nil {
+		t.Fatalf("query node: %v", err)
+	}
+	if nodeType != "wireguard" {
+		t.Fatalf("expected wireguard type, got %q", nodeType)
+	}
+
+	var cfg models.WireGuardConfig
+	if err := json.Unmarshal([]byte(configJSON), &cfg); err != nil {
+		t.Fatalf("unmarshal config: %v", err)
+	}
+	if cfg.Server != "engage.cloudflareclient.com" || cfg.ServerPort != 2408 {
+		t.Fatalf("unexpected endpoint: %+v", cfg)
+	}
+	if len(cfg.LocalAddress) != 2 || cfg.LocalAddress[1] != "2606:4700:110:8765::2/128" {
+		t.Fatalf("unexpected local_address: %+v", cfg.LocalAddress)
+	}
+	if cfg.PeerPublicKey != "peer-public-key" || cfg.Detour != "warp-selector" {
+		t.Fatalf("unexpected wireguard config: %+v", cfg)
+	}
+	if cfg.UDPFragment == nil || !*cfg.UDPFragment {
+		t.Fatalf("expected udp_fragment=true, got %+v", cfg.UDPFragment)
+	}
+}
+
+func TestParseShareLinkWireGuard(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	handler := newTestHandler(t, func(proxyAddr, username, password string) (*services.IPInfo, error) {
+		return nil, fmt.Errorf("not used")
+	})
+
+	link := "wireguard://private-key@engage.cloudflareclient.com:2408?publickey=peer-public-key&ip=172.16.0.2/32&ipv6=2606:4700:110:8765::2/128&allowedips=0.0.0.0/0,::/0&reserved=162,104,222&mtu=1280&workers=2&detour=warp-selector&domain_resolver=local&domain_resolver_strategy=prefer_ipv4&udp_fragment=1#WARP"
+	body := bytes.NewBufferString(fmt.Sprintf(`{"link":%q}`, link))
+
+	rec := httptest.NewRecorder()
+	ctx, _ := gin.CreateTestContext(rec)
+	req, _ := http.NewRequest(http.MethodPost, "/api/parse-link", body)
+	req.Header.Set("Content-Type", "application/json")
+	ctx.Request = req
+
+	handler.ParseShareLink(ctx)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("unexpected status %d body=%s", rec.Code, rec.Body.String())
+	}
+
+	var resp struct {
+		Type   string `json:"type"`
+		Name   string `json:"name"`
+		Config string `json:"config"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("unmarshal response: %v", err)
+	}
+	if resp.Type != "wireguard" || resp.Name != "WARP" {
+		t.Fatalf("unexpected response: %+v", resp)
+	}
+
+	var cfg models.WireGuardConfig
+	if err := json.Unmarshal([]byte(resp.Config), &cfg); err != nil {
+		t.Fatalf("unmarshal config: %v", err)
+	}
+	if cfg.PrivateKey != "private-key" || cfg.Workers != 2 || cfg.MTU != 1280 {
+		t.Fatalf("unexpected parsed config: %+v", cfg)
+	}
+	if len(cfg.Reserved) != 3 || cfg.Reserved[0] != 162 {
+		t.Fatalf("unexpected reserved bytes: %+v", cfg.Reserved)
+	}
+}
+
+func TestReplaceNodeWithWireGuardLinkClearsIPAndPreservesNameWhenRequested(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	handler := newTestHandler(t, func(proxyAddr, username, password string) (*services.IPInfo, error) {
+		return nil, fmt.Errorf("not used")
+	})
+
+	nodeID := insertTestNode(t, handler.db)
+	if _, err := handler.db.Exec(`
+		UPDATE proxy_nodes
+		SET name = 'old-name', node_ip = '8.8.8.8', location = 'Old', country_code = 'US', latency = 99
+		WHERE id = ?
+	`, nodeID); err != nil {
+		t.Fatalf("seed node: %v", err)
+	}
+
+	link := "wireguard://private-key@engage.cloudflareclient.com:2408?publickey=peer-public-key&ip=172.16.0.2/32&ipv6=2606:4700:110:8765::2/128&allowedips=0.0.0.0/0,::/0&reserved=162,104,222#WARP"
+	body := bytes.NewBufferString(fmt.Sprintf(`{"link":%q,"update_name":false}`, link))
+
+	rec := httptest.NewRecorder()
+	ctx, _ := gin.CreateTestContext(rec)
+	ctx.Params = gin.Params{gin.Param{Key: "id", Value: strconv.Itoa(nodeID)}}
+	req, _ := http.NewRequest(http.MethodPut, "/api/nodes/"+strconv.Itoa(nodeID)+"/replace", body)
+	req.Header.Set("Content-Type", "application/json")
+	ctx.Request = req
+
+	handler.ReplaceNode(ctx)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("unexpected status %d body=%s", rec.Code, rec.Body.String())
+	}
+
+	var (
+		name        string
+		nodeType    string
+		configJSON  string
+		nodeIP      string
+		location    string
+		countryCode string
+		latency     int
+	)
+	if err := handler.db.QueryRow(`
+		SELECT name, type, config, node_ip, location, country_code, latency
+		FROM proxy_nodes WHERE id = ?
+	`, nodeID).Scan(&name, &nodeType, &configJSON, &nodeIP, &location, &countryCode, &latency); err != nil {
+		t.Fatalf("query node: %v", err)
+	}
+	if name != "old-name" || nodeType != "wireguard" {
+		t.Fatalf("unexpected node identity: name=%q type=%q", name, nodeType)
+	}
+	if nodeIP != "" || location != "" || countryCode != "" || latency != 0 {
+		t.Fatalf("expected IP status cleared, got ip=%q location=%q country=%q latency=%d", nodeIP, location, countryCode, latency)
+	}
+
+	var cfg models.WireGuardConfig
+	if err := json.Unmarshal([]byte(configJSON), &cfg); err != nil {
+		t.Fatalf("unmarshal config: %v", err)
+	}
+	if cfg.Server != "engage.cloudflareclient.com" || cfg.PeerPublicKey != "peer-public-key" {
+		t.Fatalf("unexpected replaced config: %+v", cfg)
+	}
+}
+
+func TestBatchImportNodesAcceptsWireGuardYAMLContent(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	handler := newTestHandler(t, func(proxyAddr, username, password string) (*services.IPInfo, error) {
+		return nil, fmt.Errorf("not used")
+	})
+
+	yaml := `
+proxies:
+  - name: "WARP"
+    type: wireguard
+    server: engage.cloudflareclient.com
+    port: 2408
+    ip: 172.16.0.2
+    ipv6: "2606:4700:110:8765::2"
+    private-key: private-key
+    public-key: peer-public-key
+    allowed-ips: ["0.0.0.0/0", "::/0"]
+    reserved: [162, 104, 222]
+    mtu: 1280
+    udp: true
+    dialer-proxy: warp-selector
+`
+	payload := map[string]interface{}{
+		"content": yaml,
+		"enabled": true,
+	}
+	body, _ := json.Marshal(payload)
+
+	rec := httptest.NewRecorder()
+	ctx, _ := gin.CreateTestContext(rec)
+	req, _ := http.NewRequest(http.MethodPost, "/api/nodes/batch-import", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	ctx.Request = req
+
+	handler.BatchImportNodes(ctx)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("unexpected status %d body=%s", rec.Code, rec.Body.String())
+	}
+
+	var resp struct {
+		Success int `json:"success"`
+		Failed  int `json:"failed"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("unmarshal response: %v", err)
+	}
+	if resp.Success != 1 || resp.Failed != 0 {
+		t.Fatalf("unexpected import response: %+v", resp)
+	}
+
+	var configJSON string
+	if err := handler.db.QueryRow(
+		"SELECT config FROM proxy_nodes WHERE name = ?",
+		"WARP",
+	).Scan(&configJSON); err != nil {
+		t.Fatalf("query node: %v", err)
+	}
+
+	var cfg models.WireGuardConfig
+	if err := json.Unmarshal([]byte(configJSON), &cfg); err != nil {
+		t.Fatalf("unmarshal config: %v", err)
+	}
+	if cfg.Network != "udp" || cfg.Detour != "warp-selector" {
+		t.Fatalf("unexpected batch-import config: %+v", cfg)
+	}
+	if len(cfg.LocalAddress) != 2 || cfg.LocalAddress[0] != "172.16.0.2/32" {
+		t.Fatalf("unexpected local_address: %+v", cfg.LocalAddress)
+	}
+}
+
 func TestReorderNodesPreserveInboundPortsKeepsPorts(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	handler := newTestHandler(t, func(proxyAddr, username, password string) (*services.IPInfo, error) {
