@@ -103,7 +103,6 @@ function Login({ onLogin }) {
             >
               <GithubOutlined />
               <span>{t('official_repository')}</span>
-              <span className="login-brand-link-url">github.com/cheluen/singbox-proxy-manager</span>
             </Typography.Link>
           </div>
         </div>

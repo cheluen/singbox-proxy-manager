@@ -17,7 +17,7 @@ export default {
   stop: 'Stop',
   frontend_build: 'Frontend build',
   frontend_version_mismatch: 'Version mismatch detected: backend {{server}} / frontend {{client}}. Confirm frontend deployment is complete.',
-  official_repository: 'Official GitHub',
+  official_repository: 'Official Repository',
   
   // Login
   login_title: 'Admin Login',
@@ -161,6 +161,7 @@ export default {
   enter_share_link: 'Please enter share link',
   enter_username: 'Please enter username',
   filter_value_placeholder: 'Filter value',
+  filter_inbound_port_placeholder: 'Single port or range, e.g. 30001-30005, 30008-30015',
   username_plus_not_allowed: 'Username cannot contain +',
   select_nodes: 'Please select nodes',
   no_nodes: 'No nodes yet',

@@ -17,7 +17,7 @@ export default {
   stop: '停止',
   frontend_build: '前端构建',
   frontend_version_mismatch: '检测到版本不一致，后端 {{server}} / 前端 {{client}}。请确认已完成前端发布。',
-  official_repository: '官方 GitHub',
+  official_repository: '官方仓库',
   
   // Login
   login_title: '管理员登录',
@@ -161,6 +161,7 @@ export default {
   enter_share_link: '请输入分享链接',
   enter_username: '请输入用户名',
   filter_value_placeholder: '筛选值',
+  filter_inbound_port_placeholder: '支持单个端口或范围，如 30001-30005，30008-30015',
   username_plus_not_allowed: '用户名不能包含 +',
   select_nodes: '请选择节点',
   no_nodes: '暂无节点',

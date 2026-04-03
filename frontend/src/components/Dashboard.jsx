@@ -17,6 +17,7 @@ import {
     Popconfirm,
     Tooltip,
     Select,
+    AutoComplete,
   } from 'antd'
 import {
   LogoutOutlined,
@@ -53,6 +54,106 @@ import { OFFICIAL_GITHUB_URL } from '../constants/project'
 const { Header, Content } = Layout
 const { Title, Text } = Typography
 const { TextArea } = Input
+
+const FILTER_KEY_LABEL_MAP = {
+  status: 'status',
+  enabled: 'state_controls',
+  type: 'node_type',
+  inbound_port: 'inbound_port',
+  name: 'node_name',
+  remark: 'remark',
+  node_ip: 'node_ip',
+  location: 'location',
+  country_code: 'country_code',
+  username: 'username',
+  tcp_reuse_enabled: 'tcp_reuse',
+}
+
+const FILTER_KEY_ORDER = [
+  'status',
+  'enabled',
+  'type',
+  'inbound_port',
+  'name',
+  'remark',
+  'node_ip',
+  'location',
+  'country_code',
+  'username',
+  'tcp_reuse_enabled',
+]
+
+const FILTER_SUGGESTION_KEYS = new Set(['type', 'location', 'country_code', 'username'])
+const PORT_FILTER_TOKEN_PATTERN = /^(\d+)(?:\s*-\s*(\d+))?$/
+
+const getFilterKeyLabel = (key, t) => {
+  const labelKey = FILTER_KEY_LABEL_MAP[key]
+  return labelKey ? t(labelKey) : key
+}
+
+const getFilterKeyOptions = (t) =>
+  FILTER_KEY_ORDER.map((key) => ({
+    value: key,
+    label: getFilterKeyLabel(key, t),
+  }))
+
+const getFilterSelectOptions = (key, t) => {
+  if (key === 'status') {
+    return [
+      { value: 'healthy', label: t('status_healthy') },
+      { value: 'unverified', label: t('status_unverified') },
+    ]
+  }
+
+  if (key === 'enabled' || key === 'tcp_reuse_enabled') {
+    return [
+      { value: 'true', label: t('enabled') },
+      { value: 'false', label: t('disabled') },
+    ]
+  }
+
+  return []
+}
+
+const getFilterValuePlaceholder = (key, t) =>
+  key === 'inbound_port' ? t('filter_inbound_port_placeholder') : t('filter_value_placeholder')
+
+const getFilterValueLabel = (key, value, t) => {
+  if (key === 'status') {
+    return value === 'healthy'
+      ? t('status_healthy')
+      : value === 'unverified'
+        ? t('status_unverified')
+        : value
+  }
+
+  if (key === 'enabled' || key === 'tcp_reuse_enabled') {
+    return value === 'true' ? t('enabled') : value === 'false' ? t('disabled') : value
+  }
+
+  return value
+}
+
+const buildFilterSuggestionOptions = (nodes, key) => {
+  if (!FILTER_SUGGESTION_KEYS.has(key) || !Array.isArray(nodes)) {
+    return []
+  }
+
+  const values = new Set()
+  for (const node of nodes) {
+    const raw = String(node?.[key] ?? '').trim()
+    if (raw) {
+      values.add(raw)
+    }
+  }
+
+  return Array.from(values)
+    .sort((left, right) => left.localeCompare(right, undefined, { numeric: true, sensitivity: 'base' }))
+    .map((value) => ({
+      value,
+      label: value,
+    }))
+}
 
 function NodeRemarkEditor({ record, saving, onSave, t }) {
   const [draft, setDraft] = useState(record.remark ?? '')
@@ -155,6 +256,49 @@ const stableJSONStringify = (value) => {
 
 const normalizeFilterText = (value) => String(value ?? '').trim().toLowerCase()
 
+const parseInboundPortFilterExpression = (value) => {
+  const tokens = String(value ?? '')
+    .split(/[，,]/)
+    .map((token) => token.trim())
+    .filter(Boolean)
+
+  if (tokens.length === 0) {
+    return null
+  }
+
+  const ranges = []
+  for (const token of tokens) {
+    const matched = token.match(PORT_FILTER_TOKEN_PATTERN)
+    if (!matched) {
+      return null
+    }
+
+    const start = Number.parseInt(matched[1], 10)
+    const end = Number.parseInt(matched[2] || matched[1], 10)
+    if (!Number.isInteger(start) || !Number.isInteger(end) || start > end) {
+      return null
+    }
+
+    ranges.push({ start, end })
+  }
+
+  return ranges
+}
+
+const matchInboundPortFilter = (port, rawFilterValue) => {
+  const parsedRanges = parseInboundPortFilterExpression(rawFilterValue)
+  if (!parsedRanges) {
+    return normalizeFilterText(port).includes(normalizeFilterText(rawFilterValue))
+  }
+
+  const normalizedPort = Number.parseInt(String(port ?? '').trim(), 10)
+  if (!Number.isInteger(normalizedPort)) {
+    return false
+  }
+
+  return parsedRanges.some(({ start, end }) => normalizedPort >= start && normalizedPort <= end)
+}
+
 const getNodeStatusCode = (node) => {
   const hasIP = Boolean(String(node?.node_ip || '').trim())
   const latencyRaw = Number(node?.latency)
@@ -179,6 +323,10 @@ const matchNodeFilter = (node, filter) => {
   if (key === 'tcp_reuse_enabled') {
     const enabled = node?.tcp_reuse_enabled !== false
     return (enabled ? 'true' : 'false') === valueText
+  }
+
+  if (key === 'inbound_port') {
+    return matchInboundPortFilter(node?.inbound_port, filter?.value)
   }
 
   const candidate = normalizeFilterText(node?.[key])
@@ -236,6 +384,7 @@ function Dashboard({ onLogout }) {
   const [nodeFilters, setNodeFilters] = useState([])
   const [filterDraftKey, setFilterDraftKey] = useState('status')
   const [filterDraftValue, setFilterDraftValue] = useState('')
+  const [filterSuggestionOpen, setFilterSuggestionOpen] = useState(false)
   const [virtualDragState, setVirtualDragState] = useState(null)
   const [tableBodyScrollY, setTableBodyScrollY] = useState(0)
   const [virtualListItemHeight, setVirtualListItemHeight] = useState(40)
@@ -243,6 +392,17 @@ function Dashboard({ onLogout }) {
   const selectedNodeIdSet = useMemo(() => new Set(selectedNodeIds), [selectedNodeIds])
   const nodeFiltersRef = useRef(nodeFilters)
   const preserveInboundPortsRef = useRef(preserveInboundPorts)
+  const filterKeyOptions = useMemo(() => getFilterKeyOptions(t), [t])
+  const filterSelectOptions = useMemo(() => getFilterSelectOptions(filterDraftKey, t), [filterDraftKey, t])
+  const filterSuggestionOptions = useMemo(
+    () => buildFilterSuggestionOptions(nodes, filterDraftKey),
+    [filterDraftKey, nodes]
+  )
+  const filterValuePlaceholder = useMemo(
+    () => getFilterValuePlaceholder(filterDraftKey, t),
+    [filterDraftKey, t]
+  )
+  const filterDraftUsesSuggestions = FILTER_SUGGESTION_KEYS.has(filterDraftKey)
 
   const dragSortInlineLimit = useMemo(() => {
     const metaRaw =
@@ -848,6 +1008,7 @@ function Dashboard({ onLogout }) {
   const handleFilterKeyChange = (nextKey) => {
     setFilterDraftKey(nextKey)
     setFilterDraftValue('')
+    setFilterSuggestionOpen(false)
   }
 
   const handleAddOrUpdateFilter = () => {
@@ -2088,9 +2249,6 @@ function Dashboard({ onLogout }) {
 	                  </Tag>
 	                </Tooltip>
 	              </Space>
-	              <Text className="dashboard-repo-url">
-	                github.com/cheluen/singbox-proxy-manager
-	              </Text>
 	            </div>
 	          </div>
 	          <Space className="dashboard-actions">
@@ -2159,59 +2317,48 @@ function Dashboard({ onLogout }) {
                   value={filterDraftKey}
                   onChange={handleFilterKeyChange}
                   style={{ width: 132 }}
-                  options={[
-                    { value: 'status', label: t('status') },
-                    { value: 'enabled', label: t('state_controls') },
-                    { value: 'type', label: t('node_type') },
-                    { value: 'inbound_port', label: t('inbound_port') },
-                    { value: 'name', label: t('node_name') },
-                    { value: 'remark', label: t('remark') },
-                    { value: 'node_ip', label: t('node_ip') },
-                    { value: 'location', label: t('location') },
-                    { value: 'country_code', label: t('country_code') },
-                    { value: 'username', label: t('username') },
-                    { value: 'tcp_reuse_enabled', label: t('tcp_reuse') },
-                  ]}
+                  options={filterKeyOptions}
                 />
-                {filterDraftKey === 'status' ? (
+                {filterSelectOptions.length > 0 ? (
                   <Select
                     data-testid="nodes-filter-value"
                     value={filterDraftValue || undefined}
                     onChange={(value) => setFilterDraftValue(value)}
-                    placeholder={t('filter_value_placeholder')}
+                    placeholder={filterValuePlaceholder}
                     style={{ width: 170 }}
                     allowClear
-                    options={[
-                      { value: 'healthy', label: t('status_healthy') },
-                      { value: 'unverified', label: t('status_unverified') },
-                    ]}
+                    options={filterSelectOptions}
                   />
-                ) : filterDraftKey === 'enabled' ? (
-                  <Select
-                    data-testid="nodes-filter-value"
-                    value={filterDraftValue || undefined}
+                ) : filterDraftUsesSuggestions ? (
+                  <AutoComplete
+                    data-testid="nodes-filter-value-autocomplete"
+                    value={filterDraftValue}
+                    options={filterSuggestionOptions}
+                    style={{ width: 170 }}
+                    allowClear
+                    open={filterSuggestionOpen && filterSuggestionOptions.length > 0}
+                    placeholder={filterValuePlaceholder}
+                    filterOption={(inputValue, option) =>
+                      String(option?.value || '')
+                        .toLowerCase()
+                        .includes(String(inputValue || '').trim().toLowerCase())
+                    }
+                    onFocus={() => setFilterSuggestionOpen(true)}
+                    onBlur={() => setFilterSuggestionOpen(false)}
                     onChange={(value) => setFilterDraftValue(value)}
-                    placeholder={t('filter_value_placeholder')}
-                    style={{ width: 170 }}
-                    allowClear
-                    options={[
-                      { value: 'true', label: t('enabled') },
-                      { value: 'false', label: t('disabled') },
-                    ]}
-                  />
-                ) : filterDraftKey === 'tcp_reuse_enabled' ? (
-                  <Select
-                    data-testid="nodes-filter-value"
-                    value={filterDraftValue || undefined}
-                    onChange={(value) => setFilterDraftValue(value)}
-                    placeholder={t('filter_value_placeholder')}
-                    style={{ width: 170 }}
-                    allowClear
-                    options={[
-                      { value: 'true', label: t('enabled') },
-                      { value: 'false', label: t('disabled') },
-                    ]}
-                  />
+                    onSelect={(value) => {
+                      setFilterDraftValue(String(value || ''))
+                      setFilterSuggestionOpen(false)
+                    }}
+                  >
+                    <Input
+                      data-testid="nodes-filter-value"
+                      onPressEnter={(e) => {
+                        e.preventDefault?.()
+                        handleAddOrUpdateFilter()
+                      }}
+                    />
+                  </AutoComplete>
                 ) : (
                   <Input
                     data-testid="nodes-filter-value"
@@ -2221,7 +2368,7 @@ function Dashboard({ onLogout }) {
                       e.preventDefault?.()
                       handleAddOrUpdateFilter()
                     }}
-                    placeholder={t('filter_value_placeholder')}
+                    placeholder={filterValuePlaceholder}
                     style={{ width: 170 }}
                     allowClear
                   />
@@ -2247,44 +2394,8 @@ function Dashboard({ onLogout }) {
                   {nodeFilters.map((filter) => {
                     const key = String(filter?.key || '').trim()
                     const value = String(filter?.value ?? '').trim()
-                    const keyLabel =
-                      key === 'status'
-                        ? t('status')
-                        : key === 'enabled'
-                          ? t('state_controls')
-                          : key === 'type'
-                            ? t('node_type')
-                            : key === 'inbound_port'
-                              ? t('inbound_port')
-                              : key === 'name'
-                                ? t('node_name')
-                                : key === 'remark'
-                                  ? t('remark')
-                                  : key === 'node_ip'
-                                    ? t('node_ip')
-                                    : key === 'location'
-                                      ? t('location')
-                                      : key === 'country_code'
-                                        ? t('country_code')
-                                        : key === 'username'
-                                          ? t('username')
-                                          : key === 'tcp_reuse_enabled'
-                                            ? t('tcp_reuse')
-                                            : key
-                    const valueLabel =
-                      key === 'status'
-                        ? value === 'healthy'
-                          ? t('status_healthy')
-                          : value === 'unverified'
-                            ? t('status_unverified')
-                            : value
-                        : key === 'enabled' || key === 'tcp_reuse_enabled'
-                          ? value === 'true'
-                            ? t('enabled')
-                            : value === 'false'
-                              ? t('disabled')
-                              : value
-                          : value
+                    const keyLabel = getFilterKeyLabel(key, t)
+                    const valueLabel = getFilterValueLabel(key, value, t)
 
                     return (
                       <Tag

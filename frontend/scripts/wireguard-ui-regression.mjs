@@ -430,6 +430,8 @@ const run = async () => {
 
     const loginRepoHref = await page.$eval('.login-brand-link', (el) => el.href)
     assert(loginRepoHref === OFFICIAL_GITHUB_URL, `unexpected login repo href: ${loginRepoHref}`)
+    const loginRepoUrlCount = await page.$$eval('.login-brand-link-url', (nodes) => nodes.length)
+    assert(loginRepoUrlCount === 0, `expected login raw repo url text removed, got count=${loginRepoUrlCount}`)
 
     await page.evaluate(() => {
       localStorage.setItem('token', 'wireguard-ui-token')
@@ -442,6 +444,11 @@ const run = async () => {
     assert(
       dashboardRepoHref === OFFICIAL_GITHUB_URL,
       `unexpected dashboard repo href: ${dashboardRepoHref}`
+    )
+    const dashboardRepoUrlCount = await page.$$eval('.dashboard-repo-url', (nodes) => nodes.length)
+    assert(
+      dashboardRepoUrlCount === 0,
+      `expected dashboard raw repo url text removed, got count=${dashboardRepoUrlCount}`
     )
 
     await clickButtonByText(page, 'Add Node', 15000)

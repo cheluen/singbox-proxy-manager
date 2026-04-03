@@ -26,7 +26,7 @@ const createMockNodes = () => [
     type: 'direct',
     config: '{}',
     inbound_port: 30001,
-    username: 'u1',
+    username: 'alpha-user',
     password: 'p1',
     sort_order: 0,
     node_ip: '',
@@ -41,15 +41,15 @@ const createMockNodes = () => [
   {
     id: 2,
     name: 'node-2',
-    type: 'direct',
+    type: 'socks',
     config: '{}',
     inbound_port: 30005,
-    username: 'u2',
+    username: 'beta-user',
     password: 'p2',
     sort_order: 1,
     node_ip: '1.1.1.1',
-    location: 'Test, CN',
-    country_code: 'CN',
+    location: 'Seoul, South Korea',
+    country_code: 'KR',
     latency: 80,
     enabled: true,
     remark: '',
@@ -59,16 +59,34 @@ const createMockNodes = () => [
   {
     id: 3,
     name: 'node-3',
-    type: 'direct',
+    type: 'vmess',
     config: '{}',
     inbound_port: 30009,
-    username: 'u3',
+    username: 'gamma-user',
     password: 'p3',
     sort_order: 2,
     node_ip: '',
-    location: '',
-    country_code: '',
+    location: 'Tokyo, Japan',
+    country_code: 'JP',
     latency: 0,
+    enabled: true,
+    remark: '',
+    created_at: '2026-01-01T00:00:00Z',
+    updated_at: '2026-01-01T00:00:00Z',
+  },
+  {
+    id: 4,
+    name: 'node-4',
+    type: 'hysteria2',
+    config: '{}',
+    inbound_port: 30020,
+    username: 'delta-user',
+    password: 'p4',
+    sort_order: 3,
+    node_ip: '8.8.8.8',
+    location: 'Los Angeles, United States',
+    country_code: 'US',
+    latency: 120,
     enabled: true,
     remark: '',
     created_at: '2026-01-01T00:00:00Z',
@@ -329,6 +347,9 @@ const getVisibleRowKeys = async (page) =>
     rows.map((row) => row.getAttribute('data-row-key') || '')
   )
 
+const FILTER_VALUE_INPUT_SELECTOR =
+  'input[data-testid="nodes-filter-value"], [data-testid="nodes-filter-value"] input'
+
 const getRowNames = async (page) =>
   page.$$eval('tbody.ant-table-tbody tr[data-row-key] td:nth-child(4)', (cells) =>
     cells.map((cell) => cell.textContent?.trim() || '')
@@ -348,19 +369,59 @@ const selectAntdOptionByText = async (page, triggerSelector, optionText) => {
   await page.evaluate((text) => {
     const dropdowns = Array.from(document.querySelectorAll('.ant-select-dropdown'))
       .filter((dropdown) => !dropdown.classList.contains('ant-select-dropdown-hidden'))
-    const dropdown = dropdowns[dropdowns.length - 1]
-    if (!dropdown) {
-      throw new Error('select dropdown not found')
-    }
-    const options = Array.from(dropdown.querySelectorAll('.ant-select-item-option')).filter(
-      (option) => !option.classList.contains('ant-select-item-option-disabled')
-    )
-    const match = options.find((option) => (option.textContent || '').includes(text))
+    const match = dropdowns
+      .flatMap((dropdown) =>
+        Array.from(dropdown.querySelectorAll('.ant-select-item-option')).filter(
+          (option) => !option.classList.contains('ant-select-item-option-disabled')
+        )
+      )
+      .find((option) => (option.textContent || '').includes(text))
     if (!match) {
       throw new Error(`option not found: ${text}`)
     }
     match.click()
   }, optionText)
+}
+
+const getVisibleDropdownOptionTexts = async (page) =>
+  page.evaluate(() => {
+    const dropdowns = Array.from(document.querySelectorAll('.ant-select-dropdown')).filter(
+      (dropdown) => !dropdown.classList.contains('ant-select-dropdown-hidden')
+    )
+    const dropdown = dropdowns[dropdowns.length - 1]
+    if (!dropdown) {
+      return []
+    }
+
+    return Array.from(dropdown.querySelectorAll('.ant-select-item-option-content'))
+      .map((node) => node.textContent?.trim() || '')
+      .filter(Boolean)
+  })
+
+const focusFilterValueInput = async (page) => {
+  await page.waitForSelector(FILTER_VALUE_INPUT_SELECTOR, { timeout: 10000 })
+  await page.click(FILTER_VALUE_INPUT_SELECTOR)
+}
+
+const setFilterValueInput = async (page, value) => {
+  await page.waitForSelector(FILTER_VALUE_INPUT_SELECTOR, { timeout: 10000 })
+  await page.$eval(FILTER_VALUE_INPUT_SELECTOR, (input) => {
+    input.focus()
+    input.value = ''
+    input.dispatchEvent(new Event('input', { bubbles: true }))
+    input.dispatchEvent(new Event('change', { bubbles: true }))
+  })
+  if (value) {
+    await page.type(FILTER_VALUE_INPUT_SELECTOR, value)
+  }
+}
+
+const assertDropdownOptionsInclude = (options, expected, label) => {
+  const missing = expected.filter((item) => !options.includes(item))
+  assert(
+    missing.length === 0,
+    `${label} options missing ${JSON.stringify(missing)}, actual=${JSON.stringify(options)}`
+  )
 }
 
 const attemptDrag = async (page, fromRowKey, toRowKey) => {
@@ -427,7 +488,85 @@ const run = async () => {
       timeout: 30000,
     })
 
+    await selectAntdOptionByText(page, '[data-testid="nodes-filter-key"] .ant-select-selector', '节点类型')
+    await focusFilterValueInput(page)
+    await page.waitForSelector('.ant-select-dropdown:not(.ant-select-dropdown-hidden)', {
+      timeout: 10000,
+    })
+    assertDropdownOptionsInclude(
+      await getVisibleDropdownOptionTexts(page),
+      ['direct', 'socks', 'vmess', 'hysteria2'],
+      'type filter'
+    )
+
+    await selectAntdOptionByText(page, '[data-testid="nodes-filter-key"] .ant-select-selector', '位置')
+    await focusFilterValueInput(page)
+    await page.waitForSelector('.ant-select-dropdown:not(.ant-select-dropdown-hidden)', {
+      timeout: 10000,
+    })
+    assertDropdownOptionsInclude(
+      await getVisibleDropdownOptionTexts(page),
+      ['Seoul, South Korea', 'Tokyo, Japan', 'Los Angeles, United States'],
+      'location filter'
+    )
+
+    await selectAntdOptionByText(page, '[data-testid="nodes-filter-key"] .ant-select-selector', '地区缩写')
+    await focusFilterValueInput(page)
+    await page.waitForSelector('.ant-select-dropdown:not(.ant-select-dropdown-hidden)', {
+      timeout: 10000,
+    })
+    assertDropdownOptionsInclude(
+      await getVisibleDropdownOptionTexts(page),
+      ['KR', 'JP', 'US'],
+      'country_code filter'
+    )
+
+    await selectAntdOptionByText(page, '[data-testid="nodes-filter-key"] .ant-select-selector', '用户名')
+    await focusFilterValueInput(page)
+    await page.waitForSelector('.ant-select-dropdown:not(.ant-select-dropdown-hidden)', {
+      timeout: 10000,
+    })
+    assertDropdownOptionsInclude(
+      await getVisibleDropdownOptionTexts(page),
+      ['alpha-user', 'beta-user', 'gamma-user', 'delta-user'],
+      'username filter'
+    )
+
+    await selectAntdOptionByText(page, '[data-testid="nodes-filter-key"] .ant-select-selector', '位置')
+    await setFilterValueInput(page, 'Tokyo')
+    await page.click('[data-testid="nodes-filter-add"]')
+    await page.waitForSelector('[data-testid="nodes-filter-tag-location"]', { timeout: 10000 })
+    await sleep(600)
+
+    const locationFilteredRowKeys = await getVisibleRowKeys(page)
+    assert(
+      JSON.stringify(locationFilteredRowKeys) === JSON.stringify(['3']),
+      `Unexpected location filtered rows: ${JSON.stringify(locationFilteredRowKeys)}`
+    )
+
+    await page.click('[data-testid="nodes-filter-clear"]')
+    await sleep(600)
+
+    await selectAntdOptionByText(page, '[data-testid="nodes-filter-key"] .ant-select-selector', '入站端口')
+    await setFilterValueInput(page, '30001-30005，30008-30015')
+    await page.click('[data-testid="nodes-filter-add"]')
+    await page.waitForSelector('[data-testid="nodes-filter-tag-inbound_port"]', { timeout: 10000 })
+    await sleep(600)
+
+    const inboundPortFilteredRowKeys = await getVisibleRowKeys(page)
+    assert(
+      JSON.stringify(inboundPortFilteredRowKeys) === JSON.stringify(['1', '2', '3']),
+      `Unexpected inbound port filtered rows: ${JSON.stringify(inboundPortFilteredRowKeys)}`
+    )
+
+    await page.click('[data-testid="nodes-filter-clear"]')
+    await sleep(600)
+
     // Filter to "unverified/invalid" nodes.
+    await page.reload({ waitUntil: 'networkidle2' })
+    await page.waitForSelector('tbody.ant-table-tbody tr[data-row-key="1"]', {
+      timeout: 30000,
+    })
     await selectAntdOptionByText(
       page,
       '[data-testid="nodes-filter-value"] .ant-select-selector',
@@ -475,7 +614,7 @@ const run = async () => {
     const stateAfterEnabledDrag = mockApi.getState()
     assert(
       Array.isArray(stateAfterEnabledDrag.lastReorder?.nodes) &&
-        stateAfterEnabledDrag.lastReorder.nodes.length === 3,
+        stateAfterEnabledDrag.lastReorder.nodes.length === 4,
       `Unexpected reorder payload length: ${stateAfterEnabledDrag.lastReorder?.nodes?.length}`
     )
 
@@ -543,7 +682,7 @@ const run = async () => {
     await sleep(800)
     const remainingRowKeys = await getVisibleRowKeys(page)
     assert(
-      JSON.stringify(remainingRowKeys) === JSON.stringify(['2']),
+      JSON.stringify(remainingRowKeys) === JSON.stringify(['2', '4']),
       `Unexpected remaining rows after delete: ${JSON.stringify(remainingRowKeys)}`
     )
 

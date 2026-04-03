@@ -165,11 +165,6 @@ body {
   color: #506071;
 }
 
-.login-brand-link-url {
-  font-size: 13px;
-  color: rgba(80, 96, 113, 0.82);
-}
-
 .login-panel {
   padding: 38px 38px 34px;
   display: flex;
@@ -361,11 +356,6 @@ body {
 
 .dashboard-repo-link.ant-typography:hover {
   color: #ffffff !important;
-}
-
-.dashboard-repo-url.ant-typography {
-  color: rgba(244, 247, 250, 0.78);
-  font-size: 12px;
 }
 
 .dashboard-actions .ant-btn {
