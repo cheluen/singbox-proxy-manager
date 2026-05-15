@@ -10,7 +10,7 @@
 
 一个基于 sing-box 的代理节点管理和转发系统，提供简洁易用的 Web 界面。
 
-[功能特性](#-功能特性) • [快速开始](#-快速开始) • [二进制部署](#-二进制部署releases) • [云平台部署](#-云平台部署zeabur--clawcloud) • [使用说明](#-使用说明) • [配置说明](#-配置说明)
+[功能特性](#-功能特性) • [快速开始](#-快速开始) • [二进制部署](#-二进制部署releases) • [云平台部署](#-云平台部署zeabur) • [使用说明](#-使用说明) • [配置说明](#-配置说明)
 
 </div>
 
@@ -105,10 +105,10 @@ cp .env.example .env
 
 ---
 
-## ☁️ 云平台部署（Zeabur / ClawCloud）
+## ☁️ 云平台部署（Zeabur）
 
 > 重要说明：本项目默认 **每个节点占用一个独立入站端口**（`30001+`，节点越多端口越多）。
-> 在 Zeabur / ClawCloud 这类平台上，公网 TCP 端口往往有数量限制或按端口计费。
+> 在 Zeabur 这类平台上，公网 TCP 端口往往有数量限制或按端口计费。
 > **当节点数量较多时，成本会显著上升，因此不推荐用于大量节点部署**；更建议使用 VPS/独服/裸机等可自由开放端口的环境。
 
 ### Zeabur（Dashboard 部署，不推荐：端口成本高）
@@ -135,42 +135,9 @@ cp .env.example .env
 > 如果需要大量公网 TCP 端口（节点多），建议使用 VPS/独服/裸机部署。
 > 说明：云平台容器重启可能导致本地 SQLite 数据丢失，因此云平台部署建议配置远程数据库（PostgreSQL/MySQL `DATABASE_URL`，或 Turso）。
 
-### ClawCloud（可导入 Template，不推荐：端口成本高）
-
-> 注意：节点越多需要开放的公网 TCP 端口越多，在 ClawCloud 上会带来明显的端口资源与成本压力。
-> 大量节点场景建议改用 VPS/独服/裸机部署。
-
-你可以直接在 ClawCloud 的 Template/YAML 导入入口使用：
-
-- `deploy/clawcloud/app-launchpad-template.yaml`
-
-导入后会自动生成应用配置（包含镜像、环境变量、持久化、HTTP 入口、TCP 代理端口）。默认开放：
-
-- HTTP `30000`（管理面板）
-- TCP `30001`（第一个代理入站）
-- 资源规格 `0.5 vCPU / 512MB`
-
-导入步骤：
-
-1. 进入 `run.claw.cloud`，打开模板导入入口（会校验 `kind: Template`）。
-2. 粘贴 `deploy/clawcloud/app-launchpad-template.yaml` 内容并导入。
-3. 按提示填写 `admin_password`，并至少配置一种远程数据库：`database_url`（PostgreSQL/MySQL）或 `turso_database_url` + `turso_auth_token`。
-4. 部署完成后，访问分配域名并在面板 settings 中确认 `start_port`（默认 `30001`）。
-
-如果你只想用 Dashboard 手动配置，也可以按以下等价参数创建：
-
-- 镜像：`ghcr.io/cheluen/singbox-proxy-manager:latest`
-- HTTP 端口：`30000`
-- TCP 端口：`30001`（默认），按需再加 `30002+`
-- 环境变量：`PORT=30000`、`CONFIG_DIR=/app/config`、`TZ=UTC+8`、`ADMIN_PASSWORD=...`，并建议配置 `DATABASE_URL` 或 `TURSO_DATABASE_URL` + `TURSO_AUTH_TOKEN`
-- 建议对照根目录 `.env.example` 填写同名变量，避免多环境配置漂移
-- 持久化路径：`/app/config`
-- 资源规格：`0.5 vCPU / 512MB`
-
 ### 仓库内模板文件
 
 - Zeabur 模板：`deploy/zeabur/template.yaml`
-- ClawCloud 模板：`deploy/clawcloud/app-launchpad-template.yaml`
 
 ---
 
