@@ -571,14 +571,18 @@ func convertClashProxyToImportItem(proxy map[string]any) (ImportItem, error) {
 
 		return ImportItem{Source: "clash:" + name, Type: "wireguard", Name: name, Config: cfg}, nil
 
-	case "socks5", "socks":
+	case "socks5", "socks5h", "socks":
 		cfg := models.SOCKS5Config{
 			Server:     server,
 			ServerPort: port,
 			Username:   getString(proxy, "username"),
 			Password:   getString(proxy, "password"),
 		}
-		return ImportItem{Source: "clash:" + name, Type: "socks5", Name: name, Config: cfg}, nil
+		proxyType := "socks5"
+		if rawType == "socks5h" {
+			proxyType = "socks5h"
+		}
+		return ImportItem{Source: "clash:" + name, Type: proxyType, Name: name, Config: cfg}, nil
 
 	case "http", "https":
 		cfg := models.HTTPProxyConfig{

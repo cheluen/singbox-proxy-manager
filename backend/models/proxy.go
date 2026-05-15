@@ -9,6 +9,8 @@ import (
 	"strings"
 	"time"
 
+	appdb "sb-proxy/backend/database"
+
 	"golang.org/x/crypto/bcrypt"
 )
 
@@ -17,7 +19,7 @@ type ProxyNode struct {
 	ID          int    `json:"id"`
 	Name        string `json:"name"`
 	Remark      string `json:"remark"`
-	Type        string `json:"type"`   // ss, vless, vmess, hy2, tuic, trojan, anytls, socks5, http, wireguard, direct
+	Type        string `json:"type"`   // ss, vless, vmess, hy2, tuic, trojan, anytls, socks5, socks5h, http, wireguard, direct
 	Config      string `json:"config"` // JSON string of protocol-specific config
 	InboundPort int    `json:"inbound_port"`
 	Username    string `json:"username"`
@@ -271,88 +273,14 @@ type Settings struct {
 
 // InitDB initializes the database
 func InitDB(db *sql.DB) error {
-	// Create proxy_nodes table
-	_, err := db.Exec(`
-		CREATE TABLE IF NOT EXISTS proxy_nodes (
-			id INTEGER PRIMARY KEY AUTOINCREMENT,
-			name TEXT NOT NULL,
-			remark TEXT DEFAULT '',
-			type TEXT NOT NULL,
-			config TEXT NOT NULL,
-			inbound_port INTEGER NOT NULL,
-			username TEXT DEFAULT '',
-			password TEXT DEFAULT '',
-			tcp_reuse_enabled INTEGER NOT NULL DEFAULT 1,
-			sort_order INTEGER NOT NULL,
-			node_ip TEXT DEFAULT '',
-			location TEXT DEFAULT '',
-			country_code TEXT DEFAULT '',
-			latency INTEGER DEFAULT 0,
-			enabled INTEGER DEFAULT 1,
-			created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-			updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
-		)
-	`)
-	if err != nil {
-		return err
-	}
-
-	if err := ensureColumn(db, "proxy_nodes", "remark", "ALTER TABLE proxy_nodes ADD COLUMN remark TEXT DEFAULT ''"); err != nil {
-		return err
-	}
-	if err := ensureColumn(
-		db,
-		"proxy_nodes",
-		"tcp_reuse_enabled",
-		"ALTER TABLE proxy_nodes ADD COLUMN tcp_reuse_enabled INTEGER NOT NULL DEFAULT 1",
-	); err != nil {
-		return err
-	}
-
-	// Create settings table
-	_, err = db.Exec(`
-		CREATE TABLE IF NOT EXISTS settings (
-			id INTEGER PRIMARY KEY AUTOINCREMENT,
-			admin_password TEXT NOT NULL,
-			admin_password_set INTEGER DEFAULT 0,
-			start_port INTEGER DEFAULT 10000,
-			preserve_inbound_ports INTEGER NOT NULL DEFAULT 0,
-			created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-			updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
-		)
-	`)
-	if err != nil {
-		return err
-	}
-
-	if err := ensureColumn(db, "settings", "admin_password_set", "ALTER TABLE settings ADD COLUMN admin_password_set INTEGER DEFAULT 0"); err != nil {
-		return err
-	}
-	if err := ensureColumn(db, "settings", "preserve_inbound_ports", "ALTER TABLE settings ADD COLUMN preserve_inbound_ports INTEGER NOT NULL DEFAULT 0"); err != nil {
-		return err
-	}
-
-	// Create admin_sessions table for multi-session & multi-instance auth
-	_, err = db.Exec(`
-		CREATE TABLE IF NOT EXISTS admin_sessions (
-			id INTEGER PRIMARY KEY AUTOINCREMENT,
-			token_hash TEXT NOT NULL,
-			expires_at INTEGER NOT NULL,
-			user_agent TEXT DEFAULT '',
-			ip TEXT DEFAULT '',
-			created_at DATETIME DEFAULT CURRENT_TIMESTAMP
-		)
-	`)
-	if err != nil {
-		return err
-	}
-	if _, err := db.Exec("CREATE UNIQUE INDEX IF NOT EXISTS idx_admin_sessions_token_hash ON admin_sessions(token_hash)"); err != nil {
+	dialect := appdb.DialectFor(db)
+	if err := createSchema(db, dialect); err != nil {
 		return err
 	}
 
 	// Insert default settings if not exists
 	var count int
-	err = db.QueryRow("SELECT COUNT(*) FROM settings").Scan(&count)
+	err := db.QueryRow("SELECT COUNT(*) FROM settings").Scan(&count)
 	if err != nil {
 		return err
 	}
@@ -364,13 +292,13 @@ func InitDB(db *sql.DB) error {
 				log.Printf("Failed to hash initial admin password: %v", err)
 				return err
 			}
-			_, err = db.Exec("INSERT INTO settings (admin_password, admin_password_set, start_port, preserve_inbound_ports) VALUES (?, ?, ?, ?)", string(hashedPassword), 1, 30001, 0)
+			_, err = db.Exec("INSERT INTO settings (admin_password, admin_password_set, start_port, preserve_inbound_ports) VALUES (?, ?, ?, ?)", string(hashedPassword), 1, 30001, false)
 			if err != nil {
 				return err
 			}
 			log.Println("Admin password is managed by ADMIN_PASSWORD (env) and has been hashed")
 		} else {
-			_, err = db.Exec("INSERT INTO settings (admin_password, admin_password_set, start_port, preserve_inbound_ports) VALUES (?, ?, ?, ?)", "", 0, 30001, 0)
+			_, err = db.Exec("INSERT INTO settings (admin_password, admin_password_set, start_port, preserve_inbound_ports) VALUES (?, ?, ?, ?)", "", 0, 30001, false)
 			if err != nil {
 				return err
 			}
@@ -453,29 +381,254 @@ func InitDB(db *sql.DB) error {
 	return nil
 }
 
-func ensureColumn(db *sql.DB, table string, column string, alterSQL string) error {
-	rows, err := db.Query(fmt.Sprintf("PRAGMA table_info(%s)", table))
+func createSchema(db *sql.DB, dialect appdb.Dialect) error {
+	for _, statement := range schemaStatements(dialect) {
+		if _, err := db.Exec(statement); err != nil {
+			return err
+		}
+	}
+
+	for _, column := range migrationColumns(dialect) {
+		if err := ensureColumn(db, dialect, column.Table, column.Name, column.AlterSQL); err != nil {
+			return err
+		}
+	}
+
+	return ensureUniqueIndex(db, dialect, "idx_admin_sessions_token_hash", "admin_sessions", "token_hash")
+}
+
+type migrationColumn struct {
+	Table    string
+	Name     string
+	AlterSQL string
+}
+
+func schemaStatements(dialect appdb.Dialect) []string {
+	switch dialect {
+	case appdb.DialectPostgres:
+		return []string{
+			`CREATE TABLE IF NOT EXISTS proxy_nodes (
+				id BIGSERIAL PRIMARY KEY,
+				name TEXT NOT NULL,
+				remark TEXT NOT NULL DEFAULT '',
+				type TEXT NOT NULL,
+				config TEXT NOT NULL,
+				inbound_port INTEGER NOT NULL,
+				username TEXT NOT NULL DEFAULT '',
+				password TEXT NOT NULL DEFAULT '',
+				tcp_reuse_enabled BOOLEAN NOT NULL DEFAULT TRUE,
+				sort_order INTEGER NOT NULL,
+				node_ip TEXT NOT NULL DEFAULT '',
+				location TEXT NOT NULL DEFAULT '',
+				country_code TEXT NOT NULL DEFAULT '',
+				latency INTEGER DEFAULT 0,
+				enabled BOOLEAN DEFAULT TRUE,
+				created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
+				updated_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
+			)`,
+			`CREATE TABLE IF NOT EXISTS settings (
+				id BIGSERIAL PRIMARY KEY,
+				admin_password TEXT NOT NULL,
+				admin_password_set INTEGER DEFAULT 0,
+				start_port INTEGER DEFAULT 10000,
+				preserve_inbound_ports BOOLEAN NOT NULL DEFAULT FALSE,
+				created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
+				updated_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
+			)`,
+			`CREATE TABLE IF NOT EXISTS admin_sessions (
+				id BIGSERIAL PRIMARY KEY,
+				token_hash TEXT NOT NULL,
+				expires_at BIGINT NOT NULL,
+				user_agent TEXT NOT NULL DEFAULT '',
+				ip TEXT NOT NULL DEFAULT '',
+				created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
+			)`,
+		}
+	case appdb.DialectMySQL:
+		return []string{
+			`CREATE TABLE IF NOT EXISTS proxy_nodes (
+				id BIGINT NOT NULL AUTO_INCREMENT PRIMARY KEY,
+				name VARCHAR(255) NOT NULL,
+				remark VARCHAR(1024) NOT NULL DEFAULT '',
+				type VARCHAR(64) NOT NULL,
+				config TEXT NOT NULL,
+				inbound_port INTEGER NOT NULL,
+				username VARCHAR(255) NOT NULL DEFAULT '',
+				password VARCHAR(255) NOT NULL DEFAULT '',
+				tcp_reuse_enabled BOOLEAN NOT NULL DEFAULT TRUE,
+				sort_order INTEGER NOT NULL,
+				node_ip VARCHAR(255) NOT NULL DEFAULT '',
+				location VARCHAR(255) NOT NULL DEFAULT '',
+				country_code VARCHAR(32) NOT NULL DEFAULT '',
+				latency INTEGER DEFAULT 0,
+				enabled BOOLEAN DEFAULT TRUE,
+				created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+				updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+			)`,
+			`CREATE TABLE IF NOT EXISTS settings (
+				id BIGINT NOT NULL AUTO_INCREMENT PRIMARY KEY,
+				admin_password TEXT NOT NULL,
+				admin_password_set INTEGER DEFAULT 0,
+				start_port INTEGER DEFAULT 10000,
+				preserve_inbound_ports BOOLEAN NOT NULL DEFAULT FALSE,
+				created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+				updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+			)`,
+			`CREATE TABLE IF NOT EXISTS admin_sessions (
+				id BIGINT NOT NULL AUTO_INCREMENT PRIMARY KEY,
+				token_hash VARCHAR(128) NOT NULL,
+				expires_at BIGINT NOT NULL,
+				user_agent VARCHAR(512) NOT NULL DEFAULT '',
+				ip VARCHAR(128) NOT NULL DEFAULT '',
+				created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+			)`,
+		}
+	default:
+		return []string{
+			`CREATE TABLE IF NOT EXISTS proxy_nodes (
+				id INTEGER PRIMARY KEY AUTOINCREMENT,
+				name TEXT NOT NULL,
+				remark TEXT DEFAULT '',
+				type TEXT NOT NULL,
+				config TEXT NOT NULL,
+				inbound_port INTEGER NOT NULL,
+				username TEXT DEFAULT '',
+				password TEXT DEFAULT '',
+				tcp_reuse_enabled INTEGER NOT NULL DEFAULT 1,
+				sort_order INTEGER NOT NULL,
+				node_ip TEXT DEFAULT '',
+				location TEXT DEFAULT '',
+				country_code TEXT DEFAULT '',
+				latency INTEGER DEFAULT 0,
+				enabled INTEGER DEFAULT 1,
+				created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+				updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+			)`,
+			`CREATE TABLE IF NOT EXISTS settings (
+				id INTEGER PRIMARY KEY AUTOINCREMENT,
+				admin_password TEXT NOT NULL,
+				admin_password_set INTEGER DEFAULT 0,
+				start_port INTEGER DEFAULT 10000,
+				preserve_inbound_ports INTEGER NOT NULL DEFAULT 0,
+				created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+				updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+			)`,
+			`CREATE TABLE IF NOT EXISTS admin_sessions (
+				id INTEGER PRIMARY KEY AUTOINCREMENT,
+				token_hash TEXT NOT NULL,
+				expires_at INTEGER NOT NULL,
+				user_agent TEXT DEFAULT '',
+				ip TEXT DEFAULT '',
+				created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+			)`,
+		}
+	}
+}
+
+func migrationColumns(dialect appdb.Dialect) []migrationColumn {
+	switch dialect {
+	case appdb.DialectPostgres:
+		return []migrationColumn{
+			{Table: "proxy_nodes", Name: "remark", AlterSQL: "ALTER TABLE proxy_nodes ADD COLUMN remark TEXT NOT NULL DEFAULT ''"},
+			{Table: "proxy_nodes", Name: "tcp_reuse_enabled", AlterSQL: "ALTER TABLE proxy_nodes ADD COLUMN tcp_reuse_enabled BOOLEAN NOT NULL DEFAULT TRUE"},
+			{Table: "settings", Name: "admin_password_set", AlterSQL: "ALTER TABLE settings ADD COLUMN admin_password_set INTEGER DEFAULT 0"},
+			{Table: "settings", Name: "preserve_inbound_ports", AlterSQL: "ALTER TABLE settings ADD COLUMN preserve_inbound_ports BOOLEAN NOT NULL DEFAULT FALSE"},
+		}
+	case appdb.DialectMySQL:
+		return []migrationColumn{
+			{Table: "proxy_nodes", Name: "remark", AlterSQL: "ALTER TABLE proxy_nodes ADD COLUMN remark VARCHAR(1024) NOT NULL DEFAULT ''"},
+			{Table: "proxy_nodes", Name: "tcp_reuse_enabled", AlterSQL: "ALTER TABLE proxy_nodes ADD COLUMN tcp_reuse_enabled BOOLEAN NOT NULL DEFAULT TRUE"},
+			{Table: "settings", Name: "admin_password_set", AlterSQL: "ALTER TABLE settings ADD COLUMN admin_password_set INTEGER DEFAULT 0"},
+			{Table: "settings", Name: "preserve_inbound_ports", AlterSQL: "ALTER TABLE settings ADD COLUMN preserve_inbound_ports BOOLEAN NOT NULL DEFAULT FALSE"},
+		}
+	default:
+		return []migrationColumn{
+			{Table: "proxy_nodes", Name: "remark", AlterSQL: "ALTER TABLE proxy_nodes ADD COLUMN remark TEXT DEFAULT ''"},
+			{Table: "proxy_nodes", Name: "tcp_reuse_enabled", AlterSQL: "ALTER TABLE proxy_nodes ADD COLUMN tcp_reuse_enabled INTEGER NOT NULL DEFAULT 1"},
+			{Table: "settings", Name: "admin_password_set", AlterSQL: "ALTER TABLE settings ADD COLUMN admin_password_set INTEGER DEFAULT 0"},
+			{Table: "settings", Name: "preserve_inbound_ports", AlterSQL: "ALTER TABLE settings ADD COLUMN preserve_inbound_ports INTEGER NOT NULL DEFAULT 0"},
+		}
+	}
+}
+
+func ensureColumn(db *sql.DB, dialect appdb.Dialect, table string, column string, alterSQL string) error {
+	exists, err := columnExists(db, dialect, table, column)
 	if err != nil {
 		return err
 	}
-	defer rows.Close()
+	if exists {
+		return nil
+	}
+	_, err = db.Exec(alterSQL)
+	return err
+}
 
-	for rows.Next() {
-		var cid int
-		var name string
-		var colType string
-		var notNull int
-		var dflt sql.NullString
-		var pk int
-		if err := rows.Scan(&cid, &name, &colType, &notNull, &dflt, &pk); err != nil {
+func columnExists(db *sql.DB, dialect appdb.Dialect, table string, column string) (bool, error) {
+	switch dialect {
+	case appdb.DialectPostgres:
+		var count int
+		err := db.QueryRow(`
+			SELECT COUNT(*)
+			FROM information_schema.columns
+			WHERE table_schema = current_schema()
+			  AND table_name = ?
+			  AND column_name = ?
+		`, table, column).Scan(&count)
+		return count > 0, err
+	case appdb.DialectMySQL:
+		var count int
+		err := db.QueryRow(`
+			SELECT COUNT(*)
+			FROM information_schema.columns
+			WHERE table_schema = DATABASE()
+			  AND table_name = ?
+			  AND column_name = ?
+		`, table, column).Scan(&count)
+		return count > 0, err
+	default:
+		rows, err := db.Query(fmt.Sprintf("PRAGMA table_info(%s)", table))
+		if err != nil {
+			return false, err
+		}
+		defer rows.Close()
+
+		for rows.Next() {
+			var cid int
+			var name string
+			var colType string
+			var notNull int
+			var dflt sql.NullString
+			var pk int
+			if err := rows.Scan(&cid, &name, &colType, &notNull, &dflt, &pk); err != nil {
+				return false, err
+			}
+			if name == column {
+				return true, nil
+			}
+		}
+		return false, rows.Err()
+	}
+}
+
+func ensureUniqueIndex(db *sql.DB, dialect appdb.Dialect, indexName string, table string, column string) error {
+	if dialect == appdb.DialectMySQL {
+		var count int
+		if err := db.QueryRow(`
+			SELECT COUNT(*)
+			FROM information_schema.statistics
+			WHERE table_schema = DATABASE()
+			  AND table_name = ?
+			  AND index_name = ?
+		`, table, indexName).Scan(&count); err != nil {
 			return err
 		}
-		if name == column {
+		if count > 0 {
 			return nil
 		}
+		_, err := db.Exec(fmt.Sprintf("CREATE UNIQUE INDEX %s ON %s(%s)", indexName, table, column))
+		return err
 	}
-
-	_, err = db.Exec(alterSQL)
+	_, err := db.Exec(fmt.Sprintf("CREATE UNIQUE INDEX IF NOT EXISTS %s ON %s(%s)", indexName, table, column))
 	return err
 }
 
@@ -499,7 +652,7 @@ func (p *ProxyNode) ParseConfig() (interface{}, error) {
 		config = &TrojanConfig{}
 	case "anytls":
 		config = &AnyTLSConfig{}
-	case "socks5":
+	case "socks5", "socks5h":
 		config = &SOCKS5Config{}
 	case "http":
 		config = &HTTPProxyConfig{}

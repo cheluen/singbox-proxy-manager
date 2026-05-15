@@ -371,7 +371,7 @@ func (s *SingBoxService) generateOutbound(node *models.ProxyNode, tag string) (O
 		return s.generateTrojanOutbound(parsedConfig.(*models.TrojanConfig), tag)
 	case "anytls":
 		return s.generateAnyTLSOutbound(parsedConfig.(*models.AnyTLSConfig), tag)
-	case "socks5":
+	case "socks5", "socks5h":
 		return s.generateSOCKS5Outbound(parsedConfig.(*models.SOCKS5Config), tag)
 	case "http":
 		return s.generateHTTPProxyOutbound(parsedConfig.(*models.HTTPProxyConfig), tag)

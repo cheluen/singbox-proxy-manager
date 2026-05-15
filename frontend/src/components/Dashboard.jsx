@@ -37,6 +37,7 @@ import {
   HolderOutlined,
   FilterOutlined,
   GithubOutlined,
+  ArrowUpOutlined,
 } from '@ant-design/icons'
 import { useTranslation } from 'react-i18next'
 import { DragDropContext, Droppable, Draggable } from 'react-beautiful-dnd'
@@ -353,6 +354,7 @@ function Dashboard({ onLogout }) {
   const nodeIPCheckRunsRef = useRef(new Map())
   const [loading, setLoading] = useState(false)
   const [appVersion, setAppVersion] = useState('')
+  const [versionUpdate, setVersionUpdate] = useState(null)
   const [modalVisible, setModalVisible] = useState(false)
   const [settingsVisible, setSettingsVisible] = useState(false)
   const [batchAuthVisible, setBatchAuthVisible] = useState(false)
@@ -924,6 +926,7 @@ function Dashboard({ onLogout }) {
         return
       }
       setAppVersion(serverVersion)
+      setVersionUpdate(response.data?.update || null)
       if (versionCheck.mismatch) {
         message.warning(
           t('frontend_version_mismatch')
@@ -933,6 +936,7 @@ function Dashboard({ onLogout }) {
       }
     } catch {
       setAppVersion('')
+      setVersionUpdate(null)
     }
   }
 
@@ -2216,6 +2220,14 @@ function Dashboard({ onLogout }) {
       table
     )
 
+    const updateAvailable = Boolean(versionUpdate?.available)
+    const latestVersion = versionUpdate?.latest_version || ''
+    const releaseURL = versionUpdate?.release_url || `${OFFICIAL_GITHUB_URL}/releases/latest`
+    const versionTooltip = [
+      `${t('frontend_build')}: ${frontendBuildVersion} (${frontendBuildFingerprint})`,
+      updateAvailable && latestVersion ? `${t('update_available')}: ${latestVersion}` : '',
+    ].filter(Boolean).join('\n')
+
 	    return (
 	      <Layout className="dashboard-layout">
 	        <Header className="dashboard-header">
@@ -2241,11 +2253,21 @@ function Dashboard({ onLogout }) {
 	                  <GithubOutlined />
 	                  <span>{t('official_repository')}</span>
 	                </Typography.Link>
-	                <Tooltip
-	                  title={`${t('frontend_build')}: ${frontendBuildVersion} (${frontendBuildFingerprint})`}
-	                >
-	                  <Tag color="blue">
-	                    {t('version')} {appVersion || '-'}
+	                <Tooltip title={versionTooltip}>
+	                  <Tag color={updateAvailable ? 'gold' : 'blue'} className="dashboard-version-tag">
+	                    <span>{t('version')} {appVersion || '-'}</span>
+	                    {updateAvailable && (
+	                      <Typography.Link
+	                        href={releaseURL}
+	                        target="_blank"
+	                        rel="noreferrer"
+	                        className="dashboard-version-update-link"
+	                        aria-label={latestVersion ? `${t('update_available')}: ${latestVersion}` : t('update_available')}
+	                        onClick={(event) => event.stopPropagation()}
+	                      >
+	                        <ArrowUpOutlined />
+	                      </Typography.Link>
+	                    )}
 	                  </Tag>
 	                </Tooltip>
 	              </Space>

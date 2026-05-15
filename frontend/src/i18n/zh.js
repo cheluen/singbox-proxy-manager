@@ -18,6 +18,7 @@ export default {
   frontend_build: '前端构建',
   frontend_version_mismatch: '检测到版本不一致，后端 {{server}} / 前端 {{client}}。请确认已完成前端发布。',
   official_repository: '官方仓库',
+  update_available: '发现新版本',
   
   // Login
   login_title: '管理员登录',

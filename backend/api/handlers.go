@@ -16,6 +16,7 @@ import (
 	"github.com/gin-gonic/gin"
 	"golang.org/x/crypto/bcrypt"
 
+	appdb "sb-proxy/backend/database"
 	"sb-proxy/backend/models"
 	"sb-proxy/backend/services"
 )
@@ -602,7 +603,11 @@ func (h *Handler) CreateNode(c *gin.Context) {
 		return
 	}
 
-	id, _ := result.LastInsertId()
+	id, err := appdb.LastInsertID(c.Request.Context(), tx, result, appdb.DialectFor(h.db))
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to read created node id"})
+		return
+	}
 	req.ID = int(id)
 
 	if err := tx.Commit(); err != nil {
@@ -791,7 +796,13 @@ func (h *Handler) BatchImportNodes(c *gin.Context) {
 			continue
 		}
 
-		id, _ := dbResult.LastInsertId()
+		id, err := appdb.LastInsertID(c.Request.Context(), tx, dbResult, appdb.DialectFor(h.db))
+		if err != nil {
+			result["success"] = false
+			result["error"] = "failed to read created node id"
+			results = append(results, result)
+			continue
+		}
 
 		result["success"] = true
 		result["id"] = id

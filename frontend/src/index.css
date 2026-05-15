@@ -423,3 +423,21 @@ tr.sbpm-virtual-drag-over td,
 .sbpm-node-record-collapse.ant-collapse > .ant-collapse-item > .ant-collapse-header {
   padding: 8px 12px !important;
 }
+
+.dashboard-version-tag.ant-tag {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  margin-inline-end: 0;
+}
+
+.dashboard-version-update-link.ant-typography {
+  display: inline-flex;
+  align-items: center;
+  color: #d48806 !important;
+  line-height: 1;
+}
+
+.dashboard-version-update-link.ant-typography:hover {
+  color: #fa8c16 !important;
+}

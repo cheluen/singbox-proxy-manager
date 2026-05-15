@@ -54,6 +54,9 @@ function NodeList({
       vmess: 'orange',
       hy2: 'purple',
       tuic: 'cyan',
+      socks5: 'orange',
+      socks5h: 'volcano',
+      http: 'geekblue',
     }
     return colors[type] || 'default'
   }

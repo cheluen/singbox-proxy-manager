@@ -16,6 +16,7 @@ const proxyTypes = [
   { value: 'trojan', label: 'Trojan' },
   { value: 'anytls', label: 'AnyTLS' },
   { value: 'socks5', label: 'SOCKS5' },
+  { value: 'socks5h', label: 'SOCKS5H' },
   { value: 'http', label: 'HTTP Proxy' },
   { value: 'wireguard', label: 'Cloudflare WireGuard' },
 ]
@@ -259,6 +260,7 @@ function NodeForm({ node, onSave, onCancel }) {
         }
 
       case 'socks5':
+      case 'socks5h':
         return {
           ...config,
           username: values.proxy_username || '',
@@ -384,8 +386,8 @@ function NodeForm({ node, onSave, onCancel }) {
     tuic_password: node?.type === 'tuic' ? protocolPassword : '',
     trojan_password: node?.type === 'trojan' ? protocolPassword : '',
     anytls_password: node?.type === 'anytls' ? protocolPassword : '',
-    proxy_username: node?.type === 'socks5' || node?.type === 'http' ? protocolUsername : '',
-    proxy_password: node?.type === 'socks5' || node?.type === 'http' ? protocolPassword : '',
+    proxy_username: node?.type === 'socks5' || node?.type === 'socks5h' || node?.type === 'http' ? protocolUsername : '',
+    proxy_password: node?.type === 'socks5' || node?.type === 'socks5h' || node?.type === 'http' ? protocolPassword : '',
     proxy_tls: proxyTLS,
     proxy_sni: proxySNI,
     proxy_insecure: proxyInsecure,
@@ -870,6 +872,7 @@ function NodeForm({ node, onSave, onCancel }) {
       case 'anytls':
         return renderAnyTLSFields()
       case 'socks5':
+      case 'socks5h':
         return renderSOCKS5Fields()
       case 'http':
         return renderHTTPProxyFields()

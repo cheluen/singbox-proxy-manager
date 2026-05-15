@@ -3,6 +3,7 @@ package services
 import (
 	"encoding/base64"
 	"encoding/json"
+	"strings"
 	"testing"
 
 	"sb-proxy/backend/models"
@@ -337,5 +338,50 @@ func TestBuildWireGuardShareLinkRoundTrip(t *testing.T) {
 	}
 	if len(wgCfg.Reserved) != 3 || wgCfg.Reserved[1] != 104 {
 		t.Fatalf("unexpected round-trip reserved bytes: %+v", wgCfg.Reserved)
+	}
+}
+
+func TestParseAndExportSOCKS5HLink(t *testing.T) {
+	link := "socks5h://user:pass@example.com:1080#RemoteDNS"
+	cfg, typ, name, err := ParseShareLink(link)
+	if err != nil {
+		t.Fatalf("parse failed: %v", err)
+	}
+	if typ != "socks5h" || name != "RemoteDNS" {
+		t.Fatalf("unexpected metadata: type=%s name=%s", typ, name)
+	}
+	socksCfg, ok := cfg.(models.SOCKS5Config)
+	if !ok {
+		t.Fatalf("unexpected config type %T", cfg)
+	}
+	if socksCfg.Server != "example.com" || socksCfg.ServerPort != 1080 || socksCfg.Username != "user" || socksCfg.Password != "pass" {
+		t.Fatalf("unexpected socks5h config: %+v", socksCfg)
+	}
+
+	cfgBytes, _ := json.Marshal(socksCfg)
+	exported, err := BuildShareLink(models.ProxyNode{Name: name, Type: typ, Config: string(cfgBytes)})
+	if err != nil {
+		t.Fatalf("export failed: %v", err)
+	}
+	if !strings.HasPrefix(exported, "socks5h://") {
+		t.Fatalf("expected socks5h scheme, got %s", exported)
+	}
+}
+
+func TestGenerateSOCKS5HOutboundUsesSingBoxSocksType(t *testing.T) {
+	rawCfg := models.SOCKS5Config{Server: "proxy.example.com", ServerPort: 1080, Username: "u", Password: "p"}
+	cfgBytes, _ := json.Marshal(rawCfg)
+	node := models.ProxyNode{ID: 1, Name: "socks5h", Type: "socks5h", Config: string(cfgBytes), InboundPort: 30010}
+
+	svc := &SingBoxService{}
+	out, err := svc.generateOutbound(&node, "socks5h-out")
+	if err != nil {
+		t.Fatalf("generateOutbound error: %v", err)
+	}
+	if out.Type != "socks" || out.Tag != "socks5h-out" || out.Server != "proxy.example.com" || out.Port != 1080 {
+		t.Fatalf("unexpected outbound: %+v", out)
+	}
+	if out.Extra["version"] != "5" || out.Extra["username"] != "u" || out.Extra["password"] != "p" {
+		t.Fatalf("unexpected socks extra: %+v", out.Extra)
 	}
 }

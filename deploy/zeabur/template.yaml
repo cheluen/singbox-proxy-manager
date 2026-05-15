@@ -20,21 +20,29 @@ spec:
       type: PASSWORD
       name: 管理员密码
       description: 建议使用强密码；变量命名与仓库 .env.example 对齐
+    - key: DATABASE_URL
+      type: STRING
+      name: 远程 PostgreSQL/MySQL URL
+      description: 可选，格式示例：postgres://... 或 mysql://...；优先级高于 Turso
+    - key: MYSQL_DATABASE_NAME
+      type: STRING
+      name: MySQL 业务库名
+      description: 可选；当 MySQL URL 指向 sys 等系统库时覆盖为实际业务库
     - key: TURSO_DATABASE_URL
       type: STRING
       name: Turso 数据库地址
-      description: 必填，格式示例：libsql://your-db-name.turso.io
+      description: 可选，格式示例：libsql://your-db-name.turso.io；未配置 DATABASE_URL 时生效
     - key: TURSO_AUTH_TOKEN
       type: PASSWORD
       name: Turso 认证 Token
-      description: 必填，填写 Turso 数据库对应的 Auth Token
+      description: 可选，填写 Turso 数据库对应的 Auth Token
   readme: |-
     # SingBox Proxy Manager
 
     部署完成后请优先完成以下配置：
 
     1. 在环境变量中设置 `ADMIN_PASSWORD`（强密码，命名建议参考仓库 `.env.example`）
-    2. 必须设置 `TURSO_DATABASE_URL` 与 `TURSO_AUTH_TOKEN`（云平台部署默认强制使用 Turso）
+    2. 建议至少配置一种远程数据库：`DATABASE_URL`（PostgreSQL/MySQL）或 `TURSO_DATABASE_URL` + `TURSO_AUTH_TOKEN`
     3. 如需更多代理节点端口，请在 Ports 中继续新增 TCP 端口（30002+）
 
     > 重要提示：本项目每个节点都需要独立公网 TCP 端口（30001+）。
@@ -86,6 +94,24 @@ spec:
             default: "168"
           TRUSTED_PROXIES:
             default: ""
+          DATABASE_URL:
+            default: ${DATABASE_URL}
+          MYSQL_DATABASE_NAME:
+            default: ${MYSQL_DATABASE_NAME}
+          DB_MAX_OPEN_CONNS:
+            default: "10"
+          DB_MAX_IDLE_CONNS:
+            default: "5"
+          DB_CONN_MAX_LIFETIME:
+            default: ""
+          SBPM_UPDATE_CHECK_DISABLED:
+            default: "false"
+          SBPM_UPDATE_CHECK_REPO:
+            default: cheluen/singbox-proxy-manager
+          SBPM_UPDATE_CHECK_TTL:
+            default: 6h
+          SBPM_UPDATE_CHECK_TIMEOUT:
+            default: 5s
           HTTP_READ_HEADER_TIMEOUT:
             default: "5s"
           HTTP_READ_TIMEOUT:
@@ -113,5 +139,5 @@ spec:
             title: 成本提示
             content: 每个节点需独立公网 TCP 端口；节点多时云平台端口成本高，不推荐大量节点部署。
           - type: TEXT
-            title: Turso 必填说明
-            content: 云平台容器重启可能导致本地数据丢失，模板已强制要求填写 TURSO_DATABASE_URL 与 TURSO_AUTH_TOKEN。
+            title: 远程数据库建议
+            content: 云平台容器重启可能导致本地数据丢失，建议配置 DATABASE_URL 或 TURSO_DATABASE_URL 与 TURSO_AUTH_TOKEN。

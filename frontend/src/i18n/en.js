@@ -18,6 +18,7 @@ export default {
   frontend_build: 'Frontend build',
   frontend_version_mismatch: 'Version mismatch detected: backend {{server}} / frontend {{client}}. Confirm frontend deployment is complete.',
   official_repository: 'Official Repository',
+  update_available: 'Update available',
   
   // Login
   login_title: 'Admin Login',

@@ -36,8 +36,8 @@ func BuildShareLink(node models.ProxyNode) (string, error) {
 		return buildTUICShareLink(node.Name, parsedConfig.(*models.TUICConfig))
 	case "anytls":
 		return buildAnyTLSShareLink(node.Name, parsedConfig.(*models.AnyTLSConfig))
-	case "socks5":
-		return buildSOCKS5ShareLink(node.Name, parsedConfig.(*models.SOCKS5Config))
+	case "socks5", "socks5h":
+		return buildSOCKS5ShareLink(node.Type, node.Name, parsedConfig.(*models.SOCKS5Config))
 	case "http":
 		return buildHTTPProxyShareLink(node.Name, parsedConfig.(*models.HTTPProxyConfig))
 	case "wireguard":
@@ -390,9 +390,13 @@ func buildAnyTLSShareLink(name string, cfg *models.AnyTLSConfig) (string, error)
 	return link + encodeNameFragment(name), nil
 }
 
-func buildSOCKS5ShareLink(name string, cfg *models.SOCKS5Config) (string, error) {
+func buildSOCKS5ShareLink(proxyType string, name string, cfg *models.SOCKS5Config) (string, error) {
+	scheme := "socks5"
+	if proxyType == "socks5h" {
+		scheme = "socks5h"
+	}
 	u := &url.URL{
-		Scheme: "socks5",
+		Scheme: scheme,
 		Host:   net.JoinHostPort(cfg.Server, strconv.Itoa(cfg.ServerPort)),
 	}
 

@@ -2,7 +2,6 @@ package main
 
 import (
 	"bytes"
-	"context"
 	"crypto/sha256"
 	"database/sql"
 	"encoding/hex"
@@ -20,6 +19,7 @@ import (
 	"time"
 
 	"sb-proxy/backend/api"
+	appdb "sb-proxy/backend/database"
 	"sb-proxy/backend/models"
 	"sb-proxy/backend/services"
 	frontendassets "sb-proxy/frontend"
@@ -27,8 +27,6 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/joho/godotenv"
-	"github.com/tursodatabase/libsql-client-go/libsql"
-	sqlite "modernc.org/sqlite"
 )
 
 const (
@@ -39,54 +37,7 @@ const (
 )
 
 func openDatabase(configDir string) (*sql.DB, error) {
-	tursoURL := os.Getenv("TURSO_DATABASE_URL")
-	tursoToken := os.Getenv("TURSO_AUTH_TOKEN")
-	if tursoURL != "" && tursoToken != "" {
-		connector, err := libsql.NewConnector(tursoURL, libsql.WithAuthToken(tursoToken))
-		if err != nil {
-			return nil, err
-		}
-
-		db := sql.OpenDB(connector)
-		if err := db.Ping(); err != nil {
-			db.Close()
-			return nil, err
-		}
-
-		log.Printf("Using Turso database: %s", tursoURL)
-		return db, nil
-	}
-	if tursoURL != "" || tursoToken != "" {
-		log.Printf("Turso config incomplete (need both TURSO_DATABASE_URL and TURSO_AUTH_TOKEN), falling back to local sqlite")
-	}
-
-	sqlite.RegisterConnectionHook(func(conn sqlite.ExecQuerierContext, dsn string) error {
-		if _, err := conn.ExecContext(context.Background(), "PRAGMA foreign_keys = ON", nil); err != nil {
-			return fmt.Errorf("sqlite init failed (foreign_keys): %w", err)
-		}
-		if _, err := conn.ExecContext(context.Background(), "PRAGMA busy_timeout = 10000", nil); err != nil {
-			return fmt.Errorf("sqlite init failed (busy_timeout): %w", err)
-		}
-		if _, err := conn.ExecContext(context.Background(), "PRAGMA journal_mode = WAL", nil); err != nil {
-			return fmt.Errorf("sqlite init failed (journal_mode): %w", err)
-		}
-		return nil
-	})
-
-	dbPath := filepath.Join(configDir, "proxy.db")
-	db, err := sql.Open("sqlite", dbPath)
-	if err != nil {
-		return nil, err
-	}
-	db.SetMaxOpenConns(1)
-	db.SetMaxIdleConns(1)
-	if err := db.Ping(); err != nil {
-		db.Close()
-		return nil, err
-	}
-
-	log.Printf("Using local sqlite database: %s", dbPath)
-	return db, nil
+	return appdb.Open(configDir)
 }
 
 func loadRuntimeEnvironment() {
@@ -332,10 +283,22 @@ func main() {
 	handler := api.NewHandler(db, singBoxService)
 
 	apiGroup := r.Group("/api")
+	updateChecker := version.NewUpdateCheckerFromEnv()
 
 	// Public routes
 	apiGroup.GET("/version", func(c *gin.Context) {
-		c.JSON(http.StatusOK, gin.H{"version": version.Version()})
+		currentVersion := version.Version()
+		response := gin.H{"version": currentVersion}
+		if updateInfo, err := updateChecker.Check(c.Request.Context(), currentVersion); err == nil {
+			response["update"] = updateInfo
+		} else {
+			response["update"] = version.UpdateInfo{
+				CurrentVersion: currentVersion,
+				Available:      false,
+				Error:          err.Error(),
+			}
+		}
+		c.JSON(http.StatusOK, response)
 	})
 	apiGroup.GET("/auth/status", handler.AuthStatus)
 	apiGroup.POST("/setup/admin-password", handler.SetupAdminPassword)

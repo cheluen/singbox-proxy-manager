@@ -99,16 +99,26 @@ spec:
       type: string
       default: '1048576'
       required: false
+    database_url:
+      description: '可选：PostgreSQL/MySQL URL，格式如 postgres://... 或 mysql://...；优先级高于 Turso'
+      type: string
+      default: ''
+      required: false
+    mysql_database_name:
+      description: '可选：MySQL 业务库名；当 URL 指向 sys 等系统库时覆盖为实际业务库'
+      type: string
+      default: ''
+      required: false
     turso_database_url:
-      description: '必填：libsql://your-db-name.turso.io'
+      description: '可选：libsql://your-db-name.turso.io；未配置 database_url 时生效'
       type: string
       default: ''
-      required: true
+      required: false
     turso_auth_token:
-      description: '必填：Turso token'
+      description: '可选：Turso token'
       type: string
       default: ''
-      required: true
+      required: false
 
 ---
 apiVersion: apps/v1
@@ -163,6 +173,24 @@ spec:
               value: ${{ inputs.admin_session_ttl_hours }}
             - name: TRUSTED_PROXIES
               value: ${{ inputs.trusted_proxies }}
+            - name: DATABASE_URL
+              value: ${{ inputs.database_url }}
+            - name: MYSQL_DATABASE_NAME
+              value: ${{ inputs.mysql_database_name }}
+            - name: DB_MAX_OPEN_CONNS
+              value: '10'
+            - name: DB_MAX_IDLE_CONNS
+              value: '5'
+            - name: DB_CONN_MAX_LIFETIME
+              value: ''
+            - name: SBPM_UPDATE_CHECK_DISABLED
+              value: 'false'
+            - name: SBPM_UPDATE_CHECK_REPO
+              value: cheluen/singbox-proxy-manager
+            - name: SBPM_UPDATE_CHECK_TTL
+              value: 6h
+            - name: SBPM_UPDATE_CHECK_TIMEOUT
+              value: 5s
             - name: HTTP_READ_HEADER_TIMEOUT
               value: ${{ inputs.http_read_header_timeout }}
             - name: HTTP_READ_TIMEOUT

@@ -4,7 +4,7 @@
 
 <img src="./logo.svg" alt="SingBox Proxy Manager Logo" width="96" />
 
-![Version](https://img.shields.io/badge/version-1.3.17-blue.svg)
+![Version](https://img.shields.io/badge/version-1.4.0-blue.svg)
 ![License](https://img.shields.io/badge/license-MIT-green.svg)
 ![SingBox](https://img.shields.io/badge/sing--box-1.12.12-orange.svg)
 
@@ -21,9 +21,10 @@
 ### 核心功能
 - 🚀 **单进程架构** - 使用单个 sing-box 进程管理所有节点，资源占用低
 - 🔐 **认证保护** - 支持为每个代理节点设置独立的用户名密码
-- 🌐 **多协议支持** - 支持 VLESS、VMess、Trojan、Hysteria2、TUIC、Shadowsocks、AnyTLS，以及 SOCKS5/HTTP 上游代理
+- 🌐 **多协议支持** - 支持 VLESS、VMess、Trojan、Hysteria2、TUIC、Shadowsocks、AnyTLS，以及 SOCKS5/SOCKS5H/HTTP 上游代理
 - 🔄 **双模式代理** - 单端口同时支持 HTTP 和 SOCKS5 协议
 - 📊 **IP 检测** - 实时检测节点 IP、地理位置和延迟
+- ⬆️ **版本更新提示** - 自动检查 GitHub Release，发现新版本时在面板版本号旁显示向上箭头
 
 ### 管理功能
 - ✨ **可视化管理** - 现代化的 React + Ant Design 界面
@@ -123,7 +124,7 @@ cp .env.example .env
    - `CONFIG_DIR=/app/config`
    - `TZ=UTC+8`（或 `Asia/Shanghai`）
    - `ADMIN_PASSWORD=你的强密码`
-   - 必填：`TURSO_DATABASE_URL`、`TURSO_AUTH_TOKEN`（云平台部署默认强制使用 Turso）
+   - 建议配置远程数据库：`DATABASE_URL`（PostgreSQL/MySQL）或 `TURSO_DATABASE_URL` + `TURSO_AUTH_TOKEN`
    - 变量命名建议与仓库根目录 `.env.example` 保持一致，便于迁移和回滚
 5. 在 **Volumes** 挂载目录 `/app/config`（用于持久化 `config.json`、日志、SQLite）。
 6. 资源建议使用默认规格：`0.5 vCPU / 512MB`。
@@ -132,7 +133,7 @@ cp .env.example .env
 
 > 注意：部分区域/套餐下，同一服务可用的公网 TCP 转发数量可能受限；且当需要开放大量端口时成本很高。
 > 如果需要大量公网 TCP 端口（节点多），建议使用 VPS/独服/裸机部署。
-> 说明：云平台容器重启可能导致本地 SQLite 数据丢失，因此云平台部署默认要求配置 Turso（`TURSO_DATABASE_URL` + `TURSO_AUTH_TOKEN`）。
+> 说明：云平台容器重启可能导致本地 SQLite 数据丢失，因此云平台部署建议配置远程数据库（PostgreSQL/MySQL `DATABASE_URL`，或 Turso）。
 
 ### ClawCloud（可导入 Template，不推荐：端口成本高）
 
@@ -153,7 +154,7 @@ cp .env.example .env
 
 1. 进入 `run.claw.cloud`，打开模板导入入口（会校验 `kind: Template`）。
 2. 粘贴 `deploy/clawcloud/app-launchpad-template.yaml` 内容并导入。
-3. 按提示填写 `admin_password`、`turso_database_url`、`turso_auth_token`（三项均必填）。
+3. 按提示填写 `admin_password`，并至少配置一种远程数据库：`database_url`（PostgreSQL/MySQL）或 `turso_database_url` + `turso_auth_token`。
 4. 部署完成后，访问分配域名并在面板 settings 中确认 `start_port`（默认 `30001`）。
 
 如果你只想用 Dashboard 手动配置，也可以按以下等价参数创建：
@@ -161,7 +162,7 @@ cp .env.example .env
 - 镜像：`ghcr.io/cheluen/singbox-proxy-manager:latest`
 - HTTP 端口：`30000`
 - TCP 端口：`30001`（默认），按需再加 `30002+`
-- 环境变量：`PORT=30000`、`CONFIG_DIR=/app/config`、`TZ=UTC+8`、`ADMIN_PASSWORD=...`、必填 `TURSO_DATABASE_URL` 与 `TURSO_AUTH_TOKEN`
+- 环境变量：`PORT=30000`、`CONFIG_DIR=/app/config`、`TZ=UTC+8`、`ADMIN_PASSWORD=...`，并建议配置 `DATABASE_URL` 或 `TURSO_DATABASE_URL` + `TURSO_AUTH_TOKEN`
 - 建议对照根目录 `.env.example` 填写同名变量，避免多环境配置漂移
 - 持久化路径：`/app/config`
 - 资源规格：`0.5 vCPU / 512MB`
@@ -254,9 +255,24 @@ HTTP_IDLE_TIMEOUT=60s
 HTTP_MAX_HEADER_BYTES=1048576
 API_MAX_BODY_BYTES=1048576
 
-# 可选：Turso
+# 数据库（优先级：DATABASE_URL/POSTGRES_DATABASE_URL/MYSQL_DATABASE_URL > Turso > 本地 SQLite）
+DATABASE_URL=                         # postgres://... 或 mysql://...
+POSTGRES_DATABASE_URL=
+MYSQL_DATABASE_URL=
+PGSQL=                               # 可选短变量名：postgres://...
+MYSQL=                               # 可选短变量名：mysql://...
+MYSQL_DATABASE_NAME=                  # MySQL URL 指向 sys 等系统库时可覆盖实际业务库
+DB_MAX_OPEN_CONNS=10
+DB_MAX_IDLE_CONNS=5
+DB_CONN_MAX_LIFETIME=
 TURSO_DATABASE_URL=
 TURSO_AUTH_TOKEN=
+
+# 版本更新检查
+SBPM_UPDATE_CHECK_DISABLED=false
+SBPM_UPDATE_CHECK_REPO=cheluen/singbox-proxy-manager
+SBPM_UPDATE_CHECK_TTL=6h
+SBPM_UPDATE_CHECK_TIMEOUT=5s
 ```
 
 > `TZ` 会作为全局服务时区参与日志与排障时间显示；默认建议使用 `UTC+8`（自动映射到上海/香港时区）。
@@ -265,7 +281,7 @@ TURSO_AUTH_TOKEN=
 
 > 如本地源码构建遇到 Go 模块下载受限，可改为：`GO_MODULE_PROXY=https://goproxy.cn,direct`，必要时再配合 `GO_SUM_DB=off`。
 
-> 不想用 Turso 可以不设置 `TURSO_DATABASE_URL / TURSO_AUTH_TOKEN`，留空会自动使用本地 SQLite。
+> 不想用远程数据库可以全部留空，系统会自动使用本地 SQLite。远程数据库优先级为：`DATABASE_URL` / `POSTGRES_DATABASE_URL` / `MYSQL_DATABASE_URL` / `PGSQL` / `MYSQL` > Turso > 本地 SQLite。
 
 ### 端口说明
 
@@ -279,8 +295,8 @@ TURSO_AUTH_TOKEN=
 - `proxy.db`：节点数据库
 - `singbox.log`：sing-box 日志
 
-如果启用了 Turso 远程数据库：
-- 节点/设置数据会存到 Turso（不再写入本地 `proxy.db`）
+如果启用了远程数据库（PostgreSQL/MySQL/Turso）：
+- 节点/设置/会话数据会存到远程数据库（不再写入本地 `proxy.db`）
 - `./config` 目录仍会保存 `config.json` 和 `singbox.log`（方便排障）
 
 ```bash
@@ -331,16 +347,34 @@ CI 会自动发布以下镜像标签到 GHCR，并提供 `linux/amd64` + `linux/
 
 镜像构建会复用对应版本 Release 中的 Linux 二进制，确保二进制发布与容器发布支持的架构一致。
 
-### 使用 Turso 远程数据库（可选）
+### 使用远程数据库（可选）
 
-不想折腾就别配：默认走本地 SQLite，配合 `./config` 挂载已经能持久化数据。
+默认走本地 SQLite，配合 `./config` 挂载即可持久化。需要跨机器/云平台共享数据时，可以选择以下任一远程数据库：
 
-当你希望“数据不跟着机器/磁盘走”（比如迁移服务器、或者想把数据放云上）时，可以用 Turso。
+#### PostgreSQL
 
-1. 在 Turso 控制台创建数据库，拿到两项信息：`TURSO_DATABASE_URL` 和 `TURSO_AUTH_TOKEN`（两者缺一不可）
-2. 在项目根目录新建 `.env`，把这两项按原样写进去（不要提交到 Git）
-   - 本项目的 `docker-compose.yml` 已经预留了这两项环境变量，你只需要提供 `.env` 的值
-3. 重启服务
+```bash
+DATABASE_URL=postgres://user:password@host:5432/dbname?sslmode=require
+```
+
+#### MySQL / TiDB Cloud
+
+```bash
+DATABASE_URL=mysql://user:password@host:4000/dbname?tls=true
+# 如云厂商给出的 URL 指向 sys/mysql/information_schema/performance_schema，程序会默认改用 test；也可显式覆盖：
+MYSQL_DATABASE_NAME=your_app_db
+```
+
+#### Turso / libSQL
+
+```bash
+TURSO_DATABASE_URL=libsql://your-db.turso.io
+TURSO_AUTH_TOKEN=your-token
+```
+
+> 远程数据库优先级：`DATABASE_URL` / `POSTGRES_DATABASE_URL` / `MYSQL_DATABASE_URL` / `PGSQL` / `MYSQL` > Turso > 本地 SQLite。切换数据库前建议先备份并清理目标库中的旧测试数据，避免历史记录干扰。
+
+重启服务使配置生效：
 
 ```bash
 docker compose down
@@ -358,7 +392,7 @@ docker compose up -d
 ### 后端
 - **语言**：Go 1.24
 - **框架**：Gin
-- **数据库**：SQLite（默认，本地存储）/ Turso（可选，远程 libsql）
+- **数据库**：SQLite（默认，本地存储）/ Turso（远程 libsql）/ PostgreSQL / MySQL（含 TiDB Cloud）
 - **代理核心**：sing-box 1.12.12
 
 ### 前端
@@ -375,6 +409,7 @@ docker compose up -d
 |------|------|------|------|
 | HTTP | ✅ | ✅ | 入站/出站均支持认证（出站可选 TLS） |
 | SOCKS5 | ✅ | ✅ | 入站/出站均支持认证 |
+| SOCKS5H | ✅ | ✅ | 兼容 socks5h 分享链接；sing-box 配置映射为 `socks` + `version=5`，域名由 SOCKS 请求远端解析 |
 | VLESS | - | ✅ | Reality（pbk/sid/spx）、WS、gRPC、HTTP/Upgrade、ALPN、指纹 |
 | VMess | - | ✅ | WS、HTTP/2、gRPC、HTTPUpgrade、全套安全/填充参数 |
 | Trojan | - | ✅ | TLS/utls 指纹、WS/GRPC/HTTP/HTTPUpgrade 传输、SNI/ALPN、可跳过校验 |
@@ -383,7 +418,7 @@ docker compose up -d
 | Shadowsocks | - | ✅ | AEAD/2022、UDP over TCP、插件参数 |
 | AnyTLS | - | ✅ | TLS 伪装、SNI/ALPN/指纹、会话管理（idle_session_*） |
 
-> **说明**：入站端口使用 mixed 模式，单端口同时支持 HTTP 和 SOCKS5
+> **说明**：入站端口使用 mixed 模式，单端口同时支持 HTTP、SOCKS5 与 socks5h 客户端的远端 DNS 语义。
 
 ---
 
@@ -486,6 +521,8 @@ docker compose up -d --build
 
 # 数据会自动保留（./config 目录）
 ```
+
+面板会定期检查 `SBPM_UPDATE_CHECK_REPO` 的 GitHub Release；如果最新版本高于当前版本，版本标签旁会显示向上箭头，点击可打开对应 Release。
 
 ---
 

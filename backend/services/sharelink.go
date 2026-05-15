@@ -30,7 +30,7 @@ func ParseShareLink(link string) (interface{}, string, string, error) {
 		return parseTUICLink(link)
 	} else if strings.HasPrefix(link, "anytls://") {
 		return parseAnyTLSLink(link)
-	} else if strings.HasPrefix(link, "socks5://") || strings.HasPrefix(link, "socks://") {
+	} else if strings.HasPrefix(link, "socks5://") || strings.HasPrefix(link, "socks5h://") || strings.HasPrefix(link, "socks://") {
 		return parseSOCKS5Link(link)
 	} else if strings.HasPrefix(link, "wireguard://") || strings.HasPrefix(link, "wg://") {
 		return parseWireGuardLink(link)
@@ -766,7 +766,12 @@ func parseSOCKS5Link(link string) (interface{}, string, string, error) {
 		}
 	}
 
-	return cfg, "socks5", name, nil
+	proxyType := "socks5"
+	if strings.EqualFold(parsed.Scheme, "socks5h") {
+		proxyType = "socks5h"
+	}
+
+	return cfg, proxyType, name, nil
 }
 
 func parseHTTPProxyLink(link string) (interface{}, string, string, error) {
