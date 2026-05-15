@@ -10,7 +10,7 @@
 
 一个基于 sing-box 的代理节点管理和转发系统，提供简洁易用的 Web 界面。
 
-[功能特性](#-功能特性) • [快速开始](#-快速开始) • [二进制部署](#-二进制部署releases) • [云平台部署](#-云平台部署zeabur) • [使用说明](#-使用说明) • [配置说明](#-配置说明)
+[功能特性](#-功能特性) • [快速开始](#-快速开始) • [二进制部署](#-二进制部署releases) • [使用说明](#-使用说明) • [配置说明](#-配置说明)
 
 </div>
 
@@ -102,42 +102,6 @@ cp .env.example .env
 ```
 
 > 提示：二进制模式下可通过 `SINGBOX_BINARY=/path/to/sing-box` 指定 sing-box 可执行文件路径；未设置时会按 `PATH`、`CONFIG_DIR`、可执行文件同目录顺序自动查找。
-
----
-
-## ☁️ 云平台部署（Zeabur）
-
-> 重要说明：本项目默认 **每个节点占用一个独立入站端口**（`30001+`，节点越多端口越多）。
-> 在 Zeabur 这类平台上，公网 TCP 端口往往有数量限制或按端口计费。
-> **当节点数量较多时，成本会显著上升，因此不推荐用于大量节点部署**；更建议使用 VPS/独服/裸机等可自由开放端口的环境。
-
-### Zeabur（Dashboard 部署，不推荐：端口成本高）
-
-1. 进入 `dash.zeabur.com`，创建项目后点击 **Add Service**。
-2. 选择 **Docker Image**，填入镜像：`ghcr.io/cheluen/singbox-proxy-manager:latest`。
-3. 在 **Ports** 配置：
-   - `30000` -> `HTTP`（管理面板）
-   - `30001` -> `TCP`（第一个代理入站）
-   - 按需继续添加 `30002+` 的 `TCP`（更多代理入站）
-4. 在 **Environment Variables** 配置：
-   - `PORT=30000`
-   - `CONFIG_DIR=/app/config`
-   - `TZ=UTC+8`（或 `Asia/Shanghai`）
-   - `ADMIN_PASSWORD=你的强密码`
-   - 建议配置远程数据库：`DATABASE_URL`（PostgreSQL/MySQL）或 `TURSO_DATABASE_URL` + `TURSO_AUTH_TOKEN`
-   - 变量命名建议与仓库根目录 `.env.example` 保持一致，便于迁移和回滚
-5. 在 **Volumes** 挂载目录 `/app/config`（用于持久化 `config.json`、日志、SQLite）。
-6. 资源建议使用默认规格：`0.5 vCPU / 512MB`。
-7. 部署完成后，访问 Zeabur 分配的 HTTP 域名进入面板。
-8. 在面板 settings 中确认 `start_port` 与你实际开放的首个 TCP 端口一致（通常是 `30001`）。
-
-> 注意：部分区域/套餐下，同一服务可用的公网 TCP 转发数量可能受限；且当需要开放大量端口时成本很高。
-> 如果需要大量公网 TCP 端口（节点多），建议使用 VPS/独服/裸机部署。
-> 说明：云平台容器重启可能导致本地 SQLite 数据丢失，因此云平台部署建议配置远程数据库（PostgreSQL/MySQL `DATABASE_URL`，或 Turso）。
-
-### 仓库内模板文件
-
-- Zeabur 模板：`deploy/zeabur/template.yaml`
 
 ---
 
@@ -316,7 +280,7 @@ CI 会自动发布以下镜像标签到 GHCR，并提供 `linux/amd64` + `linux/
 
 ### 使用远程数据库（可选）
 
-默认走本地 SQLite，配合 `./config` 挂载即可持久化。需要跨机器/云平台共享数据时，可以选择以下任一远程数据库：
+默认走本地 SQLite，配合 `./config` 挂载即可持久化。需要跨机器共享数据时，可以选择以下任一远程数据库：
 
 #### PostgreSQL
 
