@@ -104,9 +104,19 @@ func NewSingBoxService(configDir string) *SingBoxService {
 type SingBoxConfig struct {
 	Log       LogConfig        `json:"log"`
 	DNS       *DNSConfig       `json:"dns,omitempty"`
+	Endpoints []EndpointConfig `json:"endpoints,omitempty"`
 	Inbounds  []InboundConfig  `json:"inbounds"`
 	Outbounds []OutboundConfig `json:"outbounds"`
 	Route     RouteConfig      `json:"route,omitempty"`
+}
+
+// EndpointConfig represents a sing-box endpoint (sing-box 1.11+). Endpoints are
+// protocols that act as both inbound and outbound (currently WireGuard); their
+// tags can be referenced by route rules just like outbound tags.
+type EndpointConfig struct {
+	Type  string                 `json:"type"`
+	Tag   string                 `json:"tag"`
+	Extra map[string]interface{} `json:"-"`
 }
 
 type DNSConfig struct {
@@ -172,8 +182,10 @@ type tcpReuseRoute struct {
 	OutboundTag string
 }
 
-// GenerateGlobalConfig generates a single sing-box configuration for all enabled nodes
-func (s *SingBoxService) GenerateGlobalConfig(nodes []models.ProxyNode) error {
+// BuildGlobalConfig renders the unified sing-box configuration for all enabled
+// nodes and returns it as JSON without touching the filesystem or the running
+// process, so callers can validate it before applying.
+func (s *SingBoxService) BuildGlobalConfig(nodes []models.ProxyNode) ([]byte, error) {
 	config := SingBoxConfig{
 		Log: LogConfig{
 			Level:     "info",
@@ -193,7 +205,7 @@ func (s *SingBoxService) GenerateGlobalConfig(nodes []models.ProxyNode) error {
 			continue
 		}
 		if strings.Contains(nodes[i].Username, "+") {
-			return fmt.Errorf("node %d username must not contain '+'", nodes[i].ID)
+			return nil, fmt.Errorf("node %d username must not contain '+'", nodes[i].ID)
 		}
 		enabledNodes = append(enabledNodes, &nodes[i])
 	}
@@ -206,7 +218,7 @@ func (s *SingBoxService) GenerateGlobalConfig(nodes []models.ProxyNode) error {
 		}
 		authUser := fmt.Sprintf("%s+%d", node.Username, node.InboundPort)
 		if _, exists := reuseRouteSet[authUser]; exists {
-			return fmt.Errorf("duplicate tcp reuse auth user %q", authUser)
+			return nil, fmt.Errorf("duplicate tcp reuse auth user %q", authUser)
 		}
 		reuseRouteSet[authUser] = struct{}{}
 		reuseRoutes = append(reuseRoutes, tcpReuseRoute{
@@ -250,11 +262,22 @@ func (s *SingBoxService) GenerateGlobalConfig(nodes []models.ProxyNode) error {
 
 		config.Inbounds = append(config.Inbounds, inbound)
 
-		outbound, err := s.generateOutbound(node, outboundTag)
-		if err != nil {
-			return fmt.Errorf("failed to generate outbound for node %d: %v", node.ID, err)
+		// WireGuard is generated as an endpoint (sing-box 1.11+ format): the
+		// legacy wireguard outbound is rejected by sing-box 1.12+ at startup
+		// and removed in 1.13. Endpoint tags remain routable like outbounds.
+		if node.Type == "wireguard" {
+			endpoint, err := s.generateWireGuardEndpointForNode(node, outboundTag)
+			if err != nil {
+				return nil, fmt.Errorf("failed to generate endpoint for node %d: %v", node.ID, err)
+			}
+			config.Endpoints = append(config.Endpoints, endpoint)
+		} else {
+			outbound, err := s.generateOutbound(node, outboundTag)
+			if err != nil {
+				return nil, fmt.Errorf("failed to generate outbound for node %d: %v", node.ID, err)
+			}
+			config.Outbounds = append(config.Outbounds, outbound)
 		}
-		config.Outbounds = append(config.Outbounds, outbound)
 		directInboundRoutes = append(directInboundRoutes, RouteRule{
 			Inbound:  []string{inboundTag},
 			Outbound: outboundTag,
@@ -278,15 +301,119 @@ func (s *SingBoxService) GenerateGlobalConfig(nodes []models.ProxyNode) error {
 		Tag:  "direct",
 	})
 
-	// Marshal config to JSON
-	configJSON, err := s.marshalConfig(config)
+	return s.marshalConfig(config)
+}
+
+// GenerateGlobalConfig renders and writes the unified configuration file for
+// all enabled nodes. It performs no kernel validation; use BuildGlobalConfig +
+// ValidateConfig + ApplyConfig when replacing the config of a running service.
+func (s *SingBoxService) GenerateGlobalConfig(nodes []models.ProxyNode) error {
+	configJSON, err := s.BuildGlobalConfig(nodes)
+	if err != nil {
+		return err
+	}
+	return s.writeConfigFile(configJSON)
+}
+
+func (s *SingBoxService) configPath() string {
+	return filepath.Join(s.configDir, "config.json")
+}
+
+func (s *SingBoxService) lastGoodConfigPath() string {
+	return filepath.Join(s.configDir, "config.json.last-good")
+}
+
+// writeConfigFile writes config.json atomically (temp file + rename) so an
+// interrupted write can never leave a truncated config behind.
+func (s *SingBoxService) writeConfigFile(configJSON []byte) error {
+	tmpPath := s.configPath() + ".tmp"
+	if err := os.WriteFile(tmpPath, configJSON, 0644); err != nil {
+		return err
+	}
+	return os.Rename(tmpPath, s.configPath())
+}
+
+// ValidateConfig runs `sing-box check` against a candidate configuration
+// without touching the running process or the live config file. On rejection
+// the kernel's own error output is returned so the caller can surface it.
+func (s *SingBoxService) ValidateConfig(configJSON []byte) error {
+	singBoxBinary, err := s.resolveSingBoxBinary()
 	if err != nil {
 		return err
 	}
 
-	// Write config to file
-	configPath := filepath.Join(s.configDir, "config.json")
-	return os.WriteFile(configPath, configJSON, 0644)
+	tmpFile, err := os.CreateTemp(s.configDir, "config.check-*.json")
+	if err != nil {
+		return err
+	}
+	tmpPath := tmpFile.Name()
+	defer func() { _ = os.Remove(tmpPath) }()
+
+	if _, err := tmpFile.Write(configJSON); err != nil {
+		_ = tmpFile.Close()
+		return err
+	}
+	if err := tmpFile.Close(); err != nil {
+		return err
+	}
+
+	output, err := exec.Command(singBoxBinary, "check", "-c", tmpPath).CombinedOutput()
+	if err != nil {
+		detail := strings.TrimSpace(string(output))
+		if detail == "" {
+			detail = err.Error()
+		}
+		return fmt.Errorf("sing-box rejected the generated config: %s", detail)
+	}
+	return nil
+}
+
+// ApplyConfig atomically writes an already-validated configuration and
+// restarts sing-box with it. If the new config still fails to start (for
+// example an inbound port was taken by another program), it rolls back to the
+// last known-good configuration so existing nodes keep working.
+func (s *SingBoxService) ApplyConfig(configJSON []byte) error {
+	if err := s.writeConfigFile(configJSON); err != nil {
+		return err
+	}
+	if err := s.Restart(); err != nil {
+		if rollbackErr := s.rollbackToLastGood(); rollbackErr != nil {
+			return fmt.Errorf("sing-box failed to start with the new config: %v (rollback also failed: %v)", err, rollbackErr)
+		}
+		return fmt.Errorf("sing-box failed to start with the new config, rolled back to the previous working config: %v", err)
+	}
+	return nil
+}
+
+// rollbackToLastGood restores the last configuration that started successfully
+// and brings sing-box back up with it.
+func (s *SingBoxService) rollbackToLastGood() error {
+	lastGood, err := os.ReadFile(s.lastGoodConfigPath())
+	if err != nil {
+		return fmt.Errorf("no last-good config available: %w", err)
+	}
+	if err := s.writeConfigFile(lastGood); err != nil {
+		return err
+	}
+	return s.Start()
+}
+
+// saveLastGoodConfig snapshots the configuration that just started
+// successfully so ApplyConfig can roll back to it later.
+func (s *SingBoxService) saveLastGoodConfig() {
+	configJSON, err := os.ReadFile(s.configPath())
+	if err != nil {
+		fmt.Printf("Warning: failed to read config for last-good snapshot: %v\n", err)
+		return
+	}
+	tmpPath := s.lastGoodConfigPath() + ".tmp"
+	if err := os.WriteFile(tmpPath, configJSON, 0644); err != nil {
+		fmt.Printf("Warning: failed to save last-good config: %v\n", err)
+		return
+	}
+	if err := os.Rename(tmpPath, s.lastGoodConfigPath()); err != nil {
+		fmt.Printf("Warning: failed to save last-good config: %v\n", err)
+	}
 }
 
 func (s *SingBoxService) marshalConfig(config SingBoxConfig) ([]byte, error) {
@@ -324,6 +451,19 @@ func (s *SingBoxService) marshalConfig(config SingBoxConfig) ([]byte, error) {
 				if i < len(config.Outbounds) && config.Outbounds[i].Extra != nil {
 					for k, v := range config.Outbounds[i].Extra {
 						outboundMap[k] = v
+					}
+				}
+			}
+		}
+	}
+
+	// Merge Extra fields for endpoints
+	if endpoints, ok := result["endpoints"].([]interface{}); ok {
+		for i, endpoint := range endpoints {
+			if endpointMap, ok := endpoint.(map[string]interface{}); ok {
+				if i < len(config.Endpoints) && config.Endpoints[i].Extra != nil {
+					for k, v := range config.Endpoints[i].Extra {
+						endpointMap[k] = v
 					}
 				}
 			}
@@ -375,8 +515,6 @@ func (s *SingBoxService) generateOutbound(node *models.ProxyNode, tag string) (O
 		return s.generateSOCKS5Outbound(parsedConfig.(*models.SOCKS5Config), tag)
 	case "http":
 		return s.generateHTTPProxyOutbound(parsedConfig.(*models.HTTPProxyConfig), tag)
-	case "wireguard":
-		return s.generateWireGuardOutbound(parsedConfig.(*models.WireGuardConfig), tag)
 	default:
 		return OutboundConfig{}, fmt.Errorf("unsupported proxy type: %s", node.Type)
 	}
@@ -1012,113 +1150,122 @@ func (s *SingBoxService) generateHTTPProxyOutbound(config *models.HTTPProxyConfi
 	return outbound, nil
 }
 
-func (s *SingBoxService) generateWireGuardOutbound(config *models.WireGuardConfig, tag string) (OutboundConfig, error) {
+// generateWireGuardEndpointForNode parses the node config and renders a
+// WireGuard endpoint in the sing-box 1.11+ format. Field mapping from the
+// legacy outbound format (per official migration guide):
+// local_address→address, system_interface→system, interface_name→name,
+// peer server→address, peer server_port→port; single-peer flat fields are
+// folded into the peers array, which is the only representation endpoints
+// accept. The legacy outbound-only "network" limiter has no endpoint
+// equivalent and is dropped. Dial fields (detour, domain_resolver,
+// udp_fragment, connect_timeout, routing_mark) carry over unchanged.
+func (s *SingBoxService) generateWireGuardEndpointForNode(node *models.ProxyNode, tag string) (EndpointConfig, error) {
+	parsedConfig, err := node.ParseConfig()
+	if err != nil {
+		return EndpointConfig{}, err
+	}
+	config, ok := parsedConfig.(*models.WireGuardConfig)
+	if !ok {
+		return EndpointConfig{}, fmt.Errorf("unexpected config type for wireguard node")
+	}
+	return s.generateWireGuardEndpoint(config, tag)
+}
+
+func (s *SingBoxService) generateWireGuardEndpoint(config *models.WireGuardConfig, tag string) (EndpointConfig, error) {
 	if len(config.LocalAddress) == 0 {
-		return OutboundConfig{}, fmt.Errorf("wireguard local_address is required")
+		return EndpointConfig{}, fmt.Errorf("wireguard local_address is required")
 	}
 	if strings.TrimSpace(config.PrivateKey) == "" {
-		return OutboundConfig{}, fmt.Errorf("wireguard private_key is required")
+		return EndpointConfig{}, fmt.Errorf("wireguard private_key is required")
 	}
 
-	outbound := OutboundConfig{
+	endpoint := EndpointConfig{
 		Type:  "wireguard",
 		Tag:   tag,
 		Extra: map[string]interface{}{},
 	}
 
-	outbound.Extra["local_address"] = config.LocalAddress
-	outbound.Extra["private_key"] = config.PrivateKey
+	endpoint.Extra["address"] = config.LocalAddress
+	endpoint.Extra["private_key"] = config.PrivateKey
 	if config.SystemInterface {
-		outbound.Extra["system_interface"] = true
+		endpoint.Extra["system"] = true
 	}
 	if config.InterfaceName != "" {
-		outbound.Extra["interface_name"] = config.InterfaceName
+		endpoint.Extra["name"] = config.InterfaceName
 	}
 	if config.Workers > 0 {
-		outbound.Extra["workers"] = config.Workers
+		endpoint.Extra["workers"] = config.Workers
 	}
 	if config.MTU > 0 {
-		outbound.Extra["mtu"] = config.MTU
-	}
-	if config.Network != "" && config.Network != "both" {
-		outbound.Extra["network"] = config.Network
+		endpoint.Extra["mtu"] = config.MTU
 	}
 	if config.Detour != "" {
-		outbound.Extra["detour"] = config.Detour
+		endpoint.Extra["detour"] = config.Detour
 	}
 	if config.DomainResolver != "" {
 		if config.DomainResolverStrategy != "" {
-			outbound.Extra["domain_resolver"] = map[string]interface{}{
+			endpoint.Extra["domain_resolver"] = map[string]interface{}{
 				"server":   config.DomainResolver,
 				"strategy": config.DomainResolverStrategy,
 			}
 		} else {
-			outbound.Extra["domain_resolver"] = config.DomainResolver
+			endpoint.Extra["domain_resolver"] = config.DomainResolver
 		}
 	}
 	if config.UDPFragment != nil {
-		outbound.Extra["udp_fragment"] = *config.UDPFragment
+		endpoint.Extra["udp_fragment"] = *config.UDPFragment
 	}
 	if config.ConnectTimeout != "" {
-		outbound.Extra["connect_timeout"] = config.ConnectTimeout
+		endpoint.Extra["connect_timeout"] = config.ConnectTimeout
 	}
 	if routingMark := parseWireGuardRoutingMark(config.RoutingMark); routingMark != nil {
-		outbound.Extra["routing_mark"] = routingMark
+		endpoint.Extra["routing_mark"] = routingMark
 	}
 
-	usePeers := len(config.Peers) > 0 || len(config.AllowedIPs) > 0
-	if usePeers {
-		peers := config.Peers
-		if len(peers) == 0 {
-			peer, ok := wireGuardSinglePeerFromConfig(config)
-			if !ok {
-				return OutboundConfig{}, fmt.Errorf("wireguard server, server_port and peer_public_key are required")
-			}
-			peers = []models.WireGuardPeerConfig{peer}
+	peers := config.Peers
+	if len(peers) == 0 {
+		peer, ok := wireGuardSinglePeerFromConfig(config)
+		if !ok {
+			return EndpointConfig{}, fmt.Errorf("wireguard server, server_port and peer_public_key are required")
+		}
+		peers = []models.WireGuardPeerConfig{peer}
+	}
+
+	peerConfigs := make([]map[string]interface{}, 0, len(peers))
+	for _, peer := range peers {
+		if strings.TrimSpace(peer.Server) == "" || peer.ServerPort <= 0 || strings.TrimSpace(peer.PublicKey) == "" {
+			return EndpointConfig{}, fmt.Errorf("wireguard peer requires server, server_port and public_key")
 		}
 
-		peerConfigs := make([]map[string]interface{}, 0, len(peers))
-		for _, peer := range peers {
-			if strings.TrimSpace(peer.Server) == "" || peer.ServerPort <= 0 || strings.TrimSpace(peer.PublicKey) == "" {
-				return OutboundConfig{}, fmt.Errorf("wireguard peer requires server, server_port and public_key")
-			}
-
-			peerConfig := map[string]interface{}{
-				"server":      peer.Server,
-				"server_port": peer.ServerPort,
-				"public_key":  peer.PublicKey,
-			}
-			if peer.PreSharedKey != "" {
-				peerConfig["pre_shared_key"] = peer.PreSharedKey
-			}
-			if len(peer.AllowedIPs) > 0 {
-				peerConfig["allowed_ips"] = peer.AllowedIPs
-			}
-			if len(peer.Reserved) > 0 {
-				peerConfig["reserved"] = peer.Reserved
-			}
-			peerConfigs = append(peerConfigs, peerConfig)
+		peerConfig := map[string]interface{}{
+			"address":    peer.Server,
+			"port":       peer.ServerPort,
+			"public_key": peer.PublicKey,
 		}
-
-		outbound.Extra["peers"] = peerConfigs
-		return outbound, nil
+		if peer.PreSharedKey != "" {
+			peerConfig["pre_shared_key"] = peer.PreSharedKey
+		}
+		allowedIPs := peer.AllowedIPs
+		if len(allowedIPs) == 0 {
+			// The legacy single-peer format had no allowed_ips and routed all
+			// traffic through the peer; endpoints require them explicitly.
+			allowedIPs = []string{"0.0.0.0/0", "::/0"}
+		}
+		peerConfig["allowed_ips"] = allowedIPs
+		if len(peer.Reserved) > 0 {
+			// []uint8 would marshal to a base64 string; emit the documented
+			// numeric-array form instead.
+			reserved := make([]int, 0, len(peer.Reserved))
+			for _, b := range peer.Reserved {
+				reserved = append(reserved, int(b))
+			}
+			peerConfig["reserved"] = reserved
+		}
+		peerConfigs = append(peerConfigs, peerConfig)
 	}
 
-	if strings.TrimSpace(config.Server) == "" || config.ServerPort <= 0 || strings.TrimSpace(config.PeerPublicKey) == "" {
-		return OutboundConfig{}, fmt.Errorf("wireguard server, server_port and peer_public_key are required")
-	}
-
-	outbound.Server = config.Server
-	outbound.Port = config.ServerPort
-	outbound.Extra["peer_public_key"] = config.PeerPublicKey
-	if config.PreSharedKey != "" {
-		outbound.Extra["pre_shared_key"] = config.PreSharedKey
-	}
-	if len(config.Reserved) > 0 {
-		outbound.Extra["reserved"] = config.Reserved
-	}
-
-	return outbound, nil
+	endpoint.Extra["peers"] = peerConfigs
+	return endpoint, nil
 }
 
 // Start starts the single sing-box process
@@ -1142,6 +1289,9 @@ func (s *SingBoxService) Start() error {
 		return err
 	}
 	cmd := exec.Command(singBoxBinary, "run", "-c", configPath)
+	// Tie the child to the manager process where the OS supports it, so even a
+	// SIGKILL'ed manager cannot leave an orphaned sing-box behind.
+	configureSysProcAttr(cmd)
 
 	// Set up logging
 	logPath := filepath.Join(s.configDir, "singbox.log")
@@ -1172,6 +1322,7 @@ func (s *SingBoxService) Start() error {
 	s.process = cmd
 	s.logFile = logFile // Save log file handle for later cleanup
 	s.waitCh = waitCh
+	s.saveLastGoodConfig()
 	return nil
 }
 
@@ -1219,10 +1370,4 @@ func (s *SingBoxService) Restart() error {
 		return err
 	}
 	return s.Start()
-}
-
-// RegenerateAndRestart regenerates config from all nodes in database and restarts
-func (s *SingBoxService) RegenerateAndRestart(db interface{}) error {
-	// This method is for compatibility, actual implementation in handlers
-	return s.Restart()
 }

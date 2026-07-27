@@ -269,12 +269,12 @@ func TestGenerateWireGuardOutboundUsesPeersWhenAllowedIPsPresent(t *testing.T) {
 	}
 
 	svc := &SingBoxService{}
-	out, err := svc.generateOutbound(&node, "wireguard-out")
+	out, err := svc.generateWireGuardEndpointForNode(&node, "wireguard-out")
 	if err != nil {
-		t.Fatalf("generateOutbound error: %v", err)
+		t.Fatalf("generateWireGuardEndpointForNode error: %v", err)
 	}
 	if out.Type != "wireguard" || out.Tag != "wireguard-out" {
-		t.Fatalf("unexpected outbound meta: %+v", out)
+		t.Fatalf("unexpected endpoint meta: %+v", out)
 	}
 
 	peers, ok := out.Extra["peers"].([]map[string]interface{})
@@ -283,6 +283,9 @@ func TestGenerateWireGuardOutboundUsesPeersWhenAllowedIPsPresent(t *testing.T) {
 	}
 	if peers[0]["public_key"] != "peer-public-key" {
 		t.Fatalf("unexpected peer config: %#v", peers[0])
+	}
+	if peers[0]["address"] != "engage.cloudflareclient.com" || peers[0]["port"] != 2408 {
+		t.Fatalf("peer must use endpoint-format address/port keys: %#v", peers[0])
 	}
 
 	domainResolver, ok := out.Extra["domain_resolver"].(map[string]interface{})

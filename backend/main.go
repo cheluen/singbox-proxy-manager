@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"crypto/sha256"
 	"database/sql"
 	"encoding/hex"
@@ -13,9 +14,11 @@ import (
 	"net/http"
 	"net/textproto"
 	"os"
+	"os/signal"
 	"path/filepath"
 	"strconv"
 	"strings"
+	"syscall"
 	"time"
 
 	"sb-proxy/backend/api"
@@ -229,46 +232,9 @@ func main() {
 	// Initialize sing-box service
 	singBoxService := services.NewSingBoxService(configDir)
 
-	// Generate global config for all nodes and start sing-box
-	rows, err := db.Query(`
-		SELECT id, name, remark, type, config, inbound_port, username, password, tcp_reuse_enabled,
-		       sort_order, node_ip, location, country_code, latency, enabled, created_at, updated_at
-		FROM proxy_nodes
-		ORDER BY sort_order ASC
-	`)
-	if err != nil {
-		log.Printf("Failed to query proxy nodes: %v", err)
-	}
-
-	var nodes []models.ProxyNode
-	if rows != nil {
-		for rows.Next() {
-			var node models.ProxyNode
-			if err := rows.Scan(
-				&node.ID, &node.Name, &node.Remark, &node.Type, &node.Config, &node.InboundPort,
-				&node.Username, &node.Password, &node.TCPReuseEnabled, &node.SortOrder, &node.NodeIP, &node.Location,
-				&node.CountryCode, &node.Latency, &node.Enabled, &node.CreatedAt, &node.UpdatedAt,
-			); err != nil {
-				log.Printf("Failed to scan proxy node: %v", err)
-				continue
-			}
-			nodes = append(nodes, node)
-		}
-		rows.Close()
-	}
-
-	if err := singBoxService.GenerateGlobalConfig(nodes); err != nil {
-		log.Printf("Failed to generate global config: %v", err)
-	} else {
-		if err := singBoxService.Start(); err != nil {
-			log.Printf("Failed to start sing-box: %v", err)
-			logSingBoxDependencyGuideIfNeeded(err, configDir)
-		} else {
-			log.Println("Sing-box started successfully")
-		}
-	}
-
-	// Initialize Gin
+	// Initialize Gin. The whole HTTP stack (routes, middleware, frontend
+	// assets) is built before the sing-box child process is launched, so any
+	// fatal error in this section cannot leave an orphaned proxy behind.
 	gin.SetMode(gin.ReleaseMode)
 	r := gin.Default()
 	trustedProxies := parseCommaListEnv("TRUSTED_PROXIES")
@@ -338,6 +304,9 @@ func main() {
 		log.Fatalf("Failed to register frontend routes: %v", err)
 	}
 
+	// Start sing-box only after the web stack is fully prepared.
+	startSingBoxFromDatabase(db, singBoxService, configDir)
+
 	// Get port from environment or use default
 	port := os.Getenv("PORT")
 	if port == "" {
@@ -354,8 +323,86 @@ func main() {
 		IdleTimeout:       readDurationEnv("HTTP_IDLE_TIMEOUT", 60*time.Second),
 		MaxHeaderBytes:    readIntEnv("HTTP_MAX_HEADER_BYTES", 1<<20),
 	}
-	if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-		log.Fatalf("Failed to start server: %v", err)
+
+	serverErr := make(chan error, 1)
+	go func() {
+		serverErr <- srv.ListenAndServe()
+	}()
+
+	quit := make(chan os.Signal, 1)
+	signal.Notify(quit, os.Interrupt, syscall.SIGTERM)
+
+	exitCode := 0
+	select {
+	case err := <-serverErr:
+		if err != nil && err != http.ErrServerClosed {
+			log.Printf("Failed to start server: %v", err)
+			exitCode = 1
+		}
+	case sig := <-quit:
+		log.Printf("Received signal %s, shutting down gracefully", sig)
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		if err := srv.Shutdown(shutdownCtx); err != nil {
+			log.Printf("HTTP server shutdown error: %v", err)
+		}
+		cancel()
+	}
+
+	// Stop the sing-box child after the HTTP server has drained: in-flight API
+	// requests may restart sing-box, so stopping it first could resurrect it.
+	if err := singBoxService.Stop(); err != nil {
+		log.Printf("Failed to stop sing-box: %v", err)
+	} else {
+		log.Println("Sing-box stopped")
+	}
+
+	if exitCode != 0 {
+		db.Close()
+		os.Exit(exitCode)
+	}
+}
+
+// startSingBoxFromDatabase generates the unified config from the current
+// database contents and launches the sing-box child process. Failures are
+// logged but not fatal so the management UI stays reachable for recovery.
+func startSingBoxFromDatabase(db *sql.DB, singBoxService *services.SingBoxService, configDir string) {
+	rows, err := db.Query(`
+		SELECT id, name, remark, type, config, inbound_port, username, password, tcp_reuse_enabled,
+		       sort_order, node_ip, location, country_code, latency, enabled, created_at, updated_at
+		FROM proxy_nodes
+		ORDER BY sort_order ASC
+	`)
+	if err != nil {
+		log.Printf("Failed to query proxy nodes: %v", err)
+	}
+
+	var nodes []models.ProxyNode
+	if rows != nil {
+		for rows.Next() {
+			var node models.ProxyNode
+			if err := rows.Scan(
+				&node.ID, &node.Name, &node.Remark, &node.Type, &node.Config, &node.InboundPort,
+				&node.Username, &node.Password, &node.TCPReuseEnabled, &node.SortOrder, &node.NodeIP, &node.Location,
+				&node.CountryCode, &node.Latency, &node.Enabled, &node.CreatedAt, &node.UpdatedAt,
+			); err != nil {
+				log.Printf("Failed to scan proxy node: %v", err)
+				continue
+			}
+			nodes = append(nodes, node)
+		}
+		rows.Close()
+	}
+
+	if err := singBoxService.GenerateGlobalConfig(nodes); err != nil {
+		log.Printf("Failed to generate global config: %v", err)
+		return
+	}
+
+	if err := singBoxService.Start(); err != nil {
+		log.Printf("Failed to start sing-box: %v", err)
+		logSingBoxDependencyGuideIfNeeded(err, configDir)
+	} else {
+		log.Println("Sing-box started successfully")
 	}
 }
 

@@ -169,9 +169,8 @@ func nodeFromUpsertRequest(req nodeUpsertRequest) models.ProxyNode {
 	return node
 }
 
-// regenerateAndRestart is a helper function to regenerate sing-box config and restart the service
-func (h *Handler) regenerateAndRestart() error {
-	// Get all nodes from database
+// loadAllNodes reads every proxy node from the database ordered by sort_order.
+func (h *Handler) loadAllNodes() ([]models.ProxyNode, error) {
 	rows, err := h.db.Query(`
 		SELECT id, name, remark, type, config, inbound_port, username, password, tcp_reuse_enabled,
 		       sort_order, node_ip, location, country_code, latency, enabled, created_at, updated_at
@@ -179,7 +178,7 @@ func (h *Handler) regenerateAndRestart() error {
 		ORDER BY sort_order ASC
 	`)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	defer rows.Close()
 
@@ -192,18 +191,60 @@ func (h *Handler) regenerateAndRestart() error {
 			&node.CountryCode, &node.Latency, &node.Enabled, &node.CreatedAt, &node.UpdatedAt,
 		)
 		if err != nil {
-			return err
+			return nil, err
 		}
 		nodes = append(nodes, node)
 	}
+	return nodes, rows.Err()
+}
 
-	// Generate global config
-	if err := h.singBoxService.GenerateGlobalConfig(nodes); err != nil {
+// regenerateAndRestart rebuilds the unified config from the database, validates
+// it with `sing-box check`, and only then swaps it into the running process.
+// A config the kernel would reject therefore never takes down working nodes:
+// on validation failure the running process and the on-disk config are left
+// untouched and the kernel's own error message is returned.
+func (h *Handler) regenerateAndRestart() error {
+	nodes, err := h.loadAllNodes()
+	if err != nil {
 		return err
 	}
 
-	// Restart sing-box
-	return h.singBoxService.Restart()
+	configJSON, err := h.singBoxService.BuildGlobalConfig(nodes)
+	if err != nil {
+		return err
+	}
+
+	if err := h.singBoxService.ValidateConfig(configJSON); err != nil {
+		return err
+	}
+
+	return h.singBoxService.ApplyConfig(configJSON)
+}
+
+// regenerateAndRestartWithRevert applies the new config; when that fails,
+// revert is invoked to undo the database change that produced it, so a bad
+// node cannot stay persisted and wedge every subsequent operation. The revert
+// only restores database state: on validation failure the running process and
+// config file were never touched, and on a start failure ApplyConfig has
+// already rolled the process back to the last-good config, which matches the
+// reverted database contents.
+func (h *Handler) regenerateAndRestartWithRevert(revert func() error) error {
+	err := h.regenerateAndRestart()
+	if err == nil {
+		return nil
+	}
+	if revert != nil {
+		if revertErr := revert(); revertErr != nil {
+			log.Printf("Failed to revert database change after sing-box config error: %v", revertErr)
+		}
+	}
+	return err
+}
+
+// singboxUpdateError builds the error payload for a failed config update,
+// surfacing the underlying kernel/validator message to the frontend.
+func singboxUpdateError(err error) gin.H {
+	return gin.H{"error": fmt.Sprintf("failed to update sing-box config: %v", err)}
 }
 
 // reorderRemainingNodes reorders all remaining nodes and reassigns ports to fill gaps
@@ -615,9 +656,13 @@ func (h *Handler) CreateNode(c *gin.Context) {
 		return
 	}
 
-	// Regenerate global config and restart sing-box
-	if err := h.regenerateAndRestart(); err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to update sing-box config"})
+	// Regenerate global config and restart sing-box; if the new node produces a
+	// config the kernel rejects, remove it again so the panel stays healthy.
+	if err := h.regenerateAndRestartWithRevert(func() error {
+		_, revertErr := h.db.Exec("DELETE FROM proxy_nodes WHERE id = ?", req.ID)
+		return revertErr
+	}); err != nil {
+		c.JSON(http.StatusInternalServerError, singboxUpdateError(err))
 		return
 	}
 
@@ -710,6 +755,8 @@ func (h *Handler) BatchImportNodes(c *gin.Context) {
 		return
 	}
 	defer stmt.Close()
+
+	var insertedIDs []int64
 
 	for _, item := range items {
 		result := map[string]interface{}{
@@ -811,6 +858,7 @@ func (h *Handler) BatchImportNodes(c *gin.Context) {
 		result["username"] = username
 		result["password"] = password
 		results = append(results, result)
+		insertedIDs = append(insertedIDs, id)
 		successCount++
 		nextOrder++
 		usedInboundPorts[inboundPort] = struct{}{}
@@ -823,10 +871,19 @@ func (h *Handler) BatchImportNodes(c *gin.Context) {
 		}
 	}
 
-	// Regenerate global config and restart sing-box after batch import
+	// Regenerate global config and restart sing-box after batch import; if any
+	// imported node produces a config the kernel rejects, remove the whole
+	// imported batch again so working nodes stay up and the panel stays usable.
 	if successCount > 0 {
-		if err := h.regenerateAndRestart(); err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to update sing-box config"})
+		if err := h.regenerateAndRestartWithRevert(func() error {
+			for _, insertedID := range insertedIDs {
+				if _, revertErr := h.db.Exec("DELETE FROM proxy_nodes WHERE id = ?", insertedID); revertErr != nil {
+					return revertErr
+				}
+			}
+			return nil
+		}); err != nil {
+			c.JSON(http.StatusInternalServerError, singboxUpdateError(err))
 			return
 		}
 	}
@@ -876,13 +933,16 @@ func (h *Handler) UpdateNode(c *gin.Context) {
 	}
 	defer tx.Rollback()
 
-	var currentSortOrder int
-	var currentReuseEnabled bool
-	var currentInboundPort int
-	if err := tx.QueryRow(
-		"SELECT sort_order, tcp_reuse_enabled, inbound_port FROM proxy_nodes WHERE id = ?",
-		id,
-	).Scan(&currentSortOrder, &currentReuseEnabled, &currentInboundPort); err != nil {
+	// Snapshot the full previous row so the update can be reverted if the new
+	// config is rejected by the kernel.
+	var prev models.ProxyNode
+	if err := tx.QueryRow(`
+		SELECT name, remark, type, config, inbound_port, username, password, tcp_reuse_enabled, sort_order, enabled
+		FROM proxy_nodes WHERE id = ?
+	`, id).Scan(
+		&prev.Name, &prev.Remark, &prev.Type, &prev.Config, &prev.InboundPort,
+		&prev.Username, &prev.Password, &prev.TCPReuseEnabled, &prev.SortOrder, &prev.Enabled,
+	); err != nil {
 		if err == sql.ErrNoRows {
 			c.JSON(http.StatusNotFound, gin.H{"error": "node not found"})
 			return
@@ -890,10 +950,11 @@ func (h *Handler) UpdateNode(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "database error"})
 		return
 	}
+	currentInboundPort := prev.InboundPort
 	if payload.TCPReuseEnabled == nil {
-		req.TCPReuseEnabled = currentReuseEnabled
+		req.TCPReuseEnabled = prev.TCPReuseEnabled
 	}
-	req.SortOrder = currentSortOrder
+	req.SortOrder = prev.SortOrder
 
 	startPort, preserveInboundPorts, err := getPortSettings(tx)
 	if err != nil {
@@ -951,9 +1012,19 @@ func (h *Handler) UpdateNode(c *gin.Context) {
 		return
 	}
 
-	// Regenerate global config and restart sing-box
-	if err := h.regenerateAndRestart(); err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to update sing-box config"})
+	// Regenerate global config and restart sing-box; restore the previous row
+	// if the updated node produces a config the kernel rejects.
+	if err := h.regenerateAndRestartWithRevert(func() error {
+		_, revertErr := h.db.Exec(`
+			UPDATE proxy_nodes
+			SET name = ?, remark = ?, type = ?, config = ?, inbound_port = ?, username = ?, password = ?,
+			    tcp_reuse_enabled = ?, enabled = ?, updated_at = CURRENT_TIMESTAMP
+			WHERE id = ?
+		`, prev.Name, prev.Remark, prev.Type, prev.Config, prev.InboundPort, prev.Username, prev.Password,
+			prev.TCPReuseEnabled, prev.Enabled, id)
+		return revertErr
+	}); err != nil {
+		c.JSON(http.StatusInternalServerError, singboxUpdateError(err))
 		return
 	}
 
@@ -1020,7 +1091,7 @@ func (h *Handler) DeleteNode(c *gin.Context) {
 
 	// Regenerate global config and restart sing-box
 	if err := h.regenerateAndRestart(); err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to update sing-box config"})
+		c.JSON(http.StatusInternalServerError, singboxUpdateError(err))
 		return
 	}
 
@@ -1080,7 +1151,7 @@ func (h *Handler) BatchDeleteNodes(c *gin.Context) {
 
 		// Only regenerate and restart once after all deletions and reordering
 		if err := h.regenerateAndRestart(); err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to update sing-box config"})
+			c.JSON(http.StatusInternalServerError, singboxUpdateError(err))
 			return
 		}
 	}
@@ -1162,7 +1233,7 @@ func (h *Handler) ReorderNodes(c *gin.Context) {
 
 	// Regenerate global config and restart sing-box
 	if err := h.regenerateAndRestart(); err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to update sing-box config"})
+		c.JSON(http.StatusInternalServerError, singboxUpdateError(err))
 		return
 	}
 
@@ -1252,6 +1323,9 @@ func (h *Handler) BatchSetAuth(c *gin.Context) {
 		return
 	}
 
+	h.nodeWriteMu.Lock()
+	defer h.nodeWriteMu.Unlock()
+
 	tx, err := h.db.Begin()
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "database error"})
@@ -1259,9 +1333,32 @@ func (h *Handler) BatchSetAuth(c *gin.Context) {
 	}
 	defer tx.Rollback()
 
+	// Snapshot previous credentials so the change can be reverted if the new
+	// config fails to apply.
+	type nodeAuthSnapshot struct {
+		id       int
+		username string
+		password string
+	}
+	prevAuth := make([]nodeAuthSnapshot, 0, len(req.NodeIDs))
+	for _, nodeID := range req.NodeIDs {
+		var snapshot nodeAuthSnapshot
+		snapshot.id = nodeID
+		if err := tx.QueryRow(
+			"SELECT username, password FROM proxy_nodes WHERE id = ?", nodeID,
+		).Scan(&snapshot.username, &snapshot.password); err != nil {
+			if err == sql.ErrNoRows {
+				continue
+			}
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "database error"})
+			return
+		}
+		prevAuth = append(prevAuth, snapshot)
+	}
+
 	for _, nodeID := range req.NodeIDs {
 		_, err := tx.Exec(`
-			UPDATE proxy_nodes 
+			UPDATE proxy_nodes
 			SET username = ?, password = ?, updated_at = CURRENT_TIMESTAMP
 			WHERE id = ?
 		`, req.Username, req.Password, nodeID)
@@ -1278,8 +1375,19 @@ func (h *Handler) BatchSetAuth(c *gin.Context) {
 	}
 
 	// Regenerate global config and restart sing-box
-	if err := h.regenerateAndRestart(); err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to update sing-box config"})
+	if err := h.regenerateAndRestartWithRevert(func() error {
+		for _, snapshot := range prevAuth {
+			if _, revertErr := h.db.Exec(`
+				UPDATE proxy_nodes
+				SET username = ?, password = ?, updated_at = CURRENT_TIMESTAMP
+				WHERE id = ?
+			`, snapshot.username, snapshot.password, snapshot.id); revertErr != nil {
+				return revertErr
+			}
+		}
+		return nil
+	}); err != nil {
+		c.JSON(http.StatusInternalServerError, singboxUpdateError(err))
 		return
 	}
 
@@ -1452,7 +1560,7 @@ func (h *Handler) UpdateSettings(c *gin.Context) {
 
 	if portsChanged {
 		if err := h.regenerateAndRestart(); err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to update sing-box config"})
+			c.JSON(http.StatusInternalServerError, singboxUpdateError(err))
 			return
 		}
 	}
@@ -1631,9 +1739,27 @@ func (h *Handler) ReplaceNode(c *gin.Context) {
 		updateName = *req.UpdateName
 	}
 
-	var res sql.Result
+	h.nodeWriteMu.Lock()
+	defer h.nodeWriteMu.Unlock()
+
+	// Snapshot the fields being replaced so the change can be reverted if the
+	// new config is rejected by the kernel.
+	var prevName, prevType, prevConfig, prevNodeIP, prevLocation, prevCountryCode string
+	var prevLatency int
+	if err := h.db.QueryRow(`
+		SELECT name, type, config, node_ip, location, country_code, latency
+		FROM proxy_nodes WHERE id = ?
+	`, id).Scan(&prevName, &prevType, &prevConfig, &prevNodeIP, &prevLocation, &prevCountryCode, &prevLatency); err != nil {
+		if err == sql.ErrNoRows {
+			c.JSON(http.StatusNotFound, gin.H{"error": "node not found"})
+			return
+		}
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "database error"})
+		return
+	}
+
 	if updateName {
-		res, err = h.db.Exec(`
+		_, err = h.db.Exec(`
 			UPDATE proxy_nodes
 			SET name = ?, type = ?, config = ?,
 			    node_ip = '', location = '', country_code = '', latency = 0,
@@ -1641,7 +1767,7 @@ func (h *Handler) ReplaceNode(c *gin.Context) {
 			WHERE id = ?
 		`, name, proxyType, string(configJSON), id)
 	} else {
-		res, err = h.db.Exec(`
+		_, err = h.db.Exec(`
 			UPDATE proxy_nodes
 			SET type = ?, config = ?,
 			    node_ip = '', location = '', country_code = '', latency = 0,
@@ -1654,13 +1780,18 @@ func (h *Handler) ReplaceNode(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to update node"})
 		return
 	}
-	if affected, _ := res.RowsAffected(); affected == 0 {
-		c.JSON(http.StatusNotFound, gin.H{"error": "node not found"})
-		return
-	}
 
-	if err := h.regenerateAndRestart(); err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to update sing-box config"})
+	if err := h.regenerateAndRestartWithRevert(func() error {
+		_, revertErr := h.db.Exec(`
+			UPDATE proxy_nodes
+			SET name = ?, type = ?, config = ?,
+			    node_ip = ?, location = ?, country_code = ?, latency = ?,
+			    updated_at = CURRENT_TIMESTAMP
+			WHERE id = ?
+		`, prevName, prevType, prevConfig, prevNodeIP, prevLocation, prevCountryCode, prevLatency, id)
+		return revertErr
+	}); err != nil {
+		c.JSON(http.StatusInternalServerError, singboxUpdateError(err))
 		return
 	}
 

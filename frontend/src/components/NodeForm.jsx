@@ -1,5 +1,5 @@
 import React, { useEffect, useState } from 'react'
-import { Form, Input, Select, Button, Switch, Space, InputNumber, message } from 'antd'
+import { Form, Input, Select, Button, Switch, Space, InputNumber, message, Collapse } from 'antd'
 import { useTranslation } from 'react-i18next'
 import api from '../utils/api'
 
@@ -153,7 +153,27 @@ function NodeForm({ node, onSave, onCancel }) {
     setProxyType(nextType)
   }
 
+  // Merge-based save: the form only renders a subset of each protocol's
+  // fields, so rebuilding the config from form values alone silently drops
+  // imported parameters (host, insecure, multiplex, ...). When editing a node
+  // of the same type, keep the original config as the base and only overwrite
+  // the form-managed keys; `undefined` means "not managed by this form" and
+  // must never clobber an original value.
   const buildConfig = (type, values) => {
+    const built = buildConfigFromForm(type, values)
+    if (!node || node.type !== type) {
+      return built
+    }
+    const overlay = {}
+    for (const [key, value] of Object.entries(built)) {
+      if (value !== undefined) {
+        overlay[key] = value
+      }
+    }
+    return { ...initialConfig, ...overlay }
+  }
+
+  const buildConfigFromForm = (type, values) => {
     if (type === 'direct') {
       return {}
     }
@@ -951,6 +971,38 @@ function NodeForm({ node, onSave, onCancel }) {
       </Form.Item>
 
       {renderConfigFields()}
+
+      {node && node.type === proxyType && (
+        <Collapse
+          ghost
+          size="small"
+          style={{ marginBottom: 16 }}
+          items={[
+            {
+              key: 'raw-config',
+              label: withHint(
+                'Full Stored Config (read-only)',
+                '当前存储的完整配置（只读，表单未覆盖的字段保存时将原样保留）'
+              ),
+              children: (
+                <pre
+                  style={{
+                    maxHeight: 240,
+                    overflow: 'auto',
+                    margin: 0,
+                    fontSize: 12,
+                    background: 'rgba(0, 0, 0, 0.04)',
+                    padding: 8,
+                    borderRadius: 4,
+                  }}
+                >
+                  {JSON.stringify(initialConfig, null, 2)}
+                </pre>
+              ),
+            },
+          ]}
+        />
+      )}
 
       <Form.Item label={withHint('Inbound Authentication (Optional)', '入站认证（可选）')}>
         <Space.Compact style={{ width: '100%' }}>

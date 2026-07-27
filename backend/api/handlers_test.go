@@ -32,8 +32,10 @@ func newTestHandler(t *testing.T, checker func(string, string, string) (*service
 		t.Fatalf("init db: %v", err)
 	}
 
+	// The fake binary must answer `check` quickly (used by config validation)
+	// and block on `run` like the real kernel does.
 	fakeBinary := filepath.Join(t.TempDir(), "fake-sing-box")
-	if err := os.WriteFile(fakeBinary, []byte("#!/bin/sh\nsleep 300\n"), 0o755); err != nil {
+	if err := os.WriteFile(fakeBinary, []byte("#!/bin/sh\nif [ \"$1\" = \"check\" ]; then exit 0; fi\nsleep 300\n"), 0o755); err != nil {
 		t.Fatalf("write fake sing-box binary: %v", err)
 	}
 	t.Setenv("SINGBOX_BINARY", fakeBinary)
@@ -1045,5 +1047,127 @@ func TestBatchSetAuthRejectsUsernameWithPlus(t *testing.T) {
 	}
 	if username != "user" {
 		t.Fatalf("username should remain unchanged, got %q", username)
+	}
+}
+
+// newTestHandlerWithScriptedKernel builds a handler whose fake sing-box
+// rejects `check` for configs containing BAD_MARKER, mirroring how the real
+// kernel rejects unsupported node parameters.
+func newTestHandlerWithScriptedKernel(t *testing.T) *Handler {
+	t.Helper()
+
+	db, err := sql.Open("sqlite", ":memory:")
+	if err != nil {
+		t.Fatalf("open db: %v", err)
+	}
+	if err := models.InitDB(db); err != nil {
+		t.Fatalf("init db: %v", err)
+	}
+
+	script := `#!/bin/sh
+if [ "$1" = "check" ]; then
+  if grep -q "BAD_MARKER" "$3"; then
+    echo "FATAL[0000] decode config: unknown field" >&2
+    exit 1
+  fi
+  exit 0
+fi
+sleep 300
+`
+	fakeBinary := filepath.Join(t.TempDir(), "fake-sing-box")
+	if err := os.WriteFile(fakeBinary, []byte(script), 0o755); err != nil {
+		t.Fatalf("write fake sing-box binary: %v", err)
+	}
+	t.Setenv("SINGBOX_BINARY", fakeBinary)
+	t.Setenv("SBPM_SKIP_PORT_AVAILABILITY_CHECK", "1")
+	svc := services.NewSingBoxService(t.TempDir())
+	h := NewHandler(db, svc)
+	t.Cleanup(func() {
+		_ = svc.Stop()
+		_ = db.Close()
+	})
+	return h
+}
+
+func postJSON(t *testing.T, handlerFn gin.HandlerFunc, method, path string, payload interface{}, params gin.Params) *httptest.ResponseRecorder {
+	t.Helper()
+	body, _ := json.Marshal(payload)
+	rec := httptest.NewRecorder()
+	ctx, _ := gin.CreateTestContext(rec)
+	req, _ := http.NewRequest(method, path, bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	ctx.Request = req
+	ctx.Params = params
+	handlerFn(ctx)
+	return rec
+}
+
+func TestCreateNodeRevertsWhenKernelRejectsConfig(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	handler := newTestHandlerWithScriptedKernel(t)
+
+	badPayload := map[string]interface{}{
+		"name":    "bad-node",
+		"type":    "ss",
+		"config":  `{"server":"BAD_MARKER.example.com","server_port":443,"method":"aes-128-gcm","password":"p"}`,
+		"enabled": true,
+	}
+
+	rec := postJSON(t, handler.CreateNode, http.MethodPost, "/api/nodes", badPayload, nil)
+	if rec.Code != http.StatusInternalServerError {
+		t.Fatalf("expected 500 for kernel-rejected node, got %d body=%s", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), "decode config: unknown field") {
+		t.Fatalf("kernel error must be surfaced to the client, got %s", rec.Body.String())
+	}
+
+	var count int
+	if err := handler.db.QueryRow("SELECT COUNT(*) FROM proxy_nodes").Scan(&count); err != nil {
+		t.Fatalf("count nodes: %v", err)
+	}
+	if count != 0 {
+		t.Fatalf("rejected node must be reverted from the database, found %d rows", count)
+	}
+
+	// The panel must stay fully usable: a valid node right after must succeed.
+	goodPayload := map[string]interface{}{
+		"name":    "good-node",
+		"type":    "ss",
+		"config":  `{"server":"good.example.com","server_port":443,"method":"aes-128-gcm","password":"p"}`,
+		"enabled": true,
+	}
+	rec = postJSON(t, handler.CreateNode, http.MethodPost, "/api/nodes", goodPayload, nil)
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("expected 201 after revert, got %d body=%s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestUpdateNodeRevertsWhenKernelRejectsConfig(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	handler := newTestHandlerWithScriptedKernel(t)
+	nodeID := insertTestNode(t, handler.db)
+
+	badPayload := map[string]interface{}{
+		"name":    "node1",
+		"type":    "ss",
+		"config":  `{"server":"BAD_MARKER.example.com","server_port":443,"method":"aes-128-gcm","password":"p"}`,
+		"enabled": true,
+	}
+
+	rec := postJSON(t, handler.UpdateNode, http.MethodPut, "/api/nodes/"+strconv.Itoa(nodeID), badPayload,
+		gin.Params{gin.Param{Key: "id", Value: strconv.Itoa(nodeID)}})
+	if rec.Code != http.StatusInternalServerError {
+		t.Fatalf("expected 500 for kernel-rejected update, got %d body=%s", rec.Code, rec.Body.String())
+	}
+
+	var config string
+	if err := handler.db.QueryRow("SELECT config FROM proxy_nodes WHERE id = ?", nodeID).Scan(&config); err != nil {
+		t.Fatalf("query config: %v", err)
+	}
+	if strings.Contains(config, "BAD_MARKER") {
+		t.Fatalf("rejected update must be reverted, config still contains bad data: %s", config)
+	}
+	if !strings.Contains(config, "example.com") {
+		t.Fatalf("previous config must be restored, got: %s", config)
 	}
 }
