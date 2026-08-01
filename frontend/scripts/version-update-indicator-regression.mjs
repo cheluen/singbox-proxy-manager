@@ -111,7 +111,11 @@ const startVite = () => {
   const viteBin = path.join(FRONTEND_ROOT, 'node_modules', 'vite', 'bin', 'vite.js')
   const child = spawn(process.execPath, [viteBin, '--host', '127.0.0.1', '--port', String(FRONTEND_PORT)], {
     cwd: FRONTEND_ROOT,
-    env: { ...process.env, E2E_API_PORT: String(API_PORT) },
+    env: {
+      ...process.env,
+      E2E_API_PORT: String(API_PORT),
+      VITE_API_TARGET: `http://127.0.0.1:${API_PORT}`,
+    },
     stdio: ['ignore', 'pipe', 'pipe'],
   })
   const logs = []
