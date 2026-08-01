@@ -10,6 +10,7 @@ env:
   GO_VERSION: "1.24.x"
   NODE_VERSION: "18"
   SINGBOX_VERSION: "1.12.12"
+  SINGBOX_LINUX_AMD64_SHA256: "7c103cb2f9a7dc54cb82962043596718ed27989a478d6405f0939a9b775f889f"
 
 jobs:
   lint-backend:
@@ -62,11 +63,24 @@ jobs:
       - name: Download dependencies
         run: go mod download
 
+      - name: Install pinned sing-box test kernel
+        run: |
+          archive="sing-box-${SINGBOX_VERSION}-linux-amd64.tar.gz"
+          curl --fail --location --silent --show-error \
+            --output "${RUNNER_TEMP}/${archive}" \
+            "https://github.com/SagerNet/sing-box/releases/download/v${SINGBOX_VERSION}/${archive}"
+          echo "${SINGBOX_LINUX_AMD64_SHA256}  ${RUNNER_TEMP}/${archive}" | sha256sum --check --strict
+          tar --extract --gzip --file "${RUNNER_TEMP}/${archive}" --directory "${RUNNER_TEMP}"
+          binary="${RUNNER_TEMP}/sing-box-${SINGBOX_VERSION}-linux-amd64/sing-box"
+          chmod +x "${binary}"
+          "${binary}" version
+          echo "SINGBOX_TEST_BINARY=${binary}" >> "${GITHUB_ENV}"
+
       - name: Build backend
         run: CGO_ENABLED=0 go build -o singbox-proxy-manager ./backend
 
       - name: Run backend tests
-        run: go test ./backend/... -v
+        run: go test -race -count=1 ./backend/... -v
 
   test-frontend-build:
     runs-on: ubuntu-latest
@@ -84,13 +98,35 @@ jobs:
         run: npm ci
         working-directory: frontend
 
+      - name: Verify global version consistency
+        run: npm run test:version-sync
+        working-directory: frontend
+
       - name: Build frontend
         run: npm run build
         working-directory: frontend
 
-  test-frontend-e2e-dnd:
+  test-frontend-e2e:
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        script:
+          - test:e2e:dnd
+          - test:e2e:dnd-virtual
+          - test:e2e:preserve-ports
+          - test:e2e:batch-import
+          - test:e2e:batch-check-ip-live
+          - test:e2e:outbound-dedup
+          - test:e2e:remark
+          - test:e2e:filter
+          - test:e2e:tcp-reuse-ui
+          - test:e2e:nodes-viewport
+          - test:e2e:version-refresh
+          - test:e2e:wireguard-ui
+          - test:e2e:version-update
+          - test:e2e:nodeform-config-preservation
     steps:
       - uses: actions/checkout@v4
 
@@ -120,152 +156,8 @@ jobs:
             exit 1
           fi
 
-      - name: Run drag reorder regression e2e
-        run: npm run test:e2e:dnd
-        working-directory: frontend
-
-  test-frontend-e2e-version-refresh:
-    runs-on: ubuntu-latest
-    timeout-minutes: 15
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Set up Node.js
-        uses: actions/setup-node@v4
-        with:
-          node-version: ${{ env.NODE_VERSION }}
-          cache: npm
-          cache-dependency-path: frontend/package-lock.json
-
-      - name: Install frontend dependencies
-        run: npm ci
-        working-directory: frontend
-
-      - name: Resolve browser path
-        run: |
-          if command -v google-chrome >/dev/null 2>&1; then
-            echo "PUPPETEER_EXECUTABLE_PATH=$(command -v google-chrome)" >> "$GITHUB_ENV"
-          elif command -v google-chrome-stable >/dev/null 2>&1; then
-            echo "PUPPETEER_EXECUTABLE_PATH=$(command -v google-chrome-stable)" >> "$GITHUB_ENV"
-          elif command -v chromium-browser >/dev/null 2>&1; then
-            echo "PUPPETEER_EXECUTABLE_PATH=$(command -v chromium-browser)" >> "$GITHUB_ENV"
-          elif command -v chromium >/dev/null 2>&1; then
-            echo "PUPPETEER_EXECUTABLE_PATH=$(command -v chromium)" >> "$GITHUB_ENV"
-          else
-            echo "::error::No Chrome/Chromium executable found on runner."
-            exit 1
-          fi
-
-      - name: Run version refresh regression e2e
-        run: npm run test:e2e:version-refresh
-        working-directory: frontend
-
-  test-frontend-e2e-remark:
-    runs-on: ubuntu-latest
-    timeout-minutes: 15
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Set up Node.js
-        uses: actions/setup-node@v4
-        with:
-          node-version: ${{ env.NODE_VERSION }}
-          cache: npm
-          cache-dependency-path: frontend/package-lock.json
-
-      - name: Install frontend dependencies
-        run: npm ci
-        working-directory: frontend
-
-      - name: Resolve browser path
-        run: |
-          if command -v google-chrome >/dev/null 2>&1; then
-            echo "PUPPETEER_EXECUTABLE_PATH=$(command -v google-chrome)" >> "$GITHUB_ENV"
-          elif command -v google-chrome-stable >/dev/null 2>&1; then
-            echo "PUPPETEER_EXECUTABLE_PATH=$(command -v google-chrome-stable)" >> "$GITHUB_ENV"
-          elif command -v chromium-browser >/dev/null 2>&1; then
-            echo "PUPPETEER_EXECUTABLE_PATH=$(command -v chromium-browser)" >> "$GITHUB_ENV"
-          elif command -v chromium >/dev/null 2>&1; then
-            echo "PUPPETEER_EXECUTABLE_PATH=$(command -v chromium)" >> "$GITHUB_ENV"
-          else
-            echo "::error::No Chrome/Chromium executable found on runner."
-            exit 1
-          fi
-
-      - name: Run remark regression e2e
-        run: npm run test:e2e:remark
-        working-directory: frontend
-
-  test-frontend-e2e-batch-check-ip-live:
-    runs-on: ubuntu-latest
-    timeout-minutes: 15
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Set up Node.js
-        uses: actions/setup-node@v4
-        with:
-          node-version: ${{ env.NODE_VERSION }}
-          cache: npm
-          cache-dependency-path: frontend/package-lock.json
-
-      - name: Install frontend dependencies
-        run: npm ci
-        working-directory: frontend
-
-      - name: Resolve browser path
-        run: |
-          if command -v google-chrome >/dev/null 2>&1; then
-            echo "PUPPETEER_EXECUTABLE_PATH=$(command -v google-chrome)" >> "$GITHUB_ENV"
-          elif command -v google-chrome-stable >/dev/null 2>&1; then
-            echo "PUPPETEER_EXECUTABLE_PATH=$(command -v google-chrome-stable)" >> "$GITHUB_ENV"
-          elif command -v chromium-browser >/dev/null 2>&1; then
-            echo "PUPPETEER_EXECUTABLE_PATH=$(command -v chromium-browser)" >> "$GITHUB_ENV"
-          elif command -v chromium >/dev/null 2>&1; then
-            echo "PUPPETEER_EXECUTABLE_PATH=$(command -v chromium)" >> "$GITHUB_ENV"
-          else
-            echo "::error::No Chrome/Chromium executable found on runner."
-            exit 1
-          fi
-
-      - name: Run batch check IP live update regression e2e
-        run: npm run test:e2e:batch-check-ip-live
-        working-directory: frontend
-
-  test-frontend-e2e-outbound-dedup:
-    runs-on: ubuntu-latest
-    timeout-minutes: 15
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Set up Node.js
-        uses: actions/setup-node@v4
-        with:
-          node-version: ${{ env.NODE_VERSION }}
-          cache: npm
-          cache-dependency-path: frontend/package-lock.json
-
-      - name: Install frontend dependencies
-        run: npm ci
-        working-directory: frontend
-
-      - name: Resolve browser path
-        run: |
-          if command -v google-chrome >/dev/null 2>&1; then
-            echo "PUPPETEER_EXECUTABLE_PATH=$(command -v google-chrome)" >> "$GITHUB_ENV"
-          elif command -v google-chrome-stable >/dev/null 2>&1; then
-            echo "PUPPETEER_EXECUTABLE_PATH=$(command -v google-chrome-stable)" >> "$GITHUB_ENV"
-          elif command -v chromium-browser >/dev/null 2>&1; then
-            echo "PUPPETEER_EXECUTABLE_PATH=$(command -v chromium-browser)" >> "$GITHUB_ENV"
-          elif command -v chromium >/dev/null 2>&1; then
-            echo "PUPPETEER_EXECUTABLE_PATH=$(command -v chromium)" >> "$GITHUB_ENV"
-          else
-            echo "::error::No Chrome/Chromium executable found on runner."
-            exit 1
-          fi
-
-      - name: Run outbound dedup regression e2e
-        run: npm run test:e2e:outbound-dedup
+      - name: Run frontend regression
+        run: npm run ${{ matrix.script }}
         working-directory: frontend
 
   test-system-local-deploy:
@@ -275,11 +167,7 @@ jobs:
       - lint-frontend
       - test-backend
       - test-frontend-build
-      - test-frontend-e2e-dnd
-      - test-frontend-e2e-version-refresh
-      - test-frontend-e2e-remark
-      - test-frontend-e2e-batch-check-ip-live
-      - test-frontend-e2e-outbound-dedup
+      - test-frontend-e2e
     steps:
       - uses: actions/checkout@v4
 
@@ -300,7 +188,7 @@ jobs:
 
       - name: Wait for API readiness
         run: |
-          for i in $(seq 1 60); do
+          for _ in $(seq 1 60); do
             if curl -fsS http://127.0.0.1:38080/api/version >/dev/null; then
               exit 0
             fi
@@ -310,8 +198,39 @@ jobs:
           docker compose logs
           exit 1
 
-      - name: Validate login + protected API
+      - name: Validate login + import + live sing-box chain
         run: |
+          mkdir -p /tmp/sbpm-live-target
+          printf 'sbpm-live-proxy-ok\n' >/tmp/sbpm-live-target/index.html
+          python3 -m http.server 39090 --bind 127.0.0.1 \
+            --directory /tmp/sbpm-live-target >/tmp/sbpm-live-target.log 2>&1 &
+          echo "$!" >/tmp/sbpm-live-target.pid
+
+          cat >/tmp/sbpm-ci-ss-upstream.json <<'JSON'
+          {
+            "log": {"level": "warn"},
+            "inbounds": [
+              {
+                "type": "shadowsocks",
+                "tag": "ss-in",
+                "listen": "127.0.0.1",
+                "listen_port": 39091,
+                "method": "aes-128-gcm",
+                "password": "ci-ss-password"
+              }
+            ],
+            "outbounds": [{"type": "direct", "tag": "direct"}],
+            "route": {"final": "direct"}
+          }
+          JSON
+          docker run --detach --name sbpm-ci-ss-upstream --network host \
+            --volume /tmp/sbpm-ci-ss-upstream.json:/tmp/config.json:ro \
+            --entrypoint sing-box singbox-proxy-manager:local \
+            run -c /tmp/config.json
+          sleep 1
+          docker ps --filter name=sbpm-ci-ss-upstream --filter status=running --format '{{.Names}}' \
+            | grep -Fx sbpm-ci-ss-upstream
+
           curl -fsS http://127.0.0.1:38080/api/auth/status | tee /tmp/auth-status.json
           TOKEN=$(curl -fsS -X POST http://127.0.0.1:38080/api/login \
             -H 'Content-Type: application/json' \
@@ -319,9 +238,69 @@ jobs:
           test -n "$TOKEN" && test "$TOKEN" != "null"
           curl -fsS -H "Authorization: Bearer $TOKEN" http://127.0.0.1:38080/api/settings >/tmp/settings.json
 
+          IMPORT_RESULT=$(curl -fsS -X POST http://127.0.0.1:38080/api/nodes/batch-import \
+            -H "Authorization: Bearer $TOKEN" \
+            -H 'Content-Type: application/json' \
+            -d '{"content":"socks5://127.0.0.1:9#ci-system-socks","enabled":true}')
+          echo "$IMPORT_RESULT" | tee /tmp/batch-import.json
+          echo "$IMPORT_RESULT" | jq -e '.success == 1 and .failed == 0'
+
+          SS_CREDENTIALS=$(printf 'aes-128-gcm:ci-ss-password' \
+            | base64 --wrap=0 | tr '+/' '-_' | tr -d '=')
+          SS_LINK="ss://${SS_CREDENTIALS}@127.0.0.1:39091#ci-system-ss"
+          SS_IMPORT=$(jq -n --arg link "$SS_LINK" '{links: [$link], enabled: true}' \
+            | curl -fsS -X POST http://127.0.0.1:38080/api/nodes/batch-import \
+                -H "Authorization: Bearer $TOKEN" \
+                -H 'Content-Type: application/json' \
+                --data-binary @-)
+          echo "$SS_IMPORT" | tee /tmp/ss-import.json
+          echo "$SS_IMPORT" | jq -e '.success == 1 and .failed == 0'
+          SS_PORT=$(echo "$SS_IMPORT" | jq -er '.results[0].port | select(. > 0)')
+          SS_USER=$(echo "$SS_IMPORT" | jq -er '.results[0].username | select(length > 0)')
+          SS_PASS=$(echo "$SS_IMPORT" | jq -er '.results[0].password | select(length > 0)')
+
+          SS_RESULT=$(curl -fsS --noproxy '' \
+            --proxy "http://127.0.0.1:${SS_PORT}" \
+            --proxy-user "${SS_USER}:${SS_PASS}" \
+            http://127.0.0.1:39090/)
+          test "$SS_RESULT" = "sbpm-live-proxy-ok"
+
+          curl -fsS -H "Authorization: Bearer $TOKEN" \
+            http://127.0.0.1:38080/api/nodes | tee /tmp/nodes.json
+          jq -e '[.[] | select(.name == "ci-system-socks" and .type == "socks5" and .enabled == true)] | length == 1' \
+            /tmp/nodes.json
+
+          DIRECT_NODE=$(curl -fsS -X POST http://127.0.0.1:38080/api/nodes \
+            -H "Authorization: Bearer $TOKEN" \
+            -H 'Content-Type: application/json' \
+            -d '{"name":"ci-system-direct","type":"direct","config":"{}","username":"ci-live-user","password":"ci-live-pass","tcp_reuse_enabled":true,"enabled":true}')
+          echo "$DIRECT_NODE" | tee /tmp/direct-node.json
+          DIRECT_PORT=$(echo "$DIRECT_NODE" | jq -er '.inbound_port | select(. > 0)')
+
+          HTTP_RESULT=$(curl -fsS --noproxy '' \
+            --proxy "http://127.0.0.1:${DIRECT_PORT}" \
+            --proxy-user 'ci-live-user:ci-live-pass' \
+            http://127.0.0.1:39090/)
+          test "$HTTP_RESULT" = "sbpm-live-proxy-ok"
+
+          SOCKS_RESULT=$(curl -fsS --noproxy '' \
+            --socks5-hostname "127.0.0.1:${DIRECT_PORT}" \
+            --proxy-user 'ci-live-user:ci-live-pass' \
+            http://127.0.0.1:39090/)
+          test "$SOCKS_RESULT" = "sbpm-live-proxy-ok"
+
+          docker compose --profile local exec -T sb-proxy-local \
+            sing-box check -c /app/config/config.json
+          docker compose --profile local top sb-proxy-local | grep -E '[s]ing-box( |$)'
+
       - name: Stop stack
         if: always()
-        run: docker compose --profile local down -v
+        run: |
+          if test -f /tmp/sbpm-live-target.pid; then
+            kill "$(cat /tmp/sbpm-live-target.pid)" 2>/dev/null || true
+          fi
+          docker rm --force sbpm-ci-ss-upstream 2>/dev/null || true
+          docker compose --profile local down -v
 
   test-release-image-build:
     runs-on: ubuntu-latest
@@ -352,10 +331,10 @@ jobs:
       - name: Build linux release binaries for image test
         run: |
           mkdir -p release-binaries
-          for GOARCH in amd64 arm64; do
-            GOOS=linux GOARCH="${GOARCH}" CGO_ENABLED=0 \
+          for arch in amd64 arm64; do
+            GOOS=linux GOARCH="${arch}" CGO_ENABLED=0 \
               go build -tags frontend_dist -trimpath -ldflags="-s -w" \
-              -o "release-binaries/singbox-proxy-manager-linux-${GOARCH}" ./backend
+              -o "release-binaries/singbox-proxy-manager-linux-${arch}" ./backend
           done
 
       - name: Set up QEMU

@@ -66,7 +66,7 @@ func Open(configDir string) (*sql.DB, error) {
 			return nil, err
 		}
 		RegisterDialect(db, dialect)
-		log.Printf("Using %s database", dialect)
+		logSelectedDatabase(dialect)
 		return db, nil
 	}
 
@@ -85,7 +85,7 @@ func Open(configDir string) (*sql.DB, error) {
 		}
 
 		RegisterDialect(db, DialectTurso)
-		log.Printf("Using Turso database: %s", tursoURL)
+		logSelectedDatabase(DialectTurso)
 		return db, nil
 	}
 	if tursoURL != "" || tursoToken != "" {
@@ -93,6 +93,10 @@ func Open(configDir string) (*sql.DB, error) {
 	}
 
 	return openSQLite(configDir)
+}
+
+func logSelectedDatabase(dialect Dialect) {
+	log.Printf("Using %s database", dialect)
 }
 
 func OpenURL(rawURL string) (*sql.DB, Dialect, error) {

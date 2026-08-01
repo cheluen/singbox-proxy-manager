@@ -4,7 +4,7 @@
 
 <img src="./logo.svg" alt="SingBox Proxy Manager Logo" width="96" />
 
-![Version](https://img.shields.io/badge/version-1.4.1-blue.svg)
+![Version](https://img.shields.io/badge/version-1.5.0-blue.svg)
 ![License](https://img.shields.io/badge/license-MIT-green.svg)
 ![SingBox](https://img.shields.io/badge/sing--box-1.12.12-orange.svg)
 
@@ -21,7 +21,7 @@
 ### 核心功能
 - 🚀 **单进程架构** - 使用单个 sing-box 进程管理所有节点，资源占用低
 - 🔐 **认证保护** - 支持为每个代理节点设置独立的用户名密码
-- 🌐 **多协议支持** - 支持 VLESS、VMess、Trojan、Hysteria2、TUIC、Shadowsocks、AnyTLS，以及 SOCKS5/SOCKS5H/HTTP 上游代理
+- 🌐 **多协议支持** - 支持 Direct、VLESS、VMess、Trojan、Hysteria2、TUIC、Shadowsocks、AnyTLS、WireGuard，以及 SOCKS5/SOCKS5H/HTTP 上游代理
 - 🔄 **双模式代理** - 单端口同时支持 HTTP 和 SOCKS5 协议
 - 📊 **IP 检测** - 实时检测节点 IP、地理位置和延迟
 - ⬆️ **版本更新提示** - 自动检查 GitHub Release，发现新版本时在面板版本号旁显示向上箭头
@@ -29,7 +29,7 @@
 ### 管理功能
 - ✨ **可视化管理** - 现代化的 React + Ant Design 界面
 - 📥 **批量操作** - 支持批量导入、删除、设置认证、检测 IP
-- 📝 **备注/导出/替换** - 给节点加备注；支持导出原分享链接；支持用新分享链接直接替换节点
+- 📝 **备注/导出/替换** - 给节点加备注；支持导出可表达的分享链接；支持用新分享链接直接替换节点
 - 🔧 **灵活配置** - 自定义入站端口，自动或手动分配
 - 🌍 **多语言** - 支持中文/英文界面切换
 - 📱 **拖拽排序** - 拖拽节点即可重新排序并自动分配端口
@@ -338,18 +338,26 @@ docker compose up -d
 
 | 协议 | 入站 | 出站 | 特性 |
 |------|------|------|------|
+| Direct | - | ✅ | sing-box 原生直连出站，支持拨号器选项与可选目标覆盖 |
 | HTTP | ✅ | ✅ | 入站/出站均支持认证（出站可选 TLS） |
 | SOCKS5 | ✅ | ✅ | 入站/出站均支持认证 |
 | SOCKS5H | ✅ | ✅ | 兼容 socks5h 分享链接；sing-box 配置映射为 `socks` + `version=5`，域名由 SOCKS 请求远端解析 |
-| VLESS | - | ✅ | Reality（pbk/sid/spx）、WS、gRPC、HTTP/Upgrade、ALPN、指纹 |
+| VLESS | - | ✅ | Reality（pbk/sid）、WS、gRPC、HTTP/Upgrade、ALPN、uTLS 指纹 |
 | VMess | - | ✅ | WS、HTTP/2、gRPC、HTTPUpgrade、全套安全/填充参数 |
 | Trojan | - | ✅ | TLS/utls 指纹、WS/GRPC/HTTP/HTTPUpgrade 传输、SNI/ALPN、可跳过校验 |
 | Hysteria2 | - | ✅ | brutal/obfs/salamander、带宽/网络/跳点参数、TLS 指纹 |
 | TUIC | - | ✅ | QUIC/UDP 模式、0-RTT、心跳、SNI/ALPN、RTT 优化 |
 | Shadowsocks | - | ✅ | AEAD/2022、UDP over TCP、插件参数 |
 | AnyTLS | - | ✅ | TLS 伪装、SNI/ALPN/指纹、会话管理（idle_session_*） |
+| WireGuard | - | ✅ | sing-box 1.12 endpoint 配置、单/多 Peer、reserved 字节、拨号器选项 |
 
 > **说明**：入站端口使用 mixed 模式，单端口同时支持 HTTP、SOCKS5 与 socks5h 客户端的远端 DNS 语义。
+
+> **内核边界**：上表以项目固定的 sing-box `1.12.12` 原生配置为准。mKCP、XHTTP/SplitHTTP、Mekya、Reality SpiderX（`spx`）/ML-DSA 验证（`pqv`）、FinalMask（`fm`）、Xray 证书绑定（`pcs`/`vcn`）等扩展不属于该版本原生出站能力，导入时会明确拒绝，不会静默丢失参数。V2Ray QUIC 传输仅接受 sing-box 原生空 options 形式，并需要 TLS。
+
+> **Shadowsocks 插件**：sing-box `1.12.12` 内置 `obfs-local` 与 `v2ray-plugin` 的 SIP003 实现，项目可直接生成对应 `plugin` / `plugin_opts`，无需在默认镜像中额外安装同名可执行文件。其他 SIP003 插件名称不属于该版本内置能力。
+
+> **分享链接边界**：Direct 没有通用分享 URI，需在面板创建，不支持分享链接导出；WireGuard 可导入 `wireguard://` / `wg://`，但仅单 Peer 配置可无歧义导出为 URI，多 Peer 会完整保存并生成内核配置，但不导出为分享链接。
 
 ---
 

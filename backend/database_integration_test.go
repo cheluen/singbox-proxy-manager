@@ -3,6 +3,7 @@ package main
 import (
 	"database/sql"
 	"os"
+	"strings"
 	"testing"
 
 	appdb "sb-proxy/backend/database"
@@ -25,6 +26,41 @@ func TestDatabaseURLIntegration(t *testing.T) {
 		t.Fatalf("open database: %v", err)
 	}
 	defer db.Close()
+	runDatabaseIntegrationContract(t, db)
+}
+
+func TestTursoDatabaseIntegration(t *testing.T) {
+	tursoURL := os.Getenv("SBPM_INTEGRATION_TURSO_URL")
+	tursoToken := os.Getenv("SBPM_INTEGRATION_TURSO_TOKEN")
+	if tursoURL == "" || tursoToken == "" {
+		t.Skip("SBPM_INTEGRATION_TURSO_URL/SBPM_INTEGRATION_TURSO_TOKEN are not set")
+	}
+
+	for _, key := range []string{
+		"DATABASE_URL",
+		"POSTGRES_DATABASE_URL",
+		"POSTGRES_URL",
+		"PGSQL_DATABASE_URL",
+		"PGSQL",
+		"MYSQL_DATABASE_URL",
+		"MYSQL",
+	} {
+		t.Setenv(key, "")
+	}
+	t.Setenv("TURSO_DATABASE_URL", tursoURL)
+	t.Setenv("TURSO_AUTH_TOKEN", tursoToken)
+	t.Setenv("ADMIN_PASSWORD", "")
+
+	db, err := openDatabase(t.TempDir())
+	if err != nil {
+		t.Fatalf("open Turso database: %v", err)
+	}
+	defer db.Close()
+	runDatabaseIntegrationContract(t, db)
+}
+
+func runDatabaseIntegrationContract(t *testing.T, db *sql.DB) {
+	t.Helper()
 
 	dialect := appdb.DialectFor(db)
 	resetApplicationTables(t, db)
@@ -34,10 +70,15 @@ func TestDatabaseURLIntegration(t *testing.T) {
 		t.Fatalf("init db (%s): %v", dialect, err)
 	}
 
-	_, err = db.Exec(`
+	// Keep the payload above MySQL TEXT's 64 KiB limit. Protocol configs can
+	// legitimately grow this large (for example, a WireGuard endpoint with
+	// many peers), so every supported remote backend must preserve it intact.
+	largeConfig := `{"server":"example.com","server_port":1080,"padding":"` + strings.Repeat("x", 70<<10) + `"}`
+
+	_, err := db.Exec(`
 		INSERT INTO proxy_nodes (name, remark, type, config, inbound_port, username, password, tcp_reuse_enabled, sort_order, latency, enabled)
 		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-	`, "integration-socks5h", "remote-db", "socks5h", `{"server":"example.com","server_port":1080}`, 31001, "user", "pass", true, 0, 0, true)
+	`, "integration-socks5h", "remote-db", "socks5h", largeConfig, 31001, "user", "pass", true, 0, 0, true)
 	if err != nil {
 		t.Fatalf("insert node (%s): %v", dialect, err)
 	}
@@ -56,6 +97,9 @@ func TestDatabaseURLIntegration(t *testing.T) {
 	}
 	if node.Type != "socks5h" || !node.TCPReuseEnabled || !node.Enabled || node.CreatedAt.IsZero() || node.UpdatedAt.IsZero() {
 		t.Fatalf("unexpected node from %s: %+v", dialect, node)
+	}
+	if node.Config != largeConfig {
+		t.Fatalf("large config was truncated by %s: got=%d want=%d", dialect, len(node.Config), len(largeConfig))
 	}
 
 	var preserve bool

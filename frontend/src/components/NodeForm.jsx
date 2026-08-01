@@ -34,7 +34,41 @@ const splitMultilineList = (rawValue) => {
 const formatMultilineList = (items) =>
   Array.isArray(items) && items.length > 0 ? items.join('\n') : ''
 
+const parseReservedByte = (value) => {
+  const normalized = String(value).trim()
+  if (!/^\d+$/.test(normalized)) {
+    throw new Error('Reserved bytes must be integers between 0 and 255')
+  }
+  const numeric = Number(normalized)
+  if (!Number.isInteger(numeric) || numeric < 0 || numeric > 255) {
+    throw new Error('Reserved bytes must be integers between 0 and 255')
+  }
+  return numeric
+}
+
+const decodeReservedBase64 = (rawValue) => {
+  const normalized = rawValue
+    .trim()
+    .replace(/-/g, '+')
+    .replace(/_/g, '/')
+    .replace(/=+$/, '')
+  if (!normalized || !/^[A-Za-z0-9+/]+$/.test(normalized) || normalized.length % 4 === 1) {
+    return null
+  }
+
+  try {
+    const padded = normalized.padEnd(Math.ceil(normalized.length / 4) * 4, '=')
+    const decoded = globalThis.atob(padded)
+    return Array.from(decoded, (character) => character.charCodeAt(0))
+  } catch {
+    return null
+  }
+}
+
 const parseReservedInput = (rawValue) => {
+  if (Array.isArray(rawValue)) {
+    return rawValue.map(parseReservedByte)
+  }
   if (typeof rawValue !== 'string' || rawValue.trim() === '') {
     return []
   }
@@ -45,26 +79,36 @@ const parseReservedInput = (rawValue) => {
     if (!Array.isArray(parsed)) {
       throw new Error('Reserved bytes must be an array')
     }
-    return parsed.map((value) => {
-      const numeric = Number.parseInt(String(value), 10)
-      if (!Number.isInteger(numeric) || numeric < 0 || numeric > 255) {
-        throw new Error('Reserved bytes must be integers between 0 and 255')
-      }
-      return numeric
-    })
+    return parsed.map(parseReservedByte)
   }
 
-  return splitMultilineList(trimmed).map((value) => {
-    const numeric = Number.parseInt(String(value), 10)
-    if (!Number.isInteger(numeric) || numeric < 0 || numeric > 255) {
-      throw new Error('Reserved bytes must be integers between 0 and 255')
-    }
-    return numeric
-  })
+  const numericValues = trimmed
+    .split(/[\s,;]+/)
+    .map((value) => value.trim())
+    .filter(Boolean)
+  if (numericValues.length > 1 || /^\d+$/.test(trimmed)) {
+    return numericValues.map(parseReservedByte)
+  }
+
+  const decoded = decodeReservedBase64(trimmed)
+  if (decoded) {
+    return decoded
+  }
+  throw new Error('Reserved bytes must be a numeric array, list, or base64 string')
 }
 
-const formatReservedInput = (items) =>
-  Array.isArray(items) && items.length > 0 ? items.join(',') : ''
+const formatReservedInput = (items) => {
+  if (items == null || items === '') {
+    return ''
+  }
+  try {
+    return parseReservedInput(items).join(',')
+  } catch {
+    // Keep malformed historical data visible so saving surfaces a validation
+    // error instead of silently replacing it with an empty byte array.
+    return typeof items === 'string' ? items : ''
+  }
+}
 
 const parsePeersJSON = (rawValue) => {
   if (typeof rawValue !== 'string' || rawValue.trim() === '') {
@@ -74,7 +118,157 @@ const parsePeersJSON = (rawValue) => {
   if (!Array.isArray(parsed)) {
     throw new Error('Peers JSON must be an array')
   }
-  return parsed
+  return parsed.map((peer) => {
+    if (
+      !peer ||
+      typeof peer !== 'object' ||
+      Array.isArray(peer) ||
+      !Object.prototype.hasOwnProperty.call(peer, 'reserved')
+    ) {
+      return peer
+    }
+    return { ...peer, reserved: parseReservedInput(peer.reserved) }
+  })
+}
+
+const isPlainObject = (value) =>
+  Boolean(value) && typeof value === 'object' && !Array.isArray(value)
+
+const hasOwn = (value, key) =>
+  Boolean(value) && Object.prototype.hasOwnProperty.call(value, key)
+
+const nativeStringList = (value) => {
+  if (Array.isArray(value)) {
+    return value.filter((item) => typeof item === 'string')
+  }
+  if (typeof value === 'string' && value.trim()) {
+    return [value]
+  }
+  return []
+}
+
+const nativeHeaderHost = (headers) => {
+  if (!isPlainObject(headers)) return ''
+  const key = Object.keys(headers).find((name) => name.toLowerCase() === 'host')
+  return key && typeof headers[key] === 'string' ? headers[key] : ''
+}
+
+const hydrateNativeCompatibilityForForm = (type, config) => {
+  const normalized = { ...config }
+  const tls = isPlainObject(config.tls_options) ? config.tls_options : null
+  if (tls) {
+    if (!hasOwn(config, 'sni') && typeof tls.server_name === 'string') {
+      normalized.sni = tls.server_name
+    }
+    if (!hasOwn(config, 'alpn')) {
+      const alpn = nativeStringList(tls.alpn)
+      if (alpn.length > 0) normalized.alpn = alpn
+    }
+    if (
+      !hasOwn(config, 'fingerprint') &&
+      isPlainObject(tls.utls) &&
+      tls.utls.enabled !== false &&
+      typeof tls.utls.fingerprint === 'string'
+    ) {
+      normalized.fingerprint = tls.utls.fingerprint
+    }
+    const insecureKey = type === 'hy2' || type === 'tuic' ? 'insecure_skip_verify' : 'insecure'
+    if (!hasOwn(config, insecureKey) && typeof tls.insecure === 'boolean') {
+      normalized[insecureKey] = tls.insecure
+    }
+    if (type === 'tuic' && !hasOwn(config, 'disable_sni') && typeof tls.disable_sni === 'boolean') {
+      normalized.disable_sni = tls.disable_sni
+    }
+
+    const reality = isPlainObject(tls.reality) ? tls.reality : null
+    const realityEnabled = reality?.enabled === true
+    if (type === 'vless') {
+      if (!hasOwn(config, 'security')) {
+        normalized.security = realityEnabled ? 'reality' : tls.enabled ? 'tls' : 'none'
+      }
+      if (
+        realityEnabled &&
+        !hasOwn(config, 'public_key') &&
+        typeof reality?.public_key === 'string'
+      ) {
+        normalized.public_key = reality.public_key
+      }
+      if (
+        realityEnabled &&
+        !hasOwn(config, 'short_id') &&
+        typeof reality?.short_id === 'string'
+      ) {
+        normalized.short_id = reality.short_id
+      }
+    } else if (type === 'vmess' && !hasOwn(config, 'tls')) {
+      normalized.tls = realityEnabled ? 'reality' : tls.enabled ? 'tls' : 'none'
+    } else if (type === 'trojan' && !hasOwn(config, 'security') && reality?.enabled) {
+      normalized.security = 'reality'
+    } else if (type === 'http' && !hasOwn(config, 'tls') && typeof tls.enabled === 'boolean') {
+      normalized.tls = tls.enabled
+    }
+  }
+
+  if (type === 'vless' || type === 'vmess' || type === 'trojan') {
+    const transport = isPlainObject(config.transport_options) ? config.transport_options : null
+    if (transport) {
+      const transportType =
+        typeof transport.type === 'string'
+          ? transport.type === 'h2'
+            ? 'http'
+            : transport.type
+          : ''
+      if (!hasOwn(config, 'network') && transportType) {
+        normalized.network = transportType
+      }
+      const network = normalized.network || transportType
+      if ((network === 'ws' || network === 'http') && !hasOwn(config, 'path') && typeof transport.path === 'string') {
+        normalized.path = transport.path
+      }
+      if (network === 'ws') {
+        if (!hasOwn(config, 'host')) {
+          const host = nativeHeaderHost(transport.headers)
+          if (host) normalized.host = host
+        }
+        if (!hasOwn(config, 'headers') && isPlainObject(transport.headers)) {
+          normalized.headers = { ...transport.headers }
+        }
+        if (!hasOwn(config, 'max_early_data') && Number.isFinite(Number(transport.max_early_data))) {
+          normalized.max_early_data = Number(transport.max_early_data)
+        }
+        if (!hasOwn(config, 'early_data_header') && typeof transport.early_data_header_name === 'string') {
+          normalized.early_data_header = transport.early_data_header_name
+        }
+      } else if (network === 'grpc' && !hasOwn(config, 'service_name') && typeof transport.service_name === 'string') {
+        normalized.service_name = transport.service_name
+      } else if (network === 'http') {
+        if (!hasOwn(config, 'host')) {
+          const hosts = nativeStringList(transport.host)
+          if (hosts.length > 0) normalized.host = hosts.join(',')
+        }
+        if (type === 'vmess' && !hasOwn(config, 'http_path') && typeof transport.path === 'string') {
+          normalized.http_path = [transport.path]
+        }
+        if (!hasOwn(config, 'method') && typeof transport.method === 'string') {
+          normalized.method = transport.method
+        }
+      } else if (network === 'httpupgrade') {
+        if (!hasOwn(config, 'http_upgrade_path') && typeof transport.path === 'string') {
+          normalized.http_upgrade_path = transport.path
+        }
+        if (!hasOwn(config, 'http_upgrade_host') && typeof transport.host === 'string') {
+          normalized.http_upgrade_host = transport.host
+        }
+        if (!hasOwn(config, 'path') && typeof transport.path === 'string') {
+          normalized.path = transport.path
+        }
+        if (!hasOwn(config, 'host') && typeof transport.host === 'string') {
+          normalized.host = transport.host
+        }
+      }
+    }
+  }
+  return normalized
 }
 
 function NodeForm({ node, onSave, onCancel }) {
@@ -162,7 +356,7 @@ function NodeForm({ node, onSave, onCancel }) {
   const buildConfig = (type, values) => {
     const built = buildConfigFromForm(type, values)
     if (!node || node.type !== type) {
-      return built
+      return finalizeFormConfig(type, built)
     }
     const overlay = {}
     for (const [key, value] of Object.entries(built)) {
@@ -170,7 +364,23 @@ function NodeForm({ node, onSave, onCancel }) {
         overlay[key] = value
       }
     }
-    return { ...initialConfig, ...overlay }
+    return finalizeFormConfig(type, { ...initialConfig, ...overlay })
+  }
+
+  const finalizeFormConfig = (type, config) => {
+    if (type !== 'vless' || config.security === 'reality') {
+      return config
+    }
+
+    // Reality credentials are only meaningful when Reality is active. Remove
+    // stale/derived flat compatibility fields after the merge so switching an
+    // imported node to TLS/none cannot produce security=tls with pbk/sid. Keep
+    // the native tls_options object untouched; backend reconciliation decides
+    // which native TLS branch is active.
+    const finalized = { ...config }
+    delete finalized.public_key
+    delete finalized.short_id
+    return finalized
   }
 
   const buildConfigFromForm = (type, values) => {
@@ -231,6 +441,10 @@ function NodeForm({ node, onSave, onCancel }) {
           down_mbps: values.down_mbps,
           obfs: values.obfs,
           obfs_password: values.obfs_password,
+          // obfs_password is the canonical form-managed field. Clear the
+          // historical alias so an old value cannot reappear after the user
+          // explicitly clears or changes the obfuscation password.
+          salamander_password: '',
           sni: values.sni,
           alpn: values.alpn ? values.alpn.split(',').map(s => s.trim()) : [],
           fingerprint: values.fingerprint,
@@ -300,33 +514,43 @@ function NodeForm({ node, onSave, onCancel }) {
       case 'wireguard': {
         const peers = parsePeersJSON(values.wireguard_peers_json)
         const reserved = parseReservedInput(values.wireguard_reserved)
+        const usesPeerArray = peers.length > 0
+		const hadPeerArray = Array.isArray(initialConfig.peers)
         return {
           ...config,
+          // Endpoint-format peer arrays take precedence over the legacy flat
+          // single-peer fields. Avoid adding derived flat values while editing
+          // an imported peers array, otherwise an unchanged save is no longer
+          // lossless and conflicting compatibility fields can change meaning.
+          server: usesPeerArray ? undefined : values.server,
+          server_port: usesPeerArray ? undefined : values.server_port,
           local_address: splitMultilineList(values.wireguard_local_address),
           private_key: values.wireguard_private_key,
-          peer_public_key: values.wireguard_peer_public_key || '',
-          pre_shared_key: values.wireguard_pre_shared_key || '',
-          allowed_ips: splitMultilineList(values.wireguard_allowed_ips),
-          reserved,
+          peer_public_key: usesPeerArray ? undefined : values.wireguard_peer_public_key || '',
+          pre_shared_key: usesPeerArray ? undefined : values.wireguard_pre_shared_key || '',
+          allowed_ips: usesPeerArray
+            ? undefined
+            : splitMultilineList(values.wireguard_allowed_ips),
+          reserved: usesPeerArray ? undefined : reserved,
           system_interface: values.wireguard_system_interface || false,
           interface_name: values.wireguard_interface_name || '',
           mtu: values.wireguard_mtu || 0,
           workers: values.wireguard_workers || 0,
-          network:
-            values.wireguard_network && values.wireguard_network !== 'both'
-              ? values.wireguard_network
-              : '',
           detour: values.wireguard_detour || '',
-          domain_resolver: values.wireguard_domain_resolver || '',
-          domain_resolver_strategy: values.wireguard_domain_resolver_strategy || '',
+	          domain_resolver: values.wireguard_domain_resolver || '',
+	          domain_resolver_strategy: values.wireguard_domain_resolver_strategy || '',
+	          domain_resolver_options:
+	            node?.type === 'wireguard'
+	              ? normalizedConfig.domain_resolver_options || {}
+	              : undefined,
           routing_mark: values.wireguard_routing_mark || '',
           udp_fragment:
             typeof values.wireguard_udp_fragment === 'boolean'
               ? values.wireguard_udp_fragment
               : undefined,
           connect_timeout: values.wireguard_connect_timeout || '',
-          peers,
-        }
+	          peers: usesPeerArray ? peers : hadPeerArray ? [] : undefined,
+	        }
       }
       
       default:
@@ -343,10 +567,27 @@ function NodeForm({ node, onSave, onCancel }) {
     }
   }
 
-  const initialConfig = node ? parseConfig(node.config) : {}
-  const normalizedConfig = { ...initialConfig }
-  if (Array.isArray(initialConfig.alpn)) {
-    normalizedConfig.alpn = initialConfig.alpn.join(',')
+	  const initialConfig = node ? parseConfig(node.config) : {}
+	  const normalizedConfig = hydrateNativeCompatibilityForForm(node?.type, initialConfig)
+  if (Array.isArray(normalizedConfig.alpn)) {
+    normalizedConfig.alpn = normalizedConfig.alpn.join(',')
+  }
+  if (node?.type === 'hy2') {
+    const nativeObfs = initialConfig.obfs
+    if (nativeObfs && typeof nativeObfs === 'object' && !Array.isArray(nativeObfs)) {
+      normalizedConfig.obfs = typeof nativeObfs.type === 'string' ? nativeObfs.type : ''
+      if (!Object.prototype.hasOwnProperty.call(initialConfig, 'obfs_password')) {
+        normalizedConfig.obfs_password =
+          typeof nativeObfs.password === 'string' ? nativeObfs.password : ''
+      }
+    }
+    if (
+      !Object.prototype.hasOwnProperty.call(initialConfig, 'obfs_password') &&
+      !normalizedConfig.obfs_password &&
+      typeof initialConfig.salamander_password === 'string'
+    ) {
+      normalizedConfig.obfs_password = initialConfig.salamander_password
+    }
   }
   if (node?.type === 'wireguard') {
     const wireguardPeers = Array.isArray(initialConfig.peers) ? initialConfig.peers : []
@@ -367,15 +608,45 @@ function NodeForm({ node, onSave, onCancel }) {
     if ((!Array.isArray(normalizedConfig.allowed_ips) || normalizedConfig.allowed_ips.length === 0) && Array.isArray(primaryPeer?.allowed_ips)) {
       normalizedConfig.allowed_ips = primaryPeer.allowed_ips
     }
-    if ((!Array.isArray(normalizedConfig.reserved) || normalizedConfig.reserved.length === 0) && Array.isArray(primaryPeer?.reserved)) {
+    if (
+      (!Array.isArray(normalizedConfig.reserved) || normalizedConfig.reserved.length === 0) &&
+      (Array.isArray(primaryPeer?.reserved) || typeof primaryPeer?.reserved === 'string')
+    ) {
       normalizedConfig.reserved = primaryPeer.reserved
     }
     normalizedConfig.wireguard_local_address = formatMultilineList(initialConfig.local_address)
     normalizedConfig.wireguard_allowed_ips = formatMultilineList(normalizedConfig.allowed_ips)
     normalizedConfig.wireguard_reserved = formatReservedInput(normalizedConfig.reserved)
     normalizedConfig.wireguard_peers_json =
-      wireguardPeers.length > 1 ? JSON.stringify(wireguardPeers, null, 2) : ''
-  }
+      wireguardPeers.length > 0 ? JSON.stringify(wireguardPeers, null, 2) : ''
+
+	    const nativeResolver = initialConfig.domain_resolver
+	    const resolverOptions = initialConfig.domain_resolver_options
+	    const nativeResolverObject = isPlainObject(nativeResolver) ? nativeResolver : null
+	    const compatibilityResolverObject = isPlainObject(resolverOptions) ? resolverOptions : null
+	    const resolverObject =
+	      nativeResolverObject || compatibilityResolverObject
+	        ? { ...(compatibilityResolverObject || {}), ...(nativeResolverObject || {}) }
+	        : null
+    if (typeof nativeResolver === 'string') {
+      normalizedConfig.domain_resolver = nativeResolver
+    } else if (resolverObject) {
+      normalizedConfig.domain_resolver =
+        typeof resolverObject.server === 'string' ? resolverObject.server : ''
+    }
+	    if (!Object.prototype.hasOwnProperty.call(initialConfig, 'domain_resolver_strategy')) {
+      normalizedConfig.domain_resolver_strategy =
+        resolverObject && typeof resolverObject.strategy === 'string'
+          ? resolverObject.strategy
+	          : ''
+	    }
+	    if (resolverObject) {
+	      const resolverCompatibility = { ...resolverObject }
+	      delete resolverCompatibility.server
+	      delete resolverCompatibility.strategy
+	      normalizedConfig.domain_resolver_options = resolverCompatibility
+	    }
+	  }
 
   const protocolUsername = normalizedConfig.username
   const protocolPassword = normalizedConfig.password
@@ -421,10 +692,6 @@ function NodeForm({ node, onSave, onCancel }) {
     wireguard_interface_name: node?.type === 'wireguard' ? normalizedConfig.interface_name || '' : '',
     wireguard_mtu: node?.type === 'wireguard' ? normalizedConfig.mtu || 0 : 0,
     wireguard_workers: node?.type === 'wireguard' ? normalizedConfig.workers || 0 : 0,
-    wireguard_network:
-      node?.type === 'wireguard'
-        ? normalizedConfig.network || 'both'
-        : 'both',
     wireguard_detour: node?.type === 'wireguard' ? normalizedConfig.detour || '' : '',
     wireguard_domain_resolver: node?.type === 'wireguard' ? normalizedConfig.domain_resolver || '' : '',
     wireguard_domain_resolver_strategy:
@@ -821,13 +1088,6 @@ function NodeForm({ node, onSave, onCancel }) {
       </Form.Item>
       <Form.Item label={withHint('Workers', '工作线程数')} name="wireguard_workers">
         <InputNumber min={0} max={128} style={{ width: '100%' }} />
-      </Form.Item>
-      <Form.Item label={withHint('Network', '启用的底层网络')} name="wireguard_network">
-        <Select>
-          <Option value="both">Both (Default)</Option>
-          <Option value="udp">UDP</Option>
-          <Option value="tcp">TCP</Option>
-        </Select>
       </Form.Item>
       <Form.Item label={withHint('Detour', '拨号绕行出站标签')} name="wireguard_detour">
         <Input placeholder="selector" />

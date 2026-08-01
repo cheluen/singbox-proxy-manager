@@ -3,10 +3,12 @@ package api
 import (
 	"bytes"
 	"database/sql"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -19,6 +21,27 @@ import (
 	"github.com/gin-gonic/gin"
 	_ "modernc.org/sqlite"
 )
+
+func useRealSingBoxForChecks(t *testing.T) {
+	t.Helper()
+	realBinary := os.Getenv("SINGBOX_TEST_BINARY")
+	if realBinary == "" {
+		t.Skip("SINGBOX_TEST_BINARY not set")
+	}
+
+	wrapper := filepath.Join(t.TempDir(), "sing-box-check-wrapper")
+	script := `#!/bin/sh
+if [ "$1" = "check" ]; then
+  exec "$REAL_SINGBOX_BINARY" "$@"
+fi
+sleep 300
+`
+	if err := os.WriteFile(wrapper, []byte(script), 0o755); err != nil {
+		t.Fatalf("write sing-box wrapper: %v", err)
+	}
+	t.Setenv("REAL_SINGBOX_BINARY", realBinary)
+	t.Setenv("SINGBOX_BINARY", wrapper)
+}
 
 // newTestHandler builds a handler with in-memory sqlite and stubbed proxy checker.
 func newTestHandler(t *testing.T, checker func(string, string, string) (*services.IPInfo, error)) *Handler {
@@ -502,7 +525,6 @@ func TestCreateNodeWireGuardPersistsConfig(t *testing.T) {
 			"peer_public_key":"peer-public-key",
 			"allowed_ips":["0.0.0.0/0","::/0"],
 			"reserved":[162,104,222],
-			"detour":"warp-selector",
 			"domain_resolver":"local",
 			"domain_resolver_strategy":"prefer_ipv4",
 			"udp_fragment":true,
@@ -546,7 +568,7 @@ func TestCreateNodeWireGuardPersistsConfig(t *testing.T) {
 	if len(cfg.LocalAddress) != 2 || cfg.LocalAddress[1] != "2606:4700:110:8765::2/128" {
 		t.Fatalf("unexpected local_address: %+v", cfg.LocalAddress)
 	}
-	if cfg.PeerPublicKey != "peer-public-key" || cfg.Detour != "warp-selector" {
+	if cfg.PeerPublicKey != "peer-public-key" || cfg.Detour != "" {
 		t.Fatalf("unexpected wireguard config: %+v", cfg)
 	}
 	if cfg.UDPFragment == nil || !*cfg.UDPFragment {
@@ -679,7 +701,6 @@ proxies:
     reserved: [162, 104, 222]
     mtu: 1280
     udp: true
-    dialer-proxy: warp-selector
 `
 	payload := map[string]interface{}{
 		"content": yaml,
@@ -721,7 +742,7 @@ proxies:
 	if err := json.Unmarshal([]byte(configJSON), &cfg); err != nil {
 		t.Fatalf("unmarshal config: %v", err)
 	}
-	if cfg.Network != "udp" || cfg.Detour != "warp-selector" {
+	if cfg.Network != "udp" || cfg.Detour != "" {
 		t.Fatalf("unexpected batch-import config: %+v", cfg)
 	}
 	if len(cfg.LocalAddress) != 2 || cfg.LocalAddress[0] != "172.16.0.2/32" {
@@ -1169,5 +1190,113 @@ func TestUpdateNodeRevertsWhenKernelRejectsConfig(t *testing.T) {
 	}
 	if !strings.Contains(config, "example.com") {
 		t.Fatalf("previous config must be restored, got: %s", config)
+	}
+}
+
+func TestBatchImportProtocolMatrixPassesRealSingBoxValidation(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	handler := newTestHandler(t, nil)
+	useRealSingBoxForChecks(t)
+
+	vmessJSON, err := json.Marshal(map[string]interface{}{
+		"v":    "2",
+		"ps":   "VMess HTTP",
+		"add":  "127.0.0.1",
+		"port": "10082",
+		"id":   "11111111-1111-1111-1111-111111111111",
+		"aid":  "0",
+		"scy":  "auto",
+		"net":  "http",
+		"host": "vmess.example.com",
+		"path": "/vmess",
+		"tls":  "",
+	})
+	if err != nil {
+		t.Fatalf("marshal VMess fixture: %v", err)
+	}
+
+	ssPassword := "MDEyMzQ1Njc4OWFiY2RlZg=="
+	privateKey := "YNXtAzepDqRv9H52osJVDQnznT5AM11eCK3ESpwSt04="
+	publicKey := "Z1XXLsKYkYxuiYjJIkRvtIKFepCYHTgON+GwPq7SOV4="
+	content := strings.Join([]string{
+		"ss://2022-blake3-aes-128-gcm:" + url.QueryEscape(ssPassword) + "@127.0.0.1:10080/?plugin=" + url.QueryEscape("obfs-local;obfs=http;obfs-host=example.com") + "#SS-SIP002",
+		"vless://22222222-2222-2222-2222-222222222222@[2001:db8::1]:443?security=tls&type=ws&path=%2Fvless&host=vless.example.com&sni=vless.example.com&allowInsecure=1#VLESS-IPv6",
+		"vmess://" + base64.RawURLEncoding.EncodeToString(vmessJSON),
+		"trojan://p%40ss@[2001:db8::2]:443?type=h2&host=trojan.example.com&path=%2Ftrojan&sni=trojan.example.com&insecure=1#Trojan-H2",
+		"hysteria2://hy%3Apass@127.0.0.1:443,8443-8444/?obfs=salamander&obfs-password=obfs-pass&sni=hy2.example.com&insecure=1#HY2-Hop",
+		"tuic://33333333-3333-3333-3333-333333333333:tuic%40pass@127.0.0.1:10443?congestion_control=bbr&udp_relay_mode=native&reduce_rtt=1&disable_sni=1&insecure=1#TUIC",
+		"anytls://any%40pass@[2001:db8::3]:443?sni=anytls.example.com&alpn=h2,http/1.1&insecure=1#AnyTLS",
+		"socks5h://user%40name:pass%3Aword@127.0.0.1:1080#SOCKS5H",
+		"https://http%40user:http%3Apass@127.0.0.1:8443?sni=http.example.com&insecure=1#HTTPS",
+		"wireguard://" + url.QueryEscape(privateKey) + "@127.0.0.1:2408?publickey=" + url.QueryEscape(publicKey) + "&ip=172.16.0.2/32&allowedips=0.0.0.0/0,::/0&reserved=1,2,3#WireGuard",
+	}, "\n")
+
+	payload := map[string]interface{}{
+		"content": content,
+		"enabled": true,
+	}
+	rec := postJSON(t, handler.BatchImportNodes, http.MethodPost, "/api/nodes/batch-import", payload, nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("protocol batch import failed real sing-box validation: status=%d body=%s", rec.Code, rec.Body.String())
+	}
+
+	var response struct {
+		Total   int `json:"total"`
+		Success int `json:"success"`
+		Failed  int `json:"failed"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &response); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if response.Total != 10 || response.Success != 10 || response.Failed != 0 {
+		t.Fatalf("unexpected import summary: %+v body=%s", response, rec.Body.String())
+	}
+
+	var count int
+	if err := handler.db.QueryRow("SELECT COUNT(*) FROM proxy_nodes").Scan(&count); err != nil {
+		t.Fatalf("count imported nodes: %v", err)
+	}
+	if count != 10 {
+		t.Fatalf("expected all protocol fixtures persisted, got %d", count)
+	}
+}
+
+func TestCreateDisabledNodeRejectsUnknownProtocol(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	handler := newTestHandler(t, nil)
+
+	payload := map[string]interface{}{
+		"name":    "unsupported",
+		"type":    "shadowtls",
+		"config":  `{}`,
+		"enabled": false,
+	}
+	rec := postJSON(t, handler.CreateNode, http.MethodPost, "/api/nodes", payload, nil)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("unknown protocol must be rejected before persistence, got %d body=%s", rec.Code, rec.Body.String())
+	}
+
+	var count int
+	if err := handler.db.QueryRow("SELECT COUNT(*) FROM proxy_nodes").Scan(&count); err != nil {
+		t.Fatalf("count nodes: %v", err)
+	}
+	if count != 0 {
+		t.Fatalf("unknown disabled protocol must not be stored, found %d rows", count)
+	}
+}
+
+func TestCreateDisabledNodeRejectsUnknownConfigField(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	handler := newTestHandler(t, nil)
+
+	payload := map[string]interface{}{
+		"name":    "unknown-field",
+		"type":    "socks5",
+		"config":  `{"server":"127.0.0.1","server_port":1080,"silently_dropped":true}`,
+		"enabled": false,
+	}
+	rec := postJSON(t, handler.CreateNode, http.MethodPost, "/api/nodes", payload, nil)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("unknown config fields must not be silently accepted, got %d body=%s", rec.Code, rec.Body.String())
 	}
 }

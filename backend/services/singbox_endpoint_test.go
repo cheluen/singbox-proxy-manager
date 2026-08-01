@@ -188,8 +188,54 @@ func TestGenerateWireGuardEndpointMultiPeerAndDialFields(t *testing.T) {
 	if got, _ := peers[0]["allowed_ips"].([]string); len(got) != 1 || got[0] != "10.0.0.0/24" {
 		t.Fatalf("explicit allowed_ips must be preserved, got %v", peers[0]["allowed_ips"])
 	}
-	if got, _ := peers[1]["allowed_ips"].([]string); len(got) != 2 {
-		t.Fatalf("missing allowed_ips must default to full routes, got %v", peers[1]["allowed_ips"])
+	if _, exists := peers[1]["allowed_ips"]; exists {
+		t.Fatalf("explicit endpoint peers must preserve omitted allowed_ips, got %v", peers[1]["allowed_ips"])
+	}
+}
+
+func TestWireGuardDomainResolverFlatFieldsOverrideAndClearCompatibility(t *testing.T) {
+	config := &models.WireGuardConfig{
+		DomainResolver:         "local",
+		DomainResolverStrategy: "prefer_ipv6",
+		DomainResolverOptions: models.NativeOptions{
+			"server":        "stale-resolver",
+			"strategy":      "prefer_ipv4",
+			"disable_cache": true,
+		},
+	}
+
+	resolver, err := wireGuardDomainResolverValue(config)
+	if err != nil {
+		t.Fatalf("merge WireGuard domain resolver: %v", err)
+	}
+	resolverMap, ok := resolver.(map[string]interface{})
+	if !ok {
+		t.Fatalf("expected resolver object, got %#v", resolver)
+	}
+	if resolverMap["server"] != "local" || resolverMap["strategy"] != "prefer_ipv6" || resolverMap["disable_cache"] != true {
+		t.Fatalf("flat resolver fields must override stale native values while preserving native-only fields: %#v", resolverMap)
+	}
+
+	config.DomainResolverStrategy = ""
+	resolver, err = wireGuardDomainResolverValue(config)
+	if err != nil {
+		t.Fatalf("clear WireGuard resolver strategy: %v", err)
+	}
+	resolverMap = resolver.(map[string]interface{})
+	if resolverMap["server"] != "local" {
+		t.Fatalf("edited flat resolver server was lost: %#v", resolverMap)
+	}
+	if _, exists := resolverMap["strategy"]; exists {
+		t.Fatalf("explicit flat strategy clear must remove stale native strategy: %#v", resolverMap)
+	}
+
+	config.DomainResolver = ""
+	resolver, err = wireGuardDomainResolverValue(config)
+	if err != nil {
+		t.Fatalf("clear WireGuard domain resolver: %v", err)
+	}
+	if resolver != nil {
+		t.Fatalf("explicit empty resolver must clear stale native options: %#v", resolver)
 	}
 }
 
@@ -323,5 +369,36 @@ func TestRealSingBoxAcceptsGeneratedWireGuardConfig(t *testing.T) {
 
 	if err := service.ValidateConfig(configJSON); err != nil {
 		t.Fatalf("real sing-box rejected the generated endpoint config: %v", err)
+	}
+}
+
+func TestRealSingBoxAcceptsEditedWireGuardDomainResolver(t *testing.T) {
+	realBinary := os.Getenv("SINGBOX_TEST_BINARY")
+	if realBinary == "" {
+		t.Skip("SINGBOX_TEST_BINARY not set")
+	}
+	t.Setenv("SINGBOX_BINARY", realBinary)
+	service := NewSingBoxService(t.TempDir())
+
+	node := nativeTestNode(t, 1, "warp-resolver", "wireguard", models.WireGuardConfig{
+		Server:                 "engage.cloudflareclient.com",
+		ServerPort:             2408,
+		LocalAddress:           []string{"172.16.0.2/32"},
+		PrivateKey:             testWireGuardPrivateKey,
+		PeerPublicKey:          testWireGuardPeerPublicKey,
+		DomainResolver:         "local",
+		DomainResolverStrategy: "prefer_ipv4",
+		DomainResolverOptions: models.NativeOptions{
+			"server":        "stale-resolver",
+			"strategy":      "prefer_ipv6",
+			"disable_cache": true,
+		},
+	})
+	configJSON, err := service.BuildGlobalConfig([]models.ProxyNode{node})
+	if err != nil {
+		t.Fatalf("BuildGlobalConfig with edited resolver: %v", err)
+	}
+	if err := service.ValidateConfig(configJSON); err != nil {
+		t.Fatalf("real sing-box rejected edited WireGuard resolver config: %v\n%s", err, configJSON)
 	}
 }
