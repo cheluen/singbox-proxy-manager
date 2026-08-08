@@ -270,6 +270,81 @@ const ensureCheckboxUnchecked = async (
   )
 }
 
+const selectAntdOptionByInputID = async (page, inputID, optionText, timeoutMs = 10000) => {
+  const opened = await page.evaluate((id) => {
+    const input = document.getElementById(id)
+    const selector = input?.closest('.ant-select')?.querySelector('.ant-select-selector')
+    if (!selector) return false
+
+    selector.scrollIntoView({ block: 'center', inline: 'nearest' })
+    const rect = selector.getBoundingClientRect()
+    const eventInit = {
+      bubbles: true,
+      cancelable: true,
+      clientX: rect.left + rect.width / 2,
+      clientY: rect.top + rect.height / 2,
+      buttons: 1,
+    }
+    selector.dispatchEvent(
+      new PointerEvent('pointerdown', { ...eventInit, pointerType: 'mouse' })
+    )
+    selector.dispatchEvent(new MouseEvent('mousedown', eventInit))
+    selector.dispatchEvent(new MouseEvent('mouseup', eventInit))
+    selector.dispatchEvent(new MouseEvent('click', eventInit))
+    return true
+  }, inputID)
+  assert(opened, `Select input was not available: ${inputID}`)
+
+  await page.waitForFunction(
+    (text) =>
+      Array.from(
+        document.querySelectorAll(
+          '.ant-select-dropdown:not(.ant-select-dropdown-hidden) .ant-select-item-option'
+        )
+      ).some((option) => (option.textContent || '').includes(text)),
+    { timeout: timeoutMs },
+    optionText
+  )
+
+  const selected = await page.evaluate((text) => {
+    const option = Array.from(
+      document.querySelectorAll(
+        '.ant-select-dropdown:not(.ant-select-dropdown-hidden) .ant-select-item-option'
+      )
+    ).find((candidate) => (candidate.textContent || '').includes(text))
+    if (!option) return false
+
+    option.scrollIntoView({ block: 'nearest', inline: 'nearest' })
+    const rect = option.getBoundingClientRect()
+    const eventInit = {
+      bubbles: true,
+      cancelable: true,
+      clientX: rect.left + rect.width / 2,
+      clientY: rect.top + rect.height / 2,
+      buttons: 1,
+    }
+    option.dispatchEvent(
+      new PointerEvent('pointerdown', { ...eventInit, pointerType: 'mouse' })
+    )
+    option.dispatchEvent(new MouseEvent('mousedown', eventInit))
+    option.dispatchEvent(new MouseEvent('mouseup', eventInit))
+    option.dispatchEvent(new MouseEvent('click', eventInit))
+    return true
+  }, optionText)
+  assert(selected, `Select option was not available: ${optionText}`)
+
+  await page.waitForFunction(
+    (id, text) => {
+      const input = document.getElementById(id)
+      const selection = input?.closest('.ant-select')?.querySelector('.ant-select-selection-item')
+      return (selection?.textContent || '').includes(text)
+    },
+    { timeout: timeoutMs },
+    inputID,
+    optionText
+  )
+}
+
 const run = async () => {
   const mockApi = await startMockApi()
   await waitForHttpReady(`http://localhost:${API_PORT}/api/version`, 10000)
@@ -308,22 +383,11 @@ const run = async () => {
     await clickButtonByText(page, 'Batch Import', 15000)
     await page.waitForSelector('.ant-modal textarea', { timeout: 15000 })
 
-    await page.click('#batch-import-source-type')
-    await page.waitForSelector('.ant-select-dropdown:not(.ant-select-dropdown-hidden)', {
-      visible: true,
-      timeout: 5000,
-    })
-    const selectedHTTPProxy = await page.evaluate(() => {
-      const option = Array.from(
-        document.querySelectorAll(
-          '.ant-select-dropdown:not(.ant-select-dropdown-hidden) .ant-select-item-option'
-        )
-      ).find((candidate) => (candidate.textContent || '').includes('HTTP/HTTPS proxy node'))
-      if (!option) return false
-      option.click()
-      return true
-    })
-    assert(selectedHTTPProxy, 'HTTP proxy import source option was not available')
+    await selectAntdOptionByInputID(
+      page,
+      'batch-import-source-type',
+      'HTTP/HTTPS proxy node'
+    )
 
     const content = 'https://example.com/subscription\nss://YWVzLTEyOC1nY206dGVzdA==@example.com:443#SS'
     await page.type('.ant-modal textarea', content)
