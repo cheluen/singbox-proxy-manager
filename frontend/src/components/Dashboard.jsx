@@ -18,6 +18,7 @@ import {
     Tooltip,
     Select,
     AutoComplete,
+    Grid,
   } from 'antd'
 import {
   LogoutOutlined,
@@ -55,6 +56,36 @@ import { OFFICIAL_GITHUB_URL } from '../constants/project'
 const { Header, Content } = Layout
 const { Title, Text } = Typography
 const { TextArea } = Input
+
+const DragHandleContext = React.createContext({
+  dragHandleProps: null,
+  isDragging: false,
+})
+
+function NodeDragHandle({ recordId, disabled, isDragging, title }) {
+  const dragHandleContext = React.useContext(DragHandleContext)
+  const dragHandleProps = disabled ? null : dragHandleContext.dragHandleProps
+  const dragging = isDragging || dragHandleContext.isDragging
+
+  return (
+    <span
+      {...(dragHandleProps || {})}
+      data-testid={`node-drag-handle-${String(recordId ?? '')}`}
+      data-node-drag-id={String(recordId ?? '')}
+      className={`node-drag-handle${disabled ? ' node-drag-handle--disabled' : ''}`}
+      title={title}
+      aria-label={title}
+      style={{
+        ...dragHandleProps?.style,
+        cursor: disabled ? 'not-allowed' : dragging ? 'grabbing' : 'grab',
+        color: disabled ? '#ccc' : '#777',
+        touchAction: disabled ? 'pan-y' : 'none',
+      }}
+    >
+      <HolderOutlined aria-hidden="true" />
+    </span>
+  )
+}
 
 const FILTER_KEY_LABEL_MAP = {
   status: 'status',
@@ -349,6 +380,8 @@ const applyNodeFilters = (nodes, filters) => {
 
 function Dashboard({ onLogout }) {
   const { t, i18n } = useTranslation()
+  const screens = Grid.useBreakpoint()
+  const isMobile = !screens.md
   const [nodes, setNodes] = useState([])
   const nodesRef = useRef(nodes)
   const nodeIPCheckRunsRef = useRef(new Map())
@@ -1792,9 +1825,34 @@ function Dashboard({ onLogout }) {
               label: t('node_record'),
               children: (
                 <Descriptions
+                  className="node-record-descriptions"
                   size="small"
-                  column={2}
+                  column={isMobile ? 1 : 2}
                   items={[
+                    ...(isMobile
+                      ? [
+                          {
+                            key: 'type',
+                            label: t('node_type'),
+                            children: String(record.type || '-').toUpperCase(),
+                          },
+                          {
+                            key: 'enabled_control',
+                            label: t('enabled'),
+                            children: (
+                              <Switch
+                                data-testid={`node-expanded-enabled-${String(record.id)}`}
+                                checked={record.enabled}
+                                onChange={() => handleToggleNode(record)}
+                                loading={!!nodeUpdating[record.id]}
+                                disabled={!!nodeUpdating[record.id]}
+                                checkedChildren={<CheckCircleOutlined />}
+                                unCheckedChildren={<CloseCircleOutlined />}
+                              />
+                            ),
+                          },
+                        ]
+                      : []),
                     {
                       key: 'port',
                       label: t('inbound_port'),
@@ -1828,10 +1886,21 @@ function Dashboard({ onLogout }) {
                     {
                       key: 'tcp_reuse',
                       label: t('tcp_reuse'),
-                      children:
-                        record.tcp_reuse_enabled === false
-                          ? t('disabled')
-                          : t('enabled'),
+                      children: isMobile ? (
+                        <Switch
+                          data-testid={`node-expanded-tcp-reuse-${String(record.id)}`}
+                          checked={record.tcp_reuse_enabled !== false}
+                          onChange={() => handleToggleTCPReuse(record)}
+                          loading={!!nodeUpdating[record.id]}
+                          disabled={!!nodeUpdating[record.id]}
+                          checkedChildren={t('tcp_reuse_short')}
+                          unCheckedChildren={t('tcp_reuse_short')}
+                        />
+                      ) : record.tcp_reuse_enabled === false ? (
+                        t('disabled')
+                      ) : (
+                        t('enabled')
+                      ),
                     },
                     {
                       key: 'status',
@@ -1863,41 +1932,23 @@ function Dashboard({ onLogout }) {
       {
         title: '',
         key: 'drag',
-        width: 34,
+        width: isMobile ? 38 : 34,
         render: (_, record) => {
           const disabled = !dragSortAllowed || displayNodes.length <= 1
           const isDragging = virtualDragState?.activeId === String(record?.id)
-          const cursor = disabled
-            ? 'not-allowed'
-            : isDragging
-              ? 'grabbing'
-              : 'grab'
-          const color = disabled ? '#ccc' : '#999'
 
           const title = !dragSortAllowed
             ? t('drag_sort_disabled_filtered')
             : t('drag_sort_hint')
 
-          const handle = (
-            <span
-              data-testid={`node-drag-handle-${String(record?.id ?? '')}`}
-              data-node-drag-id={String(record?.id ?? '')}
+          return (
+            <NodeDragHandle
+              recordId={record?.id}
+              disabled={disabled}
+              isDragging={isDragging}
               title={title}
-              style={{
-                display: 'inline-flex',
-                width: '100%',
-                height: '100%',
-                alignItems: 'center',
-                justifyContent: 'center',
-                cursor,
-                color,
-              }}
-            >
-              <HolderOutlined />
-            </span>
+            />
           )
-
-          return handle
         },
       },
       {
@@ -1914,7 +1965,7 @@ function Dashboard({ onLogout }) {
           }}
         />,
         key: 'checkbox',
-        width: 42,
+        width: isMobile ? 38 : 42,
         render: (_, record) => (
           <Checkbox
             data-testid={`node-select-${String(record?.id ?? '')}`}
@@ -1937,12 +1988,13 @@ function Dashboard({ onLogout }) {
         dataIndex: 'name',
         key: 'name',
         ellipsis: true,
-        width: 110,
+        width: isMobile ? 104 : 110,
       },
       {
         title: t('remark'),
         key: 'remark_indicator',
         width: 56,
+        responsive: ['md'],
         render: (_, record) => {
           const remark = (record?.remark ?? '').trim()
           if (!remark) return null
@@ -1959,6 +2011,7 @@ function Dashboard({ onLogout }) {
         dataIndex: 'type',
         key: 'type',
         width: 70,
+        responsive: ['md'],
         render: (type) => <Tag color="blue">{type.toUpperCase()}</Tag>,
       },
       {
@@ -1966,12 +2019,14 @@ function Dashboard({ onLogout }) {
         dataIndex: 'inbound_port',
         key: 'inbound_port',
         width: 72,
+        responsive: ['md'],
       },
       {
         title: t('username'),
         dataIndex: 'username',
         key: 'username',
         width: 76,
+        responsive: ['md'],
         render: (username) => username || '-',
       },
       {
@@ -1979,12 +2034,14 @@ function Dashboard({ onLogout }) {
         dataIndex: 'password',
         key: 'password',
         width: 76,
+        responsive: ['md'],
         render: (password) => password || '-',
       },
       {
         title: t('status'),
         key: 'status',
         width: 84,
+        responsive: ['md'],
         render: (_, record) => {
           const healthy = record.node_ip && record.latency > 0
           return (
@@ -1999,6 +2056,7 @@ function Dashboard({ onLogout }) {
         dataIndex: 'latency',
         key: 'latency',
         width: 72,
+        responsive: ['md'],
         render: (latency) => latency > 0 ? `${latency}ms` : '-',
       },
       {
@@ -2006,6 +2064,7 @@ function Dashboard({ onLogout }) {
         dataIndex: 'node_ip',
         key: 'node_ip',
         width: 86,
+        responsive: ['md'],
         render: (nodeIP) => nodeIP || '-',
       },
       {
@@ -2013,6 +2072,7 @@ function Dashboard({ onLogout }) {
         dataIndex: 'location',
         key: 'location',
         width: 96,
+        responsive: ['md'],
         render: (_, record) => {
           const label = formatCountryWithCode(record)
           return (
@@ -2029,6 +2089,7 @@ function Dashboard({ onLogout }) {
         dataIndex: 'enabled',
         key: 'enabled',
         width: 68,
+        responsive: ['md'],
         render: (_, record) => {
           const updating = !!nodeUpdating[record.id]
           return (
@@ -2047,6 +2108,7 @@ function Dashboard({ onLogout }) {
         title: t('tcp_reuse'),
         key: 'tcp_reuse',
         width: 68,
+        responsive: ['md'],
         render: (_, record) => {
           const updating = !!nodeUpdating[record.id]
           return (
@@ -2064,9 +2126,9 @@ function Dashboard({ onLogout }) {
       {
         title: t('actions'),
         key: 'actions',
-        width: 96,
+        width: isMobile ? 84 : 96,
         render: (_, record) => (
-          <Space size={[4, 4]} wrap>
+          <Space size={[4, 4]} wrap className="node-row-actions">
             <Tooltip title={t('export')}>
               <Button
                 type="link"
@@ -2105,6 +2167,13 @@ function Dashboard({ onLogout }) {
       },
     ]
 
+    const tableScrollWidth = columns.reduce((total, column) => {
+      const hiddenAtCurrentBreakpoint =
+        isMobile && Array.isArray(column.responsive) && !column.responsive.includes('xs')
+      if (hiddenAtCurrentBreakpoint) return total
+      return total + (typeof column.width === 'number' ? column.width : 0)
+    }, isMobile ? 38 : 44)
+
     const DraggableRow = (props) => {
       const rowKey = props['data-row-key']
       const { className, style, ...restProps } = props
@@ -2130,25 +2199,32 @@ function Dashboard({ onLogout }) {
         <Draggable
           draggableId={`node-${String(rowKey)}`}
           index={index}
-          isDragDisabled={!dragSortAllowed}
+          isDragDisabled={!dragSortAllowed || displayNodes.length <= 1}
         >
-          {(provided, snapshot) => (
-            <tr
-              ref={provided.innerRef}
-              {...restProps}
-              {...provided.draggableProps}
-              {...provided.dragHandleProps}
-              className={className}
-              style={{
-                ...style,
-                ...provided.draggableProps.style,
-                background: snapshot.isDragging ? '#e6f7ff' : style?.background,
-                cursor: dragSortAllowed ? 'grab' : 'not-allowed',
-              }}
-            >
-              {props.children}
-            </tr>
-          )}
+          {(provided, snapshot) => {
+            const dragHandleContext = {
+              dragHandleProps: provided.dragHandleProps,
+              isDragging: snapshot.isDragging,
+            }
+
+            return (
+              <DragHandleContext.Provider value={dragHandleContext}>
+                <tr
+                  ref={provided.innerRef}
+                  {...restProps}
+                  {...provided.draggableProps}
+                  className={className}
+                  style={{
+                    ...style,
+                    ...provided.draggableProps.style,
+                    background: snapshot.isDragging ? '#e6f7ff' : style?.background,
+                  }}
+                >
+                  {props.children}
+                </tr>
+              </DragHandleContext.Provider>
+            )
+          }}
         </Draggable>
       )
     }
@@ -2177,9 +2253,12 @@ function Dashboard({ onLogout }) {
           size="small"
           virtual={virtualTableEnabled}
           listItemHeight={virtualListItemHeight}
-          scroll={{ y: Math.max(0, tableBodyScrollY || 0) }}
+          scroll={{
+            x: virtualTableEnabled ? tableScrollWidth : 'max-content',
+            y: Math.max(0, tableBodyScrollY || 0),
+          }}
           expandable={{
-            columnWidth: 44,
+            columnWidth: isMobile ? 38 : 44,
             expandedRowRender,
             expandedRowKeys,
             onExpandedRowsChange: (keys) => setExpandedRowKeys(keys),
@@ -2252,9 +2331,10 @@ function Dashboard({ onLogout }) {
 	                  target="_blank"
 	                  rel="noreferrer"
 	                  className="dashboard-repo-link"
+	                  aria-label={t('official_repository')}
 	                >
 	                  <GithubOutlined />
-	                  <span>{t('official_repository')}</span>
+	                  <span className="dashboard-repo-link-label">{t('official_repository')}</span>
 	                </Typography.Link>
 	                <Tooltip title={versionTooltip}>
 	                  <Tag color={updateAvailable ? 'gold' : 'blue'} className="dashboard-version-tag">
@@ -2276,7 +2356,7 @@ function Dashboard({ onLogout }) {
 	              </Space>
 	            </div>
 	          </div>
-	          <Space className="dashboard-actions">
+	          <Space className="dashboard-actions" data-testid="dashboard-header-actions">
 	            <Select
 	              value={i18n.language}
 	              onChange={handleLanguageChange}
@@ -2308,7 +2388,7 @@ function Dashboard({ onLogout }) {
             className="dashboard-toolbar-row dashboard-toolbar-row--primary"
             data-testid="dashboard-toolbar-primary"
           >
-            <Space wrap size={[12, 12]} className="dashboard-toolbar-actions">
+            <div className="dashboard-toolbar-actions dashboard-toolbar-actions--primary">
               <Button
                 type="primary"
                 icon={<PlusOutlined />}
@@ -2336,7 +2416,7 @@ function Dashboard({ onLogout }) {
               >
                 {t('refresh')}
               </Button>
-              <Space.Compact>
+              <Space.Compact className="dashboard-filter-controls">
                 <Select
                   data-testid="nodes-filter-key"
                   value={filterDraftKey}
@@ -2415,7 +2495,7 @@ function Dashboard({ onLogout }) {
                 </Button>
               </Space.Compact>
               {nodeFilters.length > 0 && (
-                <Space size={[4, 4]} wrap>
+                <Space size={[4, 4]} wrap className="dashboard-active-filters">
                   {nodeFilters.map((filter) => {
                     const key = String(filter?.key || '').trim()
                     const value = String(filter?.value ?? '').trim()
@@ -2437,12 +2517,12 @@ function Dashboard({ onLogout }) {
               )}
               {!dragSortAllowed && nodeFilters.length > 0 && (
                 <Tooltip title={t('drag_sort_disabled_filtered')}>
-                  <Tag color="red" style={{ margin: 0 }}>
+                  <Tag color="red" className="dashboard-drag-filter-warning">
                     {t('drag_sort')}
                   </Tag>
                 </Tooltip>
               )}
-            </Space>
+            </div>
           </div>
 
           {selectedNodeIds.length > 0 && (
@@ -2450,7 +2530,7 @@ function Dashboard({ onLogout }) {
               className="dashboard-toolbar-row dashboard-toolbar-row--selection"
               data-testid="dashboard-toolbar-selection"
             >
-              <Space wrap size={[12, 12]} className="dashboard-toolbar-actions dashboard-toolbar-actions--selection">
+              <div className="dashboard-toolbar-actions dashboard-toolbar-actions--selection">
                 <Button
                   data-testid="nodes-batch-export"
                   icon={<ExportOutlined />}
@@ -2489,7 +2569,7 @@ function Dashboard({ onLogout }) {
                     {t('batch_delete')}
                   </Button>
                 </Popconfirm>
-              </Space>
+              </div>
               <Tag
                 data-testid="nodes-selected-count"
                 color="blue"

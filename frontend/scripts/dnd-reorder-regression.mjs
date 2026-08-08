@@ -9,6 +9,7 @@ import puppeteer from 'puppeteer-core'
 const API_PORT = Number(process.env.E2E_API_PORT || 30000)
 const FRONTEND_PORT = Number(process.env.E2E_FRONTEND_PORT || 5173)
 const FRONTEND_URL = `http://127.0.0.1:${FRONTEND_PORT}`
+const ARTIFACT_DIR = String(process.env.E2E_ARTIFACT_DIR || '').trim()
 const SCRIPT_PATH = fileURLToPath(import.meta.url)
 const SCRIPTS_DIR = path.dirname(SCRIPT_PATH)
 const FRONTEND_ROOT = path.resolve(SCRIPTS_DIR, '..')
@@ -19,62 +20,28 @@ const FRONTEND_BUILD_VERSION = FRONTEND_PACKAGE.version
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms))
 
-const createMockNodes = () => [
-  {
-    id: 1,
-    name: 'node-1',
-    type: 'direct',
-    config: '{}',
-    inbound_port: 30001,
-    username: 'u1',
-    password: 'p1',
-    sort_order: 0,
-    node_ip: '',
-    location: '',
-    country_code: '',
-    latency: 0,
-    enabled: true,
-    remark: '',
-    created_at: '2026-01-01T00:00:00Z',
-    updated_at: '2026-01-01T00:00:00Z',
-  },
-  {
-    id: 2,
-    name: 'node-2',
-    type: 'direct',
-    config: '{}',
-    inbound_port: 30002,
-    username: 'u2',
-    password: 'p2',
-    sort_order: 1,
-    node_ip: '',
-    location: '',
-    country_code: '',
-    latency: 0,
-    enabled: true,
-    remark: '',
-    created_at: '2026-01-01T00:00:00Z',
-    updated_at: '2026-01-01T00:00:00Z',
-  },
-  {
-    id: 3,
-    name: 'node-3',
-    type: 'direct',
-    config: '{}',
-    inbound_port: 30003,
-    username: 'u3',
-    password: 'p3',
-    sort_order: 2,
-    node_ip: '',
-    location: '',
-    country_code: '',
-    latency: 0,
-    enabled: true,
-    remark: '',
-    created_at: '2026-01-01T00:00:00Z',
-    updated_at: '2026-01-01T00:00:00Z',
-  },
-]
+const createMockNodes = (count = 20) =>
+  Array.from({ length: count }, (_, index) => {
+    const id = index + 1
+    return {
+      id,
+      name: `node-${id}`,
+      type: 'direct',
+      config: '{}',
+      inbound_port: 30000 + id,
+      username: `u${id}`,
+      password: `p${id}`,
+      sort_order: index,
+      node_ip: '',
+      location: '',
+      country_code: '',
+      latency: 0,
+      enabled: true,
+      remark: '',
+      created_at: '2026-01-01T00:00:00Z',
+      updated_at: '2026-01-01T00:00:00Z',
+    }
+  })
 
 const sendJson = (res, statusCode, payload) => {
   const body = JSON.stringify(payload)
@@ -110,6 +77,7 @@ const getBrowserExecutablePath = () => {
 const createMockApiServer = () => {
   let nodes = createMockNodes()
   let lastReorder = null
+  let reorderCount = 0
 
   const server = http.createServer((req, res) => {
     if (req.method === 'GET' && req.url === '/api/version') {
@@ -145,6 +113,7 @@ const createMockApiServer = () => {
           nodes = nextNodes
         }
         lastReorder = payload
+        reorderCount += 1
         sendJson(res, 200, { message: 'nodes reordered' })
       })
       return
@@ -164,7 +133,7 @@ const createMockApiServer = () => {
     sendJson(res, 404, { error: 'not found', method: req.method, url: req.url })
   })
 
-  const getState = () => ({ nodes, lastReorder })
+  const getState = () => ({ nodes, lastReorder, reorderCount })
   return { server, getState }
 }
 
@@ -254,6 +223,17 @@ const getCellCenter = async (page, selector) =>
     return { x: rect.x + rect.width / 2, y: rect.y + rect.height / 2 }
   })
 
+const dragBetween = async (page, sourceSelector, destinationSelector) => {
+  const source = await getCellCenter(page, sourceSelector)
+  const destination = await getCellCenter(page, destinationSelector)
+  await page.mouse.move(source.x, source.y)
+  await page.mouse.down()
+  await page.mouse.move(destination.x, destination.y, { steps: 18 })
+  await sleep(200)
+  await page.mouse.up()
+  await sleep(1000)
+}
+
 const clickNodeCheckbox = async (page, rowKey, timeoutMs = 10000) => {
   const cellSelector = `tbody.ant-table-tbody tr[data-row-key="${rowKey}"] td:nth-child(3)`
   const clickableSelector = `${cellSelector} .ant-checkbox`
@@ -306,41 +286,347 @@ const run = async () => {
     })
     await page.reload({ waitUntil: 'networkidle2' })
     await page.waitForSelector('tbody.ant-table-tbody tr[data-row-key="1"]', { timeout: 30000 })
+    await page.waitForSelector('[data-testid="node-drag-handle-1"]', { timeout: 30000 })
 
     const orderBefore = await getRowNames(page)
+    const desktopColumnCount = await page.$$eval(
+      'tbody.ant-table-tbody tr[data-row-key="1"] td',
+      (cells) => cells.length
+    )
+    const dragHandleScope = await page.evaluate(() => {
+      const row = document.querySelector('tbody.ant-table-tbody tr[data-row-key="1"]')
+      const libraryHandles = Array.from(
+        document.querySelectorAll('[data-rbd-drag-handle-draggable-id]')
+      )
+      return {
+        libraryHandleCount: libraryHandles.length,
+        allLibraryHandlesScoped: libraryHandles.every((handle) =>
+          Boolean(handle.closest('[data-node-drag-id]'))
+        ),
+        rowIsLibraryHandle: Boolean(row?.hasAttribute('data-rbd-drag-handle-draggable-id')),
+        rowCursor: row ? getComputedStyle(row).cursor : '',
+      }
+    })
+
+    if (ARTIFACT_DIR) {
+      fs.mkdirSync(ARTIFACT_DIR, { recursive: true })
+      await page.screenshot({ path: path.join(ARTIFACT_DIR, 'desktop-dashboard.png') })
+    }
+
     await clickNodeCheckbox(page, 1)
     await sleep(600)
     const orderAfterCheckboxClick = await getRowNames(page)
     const stateAfterCheckboxClick = mockApi.getState()
 
-    const dragFrom = await getCellCenter(page, 'tbody.ant-table-tbody tr[data-row-key="1"] td:nth-child(2)')
-    const dragTo = await getCellCenter(page, 'tbody.ant-table-tbody tr[data-row-key="3"] td:nth-child(2)')
-    await page.mouse.move(dragFrom.x, dragFrom.y)
-    await page.mouse.down()
-    await page.mouse.move(dragTo.x, dragTo.y, { steps: 18 })
-    await sleep(200)
-    await page.mouse.up()
-    await sleep(1200)
+    await dragBetween(
+      page,
+      'tbody.ant-table-tbody tr[data-row-key="1"] td:nth-child(4)',
+      'tbody.ant-table-tbody tr[data-row-key="3"] td:nth-child(4)'
+    )
+    const orderAfterNonHandleDrag = await getRowNames(page)
+    const stateAfterNonHandleDrag = mockApi.getState()
+
+    await dragBetween(
+      page,
+      '[data-testid="node-drag-handle-1"]',
+      '[data-testid="node-drag-handle-3"]'
+    )
 
     const orderAfterDrag = await getRowNames(page)
     const stateAfterDrag = mockApi.getState()
     const dragHandleErrors = consoleErrors.filter((line) => line.includes('Unable to find drag handle'))
 
+    const expectedBefore = Array.from({ length: 20 }, (_, index) => `node-${index + 1}`)
+    const expectedAfter = [
+      'node-2',
+      'node-3',
+      'node-1',
+      ...Array.from({ length: 17 }, (_, index) => `node-${index + 4}`),
+    ]
+
     assert(
-      JSON.stringify(orderBefore) === JSON.stringify(['node-1', 'node-2', 'node-3']),
+      JSON.stringify(orderBefore) === JSON.stringify(expectedBefore),
       `Unexpected initial node order: ${JSON.stringify(orderBefore)}`
     )
+    assert(desktopColumnCount === 16, `Desktop columns changed unexpectedly: ${desktopColumnCount}`)
+    assert(dragHandleScope.libraryHandleCount === 20, `Unexpected drag handle count: ${JSON.stringify(dragHandleScope)}`)
+    assert(dragHandleScope.allLibraryHandlesScoped, `Library drag handles escape the six-dot controls: ${JSON.stringify(dragHandleScope)}`)
+    assert(!dragHandleScope.rowIsLibraryHandle, `Table row is still a drag handle: ${JSON.stringify(dragHandleScope)}`)
+    assert(!['grab', 'grabbing'].includes(dragHandleScope.rowCursor), `Table row still advertises dragging: ${JSON.stringify(dragHandleScope)}`)
     assert(
       JSON.stringify(orderAfterCheckboxClick) === JSON.stringify(orderBefore),
       'Checkbox click unexpectedly changed row order'
     )
     assert(!stateAfterCheckboxClick.lastReorder, 'Checkbox click should not trigger reorder request')
-    assert(Boolean(stateAfterDrag.lastReorder), 'Drag should trigger reorder request')
     assert(
-      JSON.stringify(orderAfterDrag) === JSON.stringify(['node-2', 'node-3', 'node-1']),
+      JSON.stringify(orderAfterNonHandleDrag) === JSON.stringify(orderBefore),
+      'Dragging from the node name unexpectedly changed row order'
+    )
+    assert(stateAfterNonHandleDrag.reorderCount === 0, 'Non-handle drag should not trigger reorder request')
+    assert(Boolean(stateAfterDrag.lastReorder), 'Drag should trigger reorder request')
+    assert(stateAfterDrag.reorderCount === 1, `Handle drag should issue one reorder request: ${stateAfterDrag.reorderCount}`)
+    assert(
+      JSON.stringify(orderAfterDrag) === JSON.stringify(expectedAfter),
       `Unexpected row order after drag: ${JSON.stringify(orderAfterDrag)}`
     )
     assert(dragHandleErrors.length === 0, `Drag handle error detected: ${dragHandleErrors.join(' | ')}`)
+
+    await page.setViewport({
+      width: 390,
+      height: 700,
+      deviceScaleFactor: 1,
+      isMobile: true,
+      hasTouch: true,
+    })
+    await page.reload({ waitUntil: 'networkidle2' })
+    await page.waitForSelector('tbody.ant-table-tbody tr[data-row-key="1"]', { timeout: 30000 })
+    await page.waitForFunction(() => {
+      const row = document.querySelector('tbody.ant-table-tbody tr[data-row-key="1"]')
+      return row?.querySelectorAll('td').length === 5
+    }, { timeout: 10000 })
+
+    const mobileLayout = await page.evaluate(() => {
+      const viewportWidth = window.innerWidth
+      const isInsideViewport = (element) => {
+        if (!element) return false
+        const rect = element.getBoundingClientRect()
+        return rect.left >= -1 && rect.right <= viewportWidth + 1
+      }
+      const headerActions = document.querySelector('[data-testid="dashboard-header-actions"]')
+      const primaryToolbar = document.querySelector('[data-testid="dashboard-toolbar-primary"]')
+      const filterControls = document.querySelector('.dashboard-filter-controls')
+      const tableContainer = document.querySelector('[data-testid="nodes-table-container"]')
+      const row = document.querySelector('tbody.ant-table-tbody tr[data-row-key="1"]')
+      const handle = document.querySelector('[data-testid="node-drag-handle-1"]')
+      const body = tableContainer?.querySelector('.ant-table-body')
+      const filterChildren = Array.from(filterControls?.children || [])
+
+      return {
+        viewportWidth,
+        documentScrollWidth: document.documentElement.scrollWidth,
+        headerActionsInside: isInsideViewport(headerActions),
+        primaryToolbarInside: isInsideViewport(primaryToolbar),
+        filterControlsInside: isInsideViewport(filterControls),
+        filterChildrenInside: filterChildren.every(isInsideViewport),
+        tableInside: isInsideViewport(tableContainer),
+        primaryClientWidth: primaryToolbar?.clientWidth || 0,
+        primaryScrollWidth: primaryToolbar?.scrollWidth || 0,
+        visibleCellCount: row?.querySelectorAll('td').length || 0,
+        rowCursor: row ? getComputedStyle(row).cursor : '',
+        rowTouchAction: row ? getComputedStyle(row).touchAction : '',
+        handleTouchAction: handle ? getComputedStyle(handle).touchAction : '',
+        handleIsLibraryHandle: Boolean(
+          handle?.hasAttribute('data-rbd-drag-handle-draggable-id')
+        ),
+        bodyClientHeight: body?.clientHeight || 0,
+        bodyScrollHeight: body?.scrollHeight || 0,
+      }
+    })
+
+    assert(
+      mobileLayout.documentScrollWidth <= mobileLayout.viewportWidth + 1,
+      `Mobile page has horizontal overflow: ${JSON.stringify(mobileLayout)}`
+    )
+    assert(mobileLayout.headerActionsInside, `Mobile header actions are clipped: ${JSON.stringify(mobileLayout)}`)
+    assert(mobileLayout.primaryToolbarInside, `Mobile toolbar is clipped: ${JSON.stringify(mobileLayout)}`)
+    assert(mobileLayout.filterControlsInside, `Mobile filter controls are clipped: ${JSON.stringify(mobileLayout)}`)
+    assert(mobileLayout.filterChildrenInside, `Mobile filter child controls are clipped: ${JSON.stringify(mobileLayout)}`)
+    assert(mobileLayout.tableInside, `Mobile node table is clipped: ${JSON.stringify(mobileLayout)}`)
+    assert(
+      mobileLayout.primaryScrollWidth <= mobileLayout.primaryClientWidth + 1,
+      `Mobile toolbar overflows internally: ${JSON.stringify(mobileLayout)}`
+    )
+    assert(mobileLayout.visibleCellCount === 5, `Mobile table did not collapse optional columns: ${JSON.stringify(mobileLayout)}`)
+    assert(!['grab', 'grabbing'].includes(mobileLayout.rowCursor), `Mobile row still captures drag: ${JSON.stringify(mobileLayout)}`)
+    assert(mobileLayout.rowTouchAction !== 'none', `Mobile row blocks native scrolling: ${JSON.stringify(mobileLayout)}`)
+    assert(mobileLayout.handleTouchAction === 'none', `Mobile drag handle does not own touch dragging: ${JSON.stringify(mobileLayout)}`)
+    assert(mobileLayout.handleIsLibraryHandle, `Mobile six-dot control is not the library drag handle: ${JSON.stringify(mobileLayout)}`)
+    assert(
+      mobileLayout.bodyScrollHeight > mobileLayout.bodyClientHeight,
+      `Mobile node list is not vertically scrollable: ${JSON.stringify(mobileLayout)}`
+    )
+
+    if (ARTIFACT_DIR) {
+      await page.screenshot({ path: path.join(ARTIFACT_DIR, 'mobile-dashboard.png') })
+    }
+
+    const mobileExpandSelector =
+      'tbody.ant-table-tbody tr[data-row-key="1"] .ant-table-row-expand-icon'
+    await page.$eval(mobileExpandSelector, (button) => button.click())
+    await page.waitForSelector('.ant-table-expanded-row .sbpm-node-record-collapse', {
+      timeout: 10000,
+    })
+    await page.$eval(
+      '.ant-table-expanded-row .sbpm-node-record-collapse .ant-collapse-header',
+      (button) => button.click()
+    )
+    await page.waitForSelector('[data-testid="node-expanded-enabled-1"]', { timeout: 10000 })
+    await page.waitForSelector('[data-testid="node-expanded-tcp-reuse-1"]', { timeout: 10000 })
+    const mobileExpandedControls = await page.evaluate(() => ({
+      enabledVisible: Boolean(document.querySelector('[data-testid="node-expanded-enabled-1"]')),
+      tcpReuseVisible: Boolean(document.querySelector('[data-testid="node-expanded-tcp-reuse-1"]')),
+      descriptionColumns: document.querySelectorAll(
+        '.ant-table-expanded-row .node-record-descriptions .ant-descriptions-row'
+      ).length,
+    }))
+    assert(
+      mobileExpandedControls.enabledVisible && mobileExpandedControls.tcpReuseVisible,
+      `Mobile expansion lost node controls: ${JSON.stringify(mobileExpandedControls)}`
+    )
+    assert(
+      mobileExpandedControls.descriptionColumns >= 10,
+      `Mobile node details are incomplete: ${JSON.stringify(mobileExpandedControls)}`
+    )
+    if (ARTIFACT_DIR) {
+      await page.screenshot({ path: path.join(ARTIFACT_DIR, 'mobile-node-details.png') })
+    }
+    await page.$eval(mobileExpandSelector, (button) => button.click())
+    await page.waitForFunction(
+      () => !document.querySelector('[data-testid="node-expanded-enabled-1"]'),
+      { timeout: 10000 }
+    )
+
+    const swipeStart = await page.$eval(
+      'tbody.ant-table-tbody tr[data-row-key="4"] td:nth-child(4)',
+      (cell) => {
+        const body = cell.closest('.ant-table-body')
+        if (body) body.scrollTop = 0
+        const cellRect = cell.getBoundingClientRect()
+        const bodyRect = body?.getBoundingClientRect()
+        return {
+          x: cellRect.left + cellRect.width / 2,
+          y: cellRect.top + cellRect.height / 2,
+          endY: Math.max((bodyRect?.top || 0) + 16, cellRect.top + cellRect.height / 2 - 150),
+        }
+      }
+    )
+    const cdp = await page.createCDPSession()
+    await cdp.send('Input.dispatchTouchEvent', {
+      type: 'touchStart',
+      touchPoints: [{ x: swipeStart.x, y: swipeStart.y }],
+    })
+    await sleep(220)
+    for (let step = 1; step <= 6; step += 1) {
+      const y = swipeStart.y + ((swipeStart.endY - swipeStart.y) * step) / 6
+      await cdp.send('Input.dispatchTouchEvent', {
+        type: 'touchMove',
+        touchPoints: [{ x: swipeStart.x, y }],
+      })
+      await sleep(35)
+    }
+    await cdp.send('Input.dispatchTouchEvent', { type: 'touchEnd', touchPoints: [] })
+    await sleep(500)
+
+    const mobileScrollTop = await page.$eval(
+      '[data-testid="nodes-table-container"] .ant-table-body',
+      (body) => body.scrollTop
+    )
+    const stateAfterMobileScroll = mockApi.getState()
+    assert(mobileScrollTop > 20, `Long-press swipe outside the handle did not scroll: ${mobileScrollTop}`)
+    assert(
+      stateAfterMobileScroll.reorderCount === 1,
+      `Mobile non-handle swipe triggered reorder: ${stateAfterMobileScroll.reorderCount}`
+    )
+
+    await page.evaluate(() => localStorage.setItem('language', 'en'))
+    await page.setViewport({
+      width: 320,
+      height: 568,
+      deviceScaleFactor: 1,
+      isMobile: true,
+      hasTouch: true,
+    })
+    await page.reload({ waitUntil: 'networkidle2' })
+    await page.waitForFunction(() => {
+      const row = document.querySelector('tbody.ant-table-tbody tr[data-row-key="2"]')
+      return row?.querySelectorAll('td').length === 5
+    }, { timeout: 30000 })
+    await page.$eval(
+      'tbody.ant-table-tbody tr[data-row-key="2"] input[type="checkbox"]',
+      (input) => input.click()
+    )
+    await page.waitForSelector('[data-testid="dashboard-toolbar-selection"]', {
+      timeout: 10000,
+    })
+    const compactMobileLayout = await page.evaluate(() => {
+      const viewportWidth = window.innerWidth
+      const rectInside = (element) => {
+        if (!element) return false
+        const rect = element.getBoundingClientRect()
+        return rect.left >= -1 && rect.right <= viewportWidth + 1
+      }
+      const headerActions = document.querySelector('[data-testid="dashboard-header-actions"]')
+      const primaryToolbar = document.querySelector('[data-testid="dashboard-toolbar-primary"]')
+      const selectionToolbar = document.querySelector('[data-testid="dashboard-toolbar-selection"]')
+      const table = document.querySelector('[data-testid="nodes-table-container"]')
+      const actionButtons = Array.from(
+        selectionToolbar?.querySelectorAll('button') || []
+      )
+      return {
+        viewportWidth,
+        documentScrollWidth: document.documentElement.scrollWidth,
+        language: localStorage.getItem('language'),
+        headerActionsInside: rectInside(headerActions),
+        primaryToolbarInside: rectInside(primaryToolbar),
+        selectionToolbarInside: rectInside(selectionToolbar),
+        selectionButtonsInside: actionButtons.every(rectInside),
+        selectionClientWidth: selectionToolbar?.clientWidth || 0,
+        selectionScrollWidth: selectionToolbar?.scrollWidth || 0,
+        tableInside: rectInside(table),
+        tableHeight: table?.getBoundingClientRect().height || 0,
+      }
+    })
+    assert(
+      compactMobileLayout.documentScrollWidth <= compactMobileLayout.viewportWidth + 1,
+      `Compact English mobile page overflows: ${JSON.stringify(compactMobileLayout)}`
+    )
+    assert(compactMobileLayout.language === 'en', `Compact mobile language did not switch: ${JSON.stringify(compactMobileLayout)}`)
+    assert(compactMobileLayout.headerActionsInside, `Compact mobile header is clipped: ${JSON.stringify(compactMobileLayout)}`)
+    assert(compactMobileLayout.primaryToolbarInside, `Compact mobile primary toolbar is clipped: ${JSON.stringify(compactMobileLayout)}`)
+    assert(compactMobileLayout.selectionToolbarInside, `Compact mobile selection toolbar is clipped: ${JSON.stringify(compactMobileLayout)}`)
+    assert(compactMobileLayout.selectionButtonsInside, `Compact mobile selection buttons are clipped: ${JSON.stringify(compactMobileLayout)}`)
+    assert(
+      compactMobileLayout.selectionScrollWidth <= compactMobileLayout.selectionClientWidth + 1,
+      `Compact mobile selection toolbar overflows: ${JSON.stringify(compactMobileLayout)}`
+    )
+    assert(compactMobileLayout.tableInside && compactMobileLayout.tableHeight > 80, `Compact mobile table is unusable: ${JSON.stringify(compactMobileLayout)}`)
+
+    await page.evaluate(() => localStorage.removeItem('token'))
+    await page.reload({ waitUntil: 'networkidle2' })
+    await page.waitForSelector('.login-card', { timeout: 30000 })
+    const mobileLoginLayout = await page.evaluate(() => {
+      const shell = document.querySelector('.login-shell')
+      const card = document.querySelector('.login-card')
+      const input = document.querySelector('.login-panel input')
+      const cardRect = card?.getBoundingClientRect()
+      const inputRect = input?.getBoundingClientRect()
+      return {
+        viewportWidth: window.innerWidth,
+        documentScrollWidth: document.documentElement.scrollWidth,
+        shellOverflowY: shell ? getComputedStyle(shell).overflowY : '',
+        cardLeft: cardRect?.left || 0,
+        cardRight: cardRect?.right || 0,
+        inputLeft: inputRect?.left || 0,
+        inputRight: inputRect?.right || 0,
+      }
+    })
+    assert(
+      mobileLoginLayout.documentScrollWidth <= mobileLoginLayout.viewportWidth + 1,
+      `Mobile login has horizontal overflow: ${JSON.stringify(mobileLoginLayout)}`
+    )
+    assert(
+      mobileLoginLayout.cardLeft >= -1 && mobileLoginLayout.cardRight <= mobileLoginLayout.viewportWidth + 1,
+      `Mobile login card is clipped: ${JSON.stringify(mobileLoginLayout)}`
+    )
+    assert(
+      mobileLoginLayout.inputLeft >= -1 && mobileLoginLayout.inputRight <= mobileLoginLayout.viewportWidth + 1,
+      `Mobile login input is clipped: ${JSON.stringify(mobileLoginLayout)}`
+    )
+    assert(mobileLoginLayout.shellOverflowY === 'auto', `Mobile login cannot scroll: ${JSON.stringify(mobileLoginLayout)}`)
+
+    if (ARTIFACT_DIR) {
+      await page.screenshot({ path: path.join(ARTIFACT_DIR, 'mobile-login.png'), fullPage: true })
+    }
 
     console.log(
       JSON.stringify(
@@ -348,8 +634,15 @@ const run = async () => {
           success: true,
           orderBefore,
           orderAfterCheckboxClick,
+          orderAfterNonHandleDrag,
           orderAfterDrag,
           reorderPayload: stateAfterDrag.lastReorder,
+          dragHandleScope,
+          mobileLayout,
+          mobileExpandedControls,
+          mobileScrollTop,
+          compactMobileLayout,
+          mobileLoginLayout,
         },
         null,
         2
