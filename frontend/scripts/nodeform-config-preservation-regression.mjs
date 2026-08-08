@@ -98,12 +98,13 @@ const fixtures = [
   {
     key: 'vmess',
     type: 'vmess',
+    selectVMessCFB: true,
     config: {
       server: 'vmess.example.com',
       server_port: 443,
       uuid: '00000000-0000-0000-0000-000000000002',
       alter_id: 0,
-      security: 'auto',
+      security: 'aes-128-cfb',
       network: 'quic',
       tls: 'tls',
       sni: 'sni.example.com',
@@ -167,7 +168,7 @@ const fixtures = [
       server: 'tuic.example.com',
       server_port: 443,
       uuid: '00000000-0000-0000-0000-000000000003',
-      password: 'secret',
+      password: '',
       congestion_control: 'bbr',
       udp_relay_mode: 'native',
       sni: 'sni.example.com',
@@ -1070,6 +1071,10 @@ const run = async () => {
 
       if (fixture.switchSecurityToTLS) {
         await selectFormOption(page, 'security', 'TLS')
+      }
+
+      if (fixture.selectVMessCFB) {
+        await selectFormOption(page, 'vmess_security', 'aes-128-cfb')
       }
 
       await clickVisibleButton(page, 'Save')

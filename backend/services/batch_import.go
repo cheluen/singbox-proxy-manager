@@ -133,12 +133,13 @@ func expandBatchImportInput(
 		if err != nil {
 			return nil, nil, fmt.Errorf("invalid url: %v", err)
 		}
+		if u.Hostname() == "" {
+			return nil, nil, fmt.Errorf("invalid url: missing host")
+		}
+		u.Scheme = strings.ToLower(u.Scheme)
 		if hasHTTPProxyMarker(u) {
 			return []ImportItem{{Source: input, Link: input}}, nil, nil
 		}
-		proxyCandidate := isProbablyHTTPProxyShareLink(u)
-		explicitPort := u.Port() != ""
-		fallbackToProxy := explicitPort || proxyCandidate
 
 		normalizedURL := u.String()
 		if _, ok := visited[normalizedURL]; ok {
@@ -152,12 +153,9 @@ func expandBatchImportInput(
 
 		body, err := fetchSubscription(ctx, normalizedURL)
 		if err != nil {
-			if fallbackToProxy {
-				return []ImportItem{{Source: input, Link: input}}, nil, nil
-			}
-			return nil, nil, fmt.Errorf("failed to fetch subscription: %v", err)
+			return []ImportItem{{Source: input, Link: input}}, nil, nil
 		}
-		if fallbackToProxy && !looksLikeImportPayload(body) {
+		if !looksLikeImportPayload(body) {
 			return []ImportItem{{Source: input, Link: input}}, nil, nil
 		}
 		return expandBatchImportInput(ctx, body, depth+1, visited, fetchCount)
@@ -245,7 +243,7 @@ func convertClashProxyToImportItem(proxy map[string]any) (ImportItem, error) {
 		if cipher == "" {
 			cipher = getString(proxy, "method")
 		}
-		password := getString(proxy, "password")
+		password := getCredentialString(proxy, "password")
 		if cipher == "" || password == "" {
 			return ImportItem{}, fmt.Errorf("missing cipher/password")
 		}
@@ -474,7 +472,7 @@ func convertClashProxyToImportItem(proxy map[string]any) (ImportItem, error) {
 		return ImportItem{Source: "clash:" + name, Type: "vmess", Name: name, Config: cfg}, nil
 
 	case "trojan":
-		password := getString(proxy, "password")
+		password := getCredentialString(proxy, "password")
 		if password == "" {
 			return ImportItem{}, fmt.Errorf("missing password")
 		}
@@ -540,7 +538,7 @@ func convertClashProxyToImportItem(proxy map[string]any) (ImportItem, error) {
 		return ImportItem{Source: "clash:" + name, Type: "trojan", Name: name, Config: cfg}, nil
 
 	case "hysteria2", "hy2":
-		password := getString(proxy, "password")
+		password := getCredentialString(proxy, "password")
 		if password == "" {
 			return ImportItem{}, fmt.Errorf("missing password")
 		}
@@ -563,7 +561,7 @@ func convertClashProxyToImportItem(proxy map[string]any) (ImportItem, error) {
 		if obfsType != "" && obfsType != "salamander" {
 			return ImportItem{}, fmt.Errorf("unsupported hysteria2 obfs for sing-box 1.12.12: %s", obfsType)
 		}
-		obfsPassword := firstNonEmpty(getString(proxy, "obfs-password"), getString(proxy, "obfs_password"))
+		obfsPassword := getCredentialString(proxy, "obfs-password", "obfs_password")
 		cfg := models.Hysteria2Config{
 			Server:             server,
 			ServerPort:         port,
@@ -598,12 +596,12 @@ func convertClashProxyToImportItem(proxy map[string]any) (ImportItem, error) {
 
 	case "tuic":
 		uuid := getString(proxy, "uuid")
-		password := getString(proxy, "password")
-		if uuid == "" || password == "" {
-			if getString(proxy, "token") != "" {
-				return ImportItem{}, fmt.Errorf("tuic token (v4) is not supported; uuid/password required (v5)")
+		password := getCredentialString(proxy, "password")
+		if uuid == "" {
+			if getCredentialString(proxy, "token") != "" {
+				return ImportItem{}, fmt.Errorf("tuic token (v4) is not supported; uuid is required for v5")
 			}
-			return ImportItem{}, fmt.Errorf("missing uuid/password")
+			return ImportItem{}, fmt.Errorf("missing uuid")
 		}
 
 		network, err := normalizeNetworkList(getString(proxy, "network"))
@@ -640,7 +638,7 @@ func convertClashProxyToImportItem(proxy map[string]any) (ImportItem, error) {
 		return ImportItem{Source: "clash:" + name, Type: "tuic", Name: name, Config: cfg}, nil
 
 	case "anytls":
-		password := getString(proxy, "password")
+		password := getCredentialString(proxy, "password")
 		if password == "" {
 			return ImportItem{}, fmt.Errorf("missing password")
 		}
@@ -844,8 +842,8 @@ func convertClashProxyToImportItem(proxy map[string]any) (ImportItem, error) {
 		cfg := models.SOCKS5Config{
 			Server:     server,
 			ServerPort: port,
-			Username:   getString(proxy, "username"),
-			Password:   getString(proxy, "password"),
+			Username:   getCredentialString(proxy, "username"),
+			Password:   getCredentialString(proxy, "password"),
 		}
 		network, err := normalizeNetworkList(getString(proxy, "network"))
 		if err != nil {
@@ -875,8 +873,8 @@ func convertClashProxyToImportItem(proxy map[string]any) (ImportItem, error) {
 		cfg := models.HTTPProxyConfig{
 			Server:     server,
 			ServerPort: port,
-			Username:   getString(proxy, "username"),
-			Password:   getString(proxy, "password"),
+			Username:   getCredentialString(proxy, "username"),
+			Password:   getCredentialString(proxy, "password"),
 			TLS:        rawType == "https" || getBool(proxy, "tls"),
 			SNI:        getString(proxy, "sni"),
 			Insecure:   getBool(proxy, "skip-cert-verify") || getBool(proxy, "skip_cert_verify"),
@@ -978,47 +976,8 @@ func decodeBase64Subscription(input string) (string, bool, error) {
 }
 
 func isHTTPURL(s string) bool {
-	return strings.HasPrefix(s, "http://") || strings.HasPrefix(s, "https://")
-}
-
-func isProbablyHTTPProxyShareLink(u *url.URL) bool {
-	if u == nil {
-		return false
-	}
-	if u.Scheme != "http" && u.Scheme != "https" {
-		return false
-	}
-	if u.Hostname() == "" {
-		return false
-	}
-	if u.User != nil {
-		return true
-	}
-	if hasHTTPProxyMarker(u) {
-		return true
-	}
-	allowedKeys := map[string]struct{}{
-		"proxy": {}, "sni": {}, "insecure": {}, "allowInsecure": {}, "allow_insecure": {},
-		"headers": {}, "alpn": {}, "fp": {}, "fingerprint": {}, "ech": {}, "tls_options": {},
-		"detour": {}, "dialer-proxy": {}, "dialer_proxy": {}, "bind_interface": {}, "bind-interface": {},
-		"interface-name": {}, "interface_name": {}, "inet4_bind_address": {}, "inet4-bind-address": {},
-		"inet6_bind_address": {}, "inet6-bind-address": {}, "protect_path": {}, "protect-path": {},
-		"routing_mark": {}, "routing-mark": {}, "reuse_addr": {}, "reuse-addr": {}, "netns": {}, "net-ns": {},
-		"connect_timeout": {}, "connect-timeout": {}, "tcp_fast_open": {}, "tcp-fast-open": {}, "tfo": {},
-		"tcp_multi_path": {}, "tcp-multi-path": {}, "mptcp": {}, "udp_fragment": {}, "udp-fragment": {},
-		"domain_resolver": {}, "domain-resolver": {}, "domain_resolver_options": {}, "domain-resolver-options": {},
-		"network_strategy": {}, "network-strategy": {}, "network_type": {}, "network-type": {},
-		"fallback_network_type": {}, "fallback-network-type": {}, "fallback_delay": {}, "fallback-delay": {},
-		"domain_strategy": {}, "domain-strategy": {}, "ip-version": {}, "ip_version": {},
-	}
-	hasProxyOption := false
-	for k := range u.Query() {
-		if _, ok := allowedKeys[k]; !ok {
-			return false
-		}
-		hasProxyOption = true
-	}
-	return hasProxyOption
+	lower := strings.ToLower(strings.TrimSpace(s))
+	return strings.HasPrefix(lower, "http://") || strings.HasPrefix(lower, "https://")
 }
 
 func hasHTTPProxyMarker(u *url.URL) bool {
@@ -1102,46 +1061,65 @@ func looksLikeImportPayload(input string) bool {
 }
 
 func getString(m map[string]any, keys ...string) string {
+	return getMapScalarString(m, true, keys...)
+}
+
+func getCredentialString(m map[string]any, keys ...string) string {
+	return getMapScalarString(m, false, keys...)
+}
+
+func getMapScalarString(m map[string]any, trim bool, keys ...string) string {
 	if m == nil {
 		return ""
 	}
 	for _, key := range keys {
 		if v, ok := m[key]; ok {
-			switch vv := v.(type) {
-			case string:
-				return strings.TrimSpace(vv)
-			case bool:
-				return strconv.FormatBool(vv)
-			case int:
-				return strconv.Itoa(vv)
-			case int8:
-				return strconv.FormatInt(int64(vv), 10)
-			case int16:
-				return strconv.FormatInt(int64(vv), 10)
-			case int32:
-				return strconv.FormatInt(int64(vv), 10)
-			case int64:
-				return strconv.FormatInt(vv, 10)
-			case uint:
-				return strconv.FormatUint(uint64(vv), 10)
-			case uint8:
-				return strconv.FormatUint(uint64(vv), 10)
-			case uint16:
-				return strconv.FormatUint(uint64(vv), 10)
-			case uint32:
-				return strconv.FormatUint(uint64(vv), 10)
-			case uint64:
-				return strconv.FormatUint(vv, 10)
-			case float32:
-				return strconv.FormatFloat(float64(vv), 'f', -1, 32)
-			case float64:
-				return strconv.FormatFloat(vv, 'f', -1, 64)
-			case fmt.Stringer:
-				return strings.TrimSpace(vv.String())
+			if value, supported := scalarString(v); supported {
+				if trim {
+					return strings.TrimSpace(value)
+				}
+				return value
 			}
 		}
 	}
 	return ""
+}
+
+func scalarString(value any) (string, bool) {
+	switch typed := value.(type) {
+	case string:
+		return typed, true
+	case bool:
+		return strconv.FormatBool(typed), true
+	case int:
+		return strconv.Itoa(typed), true
+	case int8:
+		return strconv.FormatInt(int64(typed), 10), true
+	case int16:
+		return strconv.FormatInt(int64(typed), 10), true
+	case int32:
+		return strconv.FormatInt(int64(typed), 10), true
+	case int64:
+		return strconv.FormatInt(typed, 10), true
+	case uint:
+		return strconv.FormatUint(uint64(typed), 10), true
+	case uint8:
+		return strconv.FormatUint(uint64(typed), 10), true
+	case uint16:
+		return strconv.FormatUint(uint64(typed), 10), true
+	case uint32:
+		return strconv.FormatUint(uint64(typed), 10), true
+	case uint64:
+		return strconv.FormatUint(typed, 10), true
+	case float32:
+		return strconv.FormatFloat(float64(typed), 'f', -1, 32), true
+	case float64:
+		return strconv.FormatFloat(typed, 'f', -1, 64), true
+	case fmt.Stringer:
+		return typed.String(), true
+	default:
+		return "", false
+	}
 }
 
 func getInt(m map[string]any, key string) int {
@@ -1883,15 +1861,15 @@ func buildClashTLSOptions(proxy map[string]any, enabled bool, disableSNI bool) (
 			return nil, fmt.Errorf("ECH DNS query-server-name is not supported by sing-box 1.12.12")
 		}
 		configs := getStringSlice(ech, "config")
-		if len(configs) == 0 {
-			if config := getString(ech, "config"); config != "" {
-				configs = []string{config}
+		echOptions := map[string]any{"enabled": true}
+		if len(configs) > 0 {
+			_, normalizedConfig, err := normalizeShareECHConfigList(strings.Join(configs, "\n"))
+			if err != nil {
+				return nil, fmt.Errorf("invalid ech-opts config: %w", err)
 			}
+			echOptions["config"] = normalizedConfig
 		}
-		if len(configs) == 0 {
-			return nil, fmt.Errorf("ech-opts enabled without config")
-		}
-		result["ech"] = map[string]any{"enabled": true, "config": configs}
+		result["ech"] = echOptions
 	}
 	return result, nil
 }

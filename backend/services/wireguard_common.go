@@ -261,12 +261,22 @@ func parseWireGuardRoutingMark(raw string) any {
 	return value
 }
 
+func defaultWireGuardAllowedIPs() []string {
+	return []string{"0.0.0.0/0", "::/0"}
+}
+
 func wireGuardSinglePeerFromConfig(cfg *models.WireGuardConfig) (models.WireGuardPeerConfig, bool) {
 	if cfg == nil {
 		return models.WireGuardPeerConfig{}, false
 	}
 	if len(cfg.Peers) == 1 {
-		return cfg.Peers[0], true
+		peer := cfg.Peers[0]
+		peer.AllowedIPs = append([]string(nil), peer.AllowedIPs...)
+		peer.Reserved = append([]uint8(nil), peer.Reserved...)
+		if len(peer.AllowedIPs) == 0 {
+			peer.AllowedIPs = defaultWireGuardAllowedIPs()
+		}
+		return peer, true
 	}
 	if len(cfg.Peers) > 1 {
 		return models.WireGuardPeerConfig{}, false
@@ -274,12 +284,16 @@ func wireGuardSinglePeerFromConfig(cfg *models.WireGuardConfig) (models.WireGuar
 	if strings.TrimSpace(cfg.Server) == "" || cfg.ServerPort <= 0 || strings.TrimSpace(cfg.PeerPublicKey) == "" {
 		return models.WireGuardPeerConfig{}, false
 	}
-	return models.WireGuardPeerConfig{
+	peer := models.WireGuardPeerConfig{
 		Server:       cfg.Server,
 		ServerPort:   cfg.ServerPort,
 		PublicKey:    cfg.PeerPublicKey,
 		PreSharedKey: cfg.PreSharedKey,
 		AllowedIPs:   append([]string(nil), cfg.AllowedIPs...),
 		Reserved:     append([]uint8(nil), cfg.Reserved...),
-	}, true
+	}
+	if len(peer.AllowedIPs) == 0 {
+		peer.AllowedIPs = defaultWireGuardAllowedIPs()
+	}
+	return peer, true
 }

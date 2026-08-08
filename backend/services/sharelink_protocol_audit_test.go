@@ -243,8 +243,24 @@ func TestShareLinkAuditVMessEncodingsValidationAndH2(t *testing.T) {
 		})
 	}
 
+	cfbJSON := []byte(`{"v":"2","ps":"cfb","add":"example.com","port":"443","id":"00000000-0000-0000-0000-000000000021","aid":"0","scy":"aes-128-cfb","net":"tcp","type":"none","tls":"none"}`)
+	cfbAny, _, _, err := ParseShareLink("vmess://" + base64.RawURLEncoding.EncodeToString(cfbJSON))
+	if err != nil {
+		t.Fatalf("legacy VMess aes-128-cfb: %v", err)
+	}
+	if got := cfbAny.(models.VMESSConfig).Security; got != "aes-128-cfb" {
+		t.Fatalf("legacy VMess security=%q, want aes-128-cfb", got)
+	}
+
+	cfbAny, _, _, err = ParseShareLink("vmess://00000000-0000-0000-0000-000000000022@example.com:443?encryption=aes-128-cfb")
+	if err != nil {
+		t.Fatalf("URL VMess aes-128-cfb: %v", err)
+	}
+	if got := cfbAny.(models.VMESSConfig).Security; got != "aes-128-cfb" {
+		t.Fatalf("URL VMess security=%q, want aes-128-cfb", got)
+	}
+
 	invalid := []string{
-		`{"add":"example.com","port":443,"id":"id","scy":"aes-128-cfb"}`,
 		`{"add":"example.com","port":443,"id":"id","scy":"auto","tls":"foo"}`,
 		`{"add":"example.com","port":443,"id":"id","scy":"auto","tls":"reality"}`,
 	}
@@ -255,6 +271,38 @@ func TestShareLinkAuditVMessEncodingsValidationAndH2(t *testing.T) {
 	}
 	if _, _, _, err := ParseShareLink("vmess://id@example.com:443?encryption=bad"); err == nil {
 		t.Fatal("invalid VMess URL cipher accepted")
+	}
+}
+
+func TestShareLinkAuditTUICAllowsEmptyPassword(t *testing.T) {
+	links := []string{
+		"tuic://00000000-0000-0000-0000-000000000023:@example.com:443?insecure=1",
+		"tuic://00000000-0000-0000-0000-000000000024@example.com:443?insecure=1",
+	}
+
+	for index, link := range links {
+		parsed, proxyType, name, err := ParseShareLink(link)
+		if err != nil {
+			t.Fatalf("parse empty-password TUIC link %d: %v", index, err)
+		}
+		config := parsed.(models.TUICConfig)
+		if proxyType != "tuic" || config.Password != "" {
+			t.Fatalf("unexpected empty-password TUIC config: %#v", config)
+		}
+
+		if realBinary := os.Getenv("SINGBOX_TEST_BINARY"); realBinary != "" {
+			t.Setenv("SINGBOX_BINARY", realBinary)
+			service := NewSingBoxService(t.TempDir())
+			configJSON, buildErr := service.BuildGlobalConfig([]models.ProxyNode{
+				nativeTestNode(t, 300+index, name, proxyType, parsed),
+			})
+			if buildErr != nil {
+				t.Fatalf("build empty-password TUIC config: %v", buildErr)
+			}
+			if validateErr := service.ValidateConfig(configJSON); validateErr != nil {
+				t.Fatalf("sing-box rejected empty-password TUIC config: %v\n%s", validateErr, configJSON)
+			}
+		}
 	}
 }
 
@@ -1359,6 +1407,44 @@ func TestShareLinkAuditWireGuardNativeRoundTrip(t *testing.T) {
 	}
 	if parsed.DomainResolverOptions["server"] != "local" || parsed.DomainResolverOptions["strategy"] != "prefer_ipv4" {
 		t.Fatalf("domain resolver object lost: %#v", parsed.DomainResolverOptions)
+	}
+}
+
+func TestShareLinkAuditWireGuardKeepaliveDefaultsAllowedIPs(t *testing.T) {
+	link := "wireguard://" + url.User(testWireGuardPrivateKey).String() +
+		"@127.0.0.1:51820?ip=10.0.0.2%2F32&publickey=" + url.QueryEscape(testWireGuardPeerPublicKey) +
+		"&persistent_keepalive_interval=25#keepalive"
+	parsed, proxyType, name, err := ParseShareLink(link)
+	if err != nil {
+		t.Fatalf("parse WireGuard keepalive link: %v", err)
+	}
+	config := parsed.(models.WireGuardConfig)
+	if len(config.Peers) != 1 || config.Peers[0].PersistentKeepaliveInterval != 25 {
+		t.Fatalf("WireGuard keepalive peer was not retained: %#v", config.Peers)
+	}
+
+	service := NewSingBoxService(t.TempDir())
+	endpoint, err := service.generateWireGuardEndpoint(&config, "wireguard-keepalive")
+	if err != nil {
+		t.Fatalf("generate WireGuard keepalive endpoint: %v", err)
+	}
+	peers := endpoint.Extra["peers"].([]map[string]interface{})
+	allowedIPs, _ := peers[0]["allowed_ips"].([]string)
+	if len(allowedIPs) != 2 || allowedIPs[0] != "0.0.0.0/0" || allowedIPs[1] != "::/0" {
+		t.Fatalf("WireGuard keepalive peer did not receive default routes: %#v", peers[0])
+	}
+
+	if realBinary := os.Getenv("SINGBOX_TEST_BINARY"); realBinary != "" {
+		t.Setenv("SINGBOX_BINARY", realBinary)
+		configJSON, buildErr := service.BuildGlobalConfig([]models.ProxyNode{
+			nativeTestNode(t, 330, name, proxyType, parsed),
+		})
+		if buildErr != nil {
+			t.Fatalf("BuildGlobalConfig: %v", buildErr)
+		}
+		if validateErr := service.ValidateConfig(configJSON); validateErr != nil {
+			t.Fatalf("sing-box rejected WireGuard keepalive config: %v\n%s", validateErr, configJSON)
+		}
 	}
 }
 

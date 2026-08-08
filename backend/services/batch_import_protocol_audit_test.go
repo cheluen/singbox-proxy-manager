@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"strings"
+	"sync/atomic"
 	"testing"
 
 	"sb-proxy/backend/models"
@@ -290,6 +291,178 @@ proxies:
 	}
 }
 
+func TestBatchImportAuditWireGuardKeepaliveDefaultsAllowedIPs(t *testing.T) {
+	yaml := `
+proxies:
+  - name: keepalive-default-route
+    type: wireguard
+    server: 127.0.0.1
+    port: 51820
+    ip: 10.0.0.2/32
+    private-key: ` + testWireGuardPrivateKey + `
+    public-key: ` + testWireGuardPeerPublicKey + `
+    persistent-keepalive-interval: 25
+`
+	items, failures, err := ExpandBatchImportSources(context.Background(), []string{yaml})
+	if err != nil || len(failures) != 0 || len(items) != 1 {
+		t.Fatalf("items=%#v failures=%#v err=%v", items, failures, err)
+	}
+	config := items[0].Config.(models.WireGuardConfig)
+	if len(config.Peers) != 1 || config.Peers[0].PersistentKeepaliveInterval != 25 {
+		t.Fatalf("keepalive peer was not retained: %#v", config.Peers)
+	}
+	service := NewSingBoxService(t.TempDir())
+	endpoint, err := service.generateWireGuardEndpoint(&config, "wireguard-keepalive")
+	if err != nil {
+		t.Fatalf("generate WireGuard endpoint: %v", err)
+	}
+	peers := endpoint.Extra["peers"].([]map[string]interface{})
+	allowedIPs, _ := peers[0]["allowed_ips"].([]string)
+	if len(allowedIPs) != 2 || allowedIPs[0] != "0.0.0.0/0" || allowedIPs[1] != "::/0" {
+		t.Fatalf("keepalive peer did not receive default routes: %#v", peers[0])
+	}
+
+	if realBinary := os.Getenv("SINGBOX_TEST_BINARY"); realBinary != "" {
+		t.Setenv("SINGBOX_BINARY", realBinary)
+		configJSON, buildErr := service.BuildGlobalConfig([]models.ProxyNode{
+			nativeTestNode(t, 310, items[0].Name, items[0].Type, items[0].Config),
+		})
+		if buildErr != nil {
+			t.Fatalf("BuildGlobalConfig: %v", buildErr)
+		}
+		if validateErr := service.ValidateConfig(configJSON); validateErr != nil {
+			t.Fatalf("sing-box rejected keepalive WireGuard config: %v\n%s", validateErr, configJSON)
+		}
+	}
+}
+
+func TestBatchImportAuditPreservesCredentialWhitespace(t *testing.T) {
+	yaml := `
+proxies:
+  - {name: ss-space, type: ss, server: ss.example, port: 8388, cipher: aes-128-gcm, password: " ss secret "}
+  - {name: trojan-space, type: trojan, server: trojan.example, port: 443, password: " trojan secret ", tls: false}
+  - {name: hy2-space, type: hysteria2, server: hy2.example, port: 443, password: " hy2 secret ", obfs: salamander, obfs-password: " obfs secret "}
+  - {name: tuic-space, type: tuic, server: tuic.example, port: 443, uuid: 00000000-0000-0000-0000-000000000031, password: " tuic secret "}
+  - {name: anytls-space, type: anytls, server: anytls.example, port: 443, password: " anytls secret "}
+  - {name: socks-space, type: socks5, server: socks.example, port: 1080, username: " socks user ", password: " socks secret "}
+  - {name: http-space, type: http, server: http.example, port: 8080, username: " http user ", password: " http secret "}
+`
+	items, failures, err := ExpandBatchImportSources(context.Background(), []string{yaml})
+	if err != nil || len(failures) != 0 || len(items) != 7 {
+		t.Fatalf("items=%#v failures=%#v err=%v", items, failures, err)
+	}
+
+	if got := items[0].Config.(models.SSConfig).Password; got != " ss secret " {
+		t.Fatalf("Shadowsocks password changed: %q", got)
+	}
+	if got := items[1].Config.(models.TrojanConfig).Password; got != " trojan secret " {
+		t.Fatalf("Trojan password changed: %q", got)
+	}
+	hy2 := items[2].Config.(models.Hysteria2Config)
+	if hy2.Password != " hy2 secret " || hy2.ObfsPassword != " obfs secret " {
+		t.Fatalf("Hysteria2 credentials changed: %#v", hy2)
+	}
+	if got := items[3].Config.(models.TUICConfig).Password; got != " tuic secret " {
+		t.Fatalf("TUIC password changed: %q", got)
+	}
+	if got := items[4].Config.(models.AnyTLSConfig).Password; got != " anytls secret " {
+		t.Fatalf("AnyTLS password changed: %q", got)
+	}
+	socks := items[5].Config.(models.SOCKS5Config)
+	if socks.Username != " socks user " || socks.Password != " socks secret " {
+		t.Fatalf("SOCKS credentials changed: %#v", socks)
+	}
+	httpConfig := items[6].Config.(models.HTTPProxyConfig)
+	if httpConfig.Username != " http user " || httpConfig.Password != " http secret " {
+		t.Fatalf("HTTP credentials changed: %#v", httpConfig)
+	}
+}
+
+func TestBatchImportAuditAcceptsVMessCFBAndTUICEmptyPassword(t *testing.T) {
+	yaml := `
+proxies:
+  - name: vmess-cfb
+    type: vmess
+    server: 127.0.0.1
+    port: 10001
+    uuid: 00000000-0000-0000-0000-000000000032
+    cipher: aes-128-cfb
+  - name: tuic-empty-password
+    type: tuic
+    server: 127.0.0.1
+    port: 10002
+    uuid: 00000000-0000-0000-0000-000000000033
+    password: ""
+    skip-cert-verify: true
+`
+	items, failures, err := ExpandBatchImportSources(context.Background(), []string{yaml})
+	if err != nil || len(failures) != 0 || len(items) != 2 {
+		t.Fatalf("items=%#v failures=%#v err=%v", items, failures, err)
+	}
+	if got := items[0].Config.(models.VMESSConfig).Security; got != "aes-128-cfb" {
+		t.Fatalf("VMess cipher=%q, want aes-128-cfb", got)
+	}
+	if got := items[1].Config.(models.TUICConfig).Password; got != "" {
+		t.Fatalf("TUIC empty password changed: %q", got)
+	}
+}
+
+func TestBatchImportAuditNormalizesClashECHAndAllowsDNSFallback(t *testing.T) {
+	yaml := `
+proxies:
+  - name: ech-static
+    type: vless
+    server: example.com
+    port: 443
+    uuid: 00000000-0000-0000-0000-000000000034
+    tls: true
+    servername: example.com
+    ech-opts:
+      enable: true
+      config: ` + protocolAuditECHConfigListBase64 + `
+  - name: ech-dns
+    type: vless
+    server: example.com
+    port: 443
+    uuid: 00000000-0000-0000-0000-000000000035
+    tls: true
+    servername: example.com
+    ech-opts:
+      enable: true
+`
+	items, failures, err := ExpandBatchImportSources(context.Background(), []string{yaml})
+	if err != nil || len(failures) != 0 || len(items) != 2 {
+		t.Fatalf("items=%#v failures=%#v err=%v", items, failures, err)
+	}
+	staticECH := nativeMap(items[0].Config.(models.VLESSConfig).TLSOptions["ech"])
+	if staticECH["enabled"] != true || strings.Join(nativeStringSlice(staticECH["config"]), "\n") != protocolAuditECHConfigPEM {
+		t.Fatalf("static ECH was not converted to sing-box PEM: %#v", staticECH)
+	}
+	dnsECH := nativeMap(items[1].Config.(models.VLESSConfig).TLSOptions["ech"])
+	if dnsECH["enabled"] != true {
+		t.Fatalf("DNS ECH was not enabled: %#v", dnsECH)
+	}
+	if _, exists := dnsECH["config"]; exists {
+		t.Fatalf("DNS ECH must not synthesize a static config: %#v", dnsECH)
+	}
+
+	if realBinary := os.Getenv("SINGBOX_TEST_BINARY"); realBinary != "" {
+		t.Setenv("SINGBOX_BINARY", realBinary)
+		service := NewSingBoxService(t.TempDir())
+		nodes := make([]models.ProxyNode, 0, len(items))
+		for index, item := range items {
+			nodes = append(nodes, nativeTestNode(t, 320+index, item.Name, item.Type, item.Config))
+		}
+		configJSON, buildErr := service.BuildGlobalConfig(nodes)
+		if buildErr != nil {
+			t.Fatalf("BuildGlobalConfig: %v", buildErr)
+		}
+		if validateErr := service.ValidateConfig(configJSON); validateErr != nil {
+			t.Fatalf("sing-box rejected normalized Clash ECH configs: %v\n%s", validateErr, configJSON)
+		}
+	}
+}
+
 func TestBatchImportAuditHTTPProxyAndSubscriptionDisambiguation(t *testing.T) {
 	proxyCfg := &models.HTTPProxyConfig{
 		Server: "127.0.0.1", ServerPort: 65534, Path: "/proxy", DialerOptions: models.DialerOptions{Detour: "selector"},
@@ -318,6 +491,18 @@ func TestBatchImportAuditHTTPProxyAndSubscriptionDisambiguation(t *testing.T) {
 		t.Fatalf("basic-auth subscription not fetched first: items=%#v failures=%#v err=%v", items, failures, err)
 	}
 
+	var uppercaseHits atomic.Int32
+	uppercaseServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		uppercaseHits.Add(1)
+		_, _ = w.Write([]byte("trojan://secret@example.com:443#uppercase-subscription\n"))
+	}))
+	t.Cleanup(uppercaseServer.Close)
+	uppercaseURL := strings.Replace(uppercaseServer.URL, "http://", "HTTP://", 1)
+	items, failures, err = ExpandBatchImportSources(context.Background(), []string{uppercaseURL})
+	if err != nil || len(failures) != 0 || len(items) != 1 || !strings.HasPrefix(items[0].Link, "trojan://") || uppercaseHits.Load() != 1 {
+		t.Fatalf("uppercase HTTP subscription was not fetched: hits=%d items=%#v failures=%#v err=%v", uppercaseHits.Load(), items, failures, err)
+	}
+
 	aliasServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		_, _ = w.Write([]byte("not a subscription"))
 	}))
@@ -326,6 +511,14 @@ func TestBatchImportAuditHTTPProxyAndSubscriptionDisambiguation(t *testing.T) {
 	items, failures, err = ExpandBatchImportSources(context.Background(), []string{aliasLink})
 	if err != nil || len(failures) != 0 || len(items) != 1 || items[0].Link != aliasLink {
 		t.Fatalf("third-party HTTP proxy alias not recognized after fetch: items=%#v failures=%#v err=%v", items, failures, err)
+	}
+
+	cancelledContext, cancel := context.WithCancel(context.Background())
+	cancel()
+	defaultPortProxy := "http://127.0.0.1"
+	items, failures, err = ExpandBatchImportSources(cancelledContext, []string{defaultPortProxy})
+	if err != nil || len(failures) != 0 || len(items) != 1 || items[0].Link != defaultPortProxy {
+		t.Fatalf("anonymous default-port HTTP proxy was not retained after fetch failure: items=%#v failures=%#v err=%v", items, failures, err)
 	}
 }
 

@@ -506,7 +506,7 @@ func normalizeVMessCipher(raw string) (string, error) {
 		return "auto", nil
 	}
 	switch value {
-	case "auto", "aes-128-gcm", "chacha20-poly1305", "none", "zero":
+	case "auto", "aes-128-gcm", "aes-128-cfb", "chacha20-poly1305", "none", "zero":
 		return value, nil
 	default:
 		return "", fmt.Errorf("unsupported vmess cipher for sing-box 1.12.12: %s", raw)
@@ -2223,12 +2223,12 @@ func parseTUICLink(link string) (interface{}, string, string, error) {
 		return nil, "", "", fmt.Errorf("invalid tuic link: %w", err)
 	}
 	if parsed.URL.User == nil {
-		return nil, "", "", fmt.Errorf("invalid tuic link: missing uuid/password")
+		return nil, "", "", fmt.Errorf("invalid tuic link: missing uuid")
 	}
 	uuid := parsed.URL.User.Username()
-	password, hasPassword := parsed.URL.User.Password()
-	if uuid == "" || !hasPassword || password == "" {
-		return nil, "", "", fmt.Errorf("invalid tuic link: missing uuid/password")
+	password, _ := parsed.URL.User.Password()
+	if uuid == "" {
+		return nil, "", "", fmt.Errorf("invalid tuic link: missing uuid")
 	}
 	params := parsed.URL.Query()
 	if err := rejectUnsupportedTLSShareParameters(params); err != nil {

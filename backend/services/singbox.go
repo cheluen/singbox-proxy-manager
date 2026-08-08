@@ -2239,14 +2239,12 @@ func (s *SingBoxService) generateWireGuardEndpoint(config *models.WireGuardConfi
 	}
 
 	peers := config.Peers
-	synthesizedPeer := false
 	if len(peers) == 0 {
 		peer, ok := wireGuardSinglePeerFromConfig(config)
 		if !ok {
 			return EndpointConfig{}, fmt.Errorf("wireguard server, server_port and peer_public_key are required")
 		}
 		peers = []models.WireGuardPeerConfig{peer}
-		synthesizedPeer = true
 	}
 
 	peerConfigs := make([]map[string]interface{}, 0, len(peers))
@@ -2263,8 +2261,8 @@ func (s *SingBoxService) generateWireGuardEndpoint(config *models.WireGuardConfi
 			peerConfig["pre_shared_key"] = peer.PreSharedKey
 		}
 		allowedIPs := peer.AllowedIPs
-		if len(allowedIPs) == 0 && synthesizedPeer {
-			allowedIPs = []string{"0.0.0.0/0", "::/0"}
+		if len(allowedIPs) == 0 && len(peers) == 1 {
+			allowedIPs = defaultWireGuardAllowedIPs()
 		}
 		if len(allowedIPs) > 0 {
 			peerConfig["allowed_ips"] = append([]string(nil), allowedIPs...)

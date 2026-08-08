@@ -203,7 +203,7 @@ type VMESSConfig struct {
 	ServerPort      int            `json:"server_port"`
 	UUID            string         `json:"uuid"`
 	AlterID         int            `json:"alter_id"`
-	Security        string         `json:"security,omitempty"` // auto, aes-128-gcm, chacha20-poly1305, none, zero
+	Security        string         `json:"security,omitempty"` // auto, aes-128-gcm, aes-128-cfb, chacha20-poly1305, none, zero
 	Network         string         `json:"network,omitempty"`  // tcp, kcp, ws, http, quic, grpc, httpupgrade
 	OutboundNetwork ListableString `json:"outbound_network,omitempty"`
 	TLS             string         `json:"tls,omitempty"` // none, tls

@@ -806,6 +806,7 @@ function NodeForm({ node, onSave, onCancel }) {
         <Select>
           <Option value="auto">Auto</Option>
           <Option value="aes-128-gcm">aes-128-gcm</Option>
+          <Option value="aes-128-cfb">aes-128-cfb</Option>
           <Option value="chacha20-poly1305">chacha20-poly1305</Option>
           <Option value="none">None</Option>
         </Select>
@@ -886,7 +887,6 @@ function NodeForm({ node, onSave, onCancel }) {
       <Form.Item
         label={withHint('Password', '协议密码')}
         name="tuic_password"
-        rules={[{ required: true, message: 'Required' }]}
       >
         <Input.Password />
       </Form.Item>
