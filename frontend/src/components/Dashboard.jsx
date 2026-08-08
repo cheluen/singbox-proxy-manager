@@ -363,6 +363,7 @@ function Dashboard({ onLogout }) {
   const [editingNode, setEditingNode] = useState(null)
   const [selectedNodeIds, setSelectedNodeIds] = useState([])
   const [batchImportLinks, setBatchImportLinks] = useState('')
+  const [batchImportSourceType, setBatchImportSourceType] = useState('auto')
   const [enableAfterImport, setEnableAfterImport] = useState(true)
   const [checkingIP, setCheckingIP] = useState(false)
   const [exportVisible, setExportVisible] = useState(false)
@@ -1393,6 +1394,7 @@ function Dashboard({ onLogout }) {
 
       const response = await api.post('/nodes/batch-import', {
         content,
+        source_type: batchImportSourceType,
         enabled: enableAfterImport,
       })
 
@@ -1419,6 +1421,7 @@ function Dashboard({ onLogout }) {
 
       setBatchImportVisible(false)
       setBatchImportLinks('')
+      setBatchImportSourceType('auto')
       await loadNodes({ silent: true })
 
       if (enableAfterImport && importedIds.length > 0) {
@@ -2555,6 +2558,19 @@ function Dashboard({ onLogout }) {
       >
         <Space direction="vertical" style={{ width: '100%' }} size="middle">
           <div>{t('batch_import_desc')}</div>
+          <Select
+            id="batch-import-source-type"
+            value={batchImportSourceType}
+            onChange={setBatchImportSourceType}
+            options={[
+              { value: 'auto', label: t('batch_import_source_auto') },
+              { value: 'subscription', label: t('batch_import_source_subscription') },
+              { value: 'http_proxy', label: t('batch_import_source_http_proxy') },
+            ]}
+            aria-label={t('batch_import_source_type')}
+            style={{ width: '100%' }}
+          />
+          <Text type="secondary">{t('batch_import_source_hint')}</Text>
           <TextArea
             rows={10}
             placeholder={t('paste_links')}

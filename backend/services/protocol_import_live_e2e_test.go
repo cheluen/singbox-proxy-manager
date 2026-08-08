@@ -126,6 +126,117 @@ proxies:
 			},
 		},
 		{
+			name:          "trojan-empty-password",
+			serverNetwork: "tcp",
+			clashYAML: func(port int) string {
+				return fmt.Sprintf(`
+proxies:
+  - name: trojan-empty-live
+    type: trojan
+    server: 127.0.0.1
+    port: %d
+    password: ""
+    skip-cert-verify: true
+`, port)
+			},
+			serverConfig: func(t *testing.T, port int) map[string]any {
+				certPath, keyPath := writeLiveProtocolCertificate(t)
+				return liveProtocolServerConfig(map[string]any{
+					"type":        "trojan",
+					"tag":         "trojan-empty-in",
+					"listen":      "127.0.0.1",
+					"listen_port": port,
+					"users":       []map[string]any{{"password": ""}},
+					"tls": map[string]any{
+						"enabled":          true,
+						"certificate_path": certPath,
+						"key_path":         keyPath,
+					},
+				})
+			},
+			assertImport: func(t *testing.T, config any) {
+				t.Helper()
+				trojan, ok := config.(models.TrojanConfig)
+				if !ok || trojan.Password != "" {
+					t.Fatalf("Trojan empty-password import mismatch: %#v", config)
+				}
+			},
+		},
+		{
+			name:          "hysteria2-empty-password",
+			serverNetwork: "udp",
+			clashYAML: func(port int) string {
+				return fmt.Sprintf(`
+proxies:
+  - name: hysteria2-empty-live
+    type: hysteria2
+    server: 127.0.0.1
+    port: %d
+    password: ""
+    skip-cert-verify: true
+`, port)
+			},
+			serverConfig: func(t *testing.T, port int) map[string]any {
+				certPath, keyPath := writeLiveProtocolCertificate(t)
+				return liveProtocolServerConfig(map[string]any{
+					"type":        "hysteria2",
+					"tag":         "hysteria2-empty-in",
+					"listen":      "127.0.0.1",
+					"listen_port": port,
+					"users":       []map[string]any{{"password": ""}},
+					"tls": map[string]any{
+						"enabled":          true,
+						"certificate_path": certPath,
+						"key_path":         keyPath,
+					},
+				})
+			},
+			assertImport: func(t *testing.T, config any) {
+				t.Helper()
+				hysteria2, ok := config.(models.Hysteria2Config)
+				if !ok || hysteria2.Password != "" {
+					t.Fatalf("Hysteria2 empty-password import mismatch: %#v", config)
+				}
+			},
+		},
+		{
+			name:          "anytls-empty-password",
+			serverNetwork: "tcp",
+			clashYAML: func(port int) string {
+				return fmt.Sprintf(`
+proxies:
+  - name: anytls-empty-live
+    type: anytls
+    server: 127.0.0.1
+    port: %d
+    password: ""
+    skip-cert-verify: true
+`, port)
+			},
+			serverConfig: func(t *testing.T, port int) map[string]any {
+				certPath, keyPath := writeLiveProtocolCertificate(t)
+				return liveProtocolServerConfig(map[string]any{
+					"type":        "anytls",
+					"tag":         "anytls-empty-in",
+					"listen":      "127.0.0.1",
+					"listen_port": port,
+					"users":       []map[string]any{{"password": ""}},
+					"tls": map[string]any{
+						"enabled":          true,
+						"certificate_path": certPath,
+						"key_path":         keyPath,
+					},
+				})
+			},
+			assertImport: func(t *testing.T, config any) {
+				t.Helper()
+				anyTLS, ok := config.(models.AnyTLSConfig)
+				if !ok || anyTLS.Password != "" {
+					t.Fatalf("AnyTLS empty-password import mismatch: %#v", config)
+				}
+			},
+		},
+		{
 			name:          "shadowsocks-whitespace-password",
 			serverNetwork: "tcp",
 			clashYAML: func(port int) string {

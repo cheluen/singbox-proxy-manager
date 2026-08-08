@@ -92,6 +92,11 @@ export default {
   // Batch Operations
   batch_import_title: 'Batch Import Nodes',
   batch_import_desc: 'Supports: share links (one per line), Base64 subscription, Clash Meta YAML, or subscription URL (http/https). Protocols: SS, VLESS, VMess, Trojan, Hysteria2, TUIC, SOCKS5, HTTP, AnyTLS, Cloudflare WireGuard',
+  batch_import_source_type: 'Import source type',
+  batch_import_source_auto: 'Auto (HTTP URLs are subscriptions)',
+  batch_import_source_subscription: 'HTTP/HTTPS subscription URL',
+  batch_import_source_http_proxy: 'HTTP/HTTPS proxy node',
+  batch_import_source_hint: 'Anonymous HTTP proxies and subscription URLs share the same syntax. Select “HTTP/HTTPS proxy node” for those proxies; failed subscriptions are never downgraded to proxies.',
   paste_links: 'Paste share links / subscription',
   import_success: 'Successfully imported {{count}} nodes',
   import_failed: 'Failed to import {{count}} nodes',

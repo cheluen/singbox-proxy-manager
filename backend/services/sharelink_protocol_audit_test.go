@@ -25,6 +25,57 @@ func protocolAuditECHConfigPEMLines() []string {
 	return strings.Split(protocolAuditECHConfigPEM, "\n")
 }
 
+func TestShareLinkAuditExplicitEmptyPasswordsRoundTrip(t *testing.T) {
+	testCases := []struct {
+		name      string
+		proxyType string
+		link      string
+	}{
+		{name: "trojan", proxyType: "trojan", link: "trojan://@127.0.0.1:443#empty-trojan"},
+		{name: "hysteria2", proxyType: "hy2", link: "hysteria2://@127.0.0.1:443/?insecure=1#empty-hy2"},
+		{name: "anytls", proxyType: "anytls", link: "anytls://@127.0.0.1:443/?insecure=1#empty-anytls"},
+	}
+	for index, testCase := range testCases {
+		t.Run(testCase.name, func(t *testing.T) {
+			parsed, proxyType, name, err := ParseShareLink(testCase.link)
+			if err != nil {
+				t.Fatalf("parse explicit empty password: %v", err)
+			}
+			if proxyType != testCase.proxyType {
+				t.Fatalf("unexpected type %q", proxyType)
+			}
+			encoded, err := json.Marshal(parsed)
+			if err != nil {
+				t.Fatalf("marshal parsed config: %v", err)
+			}
+			var config map[string]interface{}
+			if err := json.Unmarshal(encoded, &config); err != nil {
+				t.Fatalf("decode parsed config: %v", err)
+			}
+			if password, exists := config["password"]; !exists || password != "" {
+				t.Fatalf("explicit empty password was not preserved: %#v", config)
+			}
+
+			exported, err := BuildShareLink(models.ProxyNode{
+				ID: index + 1, Name: name, Type: proxyType, Config: string(encoded),
+			})
+			if err != nil {
+				t.Fatalf("export empty password: %v", err)
+			}
+			if !strings.Contains(exported, "://@") {
+				t.Fatalf("export lost explicit empty credential delimiter: %s", exported)
+			}
+			if _, _, _, err := ParseShareLink(exported); err != nil {
+				t.Fatalf("re-import exported link: %v\n%s", err, exported)
+			}
+		})
+	}
+
+	if _, _, _, err := ParseShareLink("trojan://127.0.0.1:443#missing"); err == nil || !strings.Contains(err.Error(), "missing password") {
+		t.Fatalf("Trojan link without an explicit credential must still be rejected: %v", err)
+	}
+}
+
 func TestShareLinkAuditShadowsocksSIP002Forms(t *testing.T) {
 	t.Run("AEAD 2022 plain userinfo", func(t *testing.T) {
 		credentials := url.UserPassword("2022-blake3-aes-128-gcm", "key+/=").String()

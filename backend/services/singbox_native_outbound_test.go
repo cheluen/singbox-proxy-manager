@@ -428,12 +428,8 @@ func TestGeneratorHysteria2FormObfsOverridesNativeAndClears(t *testing.T) {
 	config.Obfs = "salamander"
 	config.ObfsPassword = ""
 	config.SalamanderPassword = "stale-legacy-password"
-	obfs, err = generatorHysteria2Obfs(config)
-	if err != nil {
-		t.Fatalf("clear Hysteria2 obfs password: %v", err)
-	}
-	if _, exists := obfs["password"]; exists {
-		t.Fatalf("explicit form password clear must not resurrect a stale alias: %#v", obfs)
+	if _, err = generatorHysteria2Obfs(config); err == nil || !strings.Contains(err.Error(), "non-empty password") {
+		t.Fatalf("salamander without a password must be rejected without resurrecting a stale alias: %v", err)
 	}
 
 	config.Obfs = ""

@@ -1087,7 +1087,7 @@ func newTestHandlerWithScriptedKernel(t *testing.T) *Handler {
 
 	script := `#!/bin/sh
 if [ "$1" = "check" ]; then
-  if grep -q "BAD_MARKER" "$3"; then
+  if grep -q "BAD_MARKER\|unsupported-flow" "$3"; then
     echo "FATAL[0000] decode config: unknown field" >&2
     exit 1
   fi
@@ -1193,6 +1193,81 @@ func TestUpdateNodeRevertsWhenKernelRejectsConfig(t *testing.T) {
 	}
 }
 
+func TestBatchImportKeepsGoodNodeWhenKernelRejectsPeer(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	handler := newTestHandlerWithScriptedKernel(t)
+
+	payload := map[string]interface{}{
+		"content": strings.Join([]string{
+			"socks5://user:pass@127.0.0.1:1080#valid-socks",
+			"vless://00000000-0000-0000-0000-000000000000@127.0.0.1:443?security=tls&flow=unsupported-flow&detour=valid-socks#bad-vless",
+		}, "\n"),
+		"enabled": true,
+	}
+	rec := postJSON(t, handler.BatchImportNodes, http.MethodPost, "/api/nodes/batch-import", payload, nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected partial-success status 200, got %d body=%s", rec.Code, rec.Body.String())
+	}
+
+	var response struct {
+		Total   int `json:"total"`
+		Success int `json:"success"`
+		Failed  int `json:"failed"`
+		Results []struct {
+			Success bool   `json:"success"`
+			Name    string `json:"name"`
+			Error   string `json:"error"`
+		} `json:"results"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &response); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if response.Total != 2 || response.Success != 1 || response.Failed != 1 {
+		t.Fatalf("unexpected partial import summary: %+v body=%s", response, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), "decode config: unknown field") {
+		t.Fatalf("kernel rejection was not attributed to the bad node: %s", rec.Body.String())
+	}
+
+	var count int
+	var proxyType, name string
+	if err := handler.db.QueryRow("SELECT COUNT(*), MIN(type), MIN(name) FROM proxy_nodes").Scan(&count, &proxyType, &name); err != nil {
+		t.Fatalf("query persisted batch: %v", err)
+	}
+	if count != 1 || proxyType != "socks5" || name != "valid-socks" {
+		t.Fatalf("valid SOCKS node was not retained: count=%d type=%q name=%q", count, proxyType, name)
+	}
+}
+
+func TestBatchImportKeepsGoodNodeWhenRealSingBoxRejectsFlow(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	handler := newTestHandler(t, nil)
+	useRealSingBoxForChecks(t)
+
+	payload := map[string]interface{}{
+		"content": strings.Join([]string{
+			"socks5://user:pass@127.0.0.1:1080#real-valid-socks",
+			"vless://00000000-0000-0000-0000-000000000000@127.0.0.1:443?security=tls&flow=unsupported-flow&detour=real-valid-socks#real-bad-vless",
+		}, "\n"),
+		"enabled": true,
+	}
+	rec := postJSON(t, handler.BatchImportNodes, http.MethodPost, "/api/nodes/batch-import", payload, nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected real-kernel partial success, got %d body=%s", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), `"success":1`) || !strings.Contains(rec.Body.String(), `"failed":1`) {
+		t.Fatalf("real kernel did not isolate unsupported flow: %s", rec.Body.String())
+	}
+	var count int
+	var proxyType string
+	if err := handler.db.QueryRow("SELECT COUNT(*), MIN(type) FROM proxy_nodes").Scan(&count, &proxyType); err != nil {
+		t.Fatalf("query real-kernel import: %v", err)
+	}
+	if count != 1 || proxyType != "socks5" {
+		t.Fatalf("valid node was lost after real kernel rejection: count=%d type=%q", count, proxyType)
+	}
+}
+
 func TestBatchImportProtocolMatrixPassesRealSingBoxValidation(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	handler := newTestHandler(t, nil)
@@ -1227,7 +1302,7 @@ func TestBatchImportProtocolMatrixPassesRealSingBoxValidation(t *testing.T) {
 		"tuic://33333333-3333-3333-3333-333333333333:tuic%40pass@127.0.0.1:10443?congestion_control=bbr&udp_relay_mode=native&reduce_rtt=1&disable_sni=1&insecure=1#TUIC",
 		"anytls://any%40pass@[2001:db8::3]:443?sni=anytls.example.com&alpn=h2,http/1.1&insecure=1#AnyTLS",
 		"socks5h://user%40name:pass%3Aword@127.0.0.1:1080#SOCKS5H",
-		"https://http%40user:http%3Apass@127.0.0.1:8443?sni=http.example.com&insecure=1#HTTPS",
+		"https://http%40user:http%3Apass@127.0.0.1:8443?proxy=1&sni=http.example.com&insecure=1#HTTPS",
 		"wireguard://" + url.QueryEscape(privateKey) + "@127.0.0.1:2408?publickey=" + url.QueryEscape(publicKey) + "&ip=172.16.0.2/32&allowedips=0.0.0.0/0,::/0&reserved=1,2,3#WireGuard",
 	}, "\n")
 

@@ -1962,6 +1962,10 @@ func generatorHysteria2Obfs(config *models.Hysteria2Config) (map[string]interfac
 	if typeName != "salamander" {
 		return nil, fmt.Errorf("hysteria2 obfs type %q is not supported by sing-box 1.12.12", typeName)
 	}
+	password, passwordPresent := base["password"].(string)
+	if !passwordPresent || password == "" {
+		return nil, fmt.Errorf("hysteria2 salamander obfuscation requires a non-empty password")
+	}
 	base["type"] = "salamander"
 	return base, nil
 }

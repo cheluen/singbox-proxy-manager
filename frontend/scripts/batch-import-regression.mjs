@@ -308,6 +308,23 @@ const run = async () => {
     await clickButtonByText(page, 'Batch Import', 15000)
     await page.waitForSelector('.ant-modal textarea', { timeout: 15000 })
 
+    await page.click('#batch-import-source-type')
+    await page.waitForSelector('.ant-select-dropdown:not(.ant-select-dropdown-hidden)', {
+      visible: true,
+      timeout: 5000,
+    })
+    const selectedHTTPProxy = await page.evaluate(() => {
+      const option = Array.from(
+        document.querySelectorAll(
+          '.ant-select-dropdown:not(.ant-select-dropdown-hidden) .ant-select-item-option'
+        )
+      ).find((candidate) => (candidate.textContent || '').includes('HTTP/HTTPS proxy node'))
+      if (!option) return false
+      option.click()
+      return true
+    })
+    assert(selectedHTTPProxy, 'HTTP proxy import source option was not available')
+
     const content = 'https://example.com/subscription\nss://YWVzLTEyOC1nY206dGVzdA==@example.com:443#SS'
     await page.type('.ant-modal textarea', content)
     await sleep(300)
@@ -335,6 +352,10 @@ const run = async () => {
     assert(
       !Array.isArray(state.lastBatchImportPayload.links),
       `expected links to be absent, got: ${JSON.stringify(state.lastBatchImportPayload.links)}`
+    )
+    assert(
+      state.lastBatchImportPayload.source_type === 'http_proxy',
+      `unexpected source_type payload: ${JSON.stringify(state.lastBatchImportPayload)}`
     )
 
     const filteredConsoleErrors = consoleErrors.filter((line) => !isIgnorableConsoleError(line))

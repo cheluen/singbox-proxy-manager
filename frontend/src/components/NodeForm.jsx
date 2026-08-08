@@ -436,7 +436,7 @@ function NodeForm({ node, onSave, onCancel }) {
       case 'hy2':
         return {
           ...config,
-          password: values.hy2_password,
+          password: values.hy2_password ?? '',
           up_mbps: values.up_mbps,
           down_mbps: values.down_mbps,
           obfs: values.obfs,
@@ -468,7 +468,7 @@ function NodeForm({ node, onSave, onCancel }) {
       case 'trojan':
         return {
           ...config,
-          password: values.trojan_password || values.password,
+          password: values.trojan_password ?? '',
           network: values.network,
           sni: values.sni,
           alpn: values.alpn ? values.alpn.split(',').map(s => s.trim()).filter(Boolean) : [],
@@ -483,7 +483,7 @@ function NodeForm({ node, onSave, onCancel }) {
       case 'anytls':
         return {
           ...config,
-          password: values.anytls_password,
+          password: values.anytls_password ?? '',
           sni: values.sni,
           alpn: values.alpn ? values.alpn.split(',').map(s => s.trim()).filter(Boolean) : [],
           fingerprint: values.fingerprint,
@@ -673,10 +673,10 @@ function NodeForm({ node, onSave, onCancel }) {
     server_port: normalizedConfig.server_port || 443,
     ...normalizedConfig,
     ss_password: node?.type === 'ss' ? protocolPassword : '',
-    hy2_password: node?.type === 'hy2' ? protocolPassword : '',
+    hy2_password: node?.type === 'hy2' ? protocolPassword ?? '' : '',
     tuic_password: node?.type === 'tuic' ? protocolPassword : '',
-    trojan_password: node?.type === 'trojan' ? protocolPassword : '',
-    anytls_password: node?.type === 'anytls' ? protocolPassword : '',
+    trojan_password: node?.type === 'trojan' ? protocolPassword ?? '' : '',
+    anytls_password: node?.type === 'anytls' ? protocolPassword ?? '' : '',
     proxy_username: node?.type === 'socks5' || node?.type === 'socks5h' || node?.type === 'http' ? protocolUsername : '',
     proxy_password: node?.type === 'socks5' || node?.type === 'socks5h' || node?.type === 'http' ? protocolPassword : '',
     proxy_tls: proxyTLS,
@@ -844,7 +844,6 @@ function NodeForm({ node, onSave, onCancel }) {
       <Form.Item
         label={withHint('Password', '协议密码')}
         name="hy2_password"
-        rules={[{ required: true, message: 'Required' }]}
       >
         <Input.Password />
       </Form.Item>
@@ -857,7 +856,22 @@ function NodeForm({ node, onSave, onCancel }) {
       <Form.Item label={withHint('Obfuscation', '混淆方式')} name="obfs">
         <Input placeholder="e.g., salamander" />
       </Form.Item>
-      <Form.Item label={withHint('Obfs Password', '混淆密码')} name="obfs_password">
+      <Form.Item
+        label={withHint('Obfs Password', '混淆密码；使用 Salamander 时不能为空')}
+        name="obfs_password"
+        dependencies={['obfs']}
+        rules={[
+          ({ getFieldValue }) => ({
+            validator(_, value) {
+              const obfs = String(getFieldValue('obfs') || '').trim().toLowerCase()
+              if (obfs === 'salamander' && String(value ?? '') === '') {
+                return Promise.reject(new Error('Required for Salamander'))
+              }
+              return Promise.resolve()
+            },
+          }),
+        ]}
+      >
         <Input.Password />
       </Form.Item>
       <Form.Item label={withHint('SNI', 'TLS 服务器名称')} name="sni">
@@ -926,7 +940,6 @@ function NodeForm({ node, onSave, onCancel }) {
       <Form.Item
         label={withHint('Password', '协议密码')}
         name="anytls_password"
-        rules={[{ required: true, message: 'Required' }]}
       >
         <Input.Password />
       </Form.Item>
@@ -965,7 +978,6 @@ function NodeForm({ node, onSave, onCancel }) {
       <Form.Item
         label={withHint('Password', '协议密码')}
         name="trojan_password"
-        rules={[{ required: true, message: 'Required' }]}
       >
         <Input.Password />
       </Form.Item>

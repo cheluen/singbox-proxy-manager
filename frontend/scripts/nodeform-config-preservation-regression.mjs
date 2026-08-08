@@ -135,11 +135,12 @@ const fixtures = [
   {
     key: 'hy2',
     type: 'hy2',
+    verifySalamanderRequired: true,
     config: {
       server: 'hy2.example.com',
       server_port: 443,
       server_ports: ['443', '8443'],
-      password: 'secret',
+      password: '',
       up_mbps: 10,
       down_mbps: 20,
       obfs: { type: 'salamander', password: 'obfs-secret' },
@@ -190,7 +191,7 @@ const fixtures = [
     config: {
       server: 'trojan.example.com',
       server_port: 443,
-      password: 'secret',
+      password: '',
       network: 'httpupgrade',
       sni: 'sni.example.com',
       alpn: ['h2', 'http/1.1'],
@@ -213,7 +214,7 @@ const fixtures = [
     config: {
       server: 'anytls.example.com',
       server_port: 443,
-      password: 'secret',
+      password: '',
       sni: 'sni.example.com',
       alpn: ['h2'],
       fingerprint: 'chrome',
@@ -695,6 +696,33 @@ const readJSONBody = (req) =>
 
 const createMockAPI = () => {
   const createdPayloads = []
+  const updatedPayloads = []
+  const existingNodes = [
+    {
+      id: 9901,
+      name: 'Existing empty Trojan',
+      remark: '',
+      type: 'trojan',
+      config: JSON.stringify({
+        server: 'trojan-existing.example.com',
+        server_port: 443,
+        password: '',
+        security: 'tls',
+      }),
+      inbound_port: 30991,
+      username: 'local-inbound-user',
+      password: 'local-inbound-secret',
+      tcp_reuse_enabled: true,
+      sort_order: 0,
+      latency: 0,
+      enabled: false,
+      node_ip: '',
+      location: '',
+      country_code: '',
+      created_at: '2026-08-08T00:00:00Z',
+      updated_at: '2026-08-08T00:00:00Z',
+    },
+  ]
   const fixtureByLink = new Map(fixtures.map((fixture) => [`audit://${fixture.key}`, fixture]))
 
   const server = http.createServer(async (req, res) => {
@@ -707,7 +735,7 @@ const createMockAPI = () => {
       return
     }
     if (req.method === 'GET' && req.url === '/api/nodes') {
-      sendJSON(res, 200, [])
+      sendJSON(res, 200, existingNodes)
       return
     }
     if (req.method === 'POST' && req.url === '/api/parse-link') {
@@ -732,6 +760,12 @@ const createMockAPI = () => {
       sendJSON(res, 201, {})
       return
     }
+    if (req.method === 'PUT' && req.url === '/api/nodes/9901') {
+      const payload = await readJSONBody(req)
+      updatedPayloads.push(payload)
+      sendJSON(res, 200, payload)
+      return
+    }
     if (req.method === 'POST' && req.url === '/api/logout') {
       sendJSON(res, 200, { message: 'logged out' })
       return
@@ -744,7 +778,7 @@ const createMockAPI = () => {
     sendJSON(res, 404, { error: 'not found', method: req.method, url: req.url })
   })
 
-  return { server, createdPayloads }
+  return { server, createdPayloads, updatedPayloads }
 }
 
 const getBrowserExecutablePath = () => {
@@ -933,6 +967,22 @@ const setImportLink = async (page, link) => {
   )
 }
 
+const setPasswordInput = async (page, selector, value) => {
+  await page.$eval(
+    selector,
+    (input, nextValue) => {
+      const setter = Object.getOwnPropertyDescriptor(
+        window.HTMLInputElement.prototype,
+        'value'
+      )?.set
+      setter?.call(input, nextValue)
+      input.dispatchEvent(new Event('input', { bubbles: true }))
+      input.dispatchEvent(new Event('change', { bubbles: true }))
+    },
+    value
+  )
+}
+
 const waitForNodeForm = async (page, expectedName) => {
   await page.waitForFunction(
     (name) => {
@@ -1077,6 +1127,22 @@ const run = async () => {
         await selectFormOption(page, 'vmess_security', 'aes-128-cfb')
       }
 
+      if (fixture.verifySalamanderRequired) {
+        await setPasswordInput(page, '#obfs_password', '')
+        await clickVisibleButton(page, 'Save')
+        await page.waitForFunction(
+          () =>
+            Array.from(document.querySelectorAll('.ant-form-item-explain-error')).some(
+              (element) => (element.textContent || '').includes('Required for Salamander')
+            ),
+          { timeout: 5000 }
+        )
+        if (mockAPI.createdPayloads.length !== captureIndex) {
+          throw new Error('Hysteria2 Salamander was saved with an empty obfs password')
+        }
+        await setPasswordInput(page, '#obfs_password', 'obfs-secret')
+      }
+
       await clickVisibleButton(page, 'Save')
       const deadline = Date.now() + 10000
       while (mockAPI.createdPayloads.length === captureIndex && Date.now() < deadline) {
@@ -1143,6 +1209,39 @@ const run = async () => {
       }
       await waitForNodeFormClosed(page)
     }
+
+    const clickedExistingTrojanEdit = await page.evaluate(() => {
+      const row = Array.from(document.querySelectorAll('tr[data-row-key]')).find((candidate) =>
+        (candidate.textContent || '').includes('Existing empty Trojan')
+      )
+      const button = row?.querySelector('.anticon-edit')?.closest('button')
+      if (!button) return false
+      button.click()
+      return true
+    })
+    if (!clickedExistingTrojanEdit) {
+      throw new Error('Existing Trojan edit action was not found')
+    }
+    await waitForNodeForm(page, 'Existing empty Trojan')
+    await clickVisibleButton(page, 'Save')
+    const updateDeadline = Date.now() + 10000
+    while (mockAPI.updatedPayloads.length === 0 && Date.now() < updateDeadline) {
+      await sleep(100)
+    }
+    const updatedTrojan = mockAPI.updatedPayloads[0]
+    if (!updatedTrojan) {
+      throw new Error('Existing empty Trojan update payload was not captured')
+    }
+    const updatedTrojanConfig = JSON.parse(updatedTrojan.config || '{}')
+    if (updatedTrojanConfig.password !== '') {
+      throw new Error(
+        `Trojan protocol password fell back to local inbound password: ${JSON.stringify(updatedTrojanConfig)}`
+      )
+    }
+    if (updatedTrojan.password !== 'local-inbound-secret') {
+      throw new Error('Existing local inbound password was not preserved independently')
+    }
+    await waitForNodeFormClosed(page)
 
     const unexpectedErrors = consoleErrors.filter((line) => !isIgnorableConsoleError(line))
     if (unexpectedErrors.length > 0) {

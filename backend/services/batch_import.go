@@ -27,6 +27,16 @@ const (
 	subscriptionFetchTimeout  = 15 * time.Second
 )
 
+type BatchImportSourceType string
+
+const (
+	BatchImportSourceAuto         BatchImportSourceType = "auto"
+	BatchImportSourceSubscription BatchImportSourceType = "subscription"
+	BatchImportSourceHTTPProxy    BatchImportSourceType = "http_proxy"
+)
+
+var subscriptionHTTPClient = &http.Client{Timeout: subscriptionFetchTimeout}
+
 type ImportItem struct {
 	Source string
 	Link   string
@@ -41,6 +51,32 @@ type ImportFailure struct {
 }
 
 func ExpandBatchImportSources(ctx context.Context, sources []string) ([]ImportItem, []ImportFailure, error) {
+	return ExpandBatchImportSourcesWithType(ctx, sources, BatchImportSourceAuto)
+}
+
+func ParseBatchImportSourceType(raw string) (BatchImportSourceType, error) {
+	normalized := strings.ToLower(strings.TrimSpace(raw))
+	if normalized == "" {
+		return BatchImportSourceAuto, nil
+	}
+	if normalized == "http-proxy" {
+		normalized = string(BatchImportSourceHTTPProxy)
+	}
+	sourceType := BatchImportSourceType(normalized)
+	switch sourceType {
+	case BatchImportSourceAuto, BatchImportSourceSubscription, BatchImportSourceHTTPProxy:
+		return sourceType, nil
+	default:
+		return "", fmt.Errorf("unsupported batch import source type %q", raw)
+	}
+}
+
+func ExpandBatchImportSourcesWithType(ctx context.Context, sources []string, sourceType BatchImportSourceType) ([]ImportItem, []ImportFailure, error) {
+	parsedSourceType, err := ParseBatchImportSourceType(string(sourceType))
+	if err != nil {
+		return nil, nil, err
+	}
+
 	visited := make(map[string]struct{})
 	fetchCount := 0
 
@@ -53,7 +89,16 @@ func ExpandBatchImportSources(ctx context.Context, sources []string) ([]ImportIt
 			continue
 		}
 
-		expItems, expFailures, err := expandBatchImportInput(ctx, src, 0, visited, &fetchCount)
+		var expItems []ImportItem
+		var expFailures []ImportFailure
+		switch parsedSourceType {
+		case BatchImportSourceSubscription:
+			expItems, expFailures, err = expandExplicitSubscriptionSources(ctx, src, visited, &fetchCount)
+		case BatchImportSourceHTTPProxy:
+			expItems, expFailures, err = expandExplicitHTTPProxySources(src)
+		default:
+			expItems, expFailures, err = expandBatchImportInput(ctx, src, 0, true, visited, &fetchCount)
+		}
 		if err != nil {
 			failures = append(failures, ImportFailure{
 				Source: summarizeSource(src),
@@ -76,6 +121,7 @@ func expandBatchImportInput(
 	ctx context.Context,
 	input string,
 	depth int,
+	allowSubscriptionFetch bool,
 	visited map[string]struct{},
 	fetchCount *int,
 ) ([]ImportItem, []ImportFailure, error) {
@@ -101,7 +147,7 @@ func expandBatchImportInput(
 	if decoded, ok, err := decodeBase64Subscription(input); err != nil {
 		return nil, nil, err
 	} else if ok {
-		return expandBatchImportInput(ctx, decoded, depth+1, visited, fetchCount)
+		return expandBatchImportInput(ctx, decoded, depth+1, false, visited, fetchCount)
 	}
 
 	// 3) Multi-line share links / subscription URLs
@@ -110,7 +156,7 @@ func expandBatchImportInput(
 		var items []ImportItem
 		var failures []ImportFailure
 		for _, line := range lines {
-			subItems, subFailures, err := expandBatchImportInput(ctx, line, depth, visited, fetchCount)
+			subItems, subFailures, err := expandBatchImportInput(ctx, line, depth, allowSubscriptionFetch, visited, fetchCount)
 			if err != nil {
 				failures = append(failures, ImportFailure{
 					Source: summarizeSource(line),
@@ -137,32 +183,138 @@ func expandBatchImportInput(
 			return nil, nil, fmt.Errorf("invalid url: missing host")
 		}
 		u.Scheme = strings.ToLower(u.Scheme)
-		if hasHTTPProxyMarker(u) {
-			return []ImportItem{{Source: input, Link: input}}, nil, nil
+		if hasHTTPProxyMarker(u) || !allowSubscriptionFetch {
+			return validatedShareLinkItem(input)
 		}
 
-		normalizedURL := u.String()
-		if _, ok := visited[normalizedURL]; ok {
-			return nil, nil, nil
-		}
-		if *fetchCount >= maxBatchImportFetches {
-			return nil, nil, fmt.Errorf("too many subscription urls (>%d)", maxBatchImportFetches)
-		}
-		visited[normalizedURL] = struct{}{}
-		*fetchCount++
-
-		body, err := fetchSubscription(ctx, normalizedURL)
-		if err != nil {
-			return []ImportItem{{Source: input, Link: input}}, nil, nil
-		}
-		if !looksLikeImportPayload(body) {
-			return []ImportItem{{Source: input, Link: input}}, nil, nil
-		}
-		return expandBatchImportInput(ctx, body, depth+1, visited, fetchCount)
+		return fetchAndExpandSubscription(ctx, input, u, depth, visited, fetchCount)
 	}
 
-	// Fallback: treat as one share link
+	return validatedShareLinkItem(input)
+}
+
+func expandExplicitSubscriptionSources(
+	ctx context.Context,
+	input string,
+	visited map[string]struct{},
+	fetchCount *int,
+) ([]ImportItem, []ImportFailure, error) {
+	lines := splitNonEmptyLines(input)
+	if len(lines) == 0 {
+		return nil, nil, nil
+	}
+
+	var items []ImportItem
+	var failures []ImportFailure
+	for _, line := range lines {
+		if !isHTTPURL(line) {
+			failures = append(failures, ImportFailure{Source: summarizeSource(line), Error: "subscription source must be an http or https URL"})
+			continue
+		}
+		u, err := url.Parse(line)
+		if err != nil || u.Hostname() == "" {
+			failures = append(failures, ImportFailure{Source: summarizeSource(line), Error: "invalid subscription URL"})
+			continue
+		}
+		u.Scheme = strings.ToLower(u.Scheme)
+		expanded, expandedFailures, err := fetchAndExpandSubscription(ctx, line, u, 0, visited, fetchCount)
+		if err != nil {
+			failures = append(failures, ImportFailure{Source: summarizeSource(line), Error: err.Error()})
+			continue
+		}
+		items = append(items, expanded...)
+		failures = append(failures, expandedFailures...)
+	}
+	return items, failures, nil
+}
+
+func expandExplicitHTTPProxySources(input string) ([]ImportItem, []ImportFailure, error) {
+	lines := splitNonEmptyLines(input)
+	if len(lines) == 0 {
+		return nil, nil, nil
+	}
+
+	items := make([]ImportItem, 0, len(lines))
+	var failures []ImportFailure
+	for _, line := range lines {
+		if !isHTTPURL(line) {
+			failures = append(failures, ImportFailure{Source: summarizeSource(line), Error: "HTTP proxy source must be an http or https URL"})
+			continue
+		}
+		expanded, _, err := validatedShareLinkItem(line)
+		if err != nil {
+			failures = append(failures, ImportFailure{Source: summarizeSource(line), Error: err.Error()})
+			continue
+		}
+		items = append(items, expanded...)
+	}
+	return items, failures, nil
+}
+
+func fetchAndExpandSubscription(
+	ctx context.Context,
+	source string,
+	u *url.URL,
+	depth int,
+	visited map[string]struct{},
+	fetchCount *int,
+) ([]ImportItem, []ImportFailure, error) {
+	if u == nil || u.Hostname() == "" {
+		return nil, nil, fmt.Errorf("invalid subscription URL")
+	}
+	normalizedURL := u.String()
+	if _, ok := visited[normalizedURL]; ok {
+		return nil, nil, fmt.Errorf("subscription URL was already processed")
+	}
+	if *fetchCount >= maxBatchImportFetches {
+		return nil, nil, fmt.Errorf("too many subscription urls (>%d)", maxBatchImportFetches)
+	}
+	visited[normalizedURL] = struct{}{}
+	*fetchCount++
+
+	body, err := fetchSubscription(ctx, normalizedURL)
+	if err != nil {
+		return nil, nil, fmt.Errorf("subscription request failed: %w", err)
+	}
+	items, failures, err := expandBatchImportInput(ctx, body, depth+1, false, visited, fetchCount)
+	if err != nil {
+		return nil, nil, fmt.Errorf("invalid subscription payload: %w", err)
+	}
+	if len(items) == 0 {
+		if len(failures) > 0 {
+			return nil, nil, fmt.Errorf("subscription contains no valid nodes: %s", failures[0].Error)
+		}
+		return nil, nil, fmt.Errorf("subscription contains no valid nodes")
+	}
+	for index := range items {
+		if strings.TrimSpace(items[index].Source) == "" {
+			items[index].Source = source
+		}
+	}
+	return items, failures, nil
+}
+
+func validatedShareLinkItem(input string) ([]ImportItem, []ImportFailure, error) {
+	if !isSupportedShareLink(input) {
+		return nil, nil, fmt.Errorf("unsupported link format")
+	}
+	if _, _, _, err := ParseShareLink(input); err != nil {
+		return nil, nil, err
+	}
 	return []ImportItem{{Source: input, Link: input}}, nil, nil
+}
+
+func isSupportedShareLink(input string) bool {
+	lower := strings.ToLower(strings.TrimSpace(input))
+	for _, prefix := range []string{
+		"ss://", "vless://", "vmess://", "trojan://", "hysteria2://", "hy2://", "tuic://", "anytls://",
+		"socks://", "socks5://", "socks5h://", "wireguard://", "wg://", "http://", "https://",
+	} {
+		if strings.HasPrefix(lower, prefix) {
+			return true
+		}
+	}
+	return false
 }
 
 func parseClashMetaYAML(input string) ([]ImportItem, []ImportFailure, bool, error) {
@@ -472,8 +624,8 @@ func convertClashProxyToImportItem(proxy map[string]any) (ImportItem, error) {
 		return ImportItem{Source: "clash:" + name, Type: "vmess", Name: name, Config: cfg}, nil
 
 	case "trojan":
-		password := getCredentialString(proxy, "password")
-		if password == "" {
+		password, passwordPresent := getCredentialStringWithPresence(proxy, "password")
+		if !passwordPresent {
 			return ImportItem{}, fmt.Errorf("missing password")
 		}
 
@@ -538,8 +690,8 @@ func convertClashProxyToImportItem(proxy map[string]any) (ImportItem, error) {
 		return ImportItem{Source: "clash:" + name, Type: "trojan", Name: name, Config: cfg}, nil
 
 	case "hysteria2", "hy2":
-		password := getCredentialString(proxy, "password")
-		if password == "" {
+		password, passwordPresent := getCredentialStringWithPresence(proxy, "password")
+		if !passwordPresent {
 			return ImportItem{}, fmt.Errorf("missing password")
 		}
 
@@ -561,7 +713,10 @@ func convertClashProxyToImportItem(proxy map[string]any) (ImportItem, error) {
 		if obfsType != "" && obfsType != "salamander" {
 			return ImportItem{}, fmt.Errorf("unsupported hysteria2 obfs for sing-box 1.12.12: %s", obfsType)
 		}
-		obfsPassword := getCredentialString(proxy, "obfs-password", "obfs_password")
+		obfsPassword, obfsPasswordPresent := getCredentialStringWithPresence(proxy, "obfs-password", "obfs_password")
+		if obfsType == "salamander" && (!obfsPasswordPresent || obfsPassword == "") {
+			return ImportItem{}, fmt.Errorf("missing obfs-password for hysteria2 salamander obfuscation")
+		}
 		cfg := models.Hysteria2Config{
 			Server:             server,
 			ServerPort:         port,
@@ -638,8 +793,8 @@ func convertClashProxyToImportItem(proxy map[string]any) (ImportItem, error) {
 		return ImportItem{Source: "clash:" + name, Type: "tuic", Name: name, Config: cfg}, nil
 
 	case "anytls":
-		password := getCredentialString(proxy, "password")
-		if password == "" {
+		password, passwordPresent := getCredentialStringWithPresence(proxy, "password")
+		if !passwordPresent {
 			return ImportItem{}, fmt.Errorf("missing password")
 		}
 
@@ -899,15 +1054,13 @@ func convertClashProxyToImportItem(proxy map[string]any) (ImportItem, error) {
 }
 
 func fetchSubscription(ctx context.Context, rawURL string) (string, error) {
-	client := &http.Client{Timeout: subscriptionFetchTimeout}
-
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, rawURL, nil)
 	if err != nil {
 		return "", err
 	}
 	req.Header.Set("User-Agent", "sb-proxy-manager/1.0")
 
-	resp, err := client.Do(req)
+	resp, err := subscriptionHTTPClient.Do(req)
 	if err != nil {
 		return "", err
 	}
@@ -916,10 +1069,26 @@ func fetchSubscription(ctx context.Context, rawURL string) (string, error) {
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		return "", fmt.Errorf("unexpected status: %s", resp.Status)
 	}
+	contentType := strings.ToLower(strings.TrimSpace(strings.SplitN(resp.Header.Get("Content-Type"), ";", 2)[0]))
+	if contentType == "text/html" || contentType == "application/xhtml+xml" {
+		return "", fmt.Errorf("subscription response is an HTML document")
+	}
 
-	body, err := io.ReadAll(io.LimitReader(resp.Body, maxSubscriptionBytes))
+	body, err := io.ReadAll(io.LimitReader(resp.Body, maxSubscriptionBytes+1))
 	if err != nil {
 		return "", err
+	}
+	if len(body) > maxSubscriptionBytes {
+		return "", fmt.Errorf("subscription response exceeds %d bytes", maxSubscriptionBytes)
+	}
+	prefixBytes := body
+	if len(prefixBytes) > 512 {
+		prefixBytes = prefixBytes[:512]
+	}
+	prefix := strings.ToLower(normalizeImportText(string(prefixBytes)))
+	detectedContentType := strings.ToLower(strings.TrimSpace(strings.SplitN(http.DetectContentType([]byte(prefix)), ";", 2)[0]))
+	if detectedContentType == "text/html" || strings.HasPrefix(prefix, "<!doctype html") || strings.HasPrefix(prefix, "<html") {
+		return "", fmt.Errorf("subscription response is an HTML document")
 	}
 
 	return normalizeImportText(string(body)), nil
@@ -1006,7 +1175,7 @@ func splitNonEmptyLines(s string) []string {
 func normalizeImportText(s string) string {
 	s = strings.TrimSpace(s)
 	s = strings.TrimPrefix(s, "\uFEFF")
-	return s
+	return strings.TrimSpace(s)
 }
 
 func summarizeSource(s string) string {
@@ -1040,32 +1209,30 @@ func looksLikeBase64(compact string) bool {
 	return true
 }
 
-func looksLikeImportPayload(input string) bool {
-	normalized := normalizeImportText(input)
-	if normalized == "" {
-		return false
-	}
-	if looksLikeClashYAML(normalized) {
-		return true
-	}
-	lower := strings.ToLower(normalized)
-	for _, scheme := range []string{"ss://", "vless://", "vmess://", "trojan://", "hysteria2://", "hy2://", "tuic://", "anytls://", "socks://", "socks5://", "socks5h://", "wireguard://", "wg://", "http://", "https://"} {
-		if strings.Contains(lower, scheme) {
-			return true
-		}
-	}
-	if decoded, ok, _ := decodeBase64Subscription(normalized); ok && strings.TrimSpace(decoded) != "" {
-		return true
-	}
-	return false
-}
-
 func getString(m map[string]any, keys ...string) string {
 	return getMapScalarString(m, true, keys...)
 }
 
 func getCredentialString(m map[string]any, keys ...string) string {
 	return getMapScalarString(m, false, keys...)
+}
+
+func getCredentialStringWithPresence(m map[string]any, keys ...string) (string, bool) {
+	if m == nil {
+		return "", false
+	}
+	for _, key := range keys {
+		value, exists := m[key]
+		if !exists {
+			continue
+		}
+		credential, supported := scalarString(value)
+		if !supported {
+			continue
+		}
+		return credential, true
+	}
+	return "", false
 }
 
 func getMapScalarString(m map[string]any, trim bool, keys ...string) string {

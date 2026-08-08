@@ -92,6 +92,11 @@ export default {
   // Batch Operations
   batch_import_title: '批量导入节点',
   batch_import_desc: '支持：每行分享链接 / Base64 订阅 / Clash Meta YAML / 订阅URL（http/https）。协议：SS、VLESS、VMess、Trojan、Hysteria2、TUIC、SOCKS5、HTTP、AnyTLS、Cloudflare WireGuard',
+  batch_import_source_type: '导入来源类型',
+  batch_import_source_auto: '自动识别（HTTP 地址按订阅处理）',
+  batch_import_source_subscription: 'HTTP/HTTPS 订阅地址',
+  batch_import_source_http_proxy: 'HTTP/HTTPS 代理节点',
+  batch_import_source_hint: '无鉴权 HTTP 代理与订阅地址格式相同，导入这类代理时请选择“HTTP/HTTPS 代理节点”；订阅请求失败不会再降级为代理。',
   paste_links: '粘贴分享链接/订阅内容/订阅URL',
   import_success: '成功导入 {{count}} 个节点',
   import_failed: '{{count}} 个节点导入失败',

@@ -3,9 +3,11 @@ package services
 import (
 	"context"
 	"encoding/base64"
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -509,16 +511,132 @@ func TestBatchImportAuditHTTPProxyAndSubscriptionDisambiguation(t *testing.T) {
 	t.Cleanup(aliasServer.Close)
 	aliasLink := aliasServer.URL + "?allow_insecure=1#proxy"
 	items, failures, err = ExpandBatchImportSources(context.Background(), []string{aliasLink})
-	if err != nil || len(failures) != 0 || len(items) != 1 || items[0].Link != aliasLink {
-		t.Fatalf("third-party HTTP proxy alias not recognized after fetch: items=%#v failures=%#v err=%v", items, failures, err)
+	if err != nil || len(failures) != 1 || len(items) != 0 {
+		t.Fatalf("invalid subscription payload silently became a proxy: items=%#v failures=%#v err=%v", items, failures, err)
 	}
 
 	cancelledContext, cancel := context.WithCancel(context.Background())
 	cancel()
 	defaultPortProxy := "http://127.0.0.1"
 	items, failures, err = ExpandBatchImportSources(cancelledContext, []string{defaultPortProxy})
+	if err != nil || len(failures) != 1 || len(items) != 0 {
+		t.Fatalf("failed subscription silently became a proxy: items=%#v failures=%#v err=%v", items, failures, err)
+	}
+
+	items, failures, err = ExpandBatchImportSourcesWithType(
+		context.Background(), []string{defaultPortProxy}, BatchImportSourceHTTPProxy,
+	)
 	if err != nil || len(failures) != 0 || len(items) != 1 || items[0].Link != defaultPortProxy {
-		t.Fatalf("anonymous default-port HTTP proxy was not retained after fetch failure: items=%#v failures=%#v err=%v", items, failures, err)
+		t.Fatalf("explicit anonymous HTTP proxy was not imported directly: items=%#v failures=%#v err=%v", items, failures, err)
+	}
+}
+
+func TestBatchImportAuditSubscriptionHTTPFailuresNeverBecomeProxyNodes(t *testing.T) {
+	for _, status := range []int{http.StatusNotFound, http.StatusInternalServerError} {
+		t.Run(http.StatusText(status), func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				w.WriteHeader(status)
+			}))
+			t.Cleanup(server.Close)
+
+			items, failures, err := ExpandBatchImportSources(context.Background(), []string{server.URL})
+			if err != nil || len(items) != 0 || len(failures) != 1 {
+				t.Fatalf("HTTP %d subscription became an item: items=%#v failures=%#v err=%v", status, items, failures, err)
+			}
+			if !strings.Contains(failures[0].Error, strconv.Itoa(status)) {
+				t.Fatalf("failure does not expose status %d: %#v", status, failures[0])
+			}
+		})
+	}
+}
+
+func TestBatchImportAuditHTMLSubscriptionCannotImportPageLinks(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		_, _ = w.Write([]byte("<!doctype html><html><body>\nhttp://127.0.0.1:8080\n</body></html>"))
+	}))
+	t.Cleanup(server.Close)
+
+	items, failures, err := ExpandBatchImportSources(context.Background(), []string{server.URL})
+	if err != nil || len(items) != 0 || len(failures) != 1 {
+		t.Fatalf("HTML page links became proxy nodes: items=%#v failures=%#v err=%v", items, failures, err)
+	}
+	if !strings.Contains(failures[0].Error, "HTML") {
+		t.Fatalf("unexpected HTML subscription failure: %#v", failures[0])
+	}
+}
+
+func TestBatchImportAuditMislabelledBOMHTMLCannotImportPageLinks(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+		_, _ = w.Write([]byte("\uFEFF \n<head><title>not a subscription</title></head>\nhttp://127.0.0.1:8080"))
+	}))
+	t.Cleanup(server.Close)
+
+	items, failures, err := ExpandBatchImportSources(context.Background(), []string{server.URL})
+	if err != nil || len(items) != 0 || len(failures) != 1 {
+		t.Fatalf("mislabelled BOM HTML page links became proxy nodes: items=%#v failures=%#v err=%v", items, failures, err)
+	}
+	if !strings.Contains(failures[0].Error, "HTML") {
+		t.Fatalf("unexpected mislabelled BOM HTML subscription failure: %#v", failures[0])
+	}
+}
+
+func TestBatchImportAuditClashAllowsExplicitEmptyProtocolPasswords(t *testing.T) {
+	yaml := `
+proxies:
+  - {name: empty-trojan, type: trojan, server: trojan.example, port: 443, password: ""}
+  - {name: empty-hy2, type: hysteria2, server: hy2.example, port: 443, password: ""}
+  - {name: empty-anytls, type: anytls, server: anytls.example, port: 443, password: ""}
+`
+	items, failures, err := ExpandBatchImportSources(context.Background(), []string{yaml})
+	if err != nil || len(failures) != 0 || len(items) != 3 {
+		t.Fatalf("explicit empty passwords were rejected: items=%#v failures=%#v err=%v", items, failures, err)
+	}
+	for _, item := range items {
+		encoded, marshalErr := json.Marshal(item.Config)
+		if marshalErr != nil {
+			t.Fatalf("marshal %s: %v", item.Name, marshalErr)
+		}
+		var config map[string]interface{}
+		if unmarshalErr := json.Unmarshal(encoded, &config); unmarshalErr != nil {
+			t.Fatalf("unmarshal %s: %v", item.Name, unmarshalErr)
+		}
+		if password, exists := config["password"]; !exists || password != "" {
+			t.Fatalf("%s did not preserve explicit empty password: %#v", item.Name, config)
+		}
+	}
+}
+
+func TestBatchImportAuditClashStillRejectsMissingProtocolPasswords(t *testing.T) {
+	yaml := `
+proxies:
+  - {name: missing-trojan, type: trojan, server: trojan.example, port: 443}
+  - {name: missing-hy2, type: hysteria2, server: hy2.example, port: 443}
+  - {name: missing-anytls, type: anytls, server: anytls.example, port: 443}
+`
+	items, failures, err := ExpandBatchImportSources(context.Background(), []string{yaml})
+	if err != nil || len(items) != 0 || len(failures) != 3 {
+		t.Fatalf("missing passwords were not rejected independently: items=%#v failures=%#v err=%v", items, failures, err)
+	}
+	for _, failure := range failures {
+		if !strings.Contains(failure.Error, "missing password") {
+			t.Fatalf("unexpected missing-password error: %#v", failure)
+		}
+	}
+}
+
+func TestBatchImportAuditHysteria2SalamanderStillRequiresPassword(t *testing.T) {
+	yaml := `
+proxies:
+  - {name: invalid-obfs, type: hysteria2, server: hy2.example, port: 443, password: "", obfs: salamander, obfs-password: ""}
+`
+	items, failures, err := ExpandBatchImportSources(context.Background(), []string{yaml})
+	if err != nil || len(items) != 0 || len(failures) != 1 {
+		t.Fatalf("empty salamander password was not isolated: items=%#v failures=%#v err=%v", items, failures, err)
+	}
+	if !strings.Contains(failures[0].Error, "obfs-password") {
+		t.Fatalf("unexpected salamander validation error: %#v", failures[0])
 	}
 }
 

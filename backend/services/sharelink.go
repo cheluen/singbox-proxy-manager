@@ -2008,7 +2008,7 @@ func parseTrojanLink(link string) (interface{}, string, string, error) {
 		return nil, "", "", fmt.Errorf("invalid trojan link: %w", err)
 	}
 	password := decodedURLUserInfo(parsed.URL)
-	if password == "" {
+	if parsed.URL.User == nil {
 		return nil, "", "", fmt.Errorf("invalid trojan link: missing password")
 	}
 	params := parsed.URL.Query()
@@ -2199,6 +2199,9 @@ func parseHysteria2Link(link string) (interface{}, string, string, error) {
 		config.ObfsPassword = config.SalamanderPassword
 	}
 	if obfs != "" {
+		if config.ObfsPassword == "" {
+			return nil, "", "", fmt.Errorf("missing obfs-password for hysteria2 salamander obfuscation")
+		}
 		config.Obfs = models.NativeOptions{"type": obfs, "password": config.ObfsPassword}
 	}
 	if len(serverPorts) > 0 {

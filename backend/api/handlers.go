@@ -669,12 +669,20 @@ func (h *Handler) CreateNode(c *gin.Context) {
 	c.JSON(http.StatusCreated, req)
 }
 
-// BatchImportNodes imports multiple nodes from share links
+type batchImportCandidate struct {
+	node   models.ProxyNode
+	result map[string]interface{}
+}
+
+// BatchImportNodes imports multiple nodes from share links, subscriptions, or
+// structured payloads. Candidate nodes are kernel-validated before any row is
+// inserted, so a rejected candidate cannot roll back unrelated valid nodes.
 func (h *Handler) BatchImportNodes(c *gin.Context) {
 	var req struct {
-		Links   []string `json:"links"`
-		Content string   `json:"content"`
-		Enabled bool     `json:"enabled"`
+		Links      []string `json:"links"`
+		Content    string   `json:"content"`
+		SourceType string   `json:"source_type"`
+		Enabled    bool     `json:"enabled"`
 	}
 
 	if err := c.BindJSON(&req); err != nil {
@@ -682,43 +690,209 @@ func (h *Handler) BatchImportNodes(c *gin.Context) {
 		return
 	}
 
+	sourceType, err := services.ParseBatchImportSourceType(req.SourceType)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
 	var sources []string
 	if strings.TrimSpace(req.Content) != "" {
 		sources = []string{req.Content}
 	} else {
 		sources = req.Links
 	}
-
 	if len(sources) == 0 {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "no input provided"})
 		return
 	}
 
-	results := []map[string]interface{}{}
-	successCount := 0
-
-	// Expand subscriptions/base64/yaml outside lock/transaction to avoid blocking node ops.
-	items, expandFailures, err := services.ExpandBatchImportSources(c.Request.Context(), sources)
+	items, expandFailures, err := services.ExpandBatchImportSourcesWithType(c.Request.Context(), sources, sourceType)
 	if err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
-	for _, f := range expandFailures {
+	results := make([]map[string]interface{}, 0, len(items)+len(expandFailures))
+	for _, failure := range expandFailures {
 		results = append(results, map[string]interface{}{
 			"success": false,
-			"source":  f.Source,
-			"error":   f.Error,
+			"source":  failure.Source,
+			"error":   failure.Error,
 		})
 	}
-
-	// If user provided raw content and nothing could be expanded, surface error directly.
-	if strings.TrimSpace(req.Content) != "" && len(items) == 0 && len(expandFailures) > 0 {
-		c.JSON(http.StatusBadRequest, gin.H{"error": expandFailures[0].Error})
+	if len(items) == 0 {
+		if len(expandFailures) > 0 {
+			c.JSON(http.StatusBadRequest, gin.H{"error": expandFailures[0].Error})
+			return
+		}
+		c.JSON(http.StatusBadRequest, gin.H{"error": "input contains no proxy nodes"})
 		return
 	}
 
 	h.nodeWriteMu.Lock()
 	defer h.nodeWriteMu.Unlock()
+
+	existingNodes, err := h.loadAllNodes()
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "database error"})
+		return
+	}
+	if err := h.validateNodeSet(existingNodes); err != nil {
+		c.JSON(http.StatusInternalServerError, singboxUpdateError(fmt.Errorf("existing node set is invalid: %w", err)))
+		return
+	}
+
+	startPort, preserveInboundPorts, err := getPortSettings(h.db)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "database error"})
+		return
+	}
+	maxOrder, maxID, usedInboundPorts := batchImportExistingState(existingNodes)
+	nextOrder := maxOrder + 1
+
+	candidates := make([]*batchImportCandidate, 0, len(items))
+	for _, item := range items {
+		result := map[string]interface{}{"source": item.Source}
+		var parsedConfig any
+		var proxyType, name string
+		if item.Link != "" {
+			result["link"] = item.Link
+			var parseErr error
+			parsedConfig, proxyType, name, parseErr = services.ParseShareLink(item.Link)
+			if parseErr != nil {
+				result["success"] = false
+				result["error"] = parseErr.Error()
+				results = append(results, result)
+				continue
+			}
+		} else {
+			parsedConfig, proxyType, name = item.Config, item.Type, item.Name
+		}
+
+		configJSON, marshalErr := json.Marshal(parsedConfig)
+		if marshalErr != nil {
+			result["success"] = false
+			result["error"] = "failed to marshal config"
+			results = append(results, result)
+			continue
+		}
+		username, usernameErr := generateRandomUsername(12)
+		if usernameErr != nil {
+			result["success"] = false
+			result["error"] = "failed to generate username"
+			results = append(results, result)
+			continue
+		}
+		password, passwordErr := generateRandomString(24)
+		if passwordErr != nil {
+			result["success"] = false
+			result["error"] = "failed to generate password"
+			results = append(results, result)
+			continue
+		}
+
+		inboundPort := startPort + nextOrder
+		if preserveInboundPorts {
+			inboundPort, err = nextAvailableInboundPort(startPort, usedInboundPorts)
+		}
+		if err == nil {
+			err = validateInboundPort(inboundPort)
+		}
+		if err == nil {
+			if _, exists := usedInboundPorts[inboundPort]; exists {
+				err = fmt.Errorf("inbound port already in use")
+			}
+		}
+		if err != nil {
+			result["success"] = false
+			result["error"] = err.Error()
+			results = append(results, result)
+			err = nil
+			continue
+		}
+
+		candidate := &batchImportCandidate{
+			node: models.ProxyNode{
+				ID:              maxID + len(candidates) + 1,
+				Name:            name,
+				Type:            proxyType,
+				Config:          string(configJSON),
+				InboundPort:     inboundPort,
+				Username:        username,
+				Password:        password,
+				TCPReuseEnabled: true,
+				SortOrder:       nextOrder,
+				Enabled:         true,
+			},
+			result: result,
+		}
+		candidates = append(candidates, candidate)
+		nextOrder++
+		usedInboundPorts[inboundPort] = struct{}{}
+	}
+
+	validCandidates, rejectedCandidates := h.selectValidBatchCandidates(existingNodes, candidates)
+	for candidate, validationErr := range rejectedCandidates {
+		candidate.result["success"] = false
+		candidate.result["error"] = fmt.Sprintf("sing-box validation failed: %v", validationErr)
+	}
+
+	// Reassign ports and order after isolation so rejected candidates leave no
+	// artificial gaps. A final grouped validation covers the exact persisted set.
+	maxOrder, maxID, usedInboundPorts = batchImportExistingState(existingNodes)
+	nextOrder = maxOrder + 1
+	portValidCandidates := make([]*batchImportCandidate, 0, len(validCandidates))
+	for _, candidate := range validCandidates {
+		inboundPort := startPort + nextOrder
+		if preserveInboundPorts {
+			inboundPort, err = nextAvailableInboundPort(startPort, usedInboundPorts)
+		}
+		if err == nil {
+			err = validateInboundPort(inboundPort)
+		}
+		if err == nil {
+			if _, exists := usedInboundPorts[inboundPort]; exists {
+				err = fmt.Errorf("inbound port already in use")
+			}
+		}
+		if err == nil {
+			err = validateInboundPortAvailable(inboundPort)
+		}
+		if err != nil {
+			candidate.result["success"] = false
+			candidate.result["error"] = err.Error()
+			err = nil
+			continue
+		}
+		candidate.node.ID = maxID + len(portValidCandidates) + 1
+		candidate.node.InboundPort = inboundPort
+		candidate.node.SortOrder = nextOrder
+		portValidCandidates = append(portValidCandidates, candidate)
+		nextOrder++
+		usedInboundPorts[inboundPort] = struct{}{}
+	}
+	validCandidates, finalRejected := h.selectValidBatchCandidates(existingNodes, portValidCandidates)
+	for candidate, validationErr := range finalRejected {
+		candidate.result["success"] = false
+		candidate.result["error"] = fmt.Sprintf("sing-box validation failed: %v", validationErr)
+	}
+
+	accepted := make(map[*batchImportCandidate]struct{}, len(validCandidates))
+	for _, candidate := range validCandidates {
+		accepted[candidate] = struct{}{}
+	}
+	for _, candidate := range candidates {
+		if _, ok := accepted[candidate]; !ok {
+			results = append(results, candidate.result)
+		}
+	}
+
+	if len(validCandidates) == 0 {
+		c.JSON(http.StatusOK, gin.H{
+			"total": len(items) + len(expandFailures), "success": 0,
+			"failed": len(items) + len(expandFailures), "results": results,
+		})
+		return
+	}
 
 	tx, err := h.db.Begin()
 	if err != nil {
@@ -726,26 +900,6 @@ func (h *Handler) BatchImportNodes(c *gin.Context) {
 		return
 	}
 	defer tx.Rollback()
-
-	startPort, preserveInboundPorts, err := getPortSettings(tx)
-	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "database error"})
-		return
-	}
-
-	var maxOrder int
-	if err := tx.QueryRow("SELECT COALESCE(MAX(sort_order), -1) FROM proxy_nodes").Scan(&maxOrder); err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "database error"})
-		return
-	}
-	nextOrder := maxOrder + 1
-
-	usedInboundPorts, err := collectUsedInboundPortsTx(tx, 0)
-	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "database error"})
-		return
-	}
-
 	stmt, err := tx.Prepare(`
 		INSERT INTO proxy_nodes (name, remark, type, config, inbound_port, username, password, tcp_reuse_enabled, sort_order, latency, enabled)
 		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
@@ -756,144 +910,293 @@ func (h *Handler) BatchImportNodes(c *gin.Context) {
 	}
 	defer stmt.Close()
 
-	var insertedIDs []int64
-
-	for _, item := range items {
-		result := map[string]interface{}{
-			"source": item.Source,
-		}
-
-		var (
-			parsedConfig any
-			proxyType    string
-			name         string
+	insertedIDs := make([]int64, 0, len(validCandidates))
+	for _, candidate := range validCandidates {
+		node := &candidate.node
+		node.Enabled = req.Enabled
+		dbResult, execErr := stmt.Exec(
+			node.Name, "", node.Type, node.Config, node.InboundPort, node.Username,
+			node.Password, node.TCPReuseEnabled, node.SortOrder, 0, node.Enabled,
 		)
-		if item.Link != "" {
-			result["link"] = item.Link
-			parsedConfig, proxyType, name, err = services.ParseShareLink(item.Link)
-			if err != nil {
-				result["success"] = false
-				result["error"] = err.Error()
-				results = append(results, result)
-				continue
-			}
-		} else {
-			parsedConfig = item.Config
-			proxyType = item.Type
-			name = item.Name
-		}
-
-		// Convert to JSON
-		configJSON, err := json.Marshal(parsedConfig)
-		if err != nil {
-			result["success"] = false
-			result["error"] = "failed to marshal config"
-			results = append(results, result)
-			continue
-		}
-
-		sortOrder := nextOrder
-		var inboundPort int
-		if preserveInboundPorts {
-			inboundPort, err = nextAvailableInboundPort(startPort, usedInboundPorts)
-			if err != nil {
-				result["success"] = false
-				result["error"] = err.Error()
-				results = append(results, result)
-				continue
-			}
-		} else {
-			inboundPort = startPort + sortOrder
-			if err := validateInboundPort(inboundPort); err != nil {
-				result["success"] = false
-				result["error"] = err.Error()
-				results = append(results, result)
-				continue
-			}
-			if _, exists := usedInboundPorts[inboundPort]; exists {
-				result["success"] = false
-				result["error"] = "inbound port already in use"
-				results = append(results, result)
-				continue
-			}
-		}
-
-		// Insert node
-		username, err := generateRandomUsername(12)
-		if err != nil {
-			result["success"] = false
-			result["error"] = "failed to generate username"
-			results = append(results, result)
-			continue
-		}
-		password, err := generateRandomString(24)
-		if err != nil {
-			result["success"] = false
-			result["error"] = "failed to generate password"
-			results = append(results, result)
-			continue
-		}
-
-		dbResult, err := stmt.Exec(name, "", proxyType, string(configJSON), inboundPort, username, password, true, sortOrder, 0, req.Enabled)
-
-		if err != nil {
-			result["success"] = false
-			result["error"] = "failed to create node"
-			results = append(results, result)
-			continue
-		}
-
-		id, err := appdb.LastInsertID(c.Request.Context(), tx, dbResult, appdb.DialectFor(h.db))
-		if err != nil {
-			result["success"] = false
-			result["error"] = "failed to read created node id"
-			results = append(results, result)
-			continue
-		}
-
-		result["success"] = true
-		result["id"] = id
-		result["name"] = name
-		result["port"] = inboundPort
-		result["username"] = username
-		result["password"] = password
-		results = append(results, result)
-		insertedIDs = append(insertedIDs, id)
-		successCount++
-		nextOrder++
-		usedInboundPorts[inboundPort] = struct{}{}
-	}
-
-	if successCount > 0 {
-		if err := tx.Commit(); err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to commit transaction"})
+		if execErr != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to create node"})
 			return
 		}
+		id, idErr := appdb.LastInsertID(c.Request.Context(), tx, dbResult, appdb.DialectFor(h.db))
+		if idErr != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to read created node id"})
+			return
+		}
+		node.ID = int(id)
+		insertedIDs = append(insertedIDs, id)
 	}
 
-	// Regenerate global config and restart sing-box after batch import; if any
-	// imported node produces a config the kernel rejects, remove the whole
-	// imported batch again so working nodes stay up and the panel stays usable.
-	if successCount > 0 {
-		if err := h.regenerateAndRestartWithRevert(func() error {
-			for _, insertedID := range insertedIDs {
-				if _, revertErr := h.db.Exec("DELETE FROM proxy_nodes WHERE id = ?", insertedID); revertErr != nil {
-					return revertErr
+	finalNodes := appendBatchCandidateNodes(existingNodes, validCandidates)
+	configJSON, err := h.singBoxService.BuildGlobalConfig(finalNodes)
+	if err == nil {
+		err = h.singBoxService.ValidateConfig(configJSON)
+	}
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, singboxUpdateError(err))
+		return
+	}
+	if err := tx.Commit(); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to commit transaction"})
+		return
+	}
+	if err := h.singBoxService.ApplyConfig(configJSON); err != nil {
+		if revertErr := h.deleteImportedNodes(insertedIDs); revertErr != nil {
+			log.Printf("Failed to revert batch import after sing-box apply error: %v", revertErr)
+		}
+		c.JSON(http.StatusInternalServerError, singboxUpdateError(err))
+		return
+	}
+
+	for _, candidate := range validCandidates {
+		candidate.result["success"] = true
+		candidate.result["id"] = candidate.node.ID
+		candidate.result["name"] = candidate.node.Name
+		candidate.result["port"] = candidate.node.InboundPort
+		candidate.result["username"] = candidate.node.Username
+		candidate.result["password"] = candidate.node.Password
+		results = append(results, candidate.result)
+	}
+	c.JSON(http.StatusOK, gin.H{
+		"total": len(items) + len(expandFailures), "success": len(validCandidates),
+		"failed": len(items) + len(expandFailures) - len(validCandidates), "results": results,
+	})
+}
+
+func batchImportExistingState(nodes []models.ProxyNode) (int, int, map[int]struct{}) {
+	maxOrder, maxID := -1, 0
+	usedPorts := make(map[int]struct{}, len(nodes))
+	for _, node := range nodes {
+		if node.SortOrder > maxOrder {
+			maxOrder = node.SortOrder
+		}
+		if node.ID > maxID {
+			maxID = node.ID
+		}
+		usedPorts[node.InboundPort] = struct{}{}
+	}
+	return maxOrder, maxID, usedPorts
+}
+
+func appendBatchCandidateNodes(existing []models.ProxyNode, candidates []*batchImportCandidate) []models.ProxyNode {
+	nodes := make([]models.ProxyNode, 0, len(existing)+len(candidates))
+	nodes = append(nodes, existing...)
+	for _, candidate := range candidates {
+		nodes = append(nodes, candidate.node)
+	}
+	return nodes
+}
+
+func (h *Handler) validateNodeSet(nodes []models.ProxyNode) error {
+	configJSON, err := h.singBoxService.BuildGlobalConfig(nodes)
+	if err != nil {
+		return err
+	}
+	return h.singBoxService.ValidateConfig(configJSON)
+}
+
+func (h *Handler) selectValidBatchCandidates(
+	existing []models.ProxyNode,
+	candidates []*batchImportCandidate,
+) ([]*batchImportCandidate, map[*batchImportCandidate]error) {
+	rejected := make(map[*batchImportCandidate]error)
+	if len(candidates) == 0 {
+		return nil, rejected
+	}
+	groups := batchImportDependencyGroups(candidates)
+	accepted := make([]*batchImportCandidate, 0, len(candidates))
+	acceptedSet := make(map[*batchImportCandidate]struct{}, len(candidates))
+
+	var isolate func([][]*batchImportCandidate)
+	isolate = func(subset [][]*batchImportCandidate) {
+		if len(subset) == 0 {
+			return
+		}
+		trial := make([]*batchImportCandidate, 0, len(accepted)+len(candidates))
+		trial = append(trial, accepted...)
+		for _, group := range subset {
+			trial = append(trial, group...)
+		}
+		err := h.validateNodeSet(appendBatchCandidateNodes(existing, trial))
+		if err == nil {
+			for _, group := range subset {
+				for _, candidate := range group {
+					accepted = append(accepted, candidate)
+					acceptedSet[candidate] = struct{}{}
 				}
 			}
-			return nil
-		}); err != nil {
-			c.JSON(http.StatusInternalServerError, singboxUpdateError(err))
 			return
+		}
+		if len(subset) == 1 {
+			groupAccepted, groupRejected := h.selectValidDependencyGroup(existing, accepted, subset[0], err)
+			for _, candidate := range groupAccepted {
+				accepted = append(accepted, candidate)
+				acceptedSet[candidate] = struct{}{}
+			}
+			for candidate, validationErr := range groupRejected {
+				rejected[candidate] = validationErr
+			}
+			return
+		}
+		middle := len(subset) / 2
+		isolate(subset[:middle])
+		isolate(subset[middle:])
+	}
+	isolate(groups)
+
+	// Dependency targets may be validated before their dependants. Preserve the
+	// user's original import order for port allocation and response ordering.
+	orderedAccepted := make([]*batchImportCandidate, 0, len(acceptedSet))
+	for _, candidate := range candidates {
+		if _, ok := acceptedSet[candidate]; ok {
+			orderedAccepted = append(orderedAccepted, candidate)
+		}
+	}
+	return orderedAccepted, rejected
+}
+
+func (h *Handler) selectValidDependencyGroup(
+	existing []models.ProxyNode,
+	accepted []*batchImportCandidate,
+	group []*batchImportCandidate,
+	groupErr error,
+) ([]*batchImportCandidate, map[*batchImportCandidate]error) {
+	groupByName := make(map[string][]*batchImportCandidate, len(group))
+	for _, candidate := range group {
+		name := strings.TrimSpace(candidate.node.Name)
+		if name != "" {
+			groupByName[name] = append(groupByName[name], candidate)
 		}
 	}
 
-	c.JSON(http.StatusOK, gin.H{
-		"total":   len(items) + len(expandFailures),
-		"success": successCount,
-		"failed":  len(items) + len(expandFailures) - successCount,
-		"results": results,
-	})
+	processed := make(map[*batchImportCandidate]struct{}, len(group))
+	selected := make([]*batchImportCandidate, 0, len(group))
+	rejected := make(map[*batchImportCandidate]error)
+	for len(processed) < len(group) {
+		ready := make([]*batchImportCandidate, 0, len(group)-len(processed))
+		for _, candidate := range group {
+			if _, done := processed[candidate]; done {
+				continue
+			}
+			dependenciesReady := true
+			detour := batchImportCandidateDetour(candidate)
+			if detour != "" && detour != "direct" {
+				for _, dependency := range groupByName[detour] {
+					if _, done := processed[dependency]; !done {
+						dependenciesReady = false
+						break
+					}
+				}
+			}
+			if dependenciesReady {
+				ready = append(ready, candidate)
+			}
+		}
+
+		if len(ready) == 0 {
+			for _, candidate := range group {
+				if _, done := processed[candidate]; done {
+					continue
+				}
+				processed[candidate] = struct{}{}
+				rejected[candidate] = groupErr
+			}
+			break
+		}
+
+		for _, candidate := range ready {
+			processed[candidate] = struct{}{}
+			trial := make([]*batchImportCandidate, 0, len(accepted)+len(selected)+1)
+			trial = append(trial, accepted...)
+			trial = append(trial, selected...)
+			trial = append(trial, candidate)
+			if err := h.validateNodeSet(appendBatchCandidateNodes(existing, trial)); err != nil {
+				rejected[candidate] = err
+				continue
+			}
+			selected = append(selected, candidate)
+		}
+	}
+	return selected, rejected
+}
+
+func batchImportCandidateDetour(candidate *batchImportCandidate) string {
+	if candidate == nil {
+		return ""
+	}
+	var config struct {
+		Detour string `json:"detour"`
+	}
+	if json.Unmarshal([]byte(candidate.node.Config), &config) != nil {
+		return ""
+	}
+	return strings.TrimSpace(config.Detour)
+}
+
+func batchImportDependencyGroups(candidates []*batchImportCandidate) [][]*batchImportCandidate {
+	nameToIndexes := make(map[string][]int, len(candidates))
+	for index, candidate := range candidates {
+		name := strings.TrimSpace(candidate.node.Name)
+		if name != "" {
+			nameToIndexes[name] = append(nameToIndexes[name], index)
+		}
+	}
+	adjacency := make([][]int, len(candidates))
+	for index, candidate := range candidates {
+		detour := batchImportCandidateDetour(candidate)
+		if detour == "" || detour == "direct" {
+			continue
+		}
+		for _, target := range nameToIndexes[detour] {
+			if target == index {
+				continue
+			}
+			adjacency[index] = append(adjacency[index], target)
+			adjacency[target] = append(adjacency[target], index)
+		}
+	}
+
+	visited := make([]bool, len(candidates))
+	groups := make([][]*batchImportCandidate, 0, len(candidates))
+	for start := range candidates {
+		if visited[start] {
+			continue
+		}
+		visited[start] = true
+		queue := []int{start}
+		group := make([]*batchImportCandidate, 0, 1)
+		for len(queue) > 0 {
+			index := queue[0]
+			queue = queue[1:]
+			group = append(group, candidates[index])
+			for _, adjacent := range adjacency[index] {
+				if !visited[adjacent] {
+					visited[adjacent] = true
+					queue = append(queue, adjacent)
+				}
+			}
+		}
+		groups = append(groups, group)
+	}
+	return groups
+}
+
+func (h *Handler) deleteImportedNodes(ids []int64) error {
+	tx, err := h.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	for _, id := range ids {
+		if _, err := tx.Exec("DELETE FROM proxy_nodes WHERE id = ?", id); err != nil {
+			return err
+		}
+	}
+	return tx.Commit()
 }
 
 // UpdateNode updates a proxy node
