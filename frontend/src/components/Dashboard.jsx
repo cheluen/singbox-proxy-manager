@@ -1984,11 +1984,11 @@ function Dashboard({ onLogout }) {
         ),
       },
       {
-        title: t('node_name'),
+        title: isMobile ? t('node_name_short') : t('node_name'),
         dataIndex: 'name',
         key: 'name',
         ellipsis: true,
-        width: isMobile ? 104 : 110,
+        width: isMobile ? 84 : 110,
       },
       {
         title: t('remark'),

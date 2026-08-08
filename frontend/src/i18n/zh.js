@@ -51,6 +51,7 @@ export default {
   batch_export: '批量导出',
   set_auth: '批量认证',
   node_name: '节点名称',
+  node_name_short: '名称',
   remark: '备注',
   node_record: '节点记录',
   remark_placeholder: '可留空',

@@ -283,6 +283,7 @@ const run = async () => {
     await page.goto(FRONTEND_URL, { waitUntil: 'networkidle2' })
     await page.evaluate(() => {
       localStorage.setItem('token', 'e2e-token')
+      localStorage.setItem('language', 'zh')
     })
     await page.reload({ waitUntil: 'networkidle2' })
     await page.waitForSelector('tbody.ant-table-tbody tr[data-row-key="1"]', { timeout: 30000 })
@@ -293,6 +294,15 @@ const run = async () => {
       'tbody.ant-table-tbody tr[data-row-key="1"] td',
       (cells) => cells.length
     )
+    const desktopNameHeader = await page.evaluate(() => {
+      const header = Array.from(document.querySelectorAll('thead.ant-table-thead th')).find(
+        (cell) => cell.textContent?.trim() === '节点名称'
+      )
+      return {
+        text: header?.textContent?.trim() || '',
+        width: header?.getBoundingClientRect().width || 0,
+      }
+    })
     const dragHandleScope = await page.evaluate(() => {
       const row = document.querySelector('tbody.ant-table-tbody tr[data-row-key="1"]')
       const libraryHandles = Array.from(
@@ -349,6 +359,10 @@ const run = async () => {
       `Unexpected initial node order: ${JSON.stringify(orderBefore)}`
     )
     assert(desktopColumnCount === 16, `Desktop columns changed unexpectedly: ${desktopColumnCount}`)
+    assert(
+      desktopNameHeader.text === '节点名称' && desktopNameHeader.width >= 100,
+      `Desktop node-name header changed unexpectedly: ${JSON.stringify(desktopNameHeader)}`
+    )
     assert(dragHandleScope.libraryHandleCount === 20, `Unexpected drag handle count: ${JSON.stringify(dragHandleScope)}`)
     assert(dragHandleScope.allLibraryHandlesScoped, `Library drag handles escape the six-dot controls: ${JSON.stringify(dragHandleScope)}`)
     assert(!dragHandleScope.rowIsLibraryHandle, `Table row is still a drag handle: ${JSON.stringify(dragHandleScope)}`)
@@ -400,6 +414,9 @@ const run = async () => {
       const handle = document.querySelector('[data-testid="node-drag-handle-1"]')
       const body = tableContainer?.querySelector('.ant-table-body')
       const filterChildren = Array.from(filterControls?.children || [])
+      const nameHeader = Array.from(
+        tableContainer?.querySelectorAll('thead.ant-table-thead th') || []
+      ).find((cell) => cell.textContent?.trim() === '名称')
 
       return {
         viewportWidth,
@@ -420,6 +437,8 @@ const run = async () => {
         ),
         bodyClientHeight: body?.clientHeight || 0,
         bodyScrollHeight: body?.scrollHeight || 0,
+        nameHeaderText: nameHeader?.textContent?.trim() || '',
+        nameHeaderWidth: nameHeader?.getBoundingClientRect().width || 0,
       }
     })
 
@@ -441,6 +460,10 @@ const run = async () => {
     assert(mobileLayout.rowTouchAction !== 'none', `Mobile row blocks native scrolling: ${JSON.stringify(mobileLayout)}`)
     assert(mobileLayout.handleTouchAction === 'none', `Mobile drag handle does not own touch dragging: ${JSON.stringify(mobileLayout)}`)
     assert(mobileLayout.handleIsLibraryHandle, `Mobile six-dot control is not the library drag handle: ${JSON.stringify(mobileLayout)}`)
+    assert(
+      mobileLayout.nameHeaderText === '名称' && mobileLayout.nameHeaderWidth <= 116,
+      `Chinese mobile node-name header is not compact: ${JSON.stringify(mobileLayout)}`
+    )
     assert(
       mobileLayout.bodyScrollHeight > mobileLayout.bodyClientHeight,
       `Mobile node list is not vertically scrollable: ${JSON.stringify(mobileLayout)}`
@@ -562,6 +585,9 @@ const run = async () => {
       const actionButtons = Array.from(
         selectionToolbar?.querySelectorAll('button') || []
       )
+      const nameHeader = Array.from(
+        table?.querySelectorAll('thead.ant-table-thead th') || []
+      ).find((cell) => cell.textContent?.trim() === 'Name')
       return {
         viewportWidth,
         documentScrollWidth: document.documentElement.scrollWidth,
@@ -574,6 +600,8 @@ const run = async () => {
         selectionScrollWidth: selectionToolbar?.scrollWidth || 0,
         tableInside: rectInside(table),
         tableHeight: table?.getBoundingClientRect().height || 0,
+        nameHeaderText: nameHeader?.textContent?.trim() || '',
+        nameHeaderWidth: nameHeader?.getBoundingClientRect().width || 0,
       }
     })
     assert(
@@ -590,6 +618,10 @@ const run = async () => {
       `Compact mobile selection toolbar overflows: ${JSON.stringify(compactMobileLayout)}`
     )
     assert(compactMobileLayout.tableInside && compactMobileLayout.tableHeight > 80, `Compact mobile table is unusable: ${JSON.stringify(compactMobileLayout)}`)
+    assert(
+      compactMobileLayout.nameHeaderText === 'Name' && compactMobileLayout.nameHeaderWidth <= 100,
+      `English compact-mobile node-name header is not compact: ${JSON.stringify(compactMobileLayout)}`
+    )
 
     await page.evaluate(() => localStorage.removeItem('token'))
     await page.reload({ waitUntil: 'networkidle2' })
@@ -638,6 +670,7 @@ const run = async () => {
           orderAfterDrag,
           reorderPayload: stateAfterDrag.lastReorder,
           dragHandleScope,
+          desktopNameHeader,
           mobileLayout,
           mobileExpandedControls,
           mobileScrollTop,

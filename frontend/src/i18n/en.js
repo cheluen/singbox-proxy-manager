@@ -51,6 +51,7 @@ export default {
   batch_export: 'Batch Export',
   set_auth: 'Set Auth',
   node_name: 'Node Name',
+  node_name_short: 'Name',
   remark: 'Remark',
   node_record: 'Node Record',
   remark_placeholder: 'Optional',
