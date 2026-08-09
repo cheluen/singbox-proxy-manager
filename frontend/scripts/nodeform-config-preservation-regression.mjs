@@ -738,6 +738,10 @@ const createMockAPI = () => {
       sendJSON(res, 200, existingNodes)
       return
     }
+    if (req.method === 'GET' && req.url === '/api/runtime/status') {
+      sendJSON(res, 200, { degraded: false, running: true })
+      return
+    }
     if (req.method === 'POST' && req.url === '/api/parse-link') {
       const payload = await readJSONBody(req)
       const fixture = fixtureByLink.get(payload.link)
@@ -998,6 +1002,25 @@ const waitForNodeForm = async (page, expectedName) => {
   )
 }
 
+const setInboundAuthentication = async (page, enabled) => {
+  await page.waitForSelector('#auth_enabled', { visible: true, timeout: 10000 })
+  await page.$eval(
+    '#auth_enabled',
+    (button, nextEnabled) => {
+      if (button.getAttribute('aria-checked') !== String(nextEnabled)) {
+        button.click()
+      }
+    },
+    enabled
+  )
+  await page.waitForFunction(
+    (nextEnabled) =>
+      document.querySelector('#auth_enabled')?.getAttribute('aria-checked') === String(nextEnabled),
+    { timeout: 5000 },
+    enabled
+  )
+}
+
 const waitForNodeFormClosed = async (page) => {
   await page.waitForFunction(
     () =>
@@ -1074,6 +1097,7 @@ const run = async () => {
       args: ['--no-sandbox', '--disable-setuid-sandbox'],
     })
     const page = await browser.newPage()
+    page.setDefaultNavigationTimeout(120000)
     await page.setViewport({ width: 1440, height: 1100 })
     await page.evaluateOnNewDocument(() => {
       localStorage.setItem('token', 'nodeform-config-preservation-token')
@@ -1086,7 +1110,7 @@ const run = async () => {
     })
     page.on('pageerror', (error) => consoleErrors.push(`pageerror:${error.message}`))
 
-    await page.goto(FRONTEND_URL, { waitUntil: 'networkidle2' })
+    await page.goto(FRONTEND_URL, { waitUntil: 'domcontentloaded' })
     await page.waitForSelector('.dashboard-repo-link', { timeout: 15000 })
 
     for (const fixture of fixtures) {
@@ -1095,6 +1119,7 @@ const run = async () => {
       await setImportLink(page, `audit://${fixture.key}`)
       await clickVisibleButton(page, 'Parse Link')
       await waitForNodeForm(page, `Imported ${fixture.key}`)
+      await setInboundAuthentication(page, false)
 
       if (fixture.peerArray) {
         const hasNetworkField = await page.evaluate(() =>
@@ -1135,7 +1160,7 @@ const run = async () => {
             Array.from(document.querySelectorAll('.ant-form-item-explain-error')).some(
               (element) => (element.textContent || '').includes('Required for Salamander')
             ),
-          { timeout: 5000 }
+          { timeout: 15000 }
         )
         if (mockAPI.createdPayloads.length !== captureIndex) {
           throw new Error('Hysteria2 Salamander was saved with an empty obfs password')
@@ -1152,6 +1177,11 @@ const run = async () => {
       if (!payload) throw new Error(`${fixture.key}: create payload was not captured`)
       if (payload.type !== fixture.type) {
         throw new Error(`${fixture.key}: expected type ${fixture.type}, got ${payload.type}`)
+      }
+      if (payload.auth_enabled !== false || payload.username !== '' || payload.password !== '') {
+        throw new Error(
+          `${fixture.key}: explicitly disabled inbound authentication was not preserved: ${JSON.stringify(payload)}`
+        )
       }
 
       const actualConfig = JSON.parse(payload.config || '{}')

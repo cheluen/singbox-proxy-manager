@@ -19,9 +19,17 @@ api.setToken = (token) => {
 api.interceptors.response.use(
   (response) => response,
   (error) => {
-    if (error.response?.status === 401) {
+    const requestPath = String(error.config?.url || '').split('?')[0]
+    const isPublicAuthRequest = [
+      '/login',
+      '/setup/admin-password',
+      '/auth/status',
+    ].includes(requestPath)
+
+    if (error.response?.status === 401 && authToken && !isPublicAuthRequest) {
+      api.setToken(null)
       localStorage.removeItem('token')
-      window.location.reload()
+      window.dispatchEvent(new CustomEvent('sbpm:unauthorized'))
     }
     return Promise.reject(error)
   }

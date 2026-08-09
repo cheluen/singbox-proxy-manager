@@ -166,11 +166,11 @@ build-freebsd:
       cat > singbox-proxy-manager-freebsd-amd64/start.sh << 'EOF'
       #!/bin/sh
       cd "$(dirname "$0")"
-	      export PATH="$PWD:$PATH"
-	      export CONFIG_DIR="$PWD/config"
-	      export PORT="${PORT:-30000}"
-	      ./main
-	      EOF
+      export PATH="$PWD:$PATH"
+      export CONFIG_DIR="$PWD/config"
+      export PORT="${PORT:-30000}"
+      ./main
+      EOF
     - chmod +x singbox-proxy-manager-freebsd-amd64/start.sh
     - tar czf singbox-proxy-manager-freebsd-amd64.tar.gz singbox-proxy-manager-freebsd-amd64/
   artifacts:
@@ -194,35 +194,35 @@ build-linux:
   script:
     - go mod download
     - GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build -o main ./backend
-	    # 下载Linux版sing-box
-	    - apt-get update && apt-get install -y --no-install-recommends ca-certificates curl jq
-	    - |
-	      ASSET="sing-box-${SINGBOX_VERSION}-linux-amd64.tar.gz"
-	      curl -fLo "$ASSET" "https://github.com/SagerNet/sing-box/releases/download/v${SINGBOX_VERSION}/$ASSET"
-	      GH_API_URL="https://api.github.com/repos/SagerNet/sing-box/releases/tags/v${SINGBOX_VERSION}"
-	      GH_BODY="$(mktemp)"
-	      GH_HEADERS="$(mktemp)"
-	      GH_STATUS="$(curl -sS -D "$GH_HEADERS" -o "$GH_BODY" -w "%{http_code}" "$GH_API_URL" || true)"
-	      if [ "$GH_STATUS" != "200" ]; then
-	        echo "ERROR: failed to fetch sing-box release metadata from GitHub API (api.github.com)." >&2
-	        echo "URL: $GH_API_URL" >&2
-	        echo "HTTP status: $GH_STATUS" >&2
-	        echo "Hint: build environment may block api.github.com or GitHub API rate limit was hit." >&2
-	        echo "GitHub rate limit headers:" >&2
-	        grep -i '^x-ratelimit' "$GH_HEADERS" >&2 || true
-	        echo "Response body (first 2000 bytes):" >&2
-	        head -c 2000 "$GH_BODY" >&2 || true
-	        exit 1
-	      fi
-	      DIGEST="$(jq -r --arg asset "$ASSET" '.assets[] | select(.name==$asset) | .digest' "$GH_BODY")"
-	      rm -f "$GH_BODY" "$GH_HEADERS"
-	      if [ -z "$DIGEST" ] || [ "$DIGEST" = "null" ]; then
-	        echo "ERROR: failed to find digest for asset '$ASSET' in GitHub release metadata." >&2
-	        exit 1
-	      fi
-	      echo "${DIGEST#sha256:}  $ASSET" | sha256sum -c -
-	      tar xzf "$ASSET"
-	    - mv sing-box-*/sing-box .
+    # 下载Linux版sing-box
+    - apt-get update && apt-get install -y --no-install-recommends ca-certificates curl jq
+    - |
+      ASSET="sing-box-${SINGBOX_VERSION}-linux-amd64.tar.gz"
+      curl -fLo "$ASSET" "https://github.com/SagerNet/sing-box/releases/download/v${SINGBOX_VERSION}/$ASSET"
+      GH_API_URL="https://api.github.com/repos/SagerNet/sing-box/releases/tags/v${SINGBOX_VERSION}"
+      GH_BODY="$(mktemp)"
+      GH_HEADERS="$(mktemp)"
+      GH_STATUS="$(curl -sS -D "$GH_HEADERS" -o "$GH_BODY" -w "%{http_code}" "$GH_API_URL" || true)"
+      if [ "$GH_STATUS" != "200" ]; then
+        echo "ERROR: failed to fetch sing-box release metadata from GitHub API (api.github.com)." >&2
+        echo "URL: $GH_API_URL" >&2
+        echo "HTTP status: $GH_STATUS" >&2
+        echo "Hint: build environment may block api.github.com or GitHub API rate limit was hit." >&2
+        echo "GitHub rate limit headers:" >&2
+        grep -i '^x-ratelimit' "$GH_HEADERS" >&2 || true
+        echo "Response body (first 2000 bytes):" >&2
+        head -c 2000 "$GH_BODY" >&2 || true
+        exit 1
+      fi
+      DIGEST="$(jq -r --arg asset "$ASSET" '.assets[] | select(.name==$asset) | .digest' "$GH_BODY")"
+      rm -f "$GH_BODY" "$GH_HEADERS"
+      if [ -z "$DIGEST" ] || [ "$DIGEST" = "null" ]; then
+        echo "ERROR: failed to find digest for asset '$ASSET' in GitHub release metadata." >&2
+        exit 1
+      fi
+      echo "${DIGEST#sha256:}  $ASSET" | sha256sum -c -
+      tar xzf "$ASSET"
+    - mv sing-box-*/sing-box .
     # 创建发布包
     - mkdir -p singbox-proxy-manager-linux-amd64/frontend
     - mv main singbox-proxy-manager-linux-amd64/
@@ -234,11 +234,11 @@ build-linux:
       cat > singbox-proxy-manager-linux-amd64/start.sh << 'EOF'
       #!/bin/sh
       cd "$(dirname "$0")"
-	      export PATH="$PWD:$PATH"
-	      export CONFIG_DIR="$PWD/config"
-	      export PORT="${PORT:-30000}"
-	      ./main
-	      EOF
+      export PATH="$PWD:$PATH"
+      export CONFIG_DIR="$PWD/config"
+      export PORT="${PORT:-30000}"
+      ./main
+      EOF
     - chmod +x singbox-proxy-manager-linux-amd64/start.sh
     - tar czf singbox-proxy-manager-linux-amd64.tar.gz singbox-proxy-manager-linux-amd64/
   artifacts:

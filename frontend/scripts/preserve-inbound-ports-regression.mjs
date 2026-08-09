@@ -115,6 +115,7 @@ const createMockApiServer = () => {
   }
   let lastReorder = null
   let lastSettingsUpdate = null
+  let settingsUpdateCount = 0
 
   const server = http.createServer((req, res) => {
     if (req.method === 'GET' && req.url === '/api/version') {
@@ -133,6 +134,11 @@ const createMockApiServer = () => {
       return
     }
 
+    if (req.method === 'GET' && req.url === '/api/runtime/status') {
+      sendJson(res, 200, { degraded: false, running: true })
+      return
+    }
+
     if (req.method === 'PUT' && req.url === '/api/settings') {
       let body = ''
       req.on('data', (chunk) => {
@@ -146,6 +152,7 @@ const createMockApiServer = () => {
           ...payload,
         }
         lastSettingsUpdate = payload
+        settingsUpdateCount += 1
 
         const nextPreserve = Boolean(settings.preserve_inbound_ports)
         const prevPreserve = Boolean(prevSettings?.preserve_inbound_ports)
@@ -211,7 +218,13 @@ const createMockApiServer = () => {
     sendJson(res, 404, { error: 'not found', method: req.method, url: req.url })
   })
 
-  const getState = () => ({ nodes, settings, lastReorder, lastSettingsUpdate })
+  const getState = () => ({
+    nodes,
+    settings,
+    lastReorder,
+    lastSettingsUpdate,
+    settingsUpdateCount,
+  })
   return { server, getState }
 }
 
@@ -585,6 +598,29 @@ const run = async () => {
       unexpected: '输入新密码（可选）',
     })
 
+    await page.$eval('input#start_port', (input) => {
+      const modal = input.closest('.ant-modal')
+      const button = modal?.querySelector?.('button[type="submit"]')
+      if (!button) {
+        throw new Error('settings submit button not found')
+      }
+      button.click()
+    })
+    await waitForModalClosed(page)
+    await sleep(800)
+    const stateAfterUnchangedSave = mockApi.getState()
+    assert(
+      stateAfterUnchangedSave.settingsUpdateCount === 0,
+      `unchanged settings issued PUT requests: ${stateAfterUnchangedSave.settingsUpdateCount}`
+    )
+    assert(
+      JSON.stringify(stateAfterUnchangedSave.nodes.map((node) => node.inbound_port)) ===
+        JSON.stringify(portsBefore),
+      `unchanged settings rewrote inbound ports: ${JSON.stringify(stateAfterUnchangedSave.nodes)}`
+    )
+
+    await openSettingsModal(page)
+
     const wasChecked = await page.$eval('input#start_port', (input) => {
       const modal = input.closest('.ant-modal')
       const element = modal?.querySelector?.('.ant-switch')
@@ -622,8 +658,10 @@ const run = async () => {
 	      `expected settings update payload to enable preserve mode, got ${JSON.stringify(stateAfterSettings.lastSettingsUpdate)}`
 	    )
 
-    const dragFrom = await getCellCenter(page, 'tbody.ant-table-tbody tr[data-row-key="1"] td:nth-child(2)')
-    const dragTo = await getCellCenter(page, 'tbody.ant-table-tbody tr[data-row-key="3"] td:nth-child(2)')
+    await page.waitForSelector('[data-testid="node-drag-handle-1"]', { timeout: 10000 })
+    await page.waitForSelector('[data-testid="node-drag-handle-3"]', { timeout: 10000 })
+    const dragFrom = await getCellCenter(page, '[data-testid="node-drag-handle-1"]')
+    const dragTo = await getCellCenter(page, '[data-testid="node-drag-handle-3"]')
     for (let attempt = 1; attempt <= 3; attempt += 1) {
       await page.mouse.move(dragFrom.x, dragFrom.y)
       await page.mouse.down()

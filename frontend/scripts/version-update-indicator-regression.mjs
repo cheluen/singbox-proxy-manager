@@ -14,6 +14,7 @@ const FRONTEND_ROOT = path.resolve(path.dirname(SCRIPT_PATH), '..')
 const FRONTEND_PACKAGE = JSON.parse(fs.readFileSync(path.join(FRONTEND_ROOT, 'package.json'), 'utf8'))
 const LATEST_VERSION = process.env.E2E_LATEST_VERSION || '9.9.9'
 const RELEASE_URL = 'https://github.com/cheluen/singbox-proxy-manager/releases/tag/v9.9.9'
+const loginAttempts = []
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms))
 
@@ -59,6 +60,34 @@ const createMockApiServer = () => http.createServer((req, res) => {
   }
   if (req.method === 'GET' && req.url === '/api/settings') {
     sendJson(res, 200, { start_port: 30001, preserve_inbound_ports: false, admin_password_locked: false })
+    return
+  }
+  if (req.method === 'GET' && req.url === '/api/runtime/status') {
+    sendJson(res, 200, {
+      degraded: true,
+      running: false,
+      message: 'sing-box exited unexpectedly',
+    })
+    return
+  }
+  if (req.method === 'GET' && req.url === '/api/auth/status') {
+    sendJson(res, 200, { setup_required: false, admin_password_locked: false })
+    return
+  }
+  if (req.method === 'POST' && req.url === '/api/login') {
+    let body = ''
+    req.on('data', (chunk) => {
+      body += chunk
+    })
+    req.on('end', () => {
+      const payload = JSON.parse(body || '{}')
+      loginAttempts.push(payload.password || '')
+      if (payload.password === 'correct-password') {
+        sendJson(res, 200, { token: 'version-update-token' })
+        return
+      }
+      sendJson(res, 401, { error: 'invalid password' })
+    })
     return
   }
   sendJson(res, 404, { error: 'not found', method: req.method, url: req.url })
@@ -148,9 +177,53 @@ const run = async () => {
       }
     })
     page.on('pageerror', (err) => consoleErrors.push(`pageerror:${err.message}`))
-    await page.evaluateOnNewDocument(() => localStorage.setItem('token', 'version-update-token'))
+    await page.evaluateOnNewDocument(() => localStorage.setItem('language', 'en'))
     await page.goto(FRONTEND_URL, { waitUntil: 'domcontentloaded' })
+    await page.waitForSelector('input#password', { visible: true, timeout: 15000 })
+
+    let navigationCount = 0
+    const countNavigation = (frame) => {
+      if (frame === page.mainFrame()) navigationCount += 1
+    }
+    page.on('framenavigated', countNavigation)
+    await page.type('input#password', 'wrong-password')
+    await page.$eval('.login-panel button[type="submit"]', (button) => button.click())
+    await page.waitForFunction(
+      () =>
+        Array.from(document.querySelectorAll('.ant-message-notice')).some(
+          (element) => (element.textContent || '').includes('invalid password')
+        ),
+      { timeout: 10000 }
+    )
+    const failedLogin = await page.evaluate(() => ({
+      value: document.querySelector('input#password')?.value || '',
+      loginVisible: Boolean(document.querySelector('.login-card')),
+    }))
+    assert(
+      failedLogin.value === 'wrong-password' && failedLogin.loginVisible,
+      `failed login lost input or left the login page: ${JSON.stringify(failedLogin)}`
+    )
+    assert(navigationCount === 0, `failed login refreshed the page ${navigationCount} time(s)`)
+
+    await page.click('input#password', { clickCount: 3 })
+    await page.keyboard.press('Backspace')
+    await page.type('input#password', 'correct-password')
+    await page.$eval('.login-panel button[type="submit"]', (button) => button.click())
+    await page.waitForFunction(
+      () =>
+        Array.from(document.querySelectorAll('.ant-message-notice')).some(
+          (element) => (element.textContent || '').includes('Login successful')
+        ),
+      { timeout: 10000 }
+    )
+    const loginSuccessNoticeCount = await page.$$eval(
+      '.ant-message-notice',
+      (elements) => elements.filter(
+        (element) => (element.textContent || '').includes('Login successful')
+      ).length
+    )
     await page.waitForSelector('.dashboard-version-update-link', { timeout: 15000 })
+    await page.waitForSelector('[data-testid="runtime-status-degraded"]', { timeout: 15000 })
 
     const result = await page.evaluate(() => {
       const tag = document.querySelector('.dashboard-version-tag')
@@ -159,13 +232,28 @@ const run = async () => {
         tagText: tag?.textContent || '',
         href: link?.getAttribute('href') || '',
         ariaLabel: link?.getAttribute('aria-label') || '',
+        degradedText: document.querySelector('[data-testid="runtime-status-degraded"]')?.textContent || '',
       }
     })
+    page.off('framenavigated', countNavigation)
 
     assert(result.tagText.includes(FRONTEND_PACKAGE.version), `version tag missing current version: ${JSON.stringify(result)}`)
     assert(result.href === RELEASE_URL, `unexpected release URL: ${JSON.stringify(result)}`)
     assert(result.ariaLabel.includes(LATEST_VERSION), `aria-label missing latest version: ${JSON.stringify(result)}`)
-    assert(consoleErrors.length === 0, `browser console errors: ${consoleErrors.join(' | ')}`)
+    assert(result.degradedText.includes('sing-box exited unexpectedly'), `runtime degraded reason missing: ${JSON.stringify(result)}`)
+    assert(loginSuccessNoticeCount === 1, `login success notification duplicated: ${loginSuccessNoticeCount}`)
+    assert(navigationCount === 0, `login flow unexpectedly navigated ${navigationCount} time(s)`)
+    assert(
+      JSON.stringify(loginAttempts) === JSON.stringify(['wrong-password', 'correct-password']),
+      `unexpected login attempts: ${JSON.stringify(loginAttempts)}`
+    )
+    const unexpectedConsoleErrors = consoleErrors.filter(
+      (line) =>
+        !line.includes('401 (Unauthorized)') &&
+        !line.includes('status of 401') &&
+        !line.includes('[antd: message] Static function can not consume context')
+    )
+    assert(unexpectedConsoleErrors.length === 0, `browser console errors: ${unexpectedConsoleErrors.join(' | ')}`)
   } finally {
     if (browser) await browser.close()
     await stopChild(vite.child)
@@ -175,5 +263,6 @@ const run = async () => {
 
 run().catch((error) => {
   console.error(error)
+  console.error(`login attempts: ${JSON.stringify(loginAttempts)}`)
   process.exit(1)
 })

@@ -18,14 +18,15 @@ import (
 
 // ProxyNode represents a proxy node configuration
 type ProxyNode struct {
-	ID          int    `json:"id"`
-	Name        string `json:"name"`
-	Remark      string `json:"remark"`
-	Type        string `json:"type"`   // ss, vless, vmess, hy2, tuic, trojan, anytls, socks5, socks5h, http, wireguard, direct
-	Config      string `json:"config"` // JSON string of protocol-specific config
-	InboundPort int    `json:"inbound_port"`
-	Username    string `json:"username"`
-	Password    string `json:"password"`
+	ID                int    `json:"id"`
+	Name              string `json:"name"`
+	Remark            string `json:"remark"`
+	Type              string `json:"type"`   // ss, vless, vmess, hy2, tuic, trojan, anytls, socks5, socks5h, http, wireguard, direct
+	Config            string `json:"config"` // JSON string of protocol-specific config
+	InboundPort       int    `json:"inbound_port"`
+	InboundPortPinned bool   `json:"inbound_port_pinned"`
+	Username          string `json:"username"`
+	Password          string `json:"password"`
 	// TCPReuseEnabled controls whether username+route-number routing can target this node.
 	TCPReuseEnabled bool      `json:"tcp_reuse_enabled"`
 	SortOrder       int       `json:"sort_order"`
@@ -410,8 +411,10 @@ type WireGuardConfig struct {
 // Settings represents global settings
 type Settings struct {
 	ID                   int       `json:"id"`
+	SingletonKey         int       `json:"-"`
 	AdminPassword        string    `json:"admin_password"`
 	AdminPasswordSet     int       `json:"admin_password_set"`
+	AuthGeneration       int64     `json:"-"`
 	StartPort            int       `json:"start_port"`
 	PreserveInboundPorts bool      `json:"preserve_inbound_ports"`
 	CreatedAt            time.Time `json:"created_at"`
@@ -439,13 +442,13 @@ func InitDB(db *sql.DB) error {
 				log.Printf("Failed to hash initial admin password: %v", err)
 				return err
 			}
-			_, err = db.Exec("INSERT INTO settings (admin_password, admin_password_set, start_port, preserve_inbound_ports) VALUES (?, ?, ?, ?)", string(hashedPassword), 1, 30001, false)
+			_, err = db.Exec("INSERT INTO settings (singleton_key, admin_password, admin_password_set, auth_generation, start_port, preserve_inbound_ports) VALUES (?, ?, ?, ?, ?, ?)", 1, string(hashedPassword), 1, 1, 30001, false)
 			if err != nil {
 				return err
 			}
 			log.Println("Admin password is managed by ADMIN_PASSWORD (env) and has been hashed")
 		} else {
-			_, err = db.Exec("INSERT INTO settings (admin_password, admin_password_set, start_port, preserve_inbound_ports) VALUES (?, ?, ?, ?)", "", 0, 30001, false)
+			_, err = db.Exec("INSERT INTO settings (singleton_key, admin_password, admin_password_set, auth_generation, start_port, preserve_inbound_ports) VALUES (?, ?, ?, ?, ?, ?)", 1, "", 0, 0, 30001, false)
 			if err != nil {
 				return err
 			}
@@ -456,20 +459,20 @@ func InitDB(db *sql.DB) error {
 		var settingsID int
 		var adminPassword string
 		var adminPasswordSet int
-		if err := db.QueryRow("SELECT id, admin_password, admin_password_set FROM settings LIMIT 1").Scan(&settingsID, &adminPassword, &adminPasswordSet); err != nil {
+		if err := db.QueryRow("SELECT id, admin_password, admin_password_set FROM settings WHERE singleton_key = 1").Scan(&settingsID, &adminPassword, &adminPasswordSet); err != nil {
 			return err
 		}
 
 		// If stored admin_password is not a bcrypt hash, force reset.
 		if adminPassword != "" && !strings.HasPrefix(adminPassword, "$2") {
-			if _, err := db.Exec("UPDATE settings SET admin_password = '', admin_password_set = 0, updated_at = CURRENT_TIMESTAMP WHERE id = ?", settingsID); err != nil {
+			if _, err := db.Exec("UPDATE settings SET admin_password = '', admin_password_set = 0, auth_generation = auth_generation + 1, updated_at = CURRENT_TIMESTAMP WHERE id = ?", settingsID); err != nil {
 				return err
 			}
 			log.Println("Admin password storage format is invalid; setup is required")
 		} else if adminPassword != "" {
 			// If the stored hash matches the insecure legacy default, force reset.
 			if err := bcrypt.CompareHashAndPassword([]byte(adminPassword), []byte("admin123")); err == nil {
-				if _, err := db.Exec("UPDATE settings SET admin_password = '', admin_password_set = 0, updated_at = CURRENT_TIMESTAMP WHERE id = ?", settingsID); err != nil {
+				if _, err := db.Exec("UPDATE settings SET admin_password = '', admin_password_set = 0, auth_generation = auth_generation + 1, updated_at = CURRENT_TIMESTAMP WHERE id = ?", settingsID); err != nil {
 					return err
 				}
 				log.Println("Legacy default admin password detected; setup is required")
@@ -478,7 +481,7 @@ func InitDB(db *sql.DB) error {
 				_, _ = db.Exec("UPDATE settings SET admin_password_set = 1 WHERE id = ?", settingsID)
 			}
 		} else if adminPasswordSet != 0 {
-			_, _ = db.Exec("UPDATE settings SET admin_password_set = 0 WHERE id = ?", settingsID)
+			_, _ = db.Exec("UPDATE settings SET admin_password_set = 0, auth_generation = auth_generation + 1 WHERE id = ?", settingsID)
 		}
 
 		// If ADMIN_PASSWORD is provided, it becomes the source of truth and will forcibly
@@ -488,7 +491,7 @@ func InitDB(db *sql.DB) error {
 		if envPassword != "" {
 			var currentHash string
 			var currentSet int
-			if err := db.QueryRow("SELECT admin_password, admin_password_set FROM settings LIMIT 1").Scan(&currentHash, &currentSet); err != nil {
+			if err := db.QueryRow("SELECT admin_password, admin_password_set FROM settings WHERE singleton_key = 1").Scan(&currentHash, &currentSet); err != nil {
 				return err
 			}
 
@@ -506,7 +509,7 @@ func InitDB(db *sql.DB) error {
 					return err
 				}
 				if _, err := db.Exec(
-					"UPDATE settings SET admin_password = ?, admin_password_set = 1, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
+					"UPDATE settings SET admin_password = ?, admin_password_set = 1, auth_generation = auth_generation + 1, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
 					string(hashedPassword),
 					settingsID,
 				); err != nil {
@@ -521,9 +524,13 @@ func InitDB(db *sql.DB) error {
 		}
 	}
 
-	// Clean up expired sessions opportunistically.
+	// Clean up expired or password-generation-invalidated sessions opportunistically.
 	now := time.Now().Unix()
-	_, _ = db.Exec("DELETE FROM admin_sessions WHERE expires_at <= ?", now)
+	_, _ = db.Exec(`
+		DELETE FROM admin_sessions
+		WHERE expires_at <= ?
+		   OR auth_generation <> COALESCE((SELECT auth_generation FROM settings WHERE singleton_key = 1), -1)
+	`, now)
 
 	return nil
 }
@@ -546,7 +553,27 @@ func createSchema(db *sql.DB, dialect appdb.Dialect) error {
 		}
 	}
 
+	if err := normalizeSettingsSingleton(db); err != nil {
+		return err
+	}
+	if err := ensureUniqueIndex(db, dialect, "idx_settings_singleton_key", "settings", "singleton_key"); err != nil {
+		return err
+	}
 	return ensureUniqueIndex(db, dialect, "idx_admin_sessions_token_hash", "admin_sessions", "token_hash")
+}
+
+func normalizeSettingsSingleton(db *sql.DB) error {
+	if _, err := db.Exec(`
+		DELETE FROM settings
+		WHERE id <> (
+			SELECT keep_id
+			FROM (SELECT MIN(id) AS keep_id FROM settings) AS settings_keeper
+		)
+	`); err != nil {
+		return err
+	}
+	_, err := db.Exec("UPDATE settings SET singleton_key = 1 WHERE singleton_key <> 1")
+	return err
 }
 
 func ensureMySQLConfigLongText(db *sql.DB) error {
@@ -585,6 +612,7 @@ func schemaStatements(dialect appdb.Dialect) []string {
 				type TEXT NOT NULL,
 				config TEXT NOT NULL,
 				inbound_port INTEGER NOT NULL,
+				inbound_port_pinned BOOLEAN NOT NULL DEFAULT FALSE,
 				username TEXT NOT NULL DEFAULT '',
 				password TEXT NOT NULL DEFAULT '',
 				tcp_reuse_enabled BOOLEAN NOT NULL DEFAULT TRUE,
@@ -599,8 +627,10 @@ func schemaStatements(dialect appdb.Dialect) []string {
 			)`,
 			`CREATE TABLE IF NOT EXISTS settings (
 				id BIGSERIAL PRIMARY KEY,
+				singleton_key SMALLINT NOT NULL DEFAULT 1,
 				admin_password TEXT NOT NULL,
 				admin_password_set INTEGER DEFAULT 0,
+				auth_generation BIGINT NOT NULL DEFAULT 0,
 				start_port INTEGER DEFAULT 10000,
 				preserve_inbound_ports BOOLEAN NOT NULL DEFAULT FALSE,
 				created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
@@ -609,6 +639,7 @@ func schemaStatements(dialect appdb.Dialect) []string {
 			`CREATE TABLE IF NOT EXISTS admin_sessions (
 				id BIGSERIAL PRIMARY KEY,
 				token_hash TEXT NOT NULL,
+				auth_generation BIGINT NOT NULL DEFAULT 0,
 				expires_at BIGINT NOT NULL,
 				user_agent TEXT NOT NULL DEFAULT '',
 				ip TEXT NOT NULL DEFAULT '',
@@ -624,6 +655,7 @@ func schemaStatements(dialect appdb.Dialect) []string {
 				type VARCHAR(64) NOT NULL,
 				config LONGTEXT NOT NULL,
 				inbound_port INTEGER NOT NULL,
+				inbound_port_pinned BOOLEAN NOT NULL DEFAULT FALSE,
 				username VARCHAR(255) NOT NULL DEFAULT '',
 				password VARCHAR(255) NOT NULL DEFAULT '',
 				tcp_reuse_enabled BOOLEAN NOT NULL DEFAULT TRUE,
@@ -638,8 +670,10 @@ func schemaStatements(dialect appdb.Dialect) []string {
 			)`,
 			`CREATE TABLE IF NOT EXISTS settings (
 				id BIGINT NOT NULL AUTO_INCREMENT PRIMARY KEY,
+				singleton_key SMALLINT NOT NULL DEFAULT 1,
 				admin_password TEXT NOT NULL,
 				admin_password_set INTEGER DEFAULT 0,
+				auth_generation BIGINT NOT NULL DEFAULT 0,
 				start_port INTEGER DEFAULT 10000,
 				preserve_inbound_ports BOOLEAN NOT NULL DEFAULT FALSE,
 				created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
@@ -648,6 +682,7 @@ func schemaStatements(dialect appdb.Dialect) []string {
 			`CREATE TABLE IF NOT EXISTS admin_sessions (
 				id BIGINT NOT NULL AUTO_INCREMENT PRIMARY KEY,
 				token_hash VARCHAR(128) NOT NULL,
+				auth_generation BIGINT NOT NULL DEFAULT 0,
 				expires_at BIGINT NOT NULL,
 				user_agent VARCHAR(512) NOT NULL DEFAULT '',
 				ip VARCHAR(128) NOT NULL DEFAULT '',
@@ -663,6 +698,7 @@ func schemaStatements(dialect appdb.Dialect) []string {
 				type TEXT NOT NULL,
 				config TEXT NOT NULL,
 				inbound_port INTEGER NOT NULL,
+				inbound_port_pinned INTEGER NOT NULL DEFAULT 0,
 				username TEXT DEFAULT '',
 				password TEXT DEFAULT '',
 				tcp_reuse_enabled INTEGER NOT NULL DEFAULT 1,
@@ -677,8 +713,10 @@ func schemaStatements(dialect appdb.Dialect) []string {
 			)`,
 			`CREATE TABLE IF NOT EXISTS settings (
 				id INTEGER PRIMARY KEY AUTOINCREMENT,
+				singleton_key INTEGER NOT NULL DEFAULT 1,
 				admin_password TEXT NOT NULL,
 				admin_password_set INTEGER DEFAULT 0,
+				auth_generation INTEGER NOT NULL DEFAULT 0,
 				start_port INTEGER DEFAULT 10000,
 				preserve_inbound_ports INTEGER NOT NULL DEFAULT 0,
 				created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
@@ -687,6 +725,7 @@ func schemaStatements(dialect appdb.Dialect) []string {
 			`CREATE TABLE IF NOT EXISTS admin_sessions (
 				id INTEGER PRIMARY KEY AUTOINCREMENT,
 				token_hash TEXT NOT NULL,
+				auth_generation INTEGER NOT NULL DEFAULT 0,
 				expires_at INTEGER NOT NULL,
 				user_agent TEXT DEFAULT '',
 				ip TEXT DEFAULT '',
@@ -702,22 +741,34 @@ func migrationColumns(dialect appdb.Dialect) []migrationColumn {
 		return []migrationColumn{
 			{Table: "proxy_nodes", Name: "remark", AlterSQL: "ALTER TABLE proxy_nodes ADD COLUMN remark TEXT NOT NULL DEFAULT ''"},
 			{Table: "proxy_nodes", Name: "tcp_reuse_enabled", AlterSQL: "ALTER TABLE proxy_nodes ADD COLUMN tcp_reuse_enabled BOOLEAN NOT NULL DEFAULT TRUE"},
+			{Table: "proxy_nodes", Name: "inbound_port_pinned", AlterSQL: "ALTER TABLE proxy_nodes ADD COLUMN inbound_port_pinned BOOLEAN NOT NULL DEFAULT FALSE"},
+			{Table: "settings", Name: "singleton_key", AlterSQL: "ALTER TABLE settings ADD COLUMN singleton_key SMALLINT NOT NULL DEFAULT 1"},
 			{Table: "settings", Name: "admin_password_set", AlterSQL: "ALTER TABLE settings ADD COLUMN admin_password_set INTEGER DEFAULT 0"},
+			{Table: "settings", Name: "auth_generation", AlterSQL: "ALTER TABLE settings ADD COLUMN auth_generation BIGINT NOT NULL DEFAULT 0"},
 			{Table: "settings", Name: "preserve_inbound_ports", AlterSQL: "ALTER TABLE settings ADD COLUMN preserve_inbound_ports BOOLEAN NOT NULL DEFAULT FALSE"},
+			{Table: "admin_sessions", Name: "auth_generation", AlterSQL: "ALTER TABLE admin_sessions ADD COLUMN auth_generation BIGINT NOT NULL DEFAULT 0"},
 		}
 	case appdb.DialectMySQL:
 		return []migrationColumn{
 			{Table: "proxy_nodes", Name: "remark", AlterSQL: "ALTER TABLE proxy_nodes ADD COLUMN remark VARCHAR(1024) NOT NULL DEFAULT ''"},
 			{Table: "proxy_nodes", Name: "tcp_reuse_enabled", AlterSQL: "ALTER TABLE proxy_nodes ADD COLUMN tcp_reuse_enabled BOOLEAN NOT NULL DEFAULT TRUE"},
+			{Table: "proxy_nodes", Name: "inbound_port_pinned", AlterSQL: "ALTER TABLE proxy_nodes ADD COLUMN inbound_port_pinned BOOLEAN NOT NULL DEFAULT FALSE"},
+			{Table: "settings", Name: "singleton_key", AlterSQL: "ALTER TABLE settings ADD COLUMN singleton_key SMALLINT NOT NULL DEFAULT 1"},
 			{Table: "settings", Name: "admin_password_set", AlterSQL: "ALTER TABLE settings ADD COLUMN admin_password_set INTEGER DEFAULT 0"},
+			{Table: "settings", Name: "auth_generation", AlterSQL: "ALTER TABLE settings ADD COLUMN auth_generation BIGINT NOT NULL DEFAULT 0"},
 			{Table: "settings", Name: "preserve_inbound_ports", AlterSQL: "ALTER TABLE settings ADD COLUMN preserve_inbound_ports BOOLEAN NOT NULL DEFAULT FALSE"},
+			{Table: "admin_sessions", Name: "auth_generation", AlterSQL: "ALTER TABLE admin_sessions ADD COLUMN auth_generation BIGINT NOT NULL DEFAULT 0"},
 		}
 	default:
 		return []migrationColumn{
 			{Table: "proxy_nodes", Name: "remark", AlterSQL: "ALTER TABLE proxy_nodes ADD COLUMN remark TEXT DEFAULT ''"},
 			{Table: "proxy_nodes", Name: "tcp_reuse_enabled", AlterSQL: "ALTER TABLE proxy_nodes ADD COLUMN tcp_reuse_enabled INTEGER NOT NULL DEFAULT 1"},
+			{Table: "proxy_nodes", Name: "inbound_port_pinned", AlterSQL: "ALTER TABLE proxy_nodes ADD COLUMN inbound_port_pinned INTEGER NOT NULL DEFAULT 0"},
+			{Table: "settings", Name: "singleton_key", AlterSQL: "ALTER TABLE settings ADD COLUMN singleton_key INTEGER NOT NULL DEFAULT 1"},
 			{Table: "settings", Name: "admin_password_set", AlterSQL: "ALTER TABLE settings ADD COLUMN admin_password_set INTEGER DEFAULT 0"},
+			{Table: "settings", Name: "auth_generation", AlterSQL: "ALTER TABLE settings ADD COLUMN auth_generation INTEGER NOT NULL DEFAULT 0"},
 			{Table: "settings", Name: "preserve_inbound_ports", AlterSQL: "ALTER TABLE settings ADD COLUMN preserve_inbound_ports INTEGER NOT NULL DEFAULT 0"},
+			{Table: "admin_sessions", Name: "auth_generation", AlterSQL: "ALTER TABLE admin_sessions ADD COLUMN auth_generation INTEGER NOT NULL DEFAULT 0"},
 		}
 	}
 }

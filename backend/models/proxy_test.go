@@ -34,7 +34,8 @@ func TestInitDB_AdminPasswordFromEnvOverridesExisting(t *testing.T) {
 
 	future := time.Now().Add(24 * time.Hour).Unix()
 	if _, err := db.Exec(
-		"INSERT INTO admin_sessions (token_hash, expires_at, user_agent, ip) VALUES (?, ?, '', '')",
+		`INSERT INTO admin_sessions (token_hash, auth_generation, expires_at, user_agent, ip)
+		 SELECT ?, auth_generation, ?, '', '' FROM settings WHERE singleton_key = 1`,
 		"tok",
 		future,
 	); err != nil {
@@ -87,7 +88,8 @@ func TestInitDB_AdminPasswordFromEnvDoesNotRevokeSessionsWhenUnchanged(t *testin
 
 	future := time.Now().Add(24 * time.Hour).Unix()
 	if _, err := db.Exec(
-		"INSERT INTO admin_sessions (token_hash, expires_at, user_agent, ip) VALUES (?, ?, '', '')",
+		`INSERT INTO admin_sessions (token_hash, auth_generation, expires_at, user_agent, ip)
+		 SELECT ?, auth_generation, ?, '', '' FROM settings WHERE singleton_key = 1`,
 		"tok",
 		future,
 	); err != nil {
@@ -133,6 +135,91 @@ func TestInitDBProxyNodeTCPReuseEnabledDefaultsToTrue(t *testing.T) {
 	}
 	if tcpReuseEnabled != 1 {
 		t.Fatalf("expected tcp_reuse_enabled default to 1, got %d", tcpReuseEnabled)
+	}
+}
+
+func TestInitDBMigratesDuplicateLegacySettingsToSingleton(t *testing.T) {
+	t.Setenv("ADMIN_PASSWORD", "")
+
+	db, err := sql.Open("sqlite", ":memory:")
+	if err != nil {
+		t.Fatalf("open db: %v", err)
+	}
+	defer db.Close()
+
+	if _, err := db.Exec(`
+		CREATE TABLE settings (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			admin_password TEXT NOT NULL,
+			start_port INTEGER DEFAULT 10000,
+			created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+			updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+		)
+	`); err != nil {
+		t.Fatalf("create legacy settings: %v", err)
+	}
+
+	firstHash, err := bcrypt.GenerateFromPassword([]byte("first-password-123"), bcrypt.DefaultCost)
+	if err != nil {
+		t.Fatalf("hash first password: %v", err)
+	}
+	secondHash, err := bcrypt.GenerateFromPassword([]byte("second-password-456"), bcrypt.DefaultCost)
+	if err != nil {
+		t.Fatalf("hash second password: %v", err)
+	}
+	if _, err := db.Exec(
+		"INSERT INTO settings (admin_password, start_port) VALUES (?, ?), (?, ?)",
+		string(firstHash),
+		31000,
+		string(secondHash),
+		32000,
+	); err != nil {
+		t.Fatalf("seed duplicate legacy settings: %v", err)
+	}
+
+	if err := InitDB(db); err != nil {
+		t.Fatalf("migrate legacy database: %v", err)
+	}
+
+	var count int
+	if err := db.QueryRow("SELECT COUNT(*) FROM settings").Scan(&count); err != nil {
+		t.Fatalf("count settings: %v", err)
+	}
+	if count != 1 {
+		t.Fatalf("expected one normalized settings row, got %d", count)
+	}
+
+	var (
+		id               int
+		singletonKey     int
+		storedHash       string
+		adminPasswordSet int
+		authGeneration   int64
+		startPort        int
+	)
+	if err := db.QueryRow(`
+		SELECT id, singleton_key, admin_password, admin_password_set, auth_generation, start_port
+		FROM settings
+	`).Scan(&id, &singletonKey, &storedHash, &adminPasswordSet, &authGeneration, &startPort); err != nil {
+		t.Fatalf("query migrated settings: %v", err)
+	}
+	if id != 1 || singletonKey != 1 || startPort != 31000 {
+		t.Fatalf("expected first legacy row to be retained, got id=%d singleton_key=%d start_port=%d", id, singletonKey, startPort)
+	}
+	if adminPasswordSet != 1 || authGeneration != 0 {
+		t.Fatalf("unexpected migrated auth state: password_set=%d generation=%d", adminPasswordSet, authGeneration)
+	}
+	if err := bcrypt.CompareHashAndPassword([]byte(storedHash), []byte("first-password-123")); err != nil {
+		t.Fatalf("expected first legacy password to be retained: %v", err)
+	}
+
+	if _, err := db.Exec(`
+		INSERT INTO settings (
+			singleton_key, admin_password, admin_password_set, auth_generation,
+			start_port, preserve_inbound_ports
+		) VALUES (1, '', 0, 0, 33000, 0)
+	`); err == nil {
+		t.Fatal("expected singleton unique index to reject a second settings row")
 	}
 }
 

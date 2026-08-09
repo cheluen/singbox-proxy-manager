@@ -213,8 +213,8 @@ func main() {
 	}
 
 	// Create config directory if not exists
-	if err := os.MkdirAll(configDir, 0755); err != nil {
-		log.Fatalf("Failed to create config directory: %v", err)
+	if err := ensureSecureConfigDir(configDir); err != nil {
+		log.Fatalf("Failed to secure config directory permissions: %v", err)
 	}
 
 	// Initialize database
@@ -283,6 +283,7 @@ func main() {
 		authorized.POST("/nodes/batch-export", handler.BatchExportNodes)
 		authorized.PUT("/nodes/:id", handler.UpdateNode)
 		authorized.PUT("/nodes/:id/remark", handler.UpdateNodeRemark)
+		authorized.PUT("/nodes/:id/port-pin", handler.SetNodeInboundPortPinned)
 		authorized.PUT("/nodes/:id/replace", handler.ReplaceNode)
 		authorized.DELETE("/nodes/:id", handler.DeleteNode)
 		authorized.GET("/nodes/:id/export", handler.ExportNode)
@@ -296,6 +297,7 @@ func main() {
 		// Settings
 		authorized.GET("/settings", handler.GetSettings)
 		authorized.PUT("/settings", handler.UpdateSettings)
+		authorized.GET("/runtime/status", handler.GetRuntimeStatus)
 		authorized.POST("/logout", handler.Logout)
 	}
 
@@ -367,43 +369,72 @@ func main() {
 // logged but not fatal so the management UI stays reachable for recovery.
 func startSingBoxFromDatabase(db *sql.DB, singBoxService *services.SingBoxService, configDir string) {
 	rows, err := db.Query(`
-		SELECT id, name, remark, type, config, inbound_port, username, password, tcp_reuse_enabled,
+		SELECT id, name, remark, type, config, inbound_port, inbound_port_pinned, username, password, tcp_reuse_enabled,
 		       sort_order, node_ip, location, country_code, latency, enabled, created_at, updated_at
 		FROM proxy_nodes
 		ORDER BY sort_order ASC
 	`)
 	if err != nil {
-		log.Printf("Failed to query proxy nodes: %v", err)
+		startPreservedConfigAfterDatabaseFailure(singBoxService, fmt.Errorf("failed to query proxy nodes: %w", err), configDir)
+		return
 	}
+	defer rows.Close()
 
 	var nodes []models.ProxyNode
-	if rows != nil {
-		for rows.Next() {
-			var node models.ProxyNode
-			if err := rows.Scan(
-				&node.ID, &node.Name, &node.Remark, &node.Type, &node.Config, &node.InboundPort,
-				&node.Username, &node.Password, &node.TCPReuseEnabled, &node.SortOrder, &node.NodeIP, &node.Location,
-				&node.CountryCode, &node.Latency, &node.Enabled, &node.CreatedAt, &node.UpdatedAt,
-			); err != nil {
-				log.Printf("Failed to scan proxy node: %v", err)
-				continue
-			}
-			nodes = append(nodes, node)
+	for rows.Next() {
+		var node models.ProxyNode
+		if err := rows.Scan(
+			&node.ID, &node.Name, &node.Remark, &node.Type, &node.Config, &node.InboundPort,
+			&node.InboundPortPinned, &node.Username, &node.Password, &node.TCPReuseEnabled,
+			&node.SortOrder, &node.NodeIP, &node.Location, &node.CountryCode, &node.Latency,
+			&node.Enabled, &node.CreatedAt, &node.UpdatedAt,
+		); err != nil {
+			startPreservedConfigAfterDatabaseFailure(singBoxService, fmt.Errorf("failed to scan proxy node: %w", err), configDir)
+			return
 		}
-		rows.Close()
+		nodes = append(nodes, node)
+	}
+	if err := rows.Err(); err != nil {
+		startPreservedConfigAfterDatabaseFailure(singBoxService, fmt.Errorf("failed while reading proxy nodes: %w", err), configDir)
+		return
 	}
 
 	if err := singBoxService.GenerateGlobalConfig(nodes); err != nil {
 		log.Printf("Failed to generate global config: %v", err)
+		singBoxService.MarkDegraded(err)
 		return
 	}
 
 	if err := singBoxService.Start(); err != nil {
 		log.Printf("Failed to start sing-box: %v", err)
+		singBoxService.MarkDegraded(err)
 		logSingBoxDependencyGuideIfNeeded(err, configDir)
 	} else {
 		log.Println("Sing-box started successfully")
 	}
+}
+
+func ensureSecureConfigDir(configDir string) error {
+	if err := os.MkdirAll(configDir, 0o700); err != nil {
+		return err
+	}
+	return os.Chmod(configDir, 0o700)
+}
+
+func startPreservedConfigAfterDatabaseFailure(
+	singBoxService *services.SingBoxService,
+	databaseErr error,
+	configDir string,
+) {
+	log.Printf("Database read failed; preserving existing sing-box configuration: %v", databaseErr)
+	startErr := singBoxService.StartPreservedConfig()
+	if startErr != nil {
+		log.Printf("Failed to start preserved sing-box configuration: %v", startErr)
+		logSingBoxDependencyGuideIfNeeded(startErr, configDir)
+		singBoxService.MarkDegraded(fmt.Errorf("%v; preserved config start failed: %w", databaseErr, startErr))
+		return
+	}
+	singBoxService.MarkDegraded(databaseErr)
 }
 
 const (

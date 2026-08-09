@@ -1,6 +1,7 @@
 package api
 
 import (
+	"context"
 	"crypto/rand"
 	"crypto/sha256"
 	"crypto/subtle"
@@ -52,13 +53,25 @@ func hashSessionToken(token string) string {
 }
 
 func (h *Handler) isValidAdminSession(token string) (bool, error) {
+	return h.isValidAdminSessionContext(context.Background(), token)
+}
+
+func (h *Handler) isValidAdminSessionContext(ctx context.Context, token string) (bool, error) {
 	if token == "" {
 		return false, nil
 	}
 
 	tokenHash := hashSessionToken(token)
 	var expiresAt int64
-	err := h.db.QueryRow("SELECT expires_at FROM admin_sessions WHERE token_hash = ? LIMIT 1", tokenHash).Scan(&expiresAt)
+	err := h.db.QueryRowContext(ctx, `
+		SELECT session.expires_at
+		FROM admin_sessions AS session
+		JOIN settings AS singleton
+		  ON singleton.singleton_key = 1
+		 AND singleton.auth_generation = session.auth_generation
+		WHERE session.token_hash = ?
+		LIMIT 1
+	`, tokenHash).Scan(&expiresAt)
 	switch err {
 	case nil:
 		if time.Now().Unix() > expiresAt {
@@ -74,6 +87,27 @@ func (h *Handler) isValidAdminSession(token string) (bool, error) {
 }
 
 func (h *Handler) createAdminSession(c *gin.Context) (string, time.Time, error) {
+	ctx := context.Background()
+	if c != nil && c.Request != nil {
+		ctx = c.Request.Context()
+	}
+	var generation int64
+	if err := h.db.QueryRowContext(ctx, "SELECT auth_generation FROM settings WHERE singleton_key = 1").Scan(&generation); err != nil {
+		return "", time.Time{}, err
+	}
+	return createAdminSessionWithGeneration(ctx, c, h.db, generation)
+}
+
+type adminSessionExecer interface {
+	ExecContext(ctx context.Context, query string, args ...interface{}) (sql.Result, error)
+}
+
+func createAdminSessionWithGeneration(
+	ctx context.Context,
+	c *gin.Context,
+	execer adminSessionExecer,
+	generation int64,
+) (string, time.Time, error) {
 	expiry := time.Now().Add(adminSessionDuration())
 	userAgent := ""
 	ip := ""
@@ -90,9 +124,11 @@ func (h *Handler) createAdminSession(c *gin.Context) (string, time.Time, error) 
 		token := base64.URLEncoding.EncodeToString(tokenBytes)
 		tokenHash := hashSessionToken(token)
 
-		if _, err := h.db.Exec(
-			"INSERT INTO admin_sessions (token_hash, expires_at, user_agent, ip) VALUES (?, ?, ?, ?)",
+		if _, err := execer.ExecContext(
+			ctx,
+			"INSERT INTO admin_sessions (token_hash, auth_generation, expires_at, user_agent, ip) VALUES (?, ?, ?, ?, ?)",
 			tokenHash,
+			generation,
 			expiry.Unix(),
 			userAgent,
 			ip,

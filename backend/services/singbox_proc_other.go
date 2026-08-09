@@ -8,3 +8,10 @@ import "os/exec"
 // (Pdeathsig is Linux-only); those platforms rely on the manager's signal
 // handler to stop the child.
 func configureSysProcAttr(cmd *exec.Cmd) {}
+
+func terminateProcess(cmd *exec.Cmd) error {
+	if cmd == nil || cmd.Process == nil {
+		return nil
+	}
+	return cmd.Process.Kill()
+}

@@ -291,6 +291,22 @@ const getFieldValueByLabel = async (page, labelText) =>
     return input ? String(input.value || '') : ''
   }, labelText)
 
+const setInputValueBySelector = async (page, selector, value) => {
+  await page.$eval(
+    selector,
+    (input, nextValue) => {
+      const descriptor = Object.getOwnPropertyDescriptor(
+        window.HTMLInputElement.prototype,
+        'value'
+      )
+      descriptor?.set?.call(input, nextValue)
+      input.dispatchEvent(new Event('input', { bubbles: true }))
+      input.dispatchEvent(new Event('change', { bubbles: true }))
+    },
+    value
+  )
+}
+
 const selectOptionByLabel = async (page, labelText, optionText, timeoutMs = 10000) => {
   const opened = await page.evaluate((labelText) => {
     const labels = Array.from(document.querySelectorAll('.ant-form-item-label label'))
@@ -414,6 +430,7 @@ const run = async () => {
     })
 
     const page = await browser.newPage()
+    page.setDefaultNavigationTimeout(120000)
     await page.setViewport({ width: 1440, height: 960 })
     const consoleErrors = []
     page.on('console', (msg) => {
@@ -467,6 +484,19 @@ const run = async () => {
     await setFieldValueByLabel(page, 'Allowed IPs (one per line)', '0.0.0.0/0\n::/0')
     await setFieldValueByLabel(page, 'Reserved Bytes', '162,104,222')
 
+    await setInputValueBySelector(page, '#username', 'wireguard-inbound-user')
+    await clickButtonByText(page, 'Save', 5000)
+    await page.waitForFunction(
+      () =>
+        Array.from(document.querySelectorAll('.ant-form-item-explain-error')).some(
+          (element) => (element.textContent || '').includes('Password is required')
+        ),
+      { timeout: 5000 }
+    )
+    assert(!mockApi.getState().lastCreatePayload, 'single inbound credential was accepted')
+
+    await setInputValueBySelector(page, '#password', 'wireguard-inbound-password')
+
     await clickButtonByText(page, 'Save', 5000)
     await sleep(1000)
 
@@ -474,6 +504,9 @@ const run = async () => {
     assert(state.lastCreatePayload, 'missing create payload')
     assert(state.lastCreatePayload.type === 'wireguard', `unexpected type: ${JSON.stringify(state.lastCreatePayload)}`)
     assert(state.lastCreatePayload.name === 'WARP Node', `unexpected name payload: ${JSON.stringify(state.lastCreatePayload)}`)
+    assert(state.lastCreatePayload.auth_enabled === true, `authentication was not explicitly enabled: ${JSON.stringify(state.lastCreatePayload)}`)
+    assert(state.lastCreatePayload.username === 'wireguard-inbound-user', `unexpected inbound username: ${JSON.stringify(state.lastCreatePayload)}`)
+    assert(state.lastCreatePayload.password === 'wireguard-inbound-password', `unexpected inbound password: ${JSON.stringify(state.lastCreatePayload)}`)
 
     const config = JSON.parse(state.lastCreatePayload.config || '{}')
     assert(config.server === 'engage.cloudflareclient.com', `unexpected wireguard config: ${JSON.stringify(config)}`)

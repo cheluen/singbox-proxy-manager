@@ -88,22 +88,36 @@ func parseIPCheckServiceURLsFromEnv() []string {
 	return out
 }
 
-func waitForTCPReady(addr string, maxWait time.Duration) error {
-	deadline := time.Now().Add(maxWait)
+func waitForTCPReady(ctx context.Context, addr string, maxWait time.Duration) error {
+	waitCtx, cancel := context.WithTimeout(ctx, maxWait)
+	defer cancel()
 	backoff := 50 * time.Millisecond
+	dialer := &net.Dialer{Timeout: 500 * time.Millisecond}
+	var lastErr error
 
 	for {
-		conn, err := net.DialTimeout("tcp", addr, 500*time.Millisecond)
+		conn, err := dialer.DialContext(waitCtx, "tcp", addr)
 		if err == nil {
 			_ = conn.Close()
 			return nil
 		}
+		lastErr = err
 
-		if time.Now().After(deadline) {
-			return err
+		timer := time.NewTimer(backoff)
+		select {
+		case <-waitCtx.Done():
+			if !timer.Stop() {
+				select {
+				case <-timer.C:
+				default:
+				}
+			}
+			if ctx.Err() != nil {
+				return ctx.Err()
+			}
+			return lastErr
+		case <-timer.C:
 		}
-
-		time.Sleep(backoff)
 		if backoff < 500*time.Millisecond {
 			backoff *= 2
 		}
@@ -113,13 +127,22 @@ func waitForTCPReady(addr string, maxWait time.Duration) error {
 // CheckProxyIP checks the IP and location through a proxy
 // proxyAddr should be in format "host:port" or "username:password@host:port"
 func CheckProxyIP(proxyAddr string, username string, password string) (*IPInfo, error) {
+	return CheckProxyIPContext(context.Background(), proxyAddr, username, password)
+}
+
+func CheckProxyIPContext(
+	ctx context.Context,
+	proxyAddr string,
+	username string,
+	password string,
+) (*IPInfo, error) {
 	log.Printf("[IPCheck] Starting IP check for proxy: %s (auth: %v)", proxyAddr, username != "")
 
-	if err := waitForTCPReady(proxyAddr, 2*time.Second); err != nil {
+	if err := waitForTCPReady(ctx, proxyAddr, 2*time.Second); err != nil {
 		return nil, fmt.Errorf("proxy not ready: %w", err)
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), ipCheckTotalDeadline)
+	ctx, cancel := context.WithTimeout(ctx, ipCheckTotalDeadline)
 	defer cancel()
 
 	// Build proxy URL with authentication if provided
@@ -191,32 +214,14 @@ func checkWithSOCKS5(ctx context.Context, proxyAddr string, username string, pas
 		log.Printf("[IPCheck] Failed to create SOCKS5 dialer: %v", err)
 		return nil, fmt.Errorf("failed to create SOCKS5 dialer: %v", err)
 	}
+	contextDialer, ok := dialer.(proxy.ContextDialer)
+	if !ok {
+		return nil, fmt.Errorf("SOCKS5 dialer does not support context cancellation")
+	}
 
 	transport := &http.Transport{
 		DialContext: func(reqCtx context.Context, network string, addr string) (net.Conn, error) {
-			type dialResult struct {
-				conn net.Conn
-				err  error
-			}
-
-			done := make(chan dialResult, 1)
-			go func() {
-				conn, err := dialer.Dial(network, addr)
-				done <- dialResult{conn: conn, err: err}
-			}()
-
-			select {
-			case <-reqCtx.Done():
-				return nil, reqCtx.Err()
-			case res := <-done:
-				if reqCtx.Err() != nil {
-					if res.conn != nil {
-						_ = res.conn.Close()
-					}
-					return nil, reqCtx.Err()
-				}
-				return res.conn, res.err
-			}
+			return contextDialer.DialContext(reqCtx, network, addr)
 		},
 		DisableKeepAlives:  true,
 		DisableCompression: false,

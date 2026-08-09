@@ -19,6 +19,7 @@ import {
     Select,
     AutoComplete,
     Grid,
+    Alert,
   } from 'antd'
 import {
   LogoutOutlined,
@@ -84,6 +85,46 @@ function NodeDragHandle({ recordId, disabled, isDragging, title }) {
     >
       <HolderOutlined aria-hidden="true" />
     </span>
+  )
+}
+
+function DraggableTableBody(props) {
+  return (
+    <Droppable droppableId="table-body">
+      {(provided) => (
+        <tbody ref={provided.innerRef} {...provided.droppableProps} {...props}>
+          {props.children}
+          {provided.placeholder}
+        </tbody>
+      )}
+    </Droppable>
+  )
+}
+
+function PortPinIcon({ pinned }) {
+  return (
+    <svg
+      aria-hidden="true"
+      className="port-pin-icon"
+      viewBox="0 0 20 20"
+      focusable="false"
+    >
+      {pinned ? (
+        <path
+          fill="currentColor"
+          d="M7 2.5h6v1.4l-1.15 1.15v3.82l2.3 2.3v1.33h-3.4V18h-1.5v-5.5h-3.4v-1.33l2.3-2.3V5.05L7 3.9V2.5Z"
+        />
+      ) : (
+        <path
+          fill="none"
+          stroke="currentColor"
+          strokeLinecap="round"
+          strokeLinejoin="round"
+          strokeWidth="1.45"
+          d="M7 2.75h6v1.1L11.8 5.1v3.75l2.25 2.3v1.1h-3.3V18m-1.5 0v-5.75h-3.3v-1.1l2.25-2.3V5.1L7 3.85v-1.1Z"
+        />
+      )}
+    </svg>
   )
 }
 
@@ -413,6 +454,8 @@ function Dashboard({ onLogout }) {
   const [remarkSaving, setRemarkSaving] = useState({})
   const [remarkPanelKeys, setRemarkPanelKeys] = useState({})
   const [nodeUpdating, setNodeUpdating] = useState({})
+  const [portPinUpdating, setPortPinUpdating] = useState({})
+  const [runtimeStatus, setRuntimeStatus] = useState(null)
   const nodesViewportRef = useRef(null)
   const tableContainerRef = useRef(null)
   const virtualDragMetaRef = useRef(null)
@@ -945,10 +988,23 @@ function Dashboard({ onLogout }) {
     }
   }
 
+  const loadRuntimeStatus = async () => {
+    try {
+      const response = await api.get('/runtime/status')
+      setRuntimeStatus(response.data || null)
+    } catch {
+      // A transient status request failure must not hide the last known state.
+    }
+  }
+
   useEffect(() => {
     loadNodes()
     loadVersion()
     loadSettings({ silent: true })
+    loadRuntimeStatus()
+
+    const runtimePoll = window.setInterval(loadRuntimeStatus, 5000)
+    return () => window.clearInterval(runtimePoll)
   }, [])
 
   const loadVersion = async () => {
@@ -992,6 +1048,7 @@ function Dashboard({ onLogout }) {
         if ((prev?.type ?? '') !== (next?.type ?? '')) return false
         if ((prev?.config ?? '') !== (next?.config ?? '')) return false
         if ((prev?.inbound_port ?? 0) !== (next?.inbound_port ?? 0)) return false
+        if (Boolean(prev?.inbound_port_pinned) !== Boolean(next?.inbound_port_pinned)) return false
         if ((prev?.username ?? '') !== (next?.username ?? '')) return false
         if ((prev?.password ?? '') !== (next?.password ?? '')) return false
         if ((prev?.tcp_reuse_enabled ?? true) !== (next?.tcp_reuse_enabled ?? true)) return false
@@ -1685,6 +1742,7 @@ function Dashboard({ onLogout }) {
         inbound_port: node?.inbound_port ?? 0,
         username: node?.username ?? '',
         password: node?.password ?? '',
+        auth_enabled: Boolean(node?.username && node?.password),
         enabled: nextEnabled,
         tcp_reuse_enabled: node?.tcp_reuse_enabled,
       })
@@ -1738,6 +1796,7 @@ function Dashboard({ onLogout }) {
         inbound_port: node?.inbound_port ?? 0,
         username: node?.username ?? '',
         password: node?.password ?? '',
+        auth_enabled: Boolean(node?.username && node?.password),
         enabled: node?.enabled !== false,
         tcp_reuse_enabled: nextTCPReuseEnabled,
       })
@@ -1757,6 +1816,64 @@ function Dashboard({ onLogout }) {
     } finally {
       setNodeUpdating((prev) => ({ ...prev, [id]: false }))
     }
+  }
+
+  const handleTogglePortPin = async (node) => {
+    const id = node?.id
+    if (!id || preserveInboundPorts || portPinUpdating[id]) return
+
+    const nextPinned = !Boolean(node?.inbound_port_pinned)
+    setPortPinUpdating((prev) => ({ ...prev, [id]: true }))
+    try {
+      await api.put(`/nodes/${id}/port-pin`, { pinned: nextPinned })
+      setNodes((prev) =>
+        prev.map((item) =>
+          String(item?.id) === String(id)
+            ? { ...item, inbound_port_pinned: nextPinned }
+            : item
+        )
+      )
+      message.success(t(nextPinned ? 'port_pin_enabled' : 'port_pin_disabled'))
+    } catch (error) {
+      message.error(error.response?.data?.error || t('server_error'))
+      await loadNodes({ silent: true })
+    } finally {
+      setPortPinUpdating((prev) => ({ ...prev, [id]: false }))
+    }
+  }
+
+  const renderInboundPort = (record) => {
+    const port = record?.inbound_port ?? '-'
+    if (preserveInboundPorts) {
+      return <span className="inbound-port-value">{port}</span>
+    }
+
+    const pinned = Boolean(record?.inbound_port_pinned)
+    const updating = Boolean(portPinUpdating[record?.id])
+    const title = t(pinned ? 'port_pin_remove_hint' : 'port_pin_add_hint')
+
+    return (
+      <Tooltip title={title}>
+        <button
+          type="button"
+          className={`port-pin-control${pinned ? ' port-pin-control--pinned' : ''}`}
+          data-testid={`node-port-pin-${String(record?.id ?? '')}`}
+          aria-label={title}
+          aria-pressed={pinned}
+          disabled={updating}
+          onPointerDown={(event) => event.stopPropagation()}
+          onClick={(event) => {
+            event.stopPropagation()
+            handleTogglePortPin(record)
+          }}
+        >
+          <span className="port-pin-control__value">{port}</span>
+          <span className={`port-pin-control__icon${updating ? ' port-pin-control__icon--loading' : ''}`}>
+            <PortPinIcon pinned={pinned} />
+          </span>
+        </button>
+      </Tooltip>
+    )
   }
 
   const handleDragEnd = async (result) => {
@@ -1856,7 +1973,7 @@ function Dashboard({ onLogout }) {
                     {
                       key: 'port',
                       label: t('inbound_port'),
-                      children: record.inbound_port ?? '-',
+                      children: renderInboundPort(record),
                     },
                     {
                       key: 'ip',
@@ -1984,11 +2101,21 @@ function Dashboard({ onLogout }) {
         ),
       },
       {
-        title: isMobile ? t('node_name_short') : t('node_name'),
+        title: t('node_name_short'),
         dataIndex: 'name',
         key: 'name',
-        ellipsis: true,
-        width: isMobile ? 84 : 110,
+        ellipsis: { showTitle: false },
+        width: isMobile ? 72 : 88,
+        render: (name) => {
+          const fullName = String(name ?? '')
+          return (
+            <Tooltip title={fullName || '-'}>
+              <Text className="node-name-ellipsis" ellipsis>
+                {fullName || '-'}
+              </Text>
+            </Tooltip>
+          )
+        },
       },
       {
         title: t('remark'),
@@ -2018,8 +2145,9 @@ function Dashboard({ onLogout }) {
         title: t('inbound_port'),
         dataIndex: 'inbound_port',
         key: 'inbound_port',
-        width: 72,
+        width: 94,
         responsive: ['md'],
+        render: (_, record) => renderInboundPort(record),
       },
       {
         title: t('username'),
@@ -2229,17 +2357,6 @@ function Dashboard({ onLogout }) {
       )
     }
 
-    const DraggableBody = (props) => (
-      <Droppable droppableId="table-body">
-        {(provided) => (
-          <tbody ref={provided.innerRef} {...provided.droppableProps} {...props}>
-            {props.children}
-            {provided.placeholder}
-          </tbody>
-        )}
-      </Droppable>
-    )
-
     const table = (
       <div
         ref={tableContainerRef}
@@ -2251,10 +2368,11 @@ function Dashboard({ onLogout }) {
           dataSource={displayNodes}
           rowKey="id"
           size="small"
+          tableLayout="fixed"
           virtual={virtualTableEnabled}
           listItemHeight={virtualListItemHeight}
           scroll={{
-            x: virtualTableEnabled ? tableScrollWidth : 'max-content',
+            x: tableScrollWidth,
             y: Math.max(0, tableBodyScrollY || 0),
           }}
           expandable={{
@@ -2284,7 +2402,7 @@ function Dashboard({ onLogout }) {
             dragSortInTableEnabled && dragSortAllowed
               ? {
                   body: {
-                    wrapper: DraggableBody,
+                    wrapper: DraggableTableBody,
                     row: DraggableRow,
                   },
                 }
@@ -2374,7 +2492,7 @@ function Dashboard({ onLogout }) {
 	            </Button>
 	            <Button
 	              icon={<LogoutOutlined />}
-	              onClick={onLogout}
+            onClick={() => onLogout()}
 	              danger
 	            >
 	              {t('logout')}
@@ -2383,6 +2501,16 @@ function Dashboard({ onLogout }) {
 	        </Header>
 
       <Content className="dashboard-content">
+        {runtimeStatus?.degraded && (
+          <Alert
+            className="runtime-status-alert"
+            data-testid="runtime-status-degraded"
+            type="error"
+            showIcon
+            message={t('runtime_degraded')}
+            description={runtimeStatus?.message || t('runtime_degraded_desc')}
+          />
+        )}
         <div className="dashboard-toolbar">
           <div
             className="dashboard-toolbar-row dashboard-toolbar-row--primary"
@@ -2728,6 +2856,7 @@ function Dashboard({ onLogout }) {
             await loadSettings({ silent: true })
             await loadNodes({ silent: true })
           }}
+          onPasswordChanged={() => onLogout({ revoke: false })}
         />
       </Modal>
 

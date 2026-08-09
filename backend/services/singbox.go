@@ -17,11 +17,25 @@ import (
 )
 
 type SingBoxService struct {
-	configDir string
-	process   *exec.Cmd
-	logFile   *os.File
-	waitCh    chan error
-	mu        sync.RWMutex
+	configDir         string
+	process           *exec.Cmd
+	logFile           *os.File
+	processDone       chan struct{}
+	processErr        error
+	processGeneration uint64
+	stopRequested     bool
+	runtimeStatus     SingBoxRuntimeStatus
+	mu                sync.RWMutex
+}
+
+type SingBoxRuntimeStatus struct {
+	State      string `json:"state"`
+	Running    bool   `json:"running"`
+	Degraded   bool   `json:"degraded"`
+	Message    string `json:"message,omitempty"`
+	PID        int    `json:"pid,omitempty"`
+	StartedAt  int64  `json:"started_at,omitempty"`
+	LastExitAt int64  `json:"last_exit_at,omitempty"`
 }
 
 var (
@@ -97,7 +111,8 @@ func isExecutableBinary(info os.FileInfo) bool {
 
 func NewSingBoxService(configDir string) *SingBoxService {
 	return &SingBoxService{
-		configDir: configDir,
+		configDir:     configDir,
+		runtimeStatus: SingBoxRuntimeStatus{State: "stopped"},
 	}
 }
 
@@ -340,11 +355,37 @@ func (s *SingBoxService) lastGoodConfigPath() string {
 // writeConfigFile writes config.json atomically (temp file + rename) so an
 // interrupted write can never leave a truncated config behind.
 func (s *SingBoxService) writeConfigFile(configJSON []byte) error {
-	tmpPath := s.configPath() + ".tmp"
-	if err := os.WriteFile(tmpPath, configJSON, 0644); err != nil {
+	return writeSensitiveFileAtomically(s.configPath(), configJSON)
+}
+
+func writeSensitiveFileAtomically(path string, content []byte) error {
+	dir := filepath.Dir(path)
+	tmpFile, err := os.CreateTemp(dir, ".sbpm-sensitive-*.tmp")
+	if err != nil {
 		return err
 	}
-	return os.Rename(tmpPath, s.configPath())
+	tmpPath := tmpFile.Name()
+	defer func() { _ = os.Remove(tmpPath) }()
+
+	if err := tmpFile.Chmod(0o600); err != nil {
+		_ = tmpFile.Close()
+		return err
+	}
+	if _, err := tmpFile.Write(content); err != nil {
+		_ = tmpFile.Close()
+		return err
+	}
+	if err := tmpFile.Sync(); err != nil {
+		_ = tmpFile.Close()
+		return err
+	}
+	if err := tmpFile.Close(); err != nil {
+		return err
+	}
+	if err := os.Rename(tmpPath, path); err != nil {
+		return err
+	}
+	return os.Chmod(path, 0o600)
 }
 
 // ValidateConfig runs `sing-box check` against a candidate configuration
@@ -420,12 +461,7 @@ func (s *SingBoxService) saveLastGoodConfig() {
 		fmt.Printf("Warning: failed to read config for last-good snapshot: %v\n", err)
 		return
 	}
-	tmpPath := s.lastGoodConfigPath() + ".tmp"
-	if err := os.WriteFile(tmpPath, configJSON, 0644); err != nil {
-		fmt.Printf("Warning: failed to save last-good config: %v\n", err)
-		return
-	}
-	if err := os.Rename(tmpPath, s.lastGoodConfigPath()); err != nil {
+	if err := writeSensitiveFileAtomically(s.lastGoodConfigPath(), configJSON); err != nil {
 		fmt.Printf("Warning: failed to save last-good config: %v\n", err)
 	}
 }
@@ -507,6 +543,7 @@ func prepareEnabledNodes(nodes []models.ProxyNode) ([]parsedEnabledNode, bool, e
 	nameToIndices := make(map[string][]int, len(nodes))
 	tagToIndex := make(map[string]int, len(nodes))
 	idToIndex := make(map[int]int, len(nodes))
+	inboundPortToID := make(map[int]int, len(nodes))
 
 	for i := range nodes {
 		node := &nodes[i]
@@ -516,6 +553,26 @@ func prepareEnabledNodes(nodes []models.ProxyNode) ([]parsedEnabledNode, bool, e
 		if strings.Contains(node.Username, "+") {
 			return nil, false, fmt.Errorf("node %d username must not contain '+'", node.ID)
 		}
+		// Keep this paired-field check identical to the inbound generator below:
+		// whitespace is still credential data, while only the exact empty string
+		// disables authentication.
+		usernameSet := node.Username != ""
+		passwordSet := node.Password != ""
+		if usernameSet != passwordSet {
+			return nil, false, fmt.Errorf("node %d inbound username and password must be provided together", node.ID)
+		}
+		if node.InboundPort <= 0 || node.InboundPort > 65535 {
+			return nil, false, fmt.Errorf("node %d inbound port out of range", node.ID)
+		}
+		if previousID, exists := inboundPortToID[node.InboundPort]; exists {
+			return nil, false, fmt.Errorf(
+				"duplicate enabled inbound port %d (nodes %d and %d)",
+				node.InboundPort,
+				previousID,
+				node.ID,
+			)
+		}
+		inboundPortToID[node.InboundPort] = node.ID
 		if previous, exists := idToIndex[node.ID]; exists {
 			return nil, false, fmt.Errorf("duplicate enabled node id %d (nodes %q and %q)", node.ID, parsedNodes[previous].Node.Name, node.Name)
 		}
@@ -2293,14 +2350,16 @@ func (s *SingBoxService) Start() error {
 		return err
 	}
 
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
 	configPath := filepath.Join(s.configDir, "config.json")
 
-	// Check if config exists
-	if _, err := os.Stat(configPath); os.IsNotExist(err) {
-		return fmt.Errorf("config file not found: %s", configPath)
+	if _, err := os.Stat(configPath); err != nil {
+		if os.IsNotExist(err) {
+			return fmt.Errorf("config file not found: %s", configPath)
+		}
+		return fmt.Errorf("failed to access config file: %w", err)
+	}
+	if err := os.Chmod(configPath, 0o600); err != nil {
+		return fmt.Errorf("failed to secure config file permissions: %w", err)
 	}
 
 	singBoxBinary, err := s.resolveSingBoxBinary()
@@ -2312,10 +2371,13 @@ func (s *SingBoxService) Start() error {
 	// SIGKILL'ed manager cannot leave an orphaned sing-box behind.
 	configureSysProcAttr(cmd)
 
-	// Set up logging
 	logPath := filepath.Join(s.configDir, "singbox.log")
-	logFile, err := os.OpenFile(logPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
+	logFile, err := os.OpenFile(logPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
 	if err != nil {
+		return err
+	}
+	if err := logFile.Chmod(0o600); err != nil {
+		_ = logFile.Close()
 		return err
 	}
 	cmd.Stdout = logFile
@@ -2326,60 +2388,186 @@ func (s *SingBoxService) Start() error {
 		return err
 	}
 
-	waitCh := make(chan error, 1)
-	go func() {
-		waitCh <- cmd.Wait()
-	}()
+	done := make(chan struct{})
+	s.mu.Lock()
+	s.processGeneration++
+	generation := s.processGeneration
+	s.process = cmd
+	s.logFile = logFile
+	s.processDone = done
+	s.processErr = nil
+	s.stopRequested = false
+	s.runtimeStatus = SingBoxRuntimeStatus{
+		State:     "starting",
+		Running:   true,
+		PID:       cmd.Process.Pid,
+		StartedAt: time.Now().Unix(),
+	}
+	s.mu.Unlock()
 
+	go s.watchProcess(cmd, logFile, done, generation)
+
+	timer := time.NewTimer(singBoxStartupGrace())
+	defer timer.Stop()
 	select {
-	case err := <-waitCh:
-		logFile.Close()
-		return fmt.Errorf("sing-box exited early: %w", err)
-	case <-time.After(300 * time.Millisecond):
+	case <-done:
+		s.mu.RLock()
+		exitErr := s.processErr
+		s.mu.RUnlock()
+		if exitErr == nil {
+			return fmt.Errorf("sing-box exited during startup")
+		}
+		return fmt.Errorf("sing-box exited during startup: %w", exitErr)
+	case <-timer.C:
 	}
 
-	s.process = cmd
-	s.logFile = logFile // Save log file handle for later cleanup
-	s.waitCh = waitCh
+	s.mu.Lock()
+	if s.process != cmd || s.processGeneration != generation {
+		exitErr := s.processErr
+		s.mu.Unlock()
+		if exitErr == nil {
+			return fmt.Errorf("sing-box exited during startup")
+		}
+		return fmt.Errorf("sing-box exited during startup: %w", exitErr)
+	}
+	s.runtimeStatus.State = "running"
+	s.runtimeStatus.Running = true
+	s.runtimeStatus.Degraded = false
+	s.runtimeStatus.Message = ""
+	s.mu.Unlock()
+
 	s.saveLastGoodConfig()
 	return nil
+}
+
+func singBoxStartupGrace() time.Duration {
+	const defaultGrace = time.Second
+	raw := strings.TrimSpace(os.Getenv("SBPM_SINGBOX_STARTUP_GRACE"))
+	if raw == "" {
+		return defaultGrace
+	}
+	grace, err := time.ParseDuration(raw)
+	if err != nil || grace < 10*time.Millisecond || grace > 30*time.Second {
+		return defaultGrace
+	}
+	return grace
+}
+
+func (s *SingBoxService) watchProcess(
+	cmd *exec.Cmd,
+	logFile *os.File,
+	done chan struct{},
+	generation uint64,
+) {
+	err := cmd.Wait()
+	exitedAt := time.Now().Unix()
+
+	s.mu.Lock()
+	if s.process == cmd && s.processGeneration == generation {
+		expected := s.stopRequested
+		s.process = nil
+		s.logFile = nil
+		s.processDone = nil
+		s.processErr = err
+		s.stopRequested = false
+		if expected {
+			s.runtimeStatus = SingBoxRuntimeStatus{
+				State:      "stopped",
+				LastExitAt: exitedAt,
+			}
+		} else {
+			message := "sing-box exited unexpectedly"
+			if err != nil {
+				message = fmt.Sprintf("sing-box exited unexpectedly: %v", err)
+			}
+			s.runtimeStatus = SingBoxRuntimeStatus{
+				State:      "degraded",
+				Degraded:   true,
+				Message:    message,
+				LastExitAt: exitedAt,
+			}
+		}
+	}
+	s.mu.Unlock()
+
+	_ = logFile.Close()
+	close(done)
 }
 
 // Stop stops the sing-box process
 func (s *SingBoxService) Stop() error {
 	s.mu.Lock()
 	cmd := s.process
-	waitCh := s.waitCh
-	logFile := s.logFile
-	s.process = nil
-	s.waitCh = nil
-	s.logFile = nil
+	done := s.processDone
+	if cmd != nil {
+		s.stopRequested = true
+	}
 	s.mu.Unlock()
 
 	if cmd == nil {
-		if logFile != nil {
-			logFile.Close()
-		}
+		s.mu.Lock()
+		s.runtimeStatus = SingBoxRuntimeStatus{State: "stopped"}
+		s.mu.Unlock()
 		return nil
 	}
 
+	var killErr error
 	if cmd.Process != nil {
-		if err := cmd.Process.Kill(); err != nil {
-			// Log but continue - process may already be dead
-			fmt.Printf("Warning: failed to kill existing process: %v\n", err)
+		if err := terminateProcess(cmd); err != nil && !errors.Is(err, os.ErrProcessDone) {
+			killErr = err
 		}
 	}
 
-	if waitCh != nil {
-		<-waitCh
-	} else {
-		cmd.Wait()
+	if done != nil {
+		<-done
 	}
-
-	if logFile != nil {
-		logFile.Close()
+	if killErr != nil {
+		return fmt.Errorf("failed to stop sing-box process: %w", killErr)
 	}
+	return nil
+}
 
+func (s *SingBoxService) RuntimeStatus() SingBoxRuntimeStatus {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	status := s.runtimeStatus
+	status.Running = s.process != nil
+	if s.process != nil && s.process.Process != nil {
+		status.PID = s.process.Process.Pid
+	}
+	return status
+}
+
+func (s *SingBoxService) MarkDegraded(err error) {
+	if err == nil {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.runtimeStatus.State = "degraded"
+	s.runtimeStatus.Degraded = true
+	s.runtimeStatus.Running = s.process != nil
+	s.runtimeStatus.Message = err.Error()
+	if s.process != nil && s.process.Process != nil {
+		s.runtimeStatus.PID = s.process.Process.Pid
+	}
+}
+
+func (s *SingBoxService) StartPreservedConfig() error {
+	currentErr := s.Start()
+	if currentErr == nil {
+		return nil
+	}
+	lastGood, err := os.ReadFile(s.lastGoodConfigPath())
+	if err != nil {
+		return fmt.Errorf("current config failed: %v; last-good config unavailable: %w", currentErr, err)
+	}
+	if err := s.writeConfigFile(lastGood); err != nil {
+		return fmt.Errorf("current config failed: %v; failed to restore last-good config: %w", currentErr, err)
+	}
+	if err := s.Start(); err != nil {
+		return fmt.Errorf("current config failed: %v; last-good config failed: %w", currentErr, err)
+	}
 	return nil
 }
 

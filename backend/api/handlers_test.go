@@ -2,6 +2,7 @@ package api
 
 import (
 	"bytes"
+	"context"
 	"database/sql"
 	"encoding/base64"
 	"encoding/json"
@@ -63,9 +64,14 @@ func newTestHandler(t *testing.T, checker func(string, string, string) (*service
 	}
 	t.Setenv("SINGBOX_BINARY", fakeBinary)
 	t.Setenv("SBPM_SKIP_PORT_AVAILABILITY_CHECK", "1")
+	t.Setenv("SBPM_SINGBOX_STARTUP_GRACE", "10ms")
 	svc := services.NewSingBoxService(t.TempDir())
 	h := NewHandler(db, svc)
-	h.checkProxyIP = checker
+	if checker != nil {
+		h.checkProxyIP = func(_ context.Context, proxyAddr, username, password string) (*services.IPInfo, error) {
+			return checker(proxyAddr, username, password)
+		}
+	}
 	t.Cleanup(func() {
 		_ = svc.Stop()
 		_ = db.Close()

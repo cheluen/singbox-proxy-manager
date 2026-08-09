@@ -121,6 +121,38 @@ func usersForInboundTag(t *testing.T, inbounds []interface{}, tag string) map[st
 	return nil
 }
 
+func TestBuildGlobalConfigRejectsLegacyUnpairedWhitespaceCredentials(t *testing.T) {
+	service := NewSingBoxService(t.TempDir())
+	testCases := []struct {
+		name     string
+		username string
+		password string
+	}{
+		{name: "whitespace username only", username: " ", password: ""},
+		{name: "whitespace password only", username: "", password: "\t"},
+	}
+
+	for _, testCase := range testCases {
+		t.Run(testCase.name, func(t *testing.T) {
+			_, err := service.BuildGlobalConfig([]models.ProxyNode{
+				{
+					ID:          1,
+					Name:        "legacy-node",
+					Type:        "direct",
+					Config:      "{}",
+					InboundPort: 30001,
+					Username:    testCase.username,
+					Password:    testCase.password,
+					Enabled:     true,
+				},
+			})
+			if err == nil {
+				t.Fatal("unpaired legacy credentials must not generate a public inbound")
+			}
+		})
+	}
+}
+
 func TestGenerateGlobalConfigAddsTCPReuseRouting(t *testing.T) {
 	configDir := t.TempDir()
 	service := NewSingBoxService(configDir)

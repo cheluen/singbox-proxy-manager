@@ -277,6 +277,7 @@ function NodeForm({ node, onSave, onCancel }) {
   const [proxyType, setProxyType] = useState(node?.type || 'ss')
   const [loading, setLoading] = useState(false)
   const [preserveInboundPorts, setPreserveInboundPorts] = useState(false)
+  const authEnabled = Form.useWatch('auth_enabled', form)
   const isChineseMode = i18n.language?.startsWith('zh')
 
   useEffect(() => {
@@ -326,8 +327,9 @@ function NodeForm({ node, onSave, onCancel }) {
         type: proxyType,
         config: JSON.stringify(config),
         inbound_port: values.inbound_port || 0, // 0 means auto-assign
-        username: values.username || '',
-        password: values.password || '',
+        auth_enabled: Boolean(values.auth_enabled),
+        username: values.auth_enabled ? values.username || '' : '',
+        password: values.auth_enabled ? values.password || '' : '',
         enabled: values.enabled !== false,
       })
     } catch (error) {
@@ -669,6 +671,9 @@ function NodeForm({ node, onSave, onCancel }) {
     inbound_port: node?.inbound_port || 0,
     username: node?.username || '',
     password: node?.password || '',
+    auth_enabled: node?.id
+      ? Boolean(node?.username && node?.password)
+      : true,
     server: normalizedConfig.server || '',
     server_port: normalizedConfig.server_port || 443,
     ...normalizedConfig,
@@ -1227,10 +1232,15 @@ function NodeForm({ node, onSave, onCancel }) {
                 'Leave as 0 for auto-assignment based on node order',
                 '填 0 按节点顺序自动分配'
               )
-            : withExtraHint(
-                'Managed by system order (enable Preserve Inbound Ports in Settings to edit)',
-                '当前未开启保留入站端口：端口由系统按顺序分配，无法手动修改；如需修改请先在系统设置开启“保留入站端口”'
-              )
+            : node?.inbound_port_pinned
+              ? withExtraHint(
+                  'This port is pinned and can be changed without automatic reassignment',
+                  '该节点端口已固定，可在此手动修改且不会参与自动重排'
+                )
+              : withExtraHint(
+                  'Managed by system order (enable Preserve Inbound Ports in Settings to edit)',
+                  '当前未开启保留入站端口：端口由系统按顺序分配，无法手动修改；如需修改请先在系统设置开启“保留入站端口”'
+                )
         }
       >
         <InputNumber
@@ -1238,7 +1248,7 @@ function NodeForm({ node, onSave, onCancel }) {
           max={65535}
           style={{ width: '100%' }}
           placeholder="0 (auto)"
-          disabled={!preserveInboundPorts}
+          disabled={!preserveInboundPorts && !node?.inbound_port_pinned}
         />
       </Form.Item>
 
@@ -1276,31 +1286,74 @@ function NodeForm({ node, onSave, onCancel }) {
         />
       )}
 
-      <Form.Item label={withHint('Inbound Authentication (Optional)', '入站认证（可选）')}>
-        <Space.Compact style={{ width: '100%' }}>
-          <Form.Item
-            name="username"
-            noStyle
-            rules={[
-              {
-                validator: (_, value) => {
-                  if (!value || !String(value).includes('+')) {
-                    return Promise.resolve()
-                  }
-                  return Promise.reject(
-                    new Error(withHint('Username cannot contain +', '用户名不能包含 +'))
-                  )
-                },
-              },
-            ]}
-          >
-            <Input placeholder={withHint('Username', '用户名')} style={{ width: '50%' }} />
-          </Form.Item>
-          <Form.Item name="password" noStyle>
-            <Input.Password placeholder={withHint('Password', '密码')} style={{ width: '50%' }} />
-          </Form.Item>
-        </Space.Compact>
+      <Form.Item
+        label={withHint('Inbound Authentication', '入站认证')}
+        name="auth_enabled"
+        valuePropName="checked"
+        extra={withExtraHint(
+          'Disable explicitly to expose this inbound without authentication',
+          '只有明确关闭后，该入站才会以无认证方式开放'
+        )}
+      >
+        <Switch
+          checkedChildren={withHint('Enabled', '启用')}
+          unCheckedChildren={withHint('Disabled', '关闭')}
+          onChange={(enabled) => {
+            if (!enabled) {
+              form.setFieldsValue({ username: '', password: '' })
+            }
+          }}
+        />
       </Form.Item>
+
+      {authEnabled && (
+        <Form.Item label={withHint('Authentication Credentials', '认证凭据')} required>
+          <Space.Compact style={{ width: '100%' }}>
+            <Form.Item
+              name="username"
+              noStyle
+              dependencies={['auth_enabled', 'password']}
+              rules={[
+                {
+                  validator: (_, value) => {
+                    if (!form.getFieldValue('auth_enabled')) {
+                      return Promise.resolve()
+                    }
+                    if (!value) {
+                      return Promise.reject(new Error(withHint('Username is required', '请输入用户名')))
+                    }
+                    if (!String(value).includes('+')) {
+                      return Promise.resolve()
+                    }
+                    return Promise.reject(
+                      new Error(withHint('Username cannot contain +', '用户名不能包含 +'))
+                    )
+                  },
+                },
+              ]}
+            >
+              <Input placeholder={withHint('Username', '用户名')} style={{ width: '50%' }} />
+            </Form.Item>
+            <Form.Item
+              name="password"
+              noStyle
+              dependencies={['auth_enabled', 'username']}
+              rules={[
+                {
+                  validator: (_, value) => {
+                    if (!form.getFieldValue('auth_enabled') || value) {
+                      return Promise.resolve()
+                    }
+                    return Promise.reject(new Error(withHint('Password is required', '请输入密码')))
+                  },
+                },
+              ]}
+            >
+              <Input.Password placeholder={withHint('Password', '密码')} style={{ width: '50%' }} />
+            </Form.Item>
+          </Space.Compact>
+        </Form.Item>
+      )}
 
       <Form.Item label={withHint('Node Status', '节点启用状态')} name="enabled" valuePropName="checked">
         <Switch checkedChildren="Enabled" unCheckedChildren="Disabled" />

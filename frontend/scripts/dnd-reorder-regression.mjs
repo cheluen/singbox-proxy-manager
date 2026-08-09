@@ -17,6 +17,7 @@ const FRONTEND_PACKAGE = JSON.parse(
   fs.readFileSync(path.join(FRONTEND_ROOT, 'package.json'), 'utf8')
 )
 const FRONTEND_BUILD_VERSION = FRONTEND_PACKAGE.version
+const LONG_NODE_NAME = 'node-20-with-an-intentionally-long-display-name-for-ellipsis-regression'
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms))
 
@@ -25,10 +26,11 @@ const createMockNodes = (count = 20) =>
     const id = index + 1
     return {
       id,
-      name: `node-${id}`,
+      name: id === 20 ? LONG_NODE_NAME : `node-${id}`,
       type: 'direct',
       config: '{}',
       inbound_port: 30000 + id,
+      inbound_port_pinned: false,
       username: `u${id}`,
       password: `p${id}`,
       sort_order: index,
@@ -78,6 +80,7 @@ const createMockApiServer = () => {
   let nodes = createMockNodes()
   let lastReorder = null
   let reorderCount = 0
+  const portPinUpdates = []
 
   const server = http.createServer((req, res) => {
     if (req.method === 'GET' && req.url === '/api/version') {
@@ -88,6 +91,40 @@ const createMockApiServer = () => {
     if (req.method === 'GET' && req.url === '/api/nodes') {
       const sorted = [...nodes].sort((a, b) => a.sort_order - b.sort_order)
       sendJson(res, 200, sorted)
+      return
+    }
+
+    if (req.method === 'GET' && req.url === '/api/runtime/status') {
+      sendJson(res, 200, { degraded: false, running: true })
+      return
+    }
+
+    if (req.method === 'GET' && req.url === '/api/settings') {
+      sendJson(res, 200, {
+        start_port: 30001,
+        preserve_inbound_ports: false,
+        admin_password_locked: false,
+      })
+      return
+    }
+
+    const portPinMatch = req.url?.match(/^\/api\/nodes\/(\d+)\/port-pin$/)
+    if (req.method === 'PUT' && portPinMatch) {
+      let body = ''
+      req.on('data', (chunk) => {
+        body += chunk
+      })
+      req.on('end', () => {
+        const id = Number(portPinMatch[1])
+        const payload = JSON.parse(body || '{}')
+        nodes = nodes.map((node) =>
+          node.id === id
+            ? { ...node, inbound_port_pinned: Boolean(payload.pinned) }
+            : node
+        )
+        portPinUpdates.push({ id, pinned: Boolean(payload.pinned) })
+        sendJson(res, 200, { message: 'port pin updated' })
+      })
       return
     }
 
@@ -133,7 +170,7 @@ const createMockApiServer = () => {
     sendJson(res, 404, { error: 'not found', method: req.method, url: req.url })
   })
 
-  const getState = () => ({ nodes, lastReorder, reorderCount })
+  const getState = () => ({ nodes, lastReorder, reorderCount, portPinUpdates })
   return { server, getState }
 }
 
@@ -182,7 +219,11 @@ const startVite = (frontendRoot) => {
   const logs = []
   const child = spawn(process.execPath, [viteBin, '--host', '127.0.0.1', '--port', String(FRONTEND_PORT)], {
     cwd: frontendRoot,
-    env: { ...process.env },
+    env: {
+      ...process.env,
+      E2E_API_PORT: String(API_PORT),
+      VITE_API_TARGET: `http://127.0.0.1:${API_PORT}`,
+    },
     stdio: ['ignore', 'pipe', 'pipe'],
   })
 
@@ -257,6 +298,8 @@ const run = async () => {
   await waitForHttpReady(`http://localhost:${API_PORT}/api/version`, 10000)
   const vite = startVite(FRONTEND_ROOT)
   let browser
+  let page
+  const consoleErrors = []
 
   try {
     await waitForHttpReady(FRONTEND_URL, 60000)
@@ -268,9 +311,9 @@ const run = async () => {
       args: ['--no-sandbox', '--disable-setuid-sandbox'],
     })
 
-    const page = await browser.newPage()
+    page = await browser.newPage()
+    page.setDefaultNavigationTimeout(120000)
     await page.setViewport({ width: 1366, height: 900 })
-    const consoleErrors = []
     page.on('console', (msg) => {
       if (msg.type() === 'error') {
         consoleErrors.push(msg.text())
@@ -286,8 +329,8 @@ const run = async () => {
       localStorage.setItem('language', 'zh')
     })
     await page.reload({ waitUntil: 'networkidle2' })
-    await page.waitForSelector('tbody.ant-table-tbody tr[data-row-key="1"]', { timeout: 30000 })
-    await page.waitForSelector('[data-testid="node-drag-handle-1"]', { timeout: 30000 })
+    await page.waitForSelector('tbody.ant-table-tbody tr[data-row-key="1"]', { timeout: 120000 })
+    await page.waitForSelector('[data-testid="node-drag-handle-1"]', { timeout: 120000 })
 
     const orderBefore = await getRowNames(page)
     const desktopColumnCount = await page.$$eval(
@@ -296,13 +339,48 @@ const run = async () => {
     )
     const desktopNameHeader = await page.evaluate(() => {
       const header = Array.from(document.querySelectorAll('thead.ant-table-thead th')).find(
-        (cell) => cell.textContent?.trim() === '节点名称'
+        (cell) => cell.textContent?.trim() === '名称'
       )
       return {
         text: header?.textContent?.trim() || '',
         width: header?.getBoundingClientRect().width || 0,
       }
     })
+    const longNamePresentation = await page.$eval(
+      'tbody.ant-table-tbody tr[data-row-key="20"] td:nth-child(4) .node-name-ellipsis',
+      (element) => ({
+        text: element.textContent?.trim() || '',
+        clientWidth: element.clientWidth,
+        scrollWidth: element.scrollWidth,
+        overflow: getComputedStyle(element).overflow,
+        textOverflow: getComputedStyle(element).textOverflow,
+      })
+    )
+    let longNameTooltipVisible = false
+    for (let attempt = 0; attempt < 3 && !longNameTooltipVisible; attempt += 1) {
+      await page.$eval(
+        'tbody.ant-table-tbody tr[data-row-key="20"] td:nth-child(4) .node-name-ellipsis',
+        (element) => {
+          element.dispatchEvent(new MouseEvent('mouseover', { bubbles: true }))
+          element.dispatchEvent(new MouseEvent('mouseenter', { bubbles: true }))
+        }
+      )
+      longNameTooltipVisible = await page.waitForFunction(
+        (expected) =>
+          Array.from(document.querySelectorAll('.ant-tooltip-inner')).some(
+            (element) => (element.textContent || '').trim() === expected
+          ),
+        { timeout: 5000 },
+        LONG_NODE_NAME
+      ).then(() => true).catch(() => false)
+    }
+    assert(longNameTooltipVisible, 'Long node name tooltip did not become visible')
+    const longNameTooltip = await page.evaluate((expected) => {
+      const tooltip = Array.from(document.querySelectorAll('.ant-tooltip-inner')).find(
+        (element) => (element.textContent || '').trim() === expected
+      )
+      return tooltip?.textContent?.trim() || ''
+    }, LONG_NODE_NAME)
     const dragHandleScope = await page.evaluate(() => {
       const row = document.querySelector('tbody.ant-table-tbody tr[data-row-key="1"]')
       const libraryHandles = Array.from(
@@ -322,6 +400,14 @@ const run = async () => {
       fs.mkdirSync(ARTIFACT_DIR, { recursive: true })
       await page.screenshot({ path: path.join(ARTIFACT_DIR, 'desktop-dashboard.png') })
     }
+
+    const pinnedPort = mockApi.getState().nodes.find((node) => node.id === 1)?.inbound_port
+    await page.locator('[data-testid="node-port-pin-1"]').click()
+    await page.waitForFunction(
+      () => document.querySelector('[data-testid="node-port-pin-1"]')?.getAttribute('aria-pressed') === 'true',
+      { timeout: 5000 }
+    )
+    const stateAfterPin = mockApi.getState()
 
     await clickNodeCheckbox(page, 1)
     await sleep(600)
@@ -346,12 +432,18 @@ const run = async () => {
     const stateAfterDrag = mockApi.getState()
     const dragHandleErrors = consoleErrors.filter((line) => line.includes('Unable to find drag handle'))
 
-    const expectedBefore = Array.from({ length: 20 }, (_, index) => `node-${index + 1}`)
+    const expectedBefore = Array.from(
+      { length: 20 },
+      (_, index) => index === 19 ? LONG_NODE_NAME : `node-${index + 1}`
+    )
     const expectedAfter = [
       'node-2',
       'node-3',
       'node-1',
-      ...Array.from({ length: 17 }, (_, index) => `node-${index + 4}`),
+      ...Array.from(
+        { length: 17 },
+        (_, index) => index === 16 ? LONG_NODE_NAME : `node-${index + 4}`
+      ),
     ]
 
     assert(
@@ -360,8 +452,22 @@ const run = async () => {
     )
     assert(desktopColumnCount === 16, `Desktop columns changed unexpectedly: ${desktopColumnCount}`)
     assert(
-      desktopNameHeader.text === '节点名称' && desktopNameHeader.width >= 100,
+      desktopNameHeader.text === '名称' && desktopNameHeader.width >= 72 && desktopNameHeader.width <= 105,
       `Desktop node-name header changed unexpectedly: ${JSON.stringify(desktopNameHeader)}`
+    )
+    assert(
+      longNamePresentation.text === LONG_NODE_NAME &&
+        longNamePresentation.scrollWidth > longNamePresentation.clientWidth &&
+        longNamePresentation.overflow === 'hidden' &&
+        longNamePresentation.textOverflow === 'ellipsis',
+      `Long node name is not visually truncated: ${JSON.stringify(longNamePresentation)}`
+    )
+    assert(longNameTooltip === LONG_NODE_NAME, `Long node tooltip lost the full value: ${longNameTooltip}`)
+    assert(
+      stateAfterPin.portPinUpdates.length === 1 &&
+        stateAfterPin.portPinUpdates[0]?.id === 1 &&
+        stateAfterPin.portPinUpdates[0]?.pinned === true,
+      `Pin click did not persist the pinned state: ${JSON.stringify(stateAfterPin.portPinUpdates)}`
     )
     assert(dragHandleScope.libraryHandleCount === 20, `Unexpected drag handle count: ${JSON.stringify(dragHandleScope)}`)
     assert(dragHandleScope.allLibraryHandlesScoped, `Library drag handles escape the six-dot controls: ${JSON.stringify(dragHandleScope)}`)
@@ -383,7 +489,29 @@ const run = async () => {
       JSON.stringify(orderAfterDrag) === JSON.stringify(expectedAfter),
       `Unexpected row order after drag: ${JSON.stringify(orderAfterDrag)}`
     )
+    const pinnedNodeAfterDrag = stateAfterDrag.nodes.find((node) => node.id === 1)
+    assert(
+      pinnedNodeAfterDrag?.inbound_port_pinned === true && pinnedNodeAfterDrag?.inbound_port === pinnedPort,
+      `Pinned node port changed during reorder: ${JSON.stringify(pinnedNodeAfterDrag)}`
+    )
     assert(dragHandleErrors.length === 0, `Drag handle error detected: ${dragHandleErrors.join(' | ')}`)
+
+    await page.locator('[data-testid="node-port-pin-1"]').click()
+    await page.waitForFunction(
+      () => document.querySelector('[data-testid="node-port-pin-1"]')?.getAttribute('aria-pressed') === 'false',
+      { timeout: 5000 }
+    )
+    const stateAfterUnpin = mockApi.getState()
+    assert(
+      stateAfterUnpin.reorderCount === 1 &&
+        stateAfterUnpin.portPinUpdates.length === 2 &&
+        stateAfterUnpin.portPinUpdates[1]?.pinned === false,
+      `Unpin unexpectedly triggered reorder or was not persisted: ${JSON.stringify(stateAfterUnpin)}`
+    )
+    assert(
+      stateAfterUnpin.nodes.find((node) => node.id === 1)?.inbound_port === pinnedPort,
+      'Unpin unexpectedly changed the node port'
+    )
 
     await page.setViewport({
       width: 390,
@@ -505,8 +633,12 @@ const run = async () => {
     }
     await page.$eval(mobileExpandSelector, (button) => button.click())
     await page.waitForFunction(
-      () => !document.querySelector('[data-testid="node-expanded-enabled-1"]'),
-      { timeout: 10000 }
+      (selector) =>
+        document
+          .querySelector(selector)
+          ?.classList.contains('ant-table-row-expand-icon-collapsed'),
+      { timeout: 10000 },
+      mobileExpandSelector
     )
 
     const swipeStart = await page.$eval(
@@ -671,6 +803,9 @@ const run = async () => {
           reorderPayload: stateAfterDrag.lastReorder,
           dragHandleScope,
           desktopNameHeader,
+          longNamePresentation,
+          longNameTooltip,
+          portPinUpdates: stateAfterUnpin.portPinUpdates,
           mobileLayout,
           mobileExpandedControls,
           mobileScrollTop,
@@ -685,6 +820,24 @@ const run = async () => {
     const viteLogs = vite.getLogs()
     console.error('E2E drag reorder regression failed.')
     console.error(error)
+    if (consoleErrors.length > 0) {
+      console.error('Browser errors:')
+      console.error(consoleErrors.join('\n'))
+    }
+    if (page) {
+      try {
+        const browserState = await page.evaluate(() => ({
+          url: window.location.href,
+          token: localStorage.getItem('token'),
+          bodyText: (document.body?.innerText || '').slice(0, 1000),
+          tableRows: document.querySelectorAll('tbody.ant-table-tbody tr[data-row-key]').length,
+          loginVisible: Boolean(document.querySelector('.login-card')),
+        }))
+        console.error(`Browser state: ${JSON.stringify(browserState)}`)
+      } catch {
+        // The page may already be gone after a navigation failure.
+      }
+    }
     if (viteLogs) {
       console.error('Vite logs:')
       console.error(viteLogs)

@@ -104,7 +104,9 @@ export default {
   enable_after_import: '导入后启用节点',
   
   batch_auth_title: '批量设置认证',
-  batch_auth_desc: '为选中的节点统一设置用户名和密码',
+  batch_auth_desc: '为选中的节点统一启用认证或明确关闭认证',
+  batch_auth_mode_desc: '关闭后会清空所选节点的用户名和密码，并以无认证方式开放入站。',
+  inbound_authentication: '入站认证',
   apply_auth: '应用认证',
   
   batch_delete_confirm: '确认删除选中的 {{count}} 个节点？',
@@ -137,6 +139,8 @@ export default {
   confirm_password: '确认密码',
   password_mismatch: '两次输入的密码不一致',
   settings_updated: '设置已更新',
+  settings_unchanged: '设置没有变化',
+  admin_password_changed_relogin: '管理员密码已更新，请使用新密码重新登录',
   
   // Messages
   node_created: '节点已创建',
@@ -144,6 +148,12 @@ export default {
   node_deleted: '节点已删除',
   node_replaced: '节点已替换',
   nodes_reordered: '节点顺序已更新',
+  port_pin_enabled: '该节点端口已固定',
+  port_pin_disabled: '已取消固定；本次不会触发端口重排',
+  port_pin_add_hint: '点击固定该节点端口',
+  port_pin_remove_hint: '点击取消固定（不会立即重排端口）',
+  runtime_degraded: 'sing-box 运行异常',
+  runtime_degraded_desc: '代理内核已停止或处于降级状态，请检查运行日志。',
   ip_check_started: 'IP检测已开始',
   auth_updated: '认证设置已更新',
   tcp_reuse_auth_required_hint: '该节点未配置入站用户名/密码，开启 TCP 复用后仍无法复用，请先设置鉴权信息',

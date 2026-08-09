@@ -3,7 +3,7 @@ import { Form, Input, InputNumber, Button, message, Divider, Alert, Switch, Moda
 import { useTranslation } from 'react-i18next'
 import api from '../utils/api'
 
-function SettingsForm({ onClose, onUpdated }) {
+function SettingsForm({ onClose, onUpdated, onPasswordChanged }) {
   const { t } = useTranslation()
   const [form] = Form.useForm()
   const [loading, setLoading] = useState(false)
@@ -66,10 +66,16 @@ function SettingsForm({ onClose, onUpdated }) {
     setLoading(true)
     try {
       const updateData = {}
-      if (values.start_port !== undefined) {
+      if (
+        values.start_port !== undefined &&
+        Number(values.start_port) !== Number(settingsData?.start_port)
+      ) {
         updateData.start_port = values.start_port
       }
-      if (values.preserve_inbound_ports !== undefined) {
+      if (
+        values.preserve_inbound_ports !== undefined &&
+        Boolean(values.preserve_inbound_ports) !== Boolean(settingsData?.preserve_inbound_ports)
+      ) {
         updateData.preserve_inbound_ports = Boolean(values.preserve_inbound_ports)
       }
       if (!adminPasswordLocked && values.admin_password) {
@@ -86,10 +92,23 @@ function SettingsForm({ onClose, onUpdated }) {
         }
       }
 
-      await api.put('/settings', updateData)
+      if (Object.keys(updateData).length === 0) {
+        message.info(t('settings_unchanged'))
+        onClose()
+        return
+      }
+
+      const response = await api.put('/settings', updateData)
+      const passwordChanged = Boolean(response.data?.password_changed)
       if (updateData.preserve_inbound_ports !== undefined) {
         setInitialPreserveInboundPorts(Boolean(updateData.preserve_inbound_ports))
       }
+      if (passwordChanged) {
+        message.success(t('admin_password_changed_relogin'))
+        onPasswordChanged?.()
+        return
+      }
+
       await onUpdated?.()
       message.success(t('settings_updated'))
       onClose()

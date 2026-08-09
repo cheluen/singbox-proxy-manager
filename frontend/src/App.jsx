@@ -35,18 +35,29 @@ function App() {
     }
   }, [])
 
+  useEffect(() => {
+    const handleUnauthorized = () => {
+      localStorage.removeItem('token')
+      api.setToken(null)
+      setToken(null)
+    }
+    window.addEventListener('sbpm:unauthorized', handleUnauthorized)
+    return () => window.removeEventListener('sbpm:unauthorized', handleUnauthorized)
+  }, [])
+
   const handleLogin = (newToken) => {
     localStorage.setItem('token', newToken)
     setToken(newToken)
     api.setToken(newToken)
-    message.success('Login successful!')
   }
 
-  const handleLogout = async () => {
-    try {
-      await api.post('/logout')
-    } catch {
-      // Even if backend logout fails, clear local session to force re-auth.
+  const handleLogout = async ({ revoke = true } = {}) => {
+    if (revoke) {
+      try {
+        await api.post('/logout')
+      } catch {
+        // Even if backend logout fails, clear local session to force re-auth.
+      }
     }
     localStorage.removeItem('token')
     setToken(null)

@@ -1,10 +1,10 @@
 package api
 
 import (
+	"context"
 	"database/sql"
 	"encoding/json"
 	"fmt"
-	"log"
 	"net"
 	"net/http"
 	"os"
@@ -26,7 +26,8 @@ type Handler struct {
 	singBoxService *services.SingBoxService
 	loginLimiter   *loginRateLimiter
 	nodeWriteMu    sync.Mutex
-	checkProxyIP   func(proxyAddr string, username string, password string) (*services.IPInfo, error)
+	nodeMutations  *NodeMutationCoordinator
+	checkProxyIP   func(context.Context, string, string, string) (*services.IPInfo, error)
 }
 
 type nodeUpsertRequest struct {
@@ -37,6 +38,7 @@ type nodeUpsertRequest struct {
 	InboundPort     int    `json:"inbound_port"`
 	Username        string `json:"username"`
 	Password        string `json:"password"`
+	AuthEnabled     *bool  `json:"auth_enabled,omitempty"`
 	Enabled         bool   `json:"enabled"`
 	TCPReuseEnabled *bool  `json:"tcp_reuse_enabled"`
 }
@@ -46,7 +48,8 @@ func NewHandler(db *sql.DB, singBoxService *services.SingBoxService) *Handler {
 		db:             db,
 		singBoxService: singBoxService,
 		loginLimiter:   newLoginRateLimiterFromEnv(),
-		checkProxyIP:   services.CheckProxyIP,
+		nodeMutations:  NewNodeMutationCoordinator(db, singBoxService),
+		checkProxyIP:   services.CheckProxyIPContext,
 	}
 }
 
@@ -57,6 +60,24 @@ func hasRouteSeparatorInUsername(username string) bool {
 func validateInboundUsername(username string) error {
 	if hasRouteSeparatorInUsername(strings.TrimSpace(username)) {
 		return fmt.Errorf("username must not contain '+'")
+	}
+	return nil
+}
+
+func validateInboundCredentials(username string, password string, authEnabled *bool) error {
+	usernameSet := username != ""
+	passwordSet := password != ""
+	if usernameSet != passwordSet {
+		return fmt.Errorf("username and password must be provided together")
+	}
+	if authEnabled == nil {
+		return nil
+	}
+	if *authEnabled && !usernameSet {
+		return fmt.Errorf("username and password are required when authentication is enabled")
+	}
+	if !*authEnabled && usernameSet {
+		return fmt.Errorf("username and password must be empty when authentication is disabled")
 	}
 	return nil
 }
@@ -104,7 +125,7 @@ type sqlQueryRower interface {
 func getPortSettings(rower sqlQueryRower) (int, bool, error) {
 	var startPort int
 	var preserveInboundPorts bool
-	if err := rower.QueryRow("SELECT start_port, preserve_inbound_ports FROM settings LIMIT 1").Scan(&startPort, &preserveInboundPorts); err != nil {
+	if err := rower.QueryRow("SELECT start_port, preserve_inbound_ports FROM settings WHERE singleton_key = 1").Scan(&startPort, &preserveInboundPorts); err != nil {
 		return 0, false, err
 	}
 	return startPort, preserveInboundPorts, nil
@@ -171,74 +192,7 @@ func nodeFromUpsertRequest(req nodeUpsertRequest) models.ProxyNode {
 
 // loadAllNodes reads every proxy node from the database ordered by sort_order.
 func (h *Handler) loadAllNodes() ([]models.ProxyNode, error) {
-	rows, err := h.db.Query(`
-		SELECT id, name, remark, type, config, inbound_port, username, password, tcp_reuse_enabled,
-		       sort_order, node_ip, location, country_code, latency, enabled, created_at, updated_at
-		FROM proxy_nodes
-		ORDER BY sort_order ASC
-	`)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-
-	var nodes []models.ProxyNode
-	for rows.Next() {
-		var node models.ProxyNode
-		err := rows.Scan(
-			&node.ID, &node.Name, &node.Remark, &node.Type, &node.Config, &node.InboundPort,
-			&node.Username, &node.Password, &node.TCPReuseEnabled, &node.SortOrder, &node.NodeIP, &node.Location,
-			&node.CountryCode, &node.Latency, &node.Enabled, &node.CreatedAt, &node.UpdatedAt,
-		)
-		if err != nil {
-			return nil, err
-		}
-		nodes = append(nodes, node)
-	}
-	return nodes, rows.Err()
-}
-
-// regenerateAndRestart rebuilds the unified config from the database, validates
-// it with `sing-box check`, and only then swaps it into the running process.
-// A config the kernel would reject therefore never takes down working nodes:
-// on validation failure the running process and the on-disk config are left
-// untouched and the kernel's own error message is returned.
-func (h *Handler) regenerateAndRestart() error {
-	nodes, err := h.loadAllNodes()
-	if err != nil {
-		return err
-	}
-
-	configJSON, err := h.singBoxService.BuildGlobalConfig(nodes)
-	if err != nil {
-		return err
-	}
-
-	if err := h.singBoxService.ValidateConfig(configJSON); err != nil {
-		return err
-	}
-
-	return h.singBoxService.ApplyConfig(configJSON)
-}
-
-// regenerateAndRestartWithRevert applies the new config; when that fails,
-// revert is invoked to undo the database change that produced it, so a bad
-// node cannot stay persisted and wedge every subsequent operation. The revert
-// only restores database state: on validation failure the running process and
-// config file were never touched, and on a start failure ApplyConfig has
-// already rolled the process back to the last-good config, which matches the
-// reverted database contents.
-func (h *Handler) regenerateAndRestartWithRevert(revert func() error) error {
-	err := h.regenerateAndRestart()
-	if err == nil {
-		return nil
-	}
-	if revert != nil {
-		if revertErr := revert(); revertErr != nil {
-			log.Printf("Failed to revert database change after sing-box config error: %v", revertErr)
-		}
-	}
-	return err
+	return loadAllNodesFrom(context.Background(), h.db)
 }
 
 // singboxUpdateError builds the error payload for a failed config update,
@@ -247,74 +201,11 @@ func singboxUpdateError(err error) gin.H {
 	return gin.H{"error": fmt.Sprintf("failed to update sing-box config: %v", err)}
 }
 
-// reorderRemainingNodes reorders all remaining nodes and reassigns ports to fill gaps
-func (h *Handler) reorderRemainingNodes() error {
-	startPort, preserveInboundPorts, err := getPortSettings(h.db)
-	if err != nil {
-		return err
-	}
-
-	// Get all remaining nodes ordered by current sort_order
-	rows, err := h.db.Query("SELECT id FROM proxy_nodes ORDER BY sort_order ASC")
-	if err != nil {
-		return err
-	}
-	defer rows.Close()
-
-	var nodeIDs []int
-	for rows.Next() {
-		var id int
-		if err := rows.Scan(&id); err != nil {
-			return err
-		}
-		nodeIDs = append(nodeIDs, id)
-	}
-
-	// Begin transaction to update all nodes
-	tx, err := h.db.Begin()
-	if err != nil {
-		return err
-	}
-	defer tx.Rollback()
-
-	// Update each node with new sort_order and inbound_port when needed
-	for newSortOrder, nodeID := range nodeIDs {
-		if preserveInboundPorts {
-			_, err := tx.Exec(`
-				UPDATE proxy_nodes
-				SET sort_order = ?, updated_at = CURRENT_TIMESTAMP
-				WHERE id = ?
-			`, newSortOrder, nodeID)
-			if err != nil {
-				return err
-			}
-			continue
-		}
-
-		newPort := startPort + newSortOrder
-		if err := validateInboundPort(newPort); err != nil {
-			return err
-		}
-		_, err := tx.Exec(`
-			UPDATE proxy_nodes
-			SET sort_order = ?, inbound_port = ?, updated_at = CURRENT_TIMESTAMP
-			WHERE id = ?
-		`, newSortOrder, newPort, nodeID)
-
-		if err != nil {
-			return err
-		}
-	}
-
-	// Commit transaction
-	return tx.Commit()
-}
-
 // Auth middleware
 func (h *Handler) AuthMiddleware() gin.HandlerFunc {
 	return func(c *gin.Context) {
 		token := normalizeAuthToken(c.GetHeader("Authorization"))
-		ok, err := h.isValidAdminSession(token)
+		ok, err := h.isValidAdminSessionContext(c.Request.Context(), token)
 		if err != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "database error"})
 			c.Abort()
@@ -352,6 +243,7 @@ func (h *Handler) Login(c *gin.Context) {
 	}
 
 	envPassword := strings.TrimSpace(os.Getenv("ADMIN_PASSWORD"))
+	var authGeneration int64
 	if envPassword != "" {
 		if !constantTimeEqual(envPassword, req.Password) {
 			if h.loginLimiter != nil {
@@ -360,9 +252,17 @@ func (h *Handler) Login(c *gin.Context) {
 			c.JSON(http.StatusUnauthorized, gin.H{"error": "invalid password"})
 			return
 		}
+		if err := h.db.QueryRowContext(c.Request.Context(), "SELECT auth_generation FROM settings WHERE singleton_key = 1").Scan(&authGeneration); err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "database error"})
+			return
+		}
 	} else {
 		var settings models.Settings
-		err := h.db.QueryRow("SELECT id, admin_password, admin_password_set FROM settings LIMIT 1").Scan(&settings.ID, &settings.AdminPassword, &settings.AdminPasswordSet)
+		err := h.db.QueryRowContext(c.Request.Context(), `
+			SELECT id, admin_password, admin_password_set, auth_generation
+			FROM settings
+			WHERE singleton_key = 1
+		`).Scan(&settings.ID, &settings.AdminPassword, &settings.AdminPasswordSet, &settings.AuthGeneration)
 		if err != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "database error"})
 			return
@@ -380,13 +280,19 @@ func (h *Handler) Login(c *gin.Context) {
 			c.JSON(http.StatusUnauthorized, gin.H{"error": "invalid password"})
 			return
 		}
+		authGeneration = settings.AuthGeneration
 	}
 
 	if h.loginLimiter != nil {
 		h.loginLimiter.OnSuccess(ip)
 	}
 
-	token, expiry, err := h.createAdminSession(c)
+	token, expiry, err := createAdminSessionWithGeneration(
+		c.Request.Context(),
+		c,
+		h.db,
+		authGeneration,
+	)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to create session"})
 		return
@@ -406,7 +312,7 @@ func (h *Handler) AuthStatus(c *gin.Context) {
 	if !locked {
 		var set int
 		var hash string
-		err := h.db.QueryRow("SELECT admin_password, admin_password_set FROM settings LIMIT 1").Scan(&hash, &set)
+		err := h.db.QueryRowContext(c.Request.Context(), "SELECT admin_password, admin_password_set FROM settings WHERE singleton_key = 1").Scan(&hash, &set)
 		if err != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "database error"})
 			return
@@ -443,31 +349,57 @@ func (h *Handler) SetupAdminPassword(c *gin.Context) {
 		return
 	}
 
-	var settingsID int
-	var hash string
-	var set int
-	if err := h.db.QueryRow("SELECT id, admin_password, admin_password_set FROM settings LIMIT 1").Scan(&settingsID, &hash, &set); err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "database error"})
-		return
-	}
-	if set != 0 && strings.TrimSpace(hash) != "" {
-		c.JSON(http.StatusConflict, gin.H{"error": "admin password already set"})
-		return
-	}
-
 	hashedPassword, err := bcrypt.GenerateFromPassword([]byte(req.Password), bcrypt.DefaultCost)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to hash password"})
 		return
 	}
-	if _, err := h.db.Exec("UPDATE settings SET admin_password = ?, admin_password_set = 1, updated_at = CURRENT_TIMESTAMP WHERE id = ?", string(hashedPassword), settingsID); err != nil {
+	tx, err := h.db.BeginTx(c.Request.Context(), nil)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "database error"})
+		return
+	}
+	defer tx.Rollback()
+
+	result, err := tx.ExecContext(c.Request.Context(), `
+		UPDATE settings
+		SET admin_password = ?,
+		    admin_password_set = 1,
+		    auth_generation = auth_generation + 1,
+		    updated_at = CURRENT_TIMESTAMP
+		WHERE singleton_key = 1 AND admin_password_set = 0
+	`, string(hashedPassword))
+	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to update password"})
 		return
 	}
+	affected, err := result.RowsAffected()
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to verify password update"})
+		return
+	}
+	if affected != 1 {
+		c.JSON(http.StatusConflict, gin.H{"error": "admin password already set"})
+		return
+	}
 
-	token, expiry, err := h.createAdminSession(c)
+	var authGeneration int64
+	if err := tx.QueryRowContext(c.Request.Context(), "SELECT auth_generation FROM settings WHERE singleton_key = 1").Scan(&authGeneration); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "database error"})
+		return
+	}
+	token, expiry, err := createAdminSessionWithGeneration(
+		c.Request.Context(),
+		c,
+		tx,
+		authGeneration,
+	)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to create session"})
+		return
+	}
+	if err := tx.Commit(); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to commit password setup"})
 		return
 	}
 	c.JSON(http.StatusOK, gin.H{
@@ -478,30 +410,10 @@ func (h *Handler) SetupAdminPassword(c *gin.Context) {
 
 // GetNodes returns all proxy nodes
 func (h *Handler) GetNodes(c *gin.Context) {
-	rows, err := h.db.Query(`
-		SELECT id, name, remark, type, config, inbound_port, username, password, tcp_reuse_enabled,
-		       sort_order, node_ip, location, country_code, latency, enabled, created_at, updated_at
-		FROM proxy_nodes
-		ORDER BY sort_order ASC
-	`)
+	nodes, err := loadAllNodesFrom(c.Request.Context(), h.db)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "database error"})
 		return
-	}
-	defer rows.Close()
-
-	var nodes []models.ProxyNode
-	for rows.Next() {
-		var node models.ProxyNode
-		err := rows.Scan(
-			&node.ID, &node.Name, &node.Remark, &node.Type, &node.Config, &node.InboundPort,
-			&node.Username, &node.Password, &node.TCPReuseEnabled, &node.SortOrder, &node.NodeIP,
-			&node.Location, &node.CountryCode, &node.Latency, &node.Enabled, &node.CreatedAt, &node.UpdatedAt,
-		)
-		if err != nil {
-			continue
-		}
-		nodes = append(nodes, node)
 	}
 
 	c.JSON(http.StatusOK, nodes)
@@ -515,16 +427,7 @@ func (h *Handler) GetNode(c *gin.Context) {
 		return
 	}
 
-	var node models.ProxyNode
-	err = h.db.QueryRow(`
-		SELECT id, name, remark, type, config, inbound_port, username, password, tcp_reuse_enabled,
-		       sort_order, node_ip, location, country_code, latency, enabled, created_at, updated_at
-		FROM proxy_nodes WHERE id = ?
-	`, id).Scan(
-		&node.ID, &node.Name, &node.Remark, &node.Type, &node.Config, &node.InboundPort,
-		&node.Username, &node.Password, &node.TCPReuseEnabled, &node.SortOrder, &node.NodeIP,
-		&node.Location, &node.CountryCode, &node.Latency, &node.Enabled, &node.CreatedAt, &node.UpdatedAt,
-	)
+	node, err := loadNodeByIDFrom(c.Request.Context(), h.db, id)
 	if err != nil {
 		if err == sql.ErrNoRows {
 			c.JSON(http.StatusNotFound, gin.H{"error": "node not found"})
@@ -555,25 +458,7 @@ func (h *Handler) CreateNode(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
-
-	// Ensure inbound auth is enabled by default (generate missing credentials).
-	if strings.TrimSpace(req.Username) == "" {
-		username, err := generateRandomUsername(12)
-		if err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to generate username"})
-			return
-		}
-		req.Username = username
-	}
-	if strings.TrimSpace(req.Password) == "" {
-		password, err := generateRandomString(24)
-		if err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to generate password"})
-			return
-		}
-		req.Password = password
-	}
-	if err := validateInboundUsername(req.Username); err != nil {
+	if err := validateInboundCredentials(req.Username, req.Password, payload.AuthEnabled); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
@@ -581,88 +466,72 @@ func (h *Handler) CreateNode(c *gin.Context) {
 	h.nodeWriteMu.Lock()
 	defer h.nodeWriteMu.Unlock()
 
-	// Allocate sort_order / inbound_port in one critical section to avoid races.
-	tx, err := h.db.Begin()
-	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "database error"})
-		return
-	}
-	defer tx.Rollback()
-
-	var maxOrder int
-	if err := tx.QueryRow("SELECT COALESCE(MAX(sort_order), -1) FROM proxy_nodes").Scan(&maxOrder); err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "database error"})
-		return
-	}
-	req.SortOrder = maxOrder + 1
-
-	startPort, preserveInboundPorts, err := getPortSettings(tx)
-	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "database error"})
-		return
-	}
-
-	usedInboundPorts, err := collectUsedInboundPortsTx(tx, 0)
-	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "database error"})
-		return
-	}
-
-	if preserveInboundPorts {
-		if req.InboundPort == 0 {
-			req.InboundPort, err = nextAvailableInboundPort(startPort, usedInboundPorts)
-			if err != nil {
-				c.JSON(http.StatusInternalServerError, gin.H{"error": "database error"})
-				return
+	var requestErr error
+	_, mutationErr := h.nodeMutations.Execute(c.Request.Context(), NodeMutationOperation{
+		ApplyRuntime: true,
+		Mutate: func(ctx context.Context, tx *sql.Tx) error {
+			var maxOrder int
+			if err := tx.QueryRowContext(ctx, "SELECT COALESCE(MAX(sort_order), -1) FROM proxy_nodes").Scan(&maxOrder); err != nil {
+				return err
 			}
+			req.SortOrder = maxOrder + 1
+
+			startPort, preserveInboundPorts, err := getPortSettings(tx)
+			if err != nil {
+				return err
+			}
+			usedInboundPorts, err := collectUsedInboundPortsTx(tx, 0)
+			if err != nil {
+				return err
+			}
+			if !preserveInboundPorts || req.InboundPort == 0 {
+				req.InboundPort, err = nextAvailableInboundPort(startPort, usedInboundPorts)
+				if err != nil {
+					return err
+				}
+			}
+			if err := validateInboundPort(req.InboundPort); err != nil {
+				requestErr = err
+				return err
+			}
+			if _, exists := usedInboundPorts[req.InboundPort]; exists {
+				requestErr = fmt.Errorf("inbound port already in use")
+				return requestErr
+			}
+			if err := validateInboundPortAvailable(req.InboundPort); err != nil {
+				requestErr = err
+				return err
+			}
+
+			result, err := tx.ExecContext(ctx, `
+				INSERT INTO proxy_nodes (
+					name, remark, type, config, inbound_port, inbound_port_pinned,
+					username, password, tcp_reuse_enabled, sort_order, latency, enabled
+				)
+				VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+			`, req.Name, req.Remark, req.Type, req.Config, req.InboundPort, false,
+				req.Username, req.Password, req.TCPReuseEnabled, req.SortOrder, 0, req.Enabled)
+			if err != nil {
+				return err
+			}
+			id, err := appdb.LastInsertID(ctx, tx, result, appdb.DialectFor(h.db))
+			if err != nil {
+				return err
+			}
+			req.ID = int(id)
+			return nil
+		},
+		Compensate: func(ctx context.Context, tx *sql.Tx) error {
+			_, err := tx.ExecContext(ctx, "DELETE FROM proxy_nodes WHERE id = ?", req.ID)
+			return err
+		},
+	})
+	if mutationErr != nil {
+		if requestErr != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": requestErr.Error()})
+			return
 		}
-	} else {
-		req.InboundPort = startPort + req.SortOrder
-	}
-
-	if err := validateInboundPort(req.InboundPort); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
-		return
-	}
-	if _, exists := usedInboundPorts[req.InboundPort]; exists {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "inbound port already in use"})
-		return
-	}
-	if err := validateInboundPortAvailable(req.InboundPort); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
-		return
-	}
-
-	// Insert node
-	result, err := tx.Exec(`
-		INSERT INTO proxy_nodes (name, remark, type, config, inbound_port, username, password, tcp_reuse_enabled, sort_order, latency, enabled)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-	`, req.Name, req.Remark, req.Type, req.Config, req.InboundPort, req.Username, req.Password, req.TCPReuseEnabled, req.SortOrder, 0, req.Enabled)
-
-	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to create node"})
-		return
-	}
-
-	id, err := appdb.LastInsertID(c.Request.Context(), tx, result, appdb.DialectFor(h.db))
-	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to read created node id"})
-		return
-	}
-	req.ID = int(id)
-
-	if err := tx.Commit(); err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to commit transaction"})
-		return
-	}
-
-	// Regenerate global config and restart sing-box; if the new node produces a
-	// config the kernel rejects, remove it again so the panel stays healthy.
-	if err := h.regenerateAndRestartWithRevert(func() error {
-		_, revertErr := h.db.Exec("DELETE FROM proxy_nodes WHERE id = ?", req.ID)
-		return revertErr
-	}); err != nil {
-		c.JSON(http.StatusInternalServerError, singboxUpdateError(err))
+		c.JSON(http.StatusInternalServerError, singboxUpdateError(mutationErr))
 		return
 	}
 
@@ -741,7 +610,7 @@ func (h *Handler) BatchImportNodes(c *gin.Context) {
 		return
 	}
 
-	startPort, preserveInboundPorts, err := getPortSettings(h.db)
+	startPort, _, err := getPortSettings(h.db)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "database error"})
 		return
@@ -790,10 +659,7 @@ func (h *Handler) BatchImportNodes(c *gin.Context) {
 			continue
 		}
 
-		inboundPort := startPort + nextOrder
-		if preserveInboundPorts {
-			inboundPort, err = nextAvailableInboundPort(startPort, usedInboundPorts)
-		}
+		inboundPort, err := nextAvailableInboundPort(startPort, usedInboundPorts)
 		if err == nil {
 			err = validateInboundPort(inboundPort)
 		}
@@ -842,10 +708,7 @@ func (h *Handler) BatchImportNodes(c *gin.Context) {
 	nextOrder = maxOrder + 1
 	portValidCandidates := make([]*batchImportCandidate, 0, len(validCandidates))
 	for _, candidate := range validCandidates {
-		inboundPort := startPort + nextOrder
-		if preserveInboundPorts {
-			inboundPort, err = nextAvailableInboundPort(startPort, usedInboundPorts)
-		}
+		inboundPort, err := nextAvailableInboundPort(startPort, usedInboundPorts)
 		if err == nil {
 			err = validateInboundPort(inboundPort)
 		}
@@ -894,61 +757,63 @@ func (h *Handler) BatchImportNodes(c *gin.Context) {
 		return
 	}
 
-	tx, err := h.db.Begin()
-	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "database error"})
-		return
-	}
-	defer tx.Rollback()
-	stmt, err := tx.Prepare(`
-		INSERT INTO proxy_nodes (name, remark, type, config, inbound_port, username, password, tcp_reuse_enabled, sort_order, latency, enabled)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-	`)
-	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "database error"})
-		return
-	}
-	defer stmt.Close()
-
 	insertedIDs := make([]int64, 0, len(validCandidates))
-	for _, candidate := range validCandidates {
-		node := &candidate.node
-		node.Enabled = req.Enabled
-		dbResult, execErr := stmt.Exec(
-			node.Name, "", node.Type, node.Config, node.InboundPort, node.Username,
-			node.Password, node.TCPReuseEnabled, node.SortOrder, 0, node.Enabled,
-		)
-		if execErr != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to create node"})
-			return
-		}
-		id, idErr := appdb.LastInsertID(c.Request.Context(), tx, dbResult, appdb.DialectFor(h.db))
-		if idErr != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to read created node id"})
-			return
-		}
-		node.ID = int(id)
-		insertedIDs = append(insertedIDs, id)
-	}
+	_, mutationErr := h.nodeMutations.Execute(c.Request.Context(), NodeMutationOperation{
+		ApplyRuntime: true,
+		Mutate: func(ctx context.Context, tx *sql.Tx) error {
+			stmt, err := tx.PrepareContext(ctx, `
+				INSERT INTO proxy_nodes (
+					name, remark, type, config, inbound_port, inbound_port_pinned,
+					username, password, tcp_reuse_enabled, sort_order, latency, enabled
+				)
+				VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+			`)
+			if err != nil {
+				return err
+			}
+			defer stmt.Close()
 
-	finalNodes := appendBatchCandidateNodes(existingNodes, validCandidates)
-	configJSON, err := h.singBoxService.BuildGlobalConfig(finalNodes)
-	if err == nil {
-		err = h.singBoxService.ValidateConfig(configJSON)
-	}
-	if err != nil {
-		c.JSON(http.StatusInternalServerError, singboxUpdateError(err))
-		return
-	}
-	if err := tx.Commit(); err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to commit transaction"})
-		return
-	}
-	if err := h.singBoxService.ApplyConfig(configJSON); err != nil {
-		if revertErr := h.deleteImportedNodes(insertedIDs); revertErr != nil {
-			log.Printf("Failed to revert batch import after sing-box apply error: %v", revertErr)
-		}
-		c.JSON(http.StatusInternalServerError, singboxUpdateError(err))
+			for _, candidate := range validCandidates {
+				node := &candidate.node
+				node.Enabled = req.Enabled
+				dbResult, err := stmt.ExecContext(
+					ctx,
+					node.Name,
+					"",
+					node.Type,
+					node.Config,
+					node.InboundPort,
+					false,
+					node.Username,
+					node.Password,
+					node.TCPReuseEnabled,
+					node.SortOrder,
+					0,
+					node.Enabled,
+				)
+				if err != nil {
+					return err
+				}
+				id, err := appdb.LastInsertID(ctx, tx, dbResult, appdb.DialectFor(h.db))
+				if err != nil {
+					return err
+				}
+				node.ID = int(id)
+				insertedIDs = append(insertedIDs, id)
+			}
+			return nil
+		},
+		Compensate: func(ctx context.Context, tx *sql.Tx) error {
+			for _, id := range insertedIDs {
+				if _, err := tx.ExecContext(ctx, "DELETE FROM proxy_nodes WHERE id = ?", id); err != nil {
+					return err
+				}
+			}
+			return nil
+		},
+	})
+	if mutationErr != nil {
+		c.JSON(http.StatusInternalServerError, singboxUpdateError(mutationErr))
 		return
 	}
 
@@ -1185,20 +1050,6 @@ func batchImportDependencyGroups(candidates []*batchImportCandidate) [][]*batchI
 	return groups
 }
 
-func (h *Handler) deleteImportedNodes(ids []int64) error {
-	tx, err := h.db.Begin()
-	if err != nil {
-		return err
-	}
-	defer tx.Rollback()
-	for _, id := range ids {
-		if _, err := tx.Exec("DELETE FROM proxy_nodes WHERE id = ?", id); err != nil {
-			return err
-		}
-	}
-	return tx.Commit()
-}
-
 // UpdateNode updates a proxy node
 func (h *Handler) UpdateNode(c *gin.Context) {
 	id, err := strconv.Atoi(c.Param("id"))
@@ -1223,111 +1074,135 @@ func (h *Handler) UpdateNode(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
+	if err := validateInboundCredentials(req.Username, req.Password, payload.AuthEnabled); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
 
 	req.ID = id
 
 	h.nodeWriteMu.Lock()
 	defer h.nodeWriteMu.Unlock()
 
-	tx, err := h.db.Begin()
-	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "database error"})
-		return
-	}
-	defer tx.Rollback()
-
-	// Snapshot the full previous row so the update can be reverted if the new
-	// config is rejected by the kernel.
 	var prev models.ProxyNode
-	if err := tx.QueryRow(`
-		SELECT name, remark, type, config, inbound_port, username, password, tcp_reuse_enabled, sort_order, enabled
-		FROM proxy_nodes WHERE id = ?
-	`, id).Scan(
-		&prev.Name, &prev.Remark, &prev.Type, &prev.Config, &prev.InboundPort,
-		&prev.Username, &prev.Password, &prev.TCPReuseEnabled, &prev.SortOrder, &prev.Enabled,
-	); err != nil {
-		if err == sql.ErrNoRows {
+	var portSnapshots []nodeOrderPortSnapshot
+	var requestErr error
+	var notFound bool
+	_, mutationErr := h.nodeMutations.Execute(c.Request.Context(), NodeMutationOperation{
+		ApplyRuntime: true,
+		Mutate: func(ctx context.Context, tx *sql.Tx) error {
+			var err error
+			prev, err = loadNodeByIDFrom(ctx, tx, id)
+			if err != nil {
+				if err == sql.ErrNoRows {
+					notFound = true
+				}
+				return err
+			}
+			if payload.TCPReuseEnabled == nil {
+				req.TCPReuseEnabled = prev.TCPReuseEnabled
+			}
+			req.SortOrder = prev.SortOrder
+			req.InboundPortPinned = prev.InboundPortPinned
+
+			startPort, preserveInboundPorts, err := getPortSettings(tx)
+			if err != nil {
+				return err
+			}
+			usedInboundPorts, err := collectUsedInboundPortsTx(tx, id)
+			if err != nil {
+				return err
+			}
+
+			switch {
+			case preserveInboundPorts && req.InboundPort == 0:
+				req.InboundPort, err = nextAvailableInboundPort(startPort, usedInboundPorts)
+				if err != nil {
+					return err
+				}
+			case !preserveInboundPorts && !prev.InboundPortPinned:
+				portSnapshots, err = snapshotNodeOrderPorts(ctx, tx)
+				if err != nil {
+					return err
+				}
+				req.InboundPort = prev.InboundPort
+			case !preserveInboundPorts && prev.InboundPortPinned && req.InboundPort == 0:
+				req.InboundPort = prev.InboundPort
+			}
+
+			if err := validateInboundPort(req.InboundPort); err != nil {
+				requestErr = err
+				return err
+			}
+			if _, exists := usedInboundPorts[req.InboundPort]; exists {
+				requestErr = fmt.Errorf("inbound port already in use")
+				return requestErr
+			}
+			if req.InboundPort != prev.InboundPort {
+				if err := validateInboundPortAvailable(req.InboundPort); err != nil {
+					requestErr = err
+					return err
+				}
+			}
+
+			result, err := tx.ExecContext(ctx, `
+				UPDATE proxy_nodes
+				SET name = ?, remark = ?, type = ?, config = ?, inbound_port = ?,
+				    username = ?, password = ?, tcp_reuse_enabled = ?, enabled = ?,
+				    updated_at = CURRENT_TIMESTAMP
+				WHERE id = ?
+			`, req.Name, req.Remark, req.Type, req.Config, req.InboundPort, req.Username,
+				req.Password, req.TCPReuseEnabled, req.Enabled, id)
+			if err != nil {
+				return err
+			}
+			affected, err := result.RowsAffected()
+			if err != nil {
+				return err
+			}
+			if affected != 1 {
+				notFound = true
+				return sql.ErrNoRows
+			}
+			if !preserveInboundPorts && !prev.InboundPortPinned {
+				if err := reassignAutomaticPortsTx(ctx, tx, startPort); err != nil {
+					return err
+				}
+				if err := tx.QueryRowContext(ctx, "SELECT inbound_port FROM proxy_nodes WHERE id = ?", id).Scan(&req.InboundPort); err != nil {
+					return err
+				}
+			}
+			return nil
+		},
+		Compensate: func(ctx context.Context, tx *sql.Tx) error {
+			_, err := tx.ExecContext(ctx, `
+				UPDATE proxy_nodes
+				SET name = ?, remark = ?, type = ?, config = ?, inbound_port = ?,
+				    inbound_port_pinned = ?, username = ?, password = ?, tcp_reuse_enabled = ?,
+				    sort_order = ?, enabled = ?, updated_at = CURRENT_TIMESTAMP
+				WHERE id = ?
+			`, prev.Name, prev.Remark, prev.Type, prev.Config, prev.InboundPort,
+				prev.InboundPortPinned, prev.Username, prev.Password, prev.TCPReuseEnabled,
+				prev.SortOrder, prev.Enabled, id)
+			if err != nil {
+				return err
+			}
+			if len(portSnapshots) > 0 {
+				return restoreNodeOrderPorts(ctx, tx, portSnapshots)
+			}
+			return nil
+		},
+	})
+	if mutationErr != nil {
+		if notFound {
 			c.JSON(http.StatusNotFound, gin.H{"error": "node not found"})
 			return
 		}
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "database error"})
-		return
-	}
-	currentInboundPort := prev.InboundPort
-	if payload.TCPReuseEnabled == nil {
-		req.TCPReuseEnabled = prev.TCPReuseEnabled
-	}
-	req.SortOrder = prev.SortOrder
-
-	startPort, preserveInboundPorts, err := getPortSettings(tx)
-	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "database error"})
-		return
-	}
-
-	usedInboundPorts, err := collectUsedInboundPortsTx(tx, id)
-	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "database error"})
-		return
-	}
-
-	if preserveInboundPorts {
-		if req.InboundPort == 0 {
-			req.InboundPort, err = nextAvailableInboundPort(startPort, usedInboundPorts)
-			if err != nil {
-				c.JSON(http.StatusInternalServerError, gin.H{"error": "database error"})
-				return
-			}
-		}
-	} else {
-		req.InboundPort = startPort + req.SortOrder
-	}
-
-	if err := validateInboundPort(req.InboundPort); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
-		return
-	}
-	if _, exists := usedInboundPorts[req.InboundPort]; exists {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "inbound port already in use"})
-		return
-	}
-	if req.InboundPort != currentInboundPort {
-		if err := validateInboundPortAvailable(req.InboundPort); err != nil {
-			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		if requestErr != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": requestErr.Error()})
 			return
 		}
-	}
-
-	// Update node
-	_, err = tx.Exec(`
-		UPDATE proxy_nodes 
-		SET name = ?, remark = ?, type = ?, config = ?, inbound_port = ?, username = ?, password = ?, tcp_reuse_enabled = ?,
-		    enabled = ?, updated_at = CURRENT_TIMESTAMP
-		WHERE id = ?
-	`, req.Name, req.Remark, req.Type, req.Config, req.InboundPort, req.Username, req.Password, req.TCPReuseEnabled, req.Enabled, id)
-
-	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to update node"})
-		return
-	}
-	if err := tx.Commit(); err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to commit transaction"})
-		return
-	}
-
-	// Regenerate global config and restart sing-box; restore the previous row
-	// if the updated node produces a config the kernel rejects.
-	if err := h.regenerateAndRestartWithRevert(func() error {
-		_, revertErr := h.db.Exec(`
-			UPDATE proxy_nodes
-			SET name = ?, remark = ?, type = ?, config = ?, inbound_port = ?, username = ?, password = ?,
-			    tcp_reuse_enabled = ?, enabled = ?, updated_at = CURRENT_TIMESTAMP
-			WHERE id = ?
-		`, prev.Name, prev.Remark, prev.Type, prev.Config, prev.InboundPort, prev.Username, prev.Password,
-			prev.TCPReuseEnabled, prev.Enabled, id)
-		return revertErr
-	}); err != nil {
-		c.JSON(http.StatusInternalServerError, singboxUpdateError(err))
+		c.JSON(http.StatusInternalServerError, singboxUpdateError(mutationErr))
 		return
 	}
 
@@ -1368,6 +1243,59 @@ func (h *Handler) UpdateNodeRemark(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"id": id, "remark": req.Remark})
 }
 
+func (h *Handler) SetNodeInboundPortPinned(c *gin.Context) {
+	id, err := strconv.Atoi(c.Param("id"))
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid id"})
+		return
+	}
+
+	var req struct {
+		Pinned *bool `json:"pinned"`
+	}
+	if err := c.BindJSON(&req); err != nil || req.Pinned == nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "pinned must be a boolean"})
+		return
+	}
+
+	h.nodeWriteMu.Lock()
+	defer h.nodeWriteMu.Unlock()
+
+	_, preserveInboundPorts, err := getPortSettings(h.db)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "database error"})
+		return
+	}
+	if preserveInboundPorts {
+		c.JSON(http.StatusConflict, gin.H{"error": "port pinning is only available in automatic sorting mode"})
+		return
+	}
+
+	result, err := h.db.ExecContext(c.Request.Context(), `
+		UPDATE proxy_nodes
+		SET inbound_port_pinned = ?, updated_at = CURRENT_TIMESTAMP
+		WHERE id = ?
+	`, *req.Pinned, id)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to update port pin"})
+		return
+	}
+	affected, err := result.RowsAffected()
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to verify port pin update"})
+		return
+	}
+	if affected != 1 {
+		c.JSON(http.StatusNotFound, gin.H{"error": "node not found"})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"id":                  id,
+		"inbound_port_pinned": *req.Pinned,
+	})
+}
+
 // DeleteNode deletes a proxy node
 func (h *Handler) DeleteNode(c *gin.Context) {
 	id, err := strconv.Atoi(c.Param("id"))
@@ -1379,22 +1307,52 @@ func (h *Handler) DeleteNode(c *gin.Context) {
 	h.nodeWriteMu.Lock()
 	defer h.nodeWriteMu.Unlock()
 
-	// Delete from database
-	_, err = h.db.Exec("DELETE FROM proxy_nodes WHERE id = ?", id)
-	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to delete node"})
-		return
-	}
-
-	// Reorder remaining nodes to fill the gap
-	if err := h.reorderRemainingNodes(); err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to reorder nodes"})
-		return
-	}
-
-	// Regenerate global config and restart sing-box
-	if err := h.regenerateAndRestart(); err != nil {
-		c.JSON(http.StatusInternalServerError, singboxUpdateError(err))
+	var deletedNode models.ProxyNode
+	var orderSnapshots []nodeOrderPortSnapshot
+	var notFound bool
+	_, mutationErr := h.nodeMutations.Execute(c.Request.Context(), NodeMutationOperation{
+		ApplyRuntime: true,
+		Mutate: func(ctx context.Context, tx *sql.Tx) error {
+			var err error
+			orderSnapshots, err = snapshotNodeOrderPorts(ctx, tx)
+			if err != nil {
+				return err
+			}
+			deletedNode, err = loadNodeByIDFrom(ctx, tx, id)
+			if err != nil {
+				if err == sql.ErrNoRows {
+					notFound = true
+				}
+				return err
+			}
+			if _, err := tx.ExecContext(ctx, "DELETE FROM proxy_nodes WHERE id = ?", id); err != nil {
+				return err
+			}
+			if err := normalizeNodeSortOrderTx(ctx, tx); err != nil {
+				return err
+			}
+			startPort, preserveInboundPorts, err := getPortSettings(tx)
+			if err != nil {
+				return err
+			}
+			if !preserveInboundPorts {
+				return reassignAutomaticPortsTx(ctx, tx, startPort)
+			}
+			return nil
+		},
+		Compensate: func(ctx context.Context, tx *sql.Tx) error {
+			if err := insertProxyNodeSnapshot(ctx, tx, deletedNode); err != nil {
+				return err
+			}
+			return restoreNodeOrderPorts(ctx, tx, orderSnapshots)
+		},
+	})
+	if mutationErr != nil {
+		if notFound {
+			c.JSON(http.StatusNotFound, gin.H{"error": "node not found"})
+			return
+		}
+		c.JSON(http.StatusInternalServerError, singboxUpdateError(mutationErr))
 		return
 	}
 
@@ -1420,48 +1378,78 @@ func (h *Handler) BatchDeleteNodes(c *gin.Context) {
 	h.nodeWriteMu.Lock()
 	defer h.nodeWriteMu.Unlock()
 
-	// Begin transaction
-	tx, err := h.db.Begin()
-	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "database error"})
-		return
-	}
-	defer tx.Rollback()
-
-	// Delete all nodes in one transaction
-	deletedCount := 0
+	seenIDs := make(map[int]struct{}, len(req.IDs))
 	for _, id := range req.IDs {
-		result, err := tx.Exec("DELETE FROM proxy_nodes WHERE id = ?", id)
-		if err != nil {
-			continue
+		if id <= 0 {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "invalid node id"})
+			return
 		}
-		if affected, _ := result.RowsAffected(); affected > 0 {
-			deletedCount++
+		if _, duplicate := seenIDs[id]; duplicate {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "duplicate node id"})
+			return
 		}
+		seenIDs[id] = struct{}{}
 	}
 
-	if err := tx.Commit(); err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to commit transaction"})
+	deletedNodes := make([]models.ProxyNode, 0, len(req.IDs))
+	var orderSnapshots []nodeOrderPortSnapshot
+	var missingID int
+	_, mutationErr := h.nodeMutations.Execute(c.Request.Context(), NodeMutationOperation{
+		ApplyRuntime: true,
+		Mutate: func(ctx context.Context, tx *sql.Tx) error {
+			var err error
+			orderSnapshots, err = snapshotNodeOrderPorts(ctx, tx)
+			if err != nil {
+				return err
+			}
+			for _, id := range req.IDs {
+				node, err := loadNodeByIDFrom(ctx, tx, id)
+				if err != nil {
+					if err == sql.ErrNoRows {
+						missingID = id
+					}
+					return err
+				}
+				deletedNodes = append(deletedNodes, node)
+			}
+			for _, id := range req.IDs {
+				if _, err := tx.ExecContext(ctx, "DELETE FROM proxy_nodes WHERE id = ?", id); err != nil {
+					return err
+				}
+			}
+			if err := normalizeNodeSortOrderTx(ctx, tx); err != nil {
+				return err
+			}
+			startPort, preserveInboundPorts, err := getPortSettings(tx)
+			if err != nil {
+				return err
+			}
+			if !preserveInboundPorts {
+				return reassignAutomaticPortsTx(ctx, tx, startPort)
+			}
+			return nil
+		},
+		Compensate: func(ctx context.Context, tx *sql.Tx) error {
+			for _, node := range deletedNodes {
+				if err := insertProxyNodeSnapshot(ctx, tx, node); err != nil {
+					return err
+				}
+			}
+			return restoreNodeOrderPorts(ctx, tx, orderSnapshots)
+		},
+	})
+	if mutationErr != nil {
+		if missingID != 0 {
+			c.JSON(http.StatusNotFound, gin.H{"error": fmt.Sprintf("node %d not found", missingID)})
+			return
+		}
+		c.JSON(http.StatusInternalServerError, singboxUpdateError(mutationErr))
 		return
-	}
-
-	// Reorder remaining nodes to fill the gaps
-	if deletedCount > 0 {
-		if err := h.reorderRemainingNodes(); err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to reorder nodes"})
-			return
-		}
-
-		// Only regenerate and restart once after all deletions and reordering
-		if err := h.regenerateAndRestart(); err != nil {
-			c.JSON(http.StatusInternalServerError, singboxUpdateError(err))
-			return
-		}
 	}
 
 	c.JSON(http.StatusOK, gin.H{
 		"message":       "nodes deleted",
-		"deleted_count": deletedCount,
+		"deleted_count": len(deletedNodes),
 	})
 }
 
@@ -1482,61 +1470,85 @@ func (h *Handler) ReorderNodes(c *gin.Context) {
 	h.nodeWriteMu.Lock()
 	defer h.nodeWriteMu.Unlock()
 
-	startPort, preserveInboundPorts, err := getPortSettings(h.db)
-	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "database error"})
-		return
-	}
-
-	// Begin transaction
-	tx, err := h.db.Begin()
-	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "database error"})
-		return
-	}
-	defer tx.Rollback()
-
-	// Update each node
-	for _, order := range req.Nodes {
-		if preserveInboundPorts {
-			_, err := tx.Exec(`
-				UPDATE proxy_nodes
-				SET sort_order = ?, updated_at = CURRENT_TIMESTAMP
-				WHERE id = ?
-			`, order.SortOrder, order.ID)
-
+	var snapshots []nodeOrderPortSnapshot
+	var requestErr error
+	_, mutationErr := h.nodeMutations.Execute(c.Request.Context(), NodeMutationOperation{
+		ApplyRuntime: true,
+		Mutate: func(ctx context.Context, tx *sql.Tx) error {
+			var err error
+			snapshots, err = snapshotNodeOrderPorts(ctx, tx)
 			if err != nil {
-				c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to update order"})
-				return
+				return err
 			}
-			continue
-		}
+			if len(req.Nodes) != len(snapshots) {
+				requestErr = fmt.Errorf("reorder request must contain every node exactly once")
+				return requestErr
+			}
 
-		newPort := startPort + order.SortOrder
-		if err := validateInboundPort(newPort); err != nil {
-			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+			currentIDs := make(map[int]struct{}, len(snapshots))
+			for _, snapshot := range snapshots {
+				currentIDs[snapshot.ID] = struct{}{}
+			}
+			requestIDs := make(map[int]struct{}, len(req.Nodes))
+			sortOrders := make(map[int]struct{}, len(req.Nodes))
+			for _, order := range req.Nodes {
+				if _, exists := currentIDs[order.ID]; !exists {
+					requestErr = fmt.Errorf("reorder request contains unknown node id %d", order.ID)
+					return requestErr
+				}
+				if _, duplicate := requestIDs[order.ID]; duplicate {
+					requestErr = fmt.Errorf("reorder request contains duplicate node id %d", order.ID)
+					return requestErr
+				}
+				if order.SortOrder < 0 || order.SortOrder >= len(req.Nodes) {
+					requestErr = fmt.Errorf("sort_order must be a complete zero-based permutation")
+					return requestErr
+				}
+				if _, duplicate := sortOrders[order.SortOrder]; duplicate {
+					requestErr = fmt.Errorf("sort_order must be unique")
+					return requestErr
+				}
+				requestIDs[order.ID] = struct{}{}
+				sortOrders[order.SortOrder] = struct{}{}
+			}
+
+			for _, order := range req.Nodes {
+				result, err := tx.ExecContext(ctx, `
+					UPDATE proxy_nodes
+					SET sort_order = ?, updated_at = CURRENT_TIMESTAMP
+					WHERE id = ?
+				`, order.SortOrder, order.ID)
+				if err != nil {
+					return err
+				}
+				affected, err := result.RowsAffected()
+				if err != nil {
+					return err
+				}
+				if affected != 1 {
+					return fmt.Errorf("node %d disappeared during reorder", order.ID)
+				}
+			}
+
+			startPort, preserveInboundPorts, err := getPortSettings(tx)
+			if err != nil {
+				return err
+			}
+			if !preserveInboundPorts {
+				return reassignAutomaticPortsTx(ctx, tx, startPort)
+			}
+			return nil
+		},
+		Compensate: func(ctx context.Context, tx *sql.Tx) error {
+			return restoreNodeOrderPorts(ctx, tx, snapshots)
+		},
+	})
+	if mutationErr != nil {
+		if requestErr != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": requestErr.Error()})
 			return
 		}
-		_, err := tx.Exec(`
-			UPDATE proxy_nodes 
-			SET sort_order = ?, inbound_port = ?, updated_at = CURRENT_TIMESTAMP
-			WHERE id = ?
-		`, order.SortOrder, newPort, order.ID)
-
-		if err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to update order"})
-			return
-		}
-	}
-
-	if err := tx.Commit(); err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to commit transaction"})
-		return
-	}
-
-	// Regenerate global config and restart sing-box
-	if err := h.regenerateAndRestart(); err != nil {
-		c.JSON(http.StatusInternalServerError, singboxUpdateError(err))
+		c.JSON(http.StatusInternalServerError, singboxUpdateError(mutationErr))
 		return
 	}
 
@@ -1554,7 +1566,7 @@ func (h *Handler) CheckNodeIP(c *gin.Context) {
 	// Get node with full info including auth
 	var node models.ProxyNode
 	var nodeName string
-	err = h.db.QueryRow(`
+	err = h.db.QueryRowContext(c.Request.Context(), `
 		SELECT id, name, inbound_port, username, password, enabled FROM proxy_nodes WHERE id = ?
 	`, id).Scan(&node.ID, &nodeName, &node.InboundPort, &node.Username, &node.Password, &node.Enabled)
 
@@ -1575,11 +1587,14 @@ func (h *Handler) CheckNodeIP(c *gin.Context) {
 
 	// Check IP through the proxy with authentication
 	proxyAddr := fmt.Sprintf("localhost:%d", node.InboundPort)
-	ipInfo, err := h.checkProxyIP(proxyAddr, node.Username, node.Password)
+	ipInfo, err := h.checkProxyIP(c.Request.Context(), proxyAddr, node.Username, node.Password)
 	if err != nil {
 		fmt.Printf("[API] Failed to check IP for node %d: %v\n", id, err)
+		if c.Request.Context().Err() != nil {
+			return
+		}
 		// Clear stale status on failure so UI can show the node as invalid
-		if _, clearErr := h.db.Exec(`
+		if _, clearErr := h.db.ExecContext(c.Request.Context(), `
 			UPDATE proxy_nodes 
 			SET node_ip = '', location = '', country_code = '', latency = 0, updated_at = CURRENT_TIMESTAMP
 			WHERE id = ?
@@ -1592,9 +1607,12 @@ func (h *Handler) CheckNodeIP(c *gin.Context) {
 
 	fmt.Printf("[API] Successfully checked IP for node %d: %s (%s), latency: %dms\n",
 		id, ipInfo.IP, ipInfo.Location, ipInfo.Latency)
+	if c.Request.Context().Err() != nil {
+		return
+	}
 
 	// Update node with IP info, location, country code, and latency
-	_, err = h.db.Exec(`
+	_, err = h.db.ExecContext(c.Request.Context(), `
 		UPDATE proxy_nodes 
 		SET node_ip = ?, location = ?, country_code = ?, latency = ?, updated_at = CURRENT_TIMESTAMP
 		WHERE id = ?
@@ -1612,9 +1630,10 @@ func (h *Handler) CheckNodeIP(c *gin.Context) {
 // BatchSetAuth sets authentication for multiple nodes
 func (h *Handler) BatchSetAuth(c *gin.Context) {
 	var req struct {
-		NodeIDs  []int  `json:"node_ids"`
-		Username string `json:"username"`
-		Password string `json:"password"`
+		NodeIDs     []int  `json:"node_ids"`
+		Username    string `json:"username"`
+		Password    string `json:"password"`
+		AuthEnabled *bool  `json:"auth_enabled,omitempty"`
 	}
 
 	if err := c.BindJSON(&req); err != nil {
@@ -1625,72 +1644,85 @@ func (h *Handler) BatchSetAuth(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
+	if err := validateInboundCredentials(req.Username, req.Password, req.AuthEnabled); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	if len(req.NodeIDs) == 0 {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "no nodes selected"})
+		return
+	}
+	seen := make(map[int]struct{}, len(req.NodeIDs))
+	for _, nodeID := range req.NodeIDs {
+		if nodeID <= 0 {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "invalid node id"})
+			return
+		}
+		if _, duplicate := seen[nodeID]; duplicate {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "duplicate node id"})
+			return
+		}
+		seen[nodeID] = struct{}{}
+	}
 
 	h.nodeWriteMu.Lock()
 	defer h.nodeWriteMu.Unlock()
 
-	tx, err := h.db.Begin()
-	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "database error"})
-		return
-	}
-	defer tx.Rollback()
-
-	// Snapshot previous credentials so the change can be reverted if the new
-	// config fails to apply.
 	type nodeAuthSnapshot struct {
 		id       int
 		username string
 		password string
 	}
 	prevAuth := make([]nodeAuthSnapshot, 0, len(req.NodeIDs))
-	for _, nodeID := range req.NodeIDs {
-		var snapshot nodeAuthSnapshot
-		snapshot.id = nodeID
-		if err := tx.QueryRow(
-			"SELECT username, password FROM proxy_nodes WHERE id = ?", nodeID,
-		).Scan(&snapshot.username, &snapshot.password); err != nil {
-			if err == sql.ErrNoRows {
-				continue
+	var missingID int
+	_, mutationErr := h.nodeMutations.Execute(c.Request.Context(), NodeMutationOperation{
+		ApplyRuntime: true,
+		Mutate: func(ctx context.Context, tx *sql.Tx) error {
+			for _, nodeID := range req.NodeIDs {
+				var snapshot nodeAuthSnapshot
+				snapshot.id = nodeID
+				if err := tx.QueryRowContext(
+					ctx,
+					"SELECT username, password FROM proxy_nodes WHERE id = ?",
+					nodeID,
+				).Scan(&snapshot.username, &snapshot.password); err != nil {
+					if err == sql.ErrNoRows {
+						missingID = nodeID
+					}
+					return err
+				}
+				prevAuth = append(prevAuth, snapshot)
 			}
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "database error"})
+			for _, nodeID := range req.NodeIDs {
+				if _, err := tx.ExecContext(ctx, `
+					UPDATE proxy_nodes
+					SET username = ?, password = ?, updated_at = CURRENT_TIMESTAMP
+					WHERE id = ?
+				`, req.Username, req.Password, nodeID); err != nil {
+					return err
+				}
+			}
+			return nil
+		},
+		Compensate: func(ctx context.Context, tx *sql.Tx) error {
+			for _, snapshot := range prevAuth {
+				if _, err := tx.ExecContext(ctx, `
+					UPDATE proxy_nodes
+					SET username = ?, password = ?, updated_at = CURRENT_TIMESTAMP
+					WHERE id = ?
+				`, snapshot.username, snapshot.password, snapshot.id); err != nil {
+					return err
+				}
+			}
+			return nil
+		},
+	})
+	if mutationErr != nil {
+		if missingID != 0 {
+			c.JSON(http.StatusNotFound, gin.H{"error": fmt.Sprintf("node %d not found", missingID)})
 			return
 		}
-		prevAuth = append(prevAuth, snapshot)
-	}
-
-	for _, nodeID := range req.NodeIDs {
-		_, err := tx.Exec(`
-			UPDATE proxy_nodes
-			SET username = ?, password = ?, updated_at = CURRENT_TIMESTAMP
-			WHERE id = ?
-		`, req.Username, req.Password, nodeID)
-
-		if err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to update auth"})
-			return
-		}
-	}
-
-	if err := tx.Commit(); err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to commit transaction"})
-		return
-	}
-
-	// Regenerate global config and restart sing-box
-	if err := h.regenerateAndRestartWithRevert(func() error {
-		for _, snapshot := range prevAuth {
-			if _, revertErr := h.db.Exec(`
-				UPDATE proxy_nodes
-				SET username = ?, password = ?, updated_at = CURRENT_TIMESTAMP
-				WHERE id = ?
-			`, snapshot.username, snapshot.password, snapshot.id); revertErr != nil {
-				return revertErr
-			}
-		}
-		return nil
-	}); err != nil {
-		c.JSON(http.StatusInternalServerError, singboxUpdateError(err))
+		c.JSON(http.StatusInternalServerError, singboxUpdateError(mutationErr))
 		return
 	}
 
@@ -1700,7 +1732,11 @@ func (h *Handler) BatchSetAuth(c *gin.Context) {
 // GetSettings returns current settings
 func (h *Handler) GetSettings(c *gin.Context) {
 	var settings models.Settings
-	err := h.db.QueryRow("SELECT id, start_port, preserve_inbound_ports FROM settings LIMIT 1").Scan(&settings.ID, &settings.StartPort, &settings.PreserveInboundPorts)
+	err := h.db.QueryRowContext(c.Request.Context(), `
+		SELECT id, start_port, preserve_inbound_ports
+		FROM settings
+		WHERE singleton_key = 1
+	`).Scan(&settings.ID, &settings.StartPort, &settings.PreserveInboundPorts)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "database error"})
 		return
@@ -1711,6 +1747,10 @@ func (h *Handler) GetSettings(c *gin.Context) {
 		"preserve_inbound_ports": settings.PreserveInboundPorts,
 		"admin_password_locked":  strings.TrimSpace(os.Getenv("ADMIN_PASSWORD")) != "",
 	})
+}
+
+func (h *Handler) GetRuntimeStatus(c *gin.Context) {
+	c.JSON(http.StatusOK, h.singBoxService.RuntimeStatus())
 }
 
 // UpdateSettings updates settings
@@ -1726,6 +1766,7 @@ func (h *Handler) UpdateSettings(c *gin.Context) {
 		return
 	}
 
+	var hashedPassword string
 	if req.AdminPassword != nil {
 		if strings.TrimSpace(os.Getenv("ADMIN_PASSWORD")) != "" {
 			c.JSON(http.StatusConflict, gin.H{"error": "admin password is managed by ADMIN_PASSWORD"})
@@ -1740,135 +1781,121 @@ func (h *Handler) UpdateSettings(c *gin.Context) {
 			return
 		}
 
-		// Hash password
-		hashedPassword, err := bcrypt.GenerateFromPassword([]byte(*req.AdminPassword), bcrypt.DefaultCost)
+		hashed, err := bcrypt.GenerateFromPassword([]byte(*req.AdminPassword), bcrypt.DefaultCost)
 		if err != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to hash password"})
 			return
 		}
-
-		_, err = h.db.Exec("UPDATE settings SET admin_password = ?, admin_password_set = 1, updated_at = CURRENT_TIMESTAMP", string(hashedPassword))
-		if err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to update password"})
-			return
-		}
-		// Revoke all sessions after password change.
-		_, _ = h.db.Exec("DELETE FROM admin_sessions")
+		hashedPassword = string(hashed)
 	}
 
-	portsChanged := false
-
-	if req.StartPort != nil || req.PreserveInboundPorts != nil {
-		if req.StartPort != nil {
-			if err := validateStartPort(*req.StartPort); err != nil {
-				c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
-				return
-			}
-		}
-
-		h.nodeWriteMu.Lock()
-		defer h.nodeWriteMu.Unlock()
-
-		tx, err := h.db.Begin()
-		if err != nil {
-			log.Printf("Failed to begin transaction: %v", err)
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to start transaction"})
+	if req.StartPort != nil {
+		if err := validateStartPort(*req.StartPort); err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 			return
 		}
-		defer tx.Rollback()
+	}
 
-		currentStartPort, currentPreserveInboundPorts, err := getPortSettings(tx)
-		if err != nil {
-			log.Printf("Failed to query settings: %v", err)
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to query settings"})
-			return
-		}
+	h.nodeWriteMu.Lock()
+	defer h.nodeWriteMu.Unlock()
 
-		nextStartPort := currentStartPort
-		if req.StartPort != nil {
-			nextStartPort = *req.StartPort
-		}
+	var previous models.Settings
+	if err := h.db.QueryRowContext(c.Request.Context(), `
+		SELECT id, singleton_key, admin_password, admin_password_set, auth_generation,
+		       start_port, preserve_inbound_ports
+		FROM settings
+		WHERE singleton_key = 1
+	`).Scan(
+		&previous.ID,
+		&previous.SingletonKey,
+		&previous.AdminPassword,
+		&previous.AdminPasswordSet,
+		&previous.AuthGeneration,
+		&previous.StartPort,
+		&previous.PreserveInboundPorts,
+	); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to query settings"})
+		return
+	}
 
-		nextPreserveInboundPorts := currentPreserveInboundPorts
-		if req.PreserveInboundPorts != nil {
-			nextPreserveInboundPorts = *req.PreserveInboundPorts
-		}
+	nextStartPort := previous.StartPort
+	if req.StartPort != nil {
+		nextStartPort = *req.StartPort
+	}
+	nextPreserveInboundPorts := previous.PreserveInboundPorts
+	if req.PreserveInboundPorts != nil {
+		nextPreserveInboundPorts = *req.PreserveInboundPorts
+	}
+	portSettingsChanged := nextStartPort != previous.StartPort ||
+		nextPreserveInboundPorts != previous.PreserveInboundPorts
+	passwordChanged := req.AdminPassword != nil
+	if !portSettingsChanged && !passwordChanged {
+		c.JSON(http.StatusOK, gin.H{"message": "settings unchanged", "changed": false})
+		return
+	}
+	shouldReassignInboundPorts := !nextPreserveInboundPorts && portSettingsChanged
 
-		_, err = tx.Exec("UPDATE settings SET start_port = ?, preserve_inbound_ports = ?, updated_at = CURRENT_TIMESTAMP", nextStartPort, nextPreserveInboundPorts)
-		if err != nil {
-			log.Printf("Failed to update settings: %v", err)
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to update settings"})
-			return
-		}
-
-		shouldReassignInboundPorts := !nextPreserveInboundPorts && (req.StartPort != nil || currentPreserveInboundPorts != nextPreserveInboundPorts)
-		if shouldReassignInboundPorts {
-			rows, err := tx.Query("SELECT id, sort_order FROM proxy_nodes ORDER BY sort_order")
-			if err != nil {
-				log.Printf("Failed to query nodes: %v", err)
-				c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to query nodes"})
-				return
-			}
-
-			var nodes []struct {
-				ID        int
-				SortOrder int
-			}
-
-			for rows.Next() {
-				var node struct {
-					ID        int
-					SortOrder int
-				}
-				if err := rows.Scan(&node.ID, &node.SortOrder); err != nil {
-					rows.Close()
-					log.Printf("Failed to scan node: %v", err)
-					c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to read node data"})
-					return
-				}
-				nodes = append(nodes, node)
-			}
-			rows.Close()
-
-			if err := rows.Err(); err != nil {
-				log.Printf("Error iterating nodes: %v", err)
-				c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to read nodes"})
-				return
-			}
-
-			for _, node := range nodes {
-				newPort := nextStartPort + node.SortOrder
-				if err := validateInboundPort(newPort); err != nil {
-					c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
-					return
-				}
-				_, err := tx.Exec("UPDATE proxy_nodes SET inbound_port = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?", newPort, node.ID)
+	var portSnapshots []nodeOrderPortSnapshot
+	_, mutationErr := h.nodeMutations.Execute(c.Request.Context(), NodeMutationOperation{
+		ApplyRuntime: shouldReassignInboundPorts,
+		Mutate: func(ctx context.Context, tx *sql.Tx) error {
+			if shouldReassignInboundPorts {
+				var err error
+				portSnapshots, err = snapshotNodeOrderPorts(ctx, tx)
 				if err != nil {
-					log.Printf("Failed to update port for node %d: %v", node.ID, err)
-					c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to update node port"})
-					return
+					return err
 				}
 			}
 
-			portsChanged = true
-		}
+			if passwordChanged {
+				if _, err := tx.ExecContext(ctx, `
+					UPDATE settings
+					SET admin_password = ?, admin_password_set = 1,
+					    auth_generation = auth_generation + 1,
+					    start_port = ?, preserve_inbound_ports = ?,
+					    updated_at = CURRENT_TIMESTAMP
+					WHERE singleton_key = 1
+				`, hashedPassword, nextStartPort, nextPreserveInboundPorts); err != nil {
+					return err
+				}
+			} else if _, err := tx.ExecContext(ctx, `
+				UPDATE settings
+				SET start_port = ?, preserve_inbound_ports = ?, updated_at = CURRENT_TIMESTAMP
+				WHERE singleton_key = 1
+			`, nextStartPort, nextPreserveInboundPorts); err != nil {
+				return err
+			}
 
-		if err := tx.Commit(); err != nil {
-			log.Printf("Failed to commit transaction: %v", err)
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to commit changes"})
-			return
-		}
-
+			if shouldReassignInboundPorts {
+				return reassignAutomaticPortsTx(ctx, tx, nextStartPort)
+			}
+			return nil
+		},
+		Compensate: func(ctx context.Context, tx *sql.Tx) error {
+			if _, err := tx.ExecContext(ctx, `
+				UPDATE settings
+				SET admin_password = ?, admin_password_set = ?, auth_generation = ?,
+				    start_port = ?, preserve_inbound_ports = ?, updated_at = CURRENT_TIMESTAMP
+				WHERE singleton_key = 1
+			`, previous.AdminPassword, previous.AdminPasswordSet, previous.AuthGeneration,
+				previous.StartPort, previous.PreserveInboundPorts); err != nil {
+				return err
+			}
+			return restoreNodeOrderPorts(ctx, tx, portSnapshots)
+		},
+	})
+	if mutationErr != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{
+			"error": fmt.Sprintf("failed to update settings consistently: %v", mutationErr),
+		})
+		return
 	}
 
-	if portsChanged {
-		if err := h.regenerateAndRestart(); err != nil {
-			c.JSON(http.StatusInternalServerError, singboxUpdateError(err))
-			return
-		}
-	}
-
-	c.JSON(http.StatusOK, gin.H{"message": "settings updated"})
+	c.JSON(http.StatusOK, gin.H{
+		"message":          "settings updated",
+		"changed":          true,
+		"password_changed": passwordChanged,
+	})
 }
 
 // Logout revokes the current admin session token.
@@ -2045,69 +2072,53 @@ func (h *Handler) ReplaceNode(c *gin.Context) {
 	h.nodeWriteMu.Lock()
 	defer h.nodeWriteMu.Unlock()
 
-	// Snapshot the fields being replaced so the change can be reverted if the
-	// new config is rejected by the kernel.
-	var prevName, prevType, prevConfig, prevNodeIP, prevLocation, prevCountryCode string
-	var prevLatency int
-	if err := h.db.QueryRow(`
-		SELECT name, type, config, node_ip, location, country_code, latency
-		FROM proxy_nodes WHERE id = ?
-	`, id).Scan(&prevName, &prevType, &prevConfig, &prevNodeIP, &prevLocation, &prevCountryCode, &prevLatency); err != nil {
-		if err == sql.ErrNoRows {
+	var previous models.ProxyNode
+	var notFound bool
+	_, mutationErr := h.nodeMutations.Execute(c.Request.Context(), NodeMutationOperation{
+		ApplyRuntime: true,
+		Mutate: func(ctx context.Context, tx *sql.Tx) error {
+			var err error
+			previous, err = loadNodeByIDFrom(ctx, tx, id)
+			if err != nil {
+				if err == sql.ErrNoRows {
+					notFound = true
+				}
+				return err
+			}
+			nextName := previous.Name
+			if updateName {
+				nextName = name
+			}
+			_, err = tx.ExecContext(ctx, `
+				UPDATE proxy_nodes
+				SET name = ?, type = ?, config = ?,
+				    node_ip = '', location = '', country_code = '', latency = 0,
+				    updated_at = CURRENT_TIMESTAMP
+				WHERE id = ?
+			`, nextName, proxyType, string(configJSON), id)
+			return err
+		},
+		Compensate: func(ctx context.Context, tx *sql.Tx) error {
+			_, err := tx.ExecContext(ctx, `
+				UPDATE proxy_nodes
+				SET name = ?, type = ?, config = ?, node_ip = ?, location = ?,
+				    country_code = ?, latency = ?, updated_at = CURRENT_TIMESTAMP
+				WHERE id = ?
+			`, previous.Name, previous.Type, previous.Config, previous.NodeIP,
+				previous.Location, previous.CountryCode, previous.Latency, id)
+			return err
+		},
+	})
+	if mutationErr != nil {
+		if notFound {
 			c.JSON(http.StatusNotFound, gin.H{"error": "node not found"})
 			return
 		}
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "database error"})
+		c.JSON(http.StatusInternalServerError, singboxUpdateError(mutationErr))
 		return
 	}
 
-	if updateName {
-		_, err = h.db.Exec(`
-			UPDATE proxy_nodes
-			SET name = ?, type = ?, config = ?,
-			    node_ip = '', location = '', country_code = '', latency = 0,
-			    updated_at = CURRENT_TIMESTAMP
-			WHERE id = ?
-		`, name, proxyType, string(configJSON), id)
-	} else {
-		_, err = h.db.Exec(`
-			UPDATE proxy_nodes
-			SET type = ?, config = ?,
-			    node_ip = '', location = '', country_code = '', latency = 0,
-			    updated_at = CURRENT_TIMESTAMP
-			WHERE id = ?
-		`, proxyType, string(configJSON), id)
-	}
-
-	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to update node"})
-		return
-	}
-
-	if err := h.regenerateAndRestartWithRevert(func() error {
-		_, revertErr := h.db.Exec(`
-			UPDATE proxy_nodes
-			SET name = ?, type = ?, config = ?,
-			    node_ip = ?, location = ?, country_code = ?, latency = ?,
-			    updated_at = CURRENT_TIMESTAMP
-			WHERE id = ?
-		`, prevName, prevType, prevConfig, prevNodeIP, prevLocation, prevCountryCode, prevLatency, id)
-		return revertErr
-	}); err != nil {
-		c.JSON(http.StatusInternalServerError, singboxUpdateError(err))
-		return
-	}
-
-	var node models.ProxyNode
-	err = h.db.QueryRow(`
-		SELECT id, name, remark, type, config, inbound_port, username, password, tcp_reuse_enabled,
-		       sort_order, node_ip, location, country_code, latency, enabled, created_at, updated_at
-		FROM proxy_nodes WHERE id = ?
-	`, id).Scan(
-		&node.ID, &node.Name, &node.Remark, &node.Type, &node.Config, &node.InboundPort,
-		&node.Username, &node.Password, &node.TCPReuseEnabled, &node.SortOrder, &node.NodeIP,
-		&node.Location, &node.CountryCode, &node.Latency, &node.Enabled, &node.CreatedAt, &node.UpdatedAt,
-	)
+	node, err := loadNodeByIDFrom(c.Request.Context(), h.db, id)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "database error"})
 		return

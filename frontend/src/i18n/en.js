@@ -104,7 +104,9 @@ export default {
   enable_after_import: 'Enable nodes after import',
   
   batch_auth_title: 'Batch Set Authentication',
-  batch_auth_desc: 'Set username and password for selected nodes',
+  batch_auth_desc: 'Enable authentication or explicitly disable it for selected nodes',
+  batch_auth_mode_desc: 'Disabling clears credentials and exposes the selected inbounds without authentication.',
+  inbound_authentication: 'Inbound Authentication',
   apply_auth: 'Apply Auth',
   
   batch_delete_confirm: 'Confirm delete {{count}} selected nodes?',
@@ -137,6 +139,8 @@ export default {
   confirm_password: 'Confirm Password',
   password_mismatch: 'Passwords do not match',
   settings_updated: 'Settings updated successfully',
+  settings_unchanged: 'No settings changed',
+  admin_password_changed_relogin: 'Admin password updated. Sign in again with the new password.',
   
   // Messages
   node_created: 'Node created',
@@ -144,6 +148,12 @@ export default {
   node_deleted: 'Node deleted',
   node_replaced: 'Node replaced',
   nodes_reordered: 'Nodes reordered',
+  port_pin_enabled: 'This node port is now pinned',
+  port_pin_disabled: 'Port unpinned without immediate reassignment',
+  port_pin_add_hint: 'Click to pin this node port',
+  port_pin_remove_hint: 'Click to unpin (ports are not reassigned immediately)',
+  runtime_degraded: 'sing-box runtime failure',
+  runtime_degraded_desc: 'The proxy kernel stopped or entered a degraded state. Check the runtime log.',
   ip_check_started: 'IP check started',
   auth_updated: 'Authentication updated',
   tcp_reuse_auth_required_hint: 'This node has no inbound username/password, so TCP reuse cannot work until auth is configured.',

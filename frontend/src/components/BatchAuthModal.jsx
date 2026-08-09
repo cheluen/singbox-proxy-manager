@@ -1,14 +1,25 @@
-import React from 'react'
-import { Modal, Form, Input } from 'antd'
+import React, { useEffect } from 'react'
+import { Modal, Form, Input, Switch } from 'antd'
 import { useTranslation } from 'react-i18next'
 
 function BatchAuthModal({ visible, selectedNodes, onClose, onSave }) {
   const { t } = useTranslation()
   const [form] = Form.useForm()
+  const authEnabled = Form.useWatch('auth_enabled', form)
+
+  useEffect(() => {
+    if (visible) {
+      form.setFieldsValue({ auth_enabled: true, username: '', password: '' })
+    }
+  }, [form, visible])
 
   const handleOk = () => {
     form.validateFields().then((values) => {
-      onSave(values)
+      onSave({
+        auth_enabled: Boolean(values.auth_enabled),
+        username: values.auth_enabled ? values.username || '' : '',
+        password: values.auth_enabled ? values.password || '' : '',
+      })
       form.resetFields()
     })
   }
@@ -30,15 +41,38 @@ function BatchAuthModal({ visible, selectedNodes, onClose, onSave }) {
       <div style={{ marginBottom: 16 }}>
         {t('batch_auth_desc')}
       </div>
-      <Form form={form} layout="vertical">
+      <Form form={form} layout="vertical" initialValues={{ auth_enabled: true }}>
+        <Form.Item
+          label={t('inbound_authentication')}
+          name="auth_enabled"
+          valuePropName="checked"
+          extra={t('batch_auth_mode_desc')}
+        >
+          <Switch
+            checkedChildren={t('enabled')}
+            unCheckedChildren={t('disabled')}
+            onChange={(enabled) => {
+              if (!enabled) {
+                form.setFieldsValue({ username: '', password: '' })
+              }
+            }}
+          />
+        </Form.Item>
         <Form.Item
           label={t('username')}
           name="username"
+          hidden={!authEnabled}
+          dependencies={['auth_enabled']}
           rules={[
-            { required: true, message: t('enter_username') },
             {
               validator: (_, value) => {
-                if (!value || !String(value).includes('+')) {
+                if (!form.getFieldValue('auth_enabled')) {
+                  return Promise.resolve()
+                }
+                if (!value) {
+                  return Promise.reject(new Error(t('enter_username')))
+                }
+                if (!String(value).includes('+')) {
                   return Promise.resolve()
                 }
                 return Promise.reject(new Error(t('username_plus_not_allowed')))
@@ -51,7 +85,18 @@ function BatchAuthModal({ visible, selectedNodes, onClose, onSave }) {
         <Form.Item
           label={t('password')}
           name="password"
-          rules={[{ required: true, message: t('enter_password') }]}
+          hidden={!authEnabled}
+          dependencies={['auth_enabled']}
+          rules={[
+            {
+              validator: (_, value) => {
+                if (!form.getFieldValue('auth_enabled') || value) {
+                  return Promise.resolve()
+                }
+                return Promise.reject(new Error(t('enter_password')))
+              },
+            },
+          ]}
         >
           <Input.Password placeholder={t('enter_password')} />
         </Form.Item>
