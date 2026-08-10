@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net"
 	"net/http"
@@ -22,12 +23,14 @@ import (
 )
 
 type Handler struct {
-	db             *sql.DB
-	singBoxService *services.SingBoxService
-	loginLimiter   *loginRateLimiter
-	nodeWriteMu    sync.Mutex
-	nodeMutations  *NodeMutationCoordinator
-	checkProxyIP   func(context.Context, string, string, string) (*services.IPInfo, error)
+	db              *sql.DB
+	singBoxService  *services.SingBoxService
+	loginLimiter    *loginRateLimiter
+	nodeWriteMu     sync.Mutex
+	passwordSetupMu sync.Mutex
+	nodeMutations   *NodeMutationCoordinator
+	checkProxyIP    func(context.Context, string, string, string) (*services.IPInfo, error)
+	hashPassword    func([]byte, int) ([]byte, error)
 }
 
 type nodeUpsertRequest struct {
@@ -50,6 +53,7 @@ func NewHandler(db *sql.DB, singBoxService *services.SingBoxService) *Handler {
 		loginLimiter:   newLoginRateLimiterFromEnv(),
 		nodeMutations:  NewNodeMutationCoordinator(db, singBoxService),
 		checkProxyIP:   services.CheckProxyIPContext,
+		hashPassword:   bcrypt.GenerateFromPassword,
 	}
 }
 
@@ -333,6 +337,23 @@ func (h *Handler) SetupAdminPassword(c *gin.Context) {
 		return
 	}
 
+	h.passwordSetupMu.Lock()
+	defer h.passwordSetupMu.Unlock()
+
+	var passwordSet int
+	var existingHash string
+	if err := h.db.QueryRowContext(
+		c.Request.Context(),
+		"SELECT admin_password, admin_password_set FROM settings WHERE singleton_key = 1",
+	).Scan(&existingHash, &passwordSet); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "database error"})
+		return
+	}
+	if passwordSet != 0 || strings.TrimSpace(existingHash) != "" {
+		c.JSON(http.StatusConflict, gin.H{"error": "admin password already set"})
+		return
+	}
+
 	var req struct {
 		Password string `json:"password"`
 	}
@@ -349,7 +370,11 @@ func (h *Handler) SetupAdminPassword(c *gin.Context) {
 		return
 	}
 
-	hashedPassword, err := bcrypt.GenerateFromPassword([]byte(req.Password), bcrypt.DefaultCost)
+	hashPassword := h.hashPassword
+	if hashPassword == nil {
+		hashPassword = bcrypt.GenerateFromPassword
+	}
+	hashedPassword, err := hashPassword([]byte(req.Password), bcrypt.DefaultCost)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to hash password"})
 		return
@@ -367,7 +392,7 @@ func (h *Handler) SetupAdminPassword(c *gin.Context) {
 		    admin_password_set = 1,
 		    auth_generation = auth_generation + 1,
 		    updated_at = CURRENT_TIMESTAMP
-		WHERE singleton_key = 1 AND admin_password_set = 0
+		WHERE singleton_key = 1 AND admin_password_set = 0 AND admin_password = ''
 	`, string(hashedPassword))
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to update password"})
@@ -520,10 +545,6 @@ func (h *Handler) CreateNode(c *gin.Context) {
 			}
 			req.ID = int(id)
 			return nil
-		},
-		Compensate: func(ctx context.Context, tx *sql.Tx) error {
-			_, err := tx.ExecContext(ctx, "DELETE FROM proxy_nodes WHERE id = ?", req.ID)
-			return err
 		},
 	})
 	if mutationErr != nil {
@@ -757,7 +778,6 @@ func (h *Handler) BatchImportNodes(c *gin.Context) {
 		return
 	}
 
-	insertedIDs := make([]int64, 0, len(validCandidates))
 	_, mutationErr := h.nodeMutations.Execute(c.Request.Context(), NodeMutationOperation{
 		ApplyRuntime: true,
 		Mutate: func(ctx context.Context, tx *sql.Tx) error {
@@ -799,15 +819,6 @@ func (h *Handler) BatchImportNodes(c *gin.Context) {
 					return err
 				}
 				node.ID = int(id)
-				insertedIDs = append(insertedIDs, id)
-			}
-			return nil
-		},
-		Compensate: func(ctx context.Context, tx *sql.Tx) error {
-			for _, id := range insertedIDs {
-				if _, err := tx.ExecContext(ctx, "DELETE FROM proxy_nodes WHERE id = ?", id); err != nil {
-					return err
-				}
 			}
 			return nil
 		},
@@ -1085,7 +1096,6 @@ func (h *Handler) UpdateNode(c *gin.Context) {
 	defer h.nodeWriteMu.Unlock()
 
 	var prev models.ProxyNode
-	var portSnapshots []nodeOrderPortSnapshot
 	var requestErr error
 	var notFound bool
 	_, mutationErr := h.nodeMutations.Execute(c.Request.Context(), NodeMutationOperation{
@@ -1121,10 +1131,6 @@ func (h *Handler) UpdateNode(c *gin.Context) {
 					return err
 				}
 			case !preserveInboundPorts && !prev.InboundPortPinned:
-				portSnapshots, err = snapshotNodeOrderPorts(ctx, tx)
-				if err != nil {
-					return err
-				}
 				req.InboundPort = prev.InboundPort
 			case !preserveInboundPorts && prev.InboundPortPinned && req.InboundPort == 0:
 				req.InboundPort = prev.InboundPort
@@ -1171,24 +1177,6 @@ func (h *Handler) UpdateNode(c *gin.Context) {
 				if err := tx.QueryRowContext(ctx, "SELECT inbound_port FROM proxy_nodes WHERE id = ?", id).Scan(&req.InboundPort); err != nil {
 					return err
 				}
-			}
-			return nil
-		},
-		Compensate: func(ctx context.Context, tx *sql.Tx) error {
-			_, err := tx.ExecContext(ctx, `
-				UPDATE proxy_nodes
-				SET name = ?, remark = ?, type = ?, config = ?, inbound_port = ?,
-				    inbound_port_pinned = ?, username = ?, password = ?, tcp_reuse_enabled = ?,
-				    sort_order = ?, enabled = ?, updated_at = CURRENT_TIMESTAMP
-				WHERE id = ?
-			`, prev.Name, prev.Remark, prev.Type, prev.Config, prev.InboundPort,
-				prev.InboundPortPinned, prev.Username, prev.Password, prev.TCPReuseEnabled,
-				prev.SortOrder, prev.Enabled, id)
-			if err != nil {
-				return err
-			}
-			if len(portSnapshots) > 0 {
-				return restoreNodeOrderPorts(ctx, tx, portSnapshots)
 			}
 			return nil
 		},
@@ -1307,18 +1295,11 @@ func (h *Handler) DeleteNode(c *gin.Context) {
 	h.nodeWriteMu.Lock()
 	defer h.nodeWriteMu.Unlock()
 
-	var deletedNode models.ProxyNode
-	var orderSnapshots []nodeOrderPortSnapshot
 	var notFound bool
 	_, mutationErr := h.nodeMutations.Execute(c.Request.Context(), NodeMutationOperation{
 		ApplyRuntime: true,
 		Mutate: func(ctx context.Context, tx *sql.Tx) error {
-			var err error
-			orderSnapshots, err = snapshotNodeOrderPorts(ctx, tx)
-			if err != nil {
-				return err
-			}
-			deletedNode, err = loadNodeByIDFrom(ctx, tx, id)
+			_, err := loadNodeByIDFrom(ctx, tx, id)
 			if err != nil {
 				if err == sql.ErrNoRows {
 					notFound = true
@@ -1339,12 +1320,6 @@ func (h *Handler) DeleteNode(c *gin.Context) {
 				return reassignAutomaticPortsTx(ctx, tx, startPort)
 			}
 			return nil
-		},
-		Compensate: func(ctx context.Context, tx *sql.Tx) error {
-			if err := insertProxyNodeSnapshot(ctx, tx, deletedNode); err != nil {
-				return err
-			}
-			return restoreNodeOrderPorts(ctx, tx, orderSnapshots)
 		},
 	})
 	if mutationErr != nil {
@@ -1391,26 +1366,18 @@ func (h *Handler) BatchDeleteNodes(c *gin.Context) {
 		seenIDs[id] = struct{}{}
 	}
 
-	deletedNodes := make([]models.ProxyNode, 0, len(req.IDs))
-	var orderSnapshots []nodeOrderPortSnapshot
 	var missingID int
 	_, mutationErr := h.nodeMutations.Execute(c.Request.Context(), NodeMutationOperation{
 		ApplyRuntime: true,
 		Mutate: func(ctx context.Context, tx *sql.Tx) error {
-			var err error
-			orderSnapshots, err = snapshotNodeOrderPorts(ctx, tx)
-			if err != nil {
-				return err
-			}
 			for _, id := range req.IDs {
-				node, err := loadNodeByIDFrom(ctx, tx, id)
+				_, err := loadNodeByIDFrom(ctx, tx, id)
 				if err != nil {
 					if err == sql.ErrNoRows {
 						missingID = id
 					}
 					return err
 				}
-				deletedNodes = append(deletedNodes, node)
 			}
 			for _, id := range req.IDs {
 				if _, err := tx.ExecContext(ctx, "DELETE FROM proxy_nodes WHERE id = ?", id); err != nil {
@@ -1429,14 +1396,6 @@ func (h *Handler) BatchDeleteNodes(c *gin.Context) {
 			}
 			return nil
 		},
-		Compensate: func(ctx context.Context, tx *sql.Tx) error {
-			for _, node := range deletedNodes {
-				if err := insertProxyNodeSnapshot(ctx, tx, node); err != nil {
-					return err
-				}
-			}
-			return restoreNodeOrderPorts(ctx, tx, orderSnapshots)
-		},
 	})
 	if mutationErr != nil {
 		if missingID != 0 {
@@ -1449,7 +1408,7 @@ func (h *Handler) BatchDeleteNodes(c *gin.Context) {
 
 	c.JSON(http.StatusOK, gin.H{
 		"message":       "nodes deleted",
-		"deleted_count": len(deletedNodes),
+		"deleted_count": len(req.IDs),
 	})
 }
 
@@ -1539,9 +1498,6 @@ func (h *Handler) ReorderNodes(c *gin.Context) {
 			}
 			return nil
 		},
-		Compensate: func(ctx context.Context, tx *sql.Tx) error {
-			return restoreNodeOrderPorts(ctx, tx, snapshots)
-		},
 	})
 	if mutationErr != nil {
 		if requestErr != nil {
@@ -1571,8 +1527,12 @@ func (h *Handler) CheckNodeIP(c *gin.Context) {
 	`, id).Scan(&node.ID, &nodeName, &node.InboundPort, &node.Username, &node.Password, &node.Enabled)
 
 	if err != nil {
-		fmt.Printf("[API] Node %d not found in database: %v\n", id, err)
-		c.JSON(http.StatusNotFound, gin.H{"error": "node not found"})
+		if errors.Is(err, sql.ErrNoRows) {
+			c.JSON(http.StatusNotFound, gin.H{"error": "node not found"})
+			return
+		}
+		fmt.Printf("[API] Failed to load node %d: %v\n", id, err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "database error"})
 		return
 	}
 
@@ -1668,30 +1628,22 @@ func (h *Handler) BatchSetAuth(c *gin.Context) {
 	h.nodeWriteMu.Lock()
 	defer h.nodeWriteMu.Unlock()
 
-	type nodeAuthSnapshot struct {
-		id       int
-		username string
-		password string
-	}
-	prevAuth := make([]nodeAuthSnapshot, 0, len(req.NodeIDs))
 	var missingID int
 	_, mutationErr := h.nodeMutations.Execute(c.Request.Context(), NodeMutationOperation{
 		ApplyRuntime: true,
 		Mutate: func(ctx context.Context, tx *sql.Tx) error {
 			for _, nodeID := range req.NodeIDs {
-				var snapshot nodeAuthSnapshot
-				snapshot.id = nodeID
+				var existingID int
 				if err := tx.QueryRowContext(
 					ctx,
-					"SELECT username, password FROM proxy_nodes WHERE id = ?",
+					"SELECT id FROM proxy_nodes WHERE id = ?",
 					nodeID,
-				).Scan(&snapshot.username, &snapshot.password); err != nil {
+				).Scan(&existingID); err != nil {
 					if err == sql.ErrNoRows {
 						missingID = nodeID
 					}
 					return err
 				}
-				prevAuth = append(prevAuth, snapshot)
 			}
 			for _, nodeID := range req.NodeIDs {
 				if _, err := tx.ExecContext(ctx, `
@@ -1699,18 +1651,6 @@ func (h *Handler) BatchSetAuth(c *gin.Context) {
 					SET username = ?, password = ?, updated_at = CURRENT_TIMESTAMP
 					WHERE id = ?
 				`, req.Username, req.Password, nodeID); err != nil {
-					return err
-				}
-			}
-			return nil
-		},
-		Compensate: func(ctx context.Context, tx *sql.Tx) error {
-			for _, snapshot := range prevAuth {
-				if _, err := tx.ExecContext(ctx, `
-					UPDATE proxy_nodes
-					SET username = ?, password = ?, updated_at = CURRENT_TIMESTAMP
-					WHERE id = ?
-				`, snapshot.username, snapshot.password, snapshot.id); err != nil {
 					return err
 				}
 			}
@@ -1751,6 +1691,34 @@ func (h *Handler) GetSettings(c *gin.Context) {
 
 func (h *Handler) GetRuntimeStatus(c *gin.Context) {
 	c.JSON(http.StatusOK, h.singBoxService.RuntimeStatus())
+}
+
+func (h *Handler) RestartRuntime(c *gin.Context) {
+	if h.singBoxService == nil || h.db == nil || h.nodeMutations == nil {
+		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "sing-box runtime is unavailable"})
+		return
+	}
+
+	h.nodeWriteMu.Lock()
+	defer h.nodeWriteMu.Unlock()
+	_, err := h.nodeMutations.Execute(c.Request.Context(), NodeMutationOperation{
+		ApplyRuntime: true,
+		Mutate: func(context.Context, *sql.Tx) error {
+			return nil
+		},
+	})
+	if err != nil {
+		h.singBoxService.MarkDegraded(err)
+		c.JSON(http.StatusInternalServerError, gin.H{
+			"error":  err.Error(),
+			"status": h.singBoxService.RuntimeStatus(),
+		})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{
+		"message": "sing-box runtime reapplied from database",
+		"status":  h.singBoxService.RuntimeStatus(),
+	})
 }
 
 // UpdateSettings updates settings
@@ -1835,18 +1803,9 @@ func (h *Handler) UpdateSettings(c *gin.Context) {
 	}
 	shouldReassignInboundPorts := !nextPreserveInboundPorts && portSettingsChanged
 
-	var portSnapshots []nodeOrderPortSnapshot
 	_, mutationErr := h.nodeMutations.Execute(c.Request.Context(), NodeMutationOperation{
 		ApplyRuntime: shouldReassignInboundPorts,
 		Mutate: func(ctx context.Context, tx *sql.Tx) error {
-			if shouldReassignInboundPorts {
-				var err error
-				portSnapshots, err = snapshotNodeOrderPorts(ctx, tx)
-				if err != nil {
-					return err
-				}
-			}
-
 			if passwordChanged {
 				if _, err := tx.ExecContext(ctx, `
 					UPDATE settings
@@ -1870,18 +1829,6 @@ func (h *Handler) UpdateSettings(c *gin.Context) {
 				return reassignAutomaticPortsTx(ctx, tx, nextStartPort)
 			}
 			return nil
-		},
-		Compensate: func(ctx context.Context, tx *sql.Tx) error {
-			if _, err := tx.ExecContext(ctx, `
-				UPDATE settings
-				SET admin_password = ?, admin_password_set = ?, auth_generation = ?,
-				    start_port = ?, preserve_inbound_ports = ?, updated_at = CURRENT_TIMESTAMP
-				WHERE singleton_key = 1
-			`, previous.AdminPassword, previous.AdminPasswordSet, previous.AuthGeneration,
-				previous.StartPort, previous.PreserveInboundPorts); err != nil {
-				return err
-			}
-			return restoreNodeOrderPorts(ctx, tx, portSnapshots)
 		},
 	})
 	if mutationErr != nil {
@@ -2096,16 +2043,6 @@ func (h *Handler) ReplaceNode(c *gin.Context) {
 				    updated_at = CURRENT_TIMESTAMP
 				WHERE id = ?
 			`, nextName, proxyType, string(configJSON), id)
-			return err
-		},
-		Compensate: func(ctx context.Context, tx *sql.Tx) error {
-			_, err := tx.ExecContext(ctx, `
-				UPDATE proxy_nodes
-				SET name = ?, type = ?, config = ?, node_ip = ?, location = ?,
-				    country_code = ?, latency = ?, updated_at = CURRENT_TIMESTAMP
-				WHERE id = ?
-			`, previous.Name, previous.Type, previous.Config, previous.NodeIP,
-				previous.Location, previous.CountryCode, previous.Latency, id)
 			return err
 		},
 	})

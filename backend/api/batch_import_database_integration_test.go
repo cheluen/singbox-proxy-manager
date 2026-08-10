@@ -82,11 +82,11 @@ func TestRemoteDatabaseCleanupVerification(t *testing.T) {
 	var query string
 	switch appdb.DialectFor(db) {
 	case appdb.DialectPostgres:
-		query = `SELECT COUNT(*) FROM information_schema.tables WHERE table_schema = current_schema() AND table_name IN ('admin_sessions', 'proxy_nodes', 'settings')`
+		query = `SELECT COUNT(*) FROM information_schema.tables WHERE table_schema = current_schema() AND table_name IN ('admin_sessions', 'proxy_nodes', 'settings', 'manager_instance_lock')`
 	case appdb.DialectMySQL:
-		query = `SELECT COUNT(*) FROM information_schema.tables WHERE table_schema = DATABASE() AND table_name IN ('admin_sessions', 'proxy_nodes', 'settings')`
+		query = `SELECT COUNT(*) FROM information_schema.tables WHERE table_schema = DATABASE() AND table_name IN ('admin_sessions', 'proxy_nodes', 'settings', 'manager_instance_lock')`
 	default:
-		query = `SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name IN ('admin_sessions', 'proxy_nodes', 'settings')`
+		query = `SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name IN ('admin_sessions', 'proxy_nodes', 'settings', 'manager_instance_lock')`
 	}
 	var count int
 	if err := db.QueryRow(query).Scan(&count); err != nil {
@@ -133,11 +133,11 @@ func resetBatchImportIntegrationTables(t *testing.T, db *sql.DB) {
 	var inspectionQuery string
 	switch appdb.DialectFor(db) {
 	case appdb.DialectPostgres:
-		inspectionQuery = `SELECT table_name FROM information_schema.tables WHERE table_schema = current_schema() AND table_name IN ('admin_sessions', 'proxy_nodes', 'settings')`
+		inspectionQuery = `SELECT table_name FROM information_schema.tables WHERE table_schema = current_schema() AND table_name IN ('admin_sessions', 'proxy_nodes', 'settings', 'manager_instance_lock')`
 	case appdb.DialectMySQL:
-		inspectionQuery = `SELECT table_name FROM information_schema.tables WHERE table_schema = DATABASE() AND table_name IN ('admin_sessions', 'proxy_nodes', 'settings')`
+		inspectionQuery = `SELECT table_name FROM information_schema.tables WHERE table_schema = DATABASE() AND table_name IN ('admin_sessions', 'proxy_nodes', 'settings', 'manager_instance_lock')`
 	default:
-		inspectionQuery = `SELECT name FROM sqlite_master WHERE type = 'table' AND name IN ('admin_sessions', 'proxy_nodes', 'settings')`
+		inspectionQuery = `SELECT name FROM sqlite_master WHERE type = 'table' AND name IN ('admin_sessions', 'proxy_nodes', 'settings', 'manager_instance_lock')`
 	}
 	rows, err := db.Query(inspectionQuery)
 	if err != nil {
@@ -157,7 +157,7 @@ func resetBatchImportIntegrationTables(t *testing.T, db *sql.DB) {
 	if err := rows.Close(); err != nil {
 		t.Fatalf("close integration table inspection: %v", err)
 	}
-	for _, table := range []string{"admin_sessions", "proxy_nodes", "settings"} {
+	for _, table := range []string{"admin_sessions", "proxy_nodes", "settings", "manager_instance_lock"} {
 		if _, err := db.Exec("DROP TABLE IF EXISTS " + table); err != nil {
 			t.Fatalf("reset integration table %s: %v", table, err)
 		}

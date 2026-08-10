@@ -115,7 +115,7 @@ const createMockApiServer = () => {
     }
 
     const matchCheckIP = req.url?.match(/^\/api\/nodes\/(\d+)\/check-ip$/)
-    if (req.method === 'GET' && matchCheckIP) {
+    if (req.method === 'POST' && matchCheckIP) {
       const id = Number(matchCheckIP[1] || 0)
       checkCalls.push({ id, at: Date.now() })
 

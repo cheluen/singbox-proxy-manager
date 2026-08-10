@@ -4,7 +4,7 @@
 
 <img src="./logo.svg" alt="SingBox Proxy Manager Logo" width="96" />
 
-![Version](https://img.shields.io/badge/version-1.5.5-blue.svg)
+![Version](https://img.shields.io/badge/version-1.6.0-blue.svg)
 ![License](https://img.shields.io/badge/license-MIT-green.svg)
 ![SingBox](https://img.shields.io/badge/sing--box-1.12.12-orange.svg)
 
@@ -52,7 +52,7 @@ cd singbox-proxy-manager
 # 2. 生成部署环境变量文件（所有部署方式建议参考这个变量清单）
 cp .env.example .env
 
-# 3. 按需修改 .env（至少建议设置 ADMIN_PASSWORD）
+# 3. 修改 .env；Compose 默认监听 0.0.0.0，必须设置 ADMIN_PASSWORD 才能启动
 # 镜像来源切换：
 #   COMPOSE_PROFILES=ghcr  -> 使用 GHCR 预构建镜像（默认）
 #   COMPOSE_PROFILES=local -> 使用本地源码构建镜像
@@ -96,6 +96,7 @@ chmod +x singbox-proxy-manager
 cp .env.example .env
 #    强烈建议显式指定 sing-box 路径，避免 PATH 差异
 #    SINGBOX_BINARY=/absolute/path/to/sing-box
+#    外部监听必须设置 ADMIN_PASSWORD；仅本机使用可设 BIND_ADDRESS=127.0.0.1 后首次设密
 
 # 3) 启动
 ./singbox-proxy-manager
@@ -112,7 +113,8 @@ cp .env.example .env
 - 默认端口：`30000`
 - **不再提供默认密码**
   - 若设置 `ADMIN_PASSWORD` 且不为空：登录密码为该值；面板内无法修改管理员密码（需修改环境变量并重启服务）
-  - 若未设置 `ADMIN_PASSWORD`：首次打开管理面板会要求先设置管理员密码（设置后可在面板内修改）
+  - 只有 `BIND_ADDRESS` 为 `127.0.0.1`、`::1` 或 `localhost` 时才允许不设置 `ADMIN_PASSWORD`，并通过本机面板首次设密
+  - 非回环监听未设置 `ADMIN_PASSWORD` 时服务会拒绝启动，避免首次部署被网络中的其他客户端接管
 
 ### 2. 添加节点
 
@@ -166,11 +168,19 @@ GO_SUM_DB=sum.golang.org
 
 # 运行配置
 PORT=30000
+BIND_ADDRESS=0.0.0.0
 CONFIG_DIR=/app/config
 CONFIG_VOLUME_HOST=./config
 TZ=UTC+8
 ADMIN_PASSWORD=
 SINGBOX_BINARY=
+SBPM_SINGBOX_LOG_OUTPUT=stdout       # stdout、file 或 both
+SBPM_SINGBOX_LOG_MAX_BYTES=10485760
+SBPM_SINGBOX_LOG_BACKUPS=3
+SBPM_SINGBOX_RECOVERY_MAX_ATTEMPTS=5
+SBPM_SINGBOX_RECOVERY_BASE_DELAY=1s
+SBPM_SINGBOX_RECOVERY_MAX_DELAY=30s
+SBPM_SINGBOX_RECOVERY_STABLE_WINDOW=1m
 
 # 安全与稳定性
 CORS_ALLOWED_ORIGINS=
@@ -196,6 +206,8 @@ MYSQL_DATABASE_NAME=                  # MySQL URL 指向 sys 等系统库时可�
 DB_MAX_OPEN_CONNS=10
 DB_MAX_IDLE_CONNS=5
 DB_CONN_MAX_LIFETIME=
+SBPM_INSTANCE_LEASE_DURATION=30s
+SBPM_INSTANCE_LEASE_HEARTBEAT=10s
 TURSO_DATABASE_URL=
 TURSO_AUTH_TOKEN=
 
@@ -214,6 +226,8 @@ SBPM_UPDATE_CHECK_TIMEOUT=5s
 
 > 不想用远程数据库可以全部留空，系统会自动使用本地 SQLite。远程数据库优先级为：`DATABASE_URL` / `POSTGRES_DATABASE_URL` / `MYSQL_DATABASE_URL` / `PGSQL` / `MYSQL` > Turso > 本地 SQLite。
 
+> 管理进程通过数据库租约强制单实例运行。共享同一数据库启动第二个管理实例会直接失败；每个实例仍管理各自本地 sing-box 运行时，因此不支持横向扩容。
+
 ### 端口说明
 
 - `30000`：管理界面端口（可修改）
@@ -224,11 +238,13 @@ SBPM_UPDATE_CHECK_TIMEOUT=5s
 默认使用本地 SQLite，数据存储在 `./config` 目录：
 - `config.json`：sing-box 配置文件
 - `proxy.db`：节点数据库
-- `singbox.log`：sing-box 日志
+- `config.json.last-good`：最近一次成功启动的 sing-box 配置快照
 
 如果启用了远程数据库（PostgreSQL/MySQL/Turso）：
 - 节点/设置/会话数据会存到远程数据库（不再写入本地 `proxy.db`）
-- `./config` 目录仍会保存 `config.json` 和 `singbox.log`（方便排障）
+- `./config` 目录仍会保存 `config.json` 和 `config.json.last-good`
+
+Compose 默认使用 `SBPM_SINGBOX_LOG_OUTPUT=stdout`，内核日志由容器 `json-file` 驱动按 `10m × 3` 轮转，不写入配置卷。独立二进制如设置为 `file` 或 `both`，则在配置目录生成 `singbox.log`，并按 `SBPM_SINGBOX_LOG_MAX_BYTES` 和 `SBPM_SINGBOX_LOG_BACKUPS` 保留轮转文件。
 
 ```bash
 # 备份数据
@@ -364,8 +380,8 @@ docker compose up -d
 ## 🔒 安全建议
 
 1. **设置强管理员密码**
-   - 推荐：通过环境变量 `ADMIN_PASSWORD` 配置固定密码（面板内无法修改，需改环境变量并重启）
-   - 或者：不设置 `ADMIN_PASSWORD`，首次打开面板时设置一个强密码（后续可在面板内修改）
+   - 外部监听：必须通过环境变量 `ADMIN_PASSWORD` 配置固定密码（面板内无法修改，需改环境变量并重启）
+   - 仅本机监听：可将 `BIND_ADDRESS` 设为回环地址并暂不设置 `ADMIN_PASSWORD`，再从本机面板首次设密
 
 2. **限制访问 IP**（可选）
    ```bash
@@ -421,7 +437,10 @@ SINGBOX_BINARY=/path/to/sing-box
 # 测试代理连通性
 curl --proxy http://用户名:密码@服务器IP:30001 http://httpbin.org/ip
 
-# 检查 sing-box 日志
+# Compose 默认日志输出（包含管理进程与 sing-box）
+docker compose logs -f
+
+# 仅当 SBPM_SINGBOX_LOG_OUTPUT=file 或 both 时查看文件日志
 docker exec sb-proxy tail -f /app/config/singbox.log
 
 # 检查端口监听

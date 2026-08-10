@@ -3,6 +3,7 @@ package api
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"database/sql"
 	"encoding/base64"
 	"encoding/json"
@@ -127,7 +128,7 @@ func TestCheckNodeIPSuccessUpdatesNode(t *testing.T) {
 	rec := httptest.NewRecorder()
 	ctx, _ := gin.CreateTestContext(rec)
 	ctx.Params = gin.Params{gin.Param{Key: "id", Value: strconv.Itoa(nodeID)}}
-	ctx.Request, _ = http.NewRequest(http.MethodGet, "/api/nodes/"+strconv.Itoa(nodeID)+"/check-ip", nil)
+	ctx.Request, _ = http.NewRequest(http.MethodPost, "/api/nodes/"+strconv.Itoa(nodeID)+"/check-ip", nil)
 
 	handler.CheckNodeIP(ctx)
 
@@ -155,6 +156,62 @@ func TestCheckNodeIPSuccessUpdatesNode(t *testing.T) {
 	}
 }
 
+func TestCheckNodeIPDatabaseFailureReturns500(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	handler := newTestHandler(t, nil)
+	if err := handler.db.Close(); err != nil {
+		t.Fatalf("close database: %v", err)
+	}
+
+	recorder := httptest.NewRecorder()
+	ctx, _ := gin.CreateTestContext(recorder)
+	ctx.Params = gin.Params{{Key: "id", Value: "1"}}
+	ctx.Request = httptest.NewRequest(http.MethodPost, "/api/nodes/1/check-ip", nil)
+	handler.CheckNodeIP(ctx)
+	if recorder.Code != http.StatusInternalServerError {
+		t.Fatalf("expected 500 for database failure, got %d body=%s", recorder.Code, recorder.Body.String())
+	}
+}
+
+func TestRestartRuntimeReturnsServiceUnavailableWithoutRuntime(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	recorder := httptest.NewRecorder()
+	ctx, _ := gin.CreateTestContext(recorder)
+	NewHandler(nil, nil).RestartRuntime(ctx)
+	if recorder.Code != http.StatusServiceUnavailable {
+		t.Fatalf("expected 503 without runtime service, got %d body=%s", recorder.Code, recorder.Body.String())
+	}
+}
+
+func TestRestartRuntimeReappliesDatabaseState(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	handler := newTestHandler(t, nil)
+	insertTestNode(t, handler.db)
+
+	recorder := httptest.NewRecorder()
+	ctx, _ := gin.CreateTestContext(recorder)
+	ctx.Request = httptest.NewRequest(http.MethodPost, "/api/runtime/restart", nil)
+	handler.RestartRuntime(ctx)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("restart failed: status=%d body=%s", recorder.Code, recorder.Body.String())
+	}
+
+	nodes, err := loadAllNodesFrom(context.Background(), handler.db)
+	if err != nil {
+		t.Fatalf("load expected database state: %v", err)
+	}
+	expectedConfig, err := handler.singBoxService.BuildGlobalConfig(nodes)
+	if err != nil {
+		t.Fatalf("build expected runtime config: %v", err)
+	}
+	expectedSum := sha256.Sum256(expectedConfig)
+	expectedHash := fmt.Sprintf("%x", expectedSum[:8])
+	status := handler.singBoxService.RuntimeStatus()
+	if !status.Running || status.Degraded || status.ActiveConfigHash != expectedHash {
+		t.Fatalf("reapplied runtime is not healthy: %+v", status)
+	}
+}
+
 func TestCheckNodeIPFailureClearsStatus(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 
@@ -167,7 +224,7 @@ func TestCheckNodeIPFailureClearsStatus(t *testing.T) {
 	rec := httptest.NewRecorder()
 	ctx, _ := gin.CreateTestContext(rec)
 	ctx.Params = gin.Params{gin.Param{Key: "id", Value: strconv.Itoa(nodeID)}}
-	ctx.Request, _ = http.NewRequest(http.MethodGet, "/api/nodes/"+strconv.Itoa(nodeID)+"/check-ip", nil)
+	ctx.Request, _ = http.NewRequest(http.MethodPost, "/api/nodes/"+strconv.Itoa(nodeID)+"/check-ip", nil)
 
 	// Prime node with old values to ensure they get cleared.
 	if _, err := handler.db.Exec(`
@@ -212,7 +269,7 @@ func TestCheckNodeIPAcceptsSocksFallback(t *testing.T) {
 	rec := httptest.NewRecorder()
 	ctx, _ := gin.CreateTestContext(rec)
 	ctx.Params = gin.Params{gin.Param{Key: "id", Value: strconv.Itoa(nodeID)}}
-	ctx.Request, _ = http.NewRequest(http.MethodGet, "/api/nodes/"+strconv.Itoa(nodeID)+"/check-ip", nil)
+	ctx.Request, _ = http.NewRequest(http.MethodPost, "/api/nodes/"+strconv.Itoa(nodeID)+"/check-ip", nil)
 
 	handler.CheckNodeIP(ctx)
 

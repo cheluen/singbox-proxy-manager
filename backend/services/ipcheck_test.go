@@ -2,6 +2,7 @@ package services
 
 import (
 	"context"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -31,6 +32,28 @@ func TestCheckWithService_SendsHeaders(t *testing.T) {
 	}
 	if info.IP != "1.2.3.4" {
 		t.Fatalf("unexpected ip: %q", info.IP)
+	}
+}
+
+func TestRunIPCheckAttemptGivesFallbackAFreshTimeout(t *testing.T) {
+	firstStarted := time.Now()
+	_, firstErr := runIPCheckAttempt(context.Background(), 30*time.Millisecond, func(ctx context.Context) (*IPInfo, error) {
+		<-ctx.Done()
+		return nil, ctx.Err()
+	})
+	if firstErr == nil || time.Since(firstStarted) < 20*time.Millisecond {
+		t.Fatalf("first attempt did not consume its own timeout: %v", firstErr)
+	}
+
+	info, err := runIPCheckAttempt(context.Background(), 30*time.Millisecond, func(ctx context.Context) (*IPInfo, error) {
+		deadline, ok := ctx.Deadline()
+		if !ok || time.Until(deadline) < 20*time.Millisecond {
+			return nil, fmt.Errorf("fallback context has no fresh timeout budget")
+		}
+		return &IPInfo{IP: "203.0.113.10"}, nil
+	})
+	if err != nil || info == nil || info.IP == "" {
+		t.Fatalf("fallback did not receive a fresh timeout: info=%+v err=%v", info, err)
 	}
 }
 

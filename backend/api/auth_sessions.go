@@ -74,7 +74,7 @@ func (h *Handler) isValidAdminSessionContext(ctx context.Context, token string) 
 	`, tokenHash).Scan(&expiresAt)
 	switch err {
 	case nil:
-		if time.Now().Unix() > expiresAt {
+		if time.Now().Unix() >= expiresAt {
 			_, _ = h.db.Exec("DELETE FROM admin_sessions WHERE token_hash = ?", tokenHash)
 			return false, nil
 		}
@@ -108,7 +108,17 @@ func createAdminSessionWithGeneration(
 	execer adminSessionExecer,
 	generation int64,
 ) (string, time.Time, error) {
-	expiry := time.Now().Add(adminSessionDuration())
+	now := time.Now()
+	if _, err := execer.ExecContext(
+		ctx,
+		"DELETE FROM admin_sessions WHERE expires_at <= ? OR auth_generation <> ?",
+		now.Unix(),
+		generation,
+	); err != nil {
+		return "", time.Time{}, err
+	}
+
+	expiry := now.Add(adminSessionDuration())
 	userAgent := ""
 	ip := ""
 	if c != nil && c.Request != nil {

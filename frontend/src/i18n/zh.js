@@ -154,6 +154,8 @@ export default {
   port_pin_remove_hint: '点击取消固定（不会立即重排端口）',
   runtime_degraded: 'sing-box 运行异常',
   runtime_degraded_desc: '代理内核已停止或处于降级状态，请检查运行日志。',
+  runtime_restart: '重启内核',
+  runtime_restarted: 'sing-box 已重新启动',
   ip_check_started: 'IP检测已开始',
   auth_updated: '认证设置已更新',
   tcp_reuse_auth_required_hint: '该节点未配置入站用户名/密码，开启 TCP 复用后仍无法复用，请先设置鉴权信息',

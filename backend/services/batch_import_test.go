@@ -10,6 +10,13 @@ import (
 	"sb-proxy/backend/models"
 )
 
+func useLoopbackSubscriptionClientForTest(t *testing.T) {
+	t.Helper()
+	previous := subscriptionHTTPClient
+	subscriptionHTTPClient = &http.Client{Timeout: subscriptionFetchTimeout}
+	t.Cleanup(func() { subscriptionHTTPClient = previous })
+}
+
 func TestExpandBatchImportSources_Base64Subscription(t *testing.T) {
 	src := "trojan://pass123@example.com:443#A\nvless://00000000-0000-0000-0000-000000000000@example.com:443?security=tls&type=ws&path=%2Fws&host=example.com#B\n"
 	encoded := base64.StdEncoding.EncodeToString([]byte(src))
@@ -149,6 +156,7 @@ proxies:
 }
 
 func TestExpandBatchImportSources_SubscriptionURL(t *testing.T) {
+	useLoopbackSubscriptionClientForTest(t)
 	sub := "trojan://pass123@example.com:443#A\nvless://00000000-0000-0000-0000-000000000000@example.com:443?security=tls#B\n"
 	encoded := base64.StdEncoding.EncodeToString([]byte(sub))
 

@@ -4,7 +4,6 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
-	"time"
 
 	"sb-proxy/backend/models"
 	"sb-proxy/backend/services"
@@ -89,16 +88,20 @@ func loadNodeByIDFrom(ctx context.Context, queryer nodeQueryRower, id int) (mode
 type NodeMutationOperation struct {
 	ApplyRuntime bool
 	Mutate       func(context.Context, *sql.Tx) error
-	Compensate   func(context.Context, *sql.Tx) error
 }
 
 type NodeMutationCoordinator struct {
 	db             *sql.DB
 	singBoxService *services.SingBoxService
+	runtimeApplier *services.RuntimeApplier
 }
 
 func NewNodeMutationCoordinator(db *sql.DB, singBoxService *services.SingBoxService) *NodeMutationCoordinator {
-	return &NodeMutationCoordinator{db: db, singBoxService: singBoxService}
+	return &NodeMutationCoordinator{
+		db:             db,
+		singBoxService: singBoxService,
+		runtimeApplier: services.NewRuntimeApplier(singBoxService),
+	}
 }
 
 func (coordinator *NodeMutationCoordinator) Execute(
@@ -120,66 +123,46 @@ func (coordinator *NodeMutationCoordinator) Execute(
 	}
 
 	var candidateNodes []models.ProxyNode
-	var candidateConfig []byte
+	var runtimePlan *services.RuntimePlan
 	if operation.ApplyRuntime {
 		candidateNodes, err = loadAllNodesFrom(ctx, tx)
 		if err != nil {
 			return nil, err
 		}
-		candidateConfig, err = coordinator.singBoxService.BuildGlobalConfig(candidateNodes)
+		runtimePlan, err = coordinator.runtimeApplier.Prepare(candidateNodes)
 		if err != nil {
 			return nil, err
 		}
-		if err := coordinator.singBoxService.ValidateConfig(candidateConfig); err != nil {
-			return nil, err
-		}
-	}
-
-	if err := tx.Commit(); err != nil {
-		return nil, err
 	}
 
 	if !operation.ApplyRuntime {
+		if err := tx.Commit(); err != nil {
+			return nil, err
+		}
 		return candidateNodes, nil
 	}
-	if err := coordinator.singBoxService.ApplyConfig(candidateConfig); err != nil {
-		compensationErr := coordinator.compensate(operation.Compensate)
-		if compensationErr != nil {
-			coordinator.singBoxService.MarkDegraded(fmt.Errorf(
-				"node mutation apply failed and database compensation failed: apply=%v compensation=%v",
-				err,
-				compensationErr,
-			))
-			return nil, fmt.Errorf(
-				"runtime apply failed: %v; database compensation failed: %v",
-				err,
-				compensationErr,
-			)
-		}
+
+	runtimeTransaction, err := coordinator.runtimeApplier.Begin(runtimePlan)
+	if err != nil {
 		return nil, err
 	}
-
+	if err := tx.Commit(); err != nil {
+		if rollbackErr := runtimeTransaction.Rollback(); rollbackErr != nil {
+			coordinator.singBoxService.MarkDegraded(fmt.Errorf(
+				"database commit failed after runtime start: commit=%v rollback=%v",
+				err,
+				rollbackErr,
+			))
+			return nil, fmt.Errorf(
+				"database commit failed: %v; runtime rollback failed: %v",
+				err,
+				rollbackErr,
+			)
+		}
+		return nil, fmt.Errorf("database commit failed and runtime was rolled back: %w", err)
+	}
+	runtimeTransaction.Commit()
 	return candidateNodes, nil
-}
-
-func (coordinator *NodeMutationCoordinator) compensate(
-	compensate func(context.Context, *sql.Tx) error,
-) error {
-	if compensate == nil {
-		return fmt.Errorf("database compensation callback is required")
-	}
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-	defer cancel()
-
-	tx, err := coordinator.db.BeginTx(ctx, nil)
-	if err != nil {
-		return err
-	}
-	defer tx.Rollback()
-	if err := compensate(ctx, tx); err != nil {
-		return err
-	}
-	return tx.Commit()
 }
 
 type nodeOrderPortSnapshot struct {
@@ -217,38 +200,6 @@ func snapshotNodeOrderPorts(ctx context.Context, tx *sql.Tx) ([]nodeOrderPortSna
 		return nil, err
 	}
 	return snapshots, nil
-}
-
-func restoreNodeOrderPorts(
-	ctx context.Context,
-	tx *sql.Tx,
-	snapshots []nodeOrderPortSnapshot,
-) error {
-	for _, snapshot := range snapshots {
-		if _, err := tx.ExecContext(ctx, `
-			UPDATE proxy_nodes
-			SET sort_order = ?, inbound_port = ?, inbound_port_pinned = ?, updated_at = CURRENT_TIMESTAMP
-			WHERE id = ?
-		`, snapshot.SortOrder, snapshot.InboundPort, snapshot.InboundPortPinned, snapshot.ID); err != nil {
-			return err
-		}
-	}
-	return nil
-}
-
-func insertProxyNodeSnapshot(ctx context.Context, tx *sql.Tx, node models.ProxyNode) error {
-	_, err := tx.ExecContext(ctx, `
-		INSERT INTO proxy_nodes (
-			id, name, remark, type, config, inbound_port, inbound_port_pinned,
-			username, password, tcp_reuse_enabled, sort_order, node_ip, location,
-			country_code, latency, enabled, created_at, updated_at
-		)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-	`, node.ID, node.Name, node.Remark, node.Type, node.Config, node.InboundPort,
-		node.InboundPortPinned, node.Username, node.Password, node.TCPReuseEnabled,
-		node.SortOrder, node.NodeIP, node.Location, node.CountryCode, node.Latency,
-		node.Enabled, node.CreatedAt, node.UpdatedAt)
-	return err
 }
 
 func normalizeNodeSortOrderTx(ctx context.Context, tx *sql.Tx) error {

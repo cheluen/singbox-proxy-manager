@@ -2,6 +2,7 @@ package services
 
 import (
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -315,11 +316,47 @@ func TestApplyConfigRollsBackToLastGood(t *testing.T) {
 		t.Fatalf("config.json must be restored to last-good, got %q err %v", restored, err)
 	}
 
-	service.mu.RLock()
-	running := service.process != nil
-	service.mu.RUnlock()
-	if !running {
-		t.Fatalf("sing-box must be running again on the last-good config")
+	status := service.RuntimeStatus()
+	if !status.Running || status.Degraded ||
+		status.ActiveConfigHash != runtimeConfigHash(goodConfig) ||
+		status.DesiredConfigHash != runtimeConfigHash(goodConfig) {
+		t.Fatalf("sing-box must be healthy and aligned with the last-good config: %+v", status)
+	}
+}
+
+func TestApplyConfigRollsBackWhenLastGoodSnapshotFails(t *testing.T) {
+	t.Setenv("SINGBOX_BINARY", writeScriptedSingBox(t))
+	configDir := t.TempDir()
+	service := NewSingBoxService(configDir)
+	t.Cleanup(func() { _ = service.Stop() })
+
+	goodConfig := []byte(`{"generation":"old"}`)
+	if err := service.writeConfigFile(goodConfig); err != nil {
+		t.Fatalf("write good config: %v", err)
+	}
+	if err := service.Start(); err != nil {
+		t.Fatalf("start good config: %v", err)
+	}
+	service.writeLastGoodFile = func(_ string, _ []byte) error {
+		return errors.New("snapshot storage unavailable")
+	}
+
+	candidate := []byte(`{"generation":"candidate"}`)
+	err := service.ApplyConfig(candidate)
+	if err == nil || !strings.Contains(err.Error(), "snapshot") || !strings.Contains(err.Error(), "rolled back") {
+		t.Fatalf("snapshot failure was not propagated with rollback status: %v", err)
+	}
+	liveConfig, readErr := os.ReadFile(service.configPath())
+	if readErr != nil || string(liveConfig) != string(goodConfig) {
+		t.Fatalf("live config was not rolled back: config=%q err=%v", liveConfig, readErr)
+	}
+	lastGood, readErr := os.ReadFile(service.lastGoodConfigPath())
+	if readErr != nil || string(lastGood) != string(goodConfig) {
+		t.Fatalf("last-good config changed after failed snapshot: config=%q err=%v", lastGood, readErr)
+	}
+	status := service.RuntimeStatus()
+	if !status.Running || status.Degraded || status.ActiveConfigHash != runtimeConfigHash(goodConfig) {
+		t.Fatalf("previous runtime was not restored cleanly: %+v", status)
 	}
 }
 

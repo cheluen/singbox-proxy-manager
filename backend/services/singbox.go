@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -19,23 +20,37 @@ import (
 type SingBoxService struct {
 	configDir         string
 	process           *exec.Cmd
-	logFile           *os.File
+	logCloser         io.Closer
 	processDone       chan struct{}
 	processErr        error
 	processGeneration uint64
+	processStartedAt  time.Time
 	stopRequested     bool
+	desiredRunning    bool
+	recoveryRunning   bool
+	recoveryCancel    chan struct{}
+	recoveryEpoch     uint64
+	recoveryAttempts  int
+	recoveryWG        sync.WaitGroup
+	operationMu       sync.Mutex
+	writeLastGoodFile func(string, []byte) error
 	runtimeStatus     SingBoxRuntimeStatus
 	mu                sync.RWMutex
 }
 
 type SingBoxRuntimeStatus struct {
-	State      string `json:"state"`
-	Running    bool   `json:"running"`
-	Degraded   bool   `json:"degraded"`
-	Message    string `json:"message,omitempty"`
-	PID        int    `json:"pid,omitempty"`
-	StartedAt  int64  `json:"started_at,omitempty"`
-	LastExitAt int64  `json:"last_exit_at,omitempty"`
+	State             string `json:"state"`
+	Running           bool   `json:"running"`
+	Degraded          bool   `json:"degraded"`
+	Message           string `json:"message,omitempty"`
+	PID               int    `json:"pid,omitempty"`
+	StartedAt         int64  `json:"started_at,omitempty"`
+	LastExitAt        int64  `json:"last_exit_at,omitempty"`
+	ApplyStage        string `json:"apply_stage,omitempty"`
+	DesiredConfigHash string `json:"desired_config_hash,omitempty"`
+	ActiveConfigHash  string `json:"active_config_hash,omitempty"`
+	RecoveryAttempts  int    `json:"recovery_attempts,omitempty"`
+	NextRetryAt       int64  `json:"next_retry_at,omitempty"`
 }
 
 var (
@@ -109,11 +124,28 @@ func isExecutableBinary(info os.FileInfo) bool {
 	return info.Mode().Perm()&0o111 != 0
 }
 
-func NewSingBoxService(configDir string) *SingBoxService {
-	return &SingBoxService{
-		configDir:     configDir,
-		runtimeStatus: SingBoxRuntimeStatus{State: "stopped"},
+type SingBoxServiceOption func(*SingBoxService)
+
+func WithLastGoodSnapshotWriter(writer func(string, []byte) error) SingBoxServiceOption {
+	return func(service *SingBoxService) {
+		if writer != nil {
+			service.writeLastGoodFile = writer
+		}
 	}
+}
+
+func NewSingBoxService(configDir string, options ...SingBoxServiceOption) *SingBoxService {
+	service := &SingBoxService{
+		configDir:         configDir,
+		writeLastGoodFile: writeSensitiveFileAtomically,
+		runtimeStatus:     SingBoxRuntimeStatus{State: "stopped"},
+	}
+	for _, option := range options {
+		if option != nil {
+			option(service)
+		}
+	}
+	return service
 }
 
 // SingBoxConfig represents sing-box configuration structure
@@ -385,7 +417,7 @@ func writeSensitiveFileAtomically(path string, content []byte) error {
 	if err := os.Rename(tmpPath, path); err != nil {
 		return err
 	}
-	return os.Chmod(path, 0o600)
+	return nil
 }
 
 // ValidateConfig runs `sing-box check` against a candidate configuration
@@ -428,42 +460,24 @@ func (s *SingBoxService) ValidateConfig(configJSON []byte) error {
 // example an inbound port was taken by another program), it rolls back to the
 // last known-good configuration so existing nodes keep working.
 func (s *SingBoxService) ApplyConfig(configJSON []byte) error {
-	if err := s.writeConfigFile(configJSON); err != nil {
+	plan := RuntimePlan{configJSON: append([]byte(nil), configJSON...), hash: runtimeConfigHash(configJSON)}
+	transaction, err := s.beginRuntimeApply(plan)
+	if err != nil {
 		return err
 	}
-	if err := s.Restart(); err != nil {
-		if rollbackErr := s.rollbackToLastGood(); rollbackErr != nil {
-			return fmt.Errorf("sing-box failed to start with the new config: %v (rollback also failed: %v)", err, rollbackErr)
-		}
-		return fmt.Errorf("sing-box failed to start with the new config, rolled back to the previous working config: %v", err)
-	}
+	transaction.Commit()
 	return nil
 }
 
-// rollbackToLastGood restores the last configuration that started successfully
-// and brings sing-box back up with it.
-func (s *SingBoxService) rollbackToLastGood() error {
-	lastGood, err := os.ReadFile(s.lastGoodConfigPath())
-	if err != nil {
-		return fmt.Errorf("no last-good config available: %w", err)
+func (s *SingBoxService) saveLastGoodBytes(configJSON []byte) error {
+	writer := s.writeLastGoodFile
+	if writer == nil {
+		writer = writeSensitiveFileAtomically
 	}
-	if err := s.writeConfigFile(lastGood); err != nil {
-		return err
+	if err := writer(s.lastGoodConfigPath(), configJSON); err != nil {
+		return fmt.Errorf("failed to save last-good config: %w", err)
 	}
-	return s.Start()
-}
-
-// saveLastGoodConfig snapshots the configuration that just started
-// successfully so ApplyConfig can roll back to it later.
-func (s *SingBoxService) saveLastGoodConfig() {
-	configJSON, err := os.ReadFile(s.configPath())
-	if err != nil {
-		fmt.Printf("Warning: failed to read config for last-good snapshot: %v\n", err)
-		return
-	}
-	if err := writeSensitiveFileAtomically(s.lastGoodConfigPath(), configJSON); err != nil {
-		fmt.Printf("Warning: failed to save last-good config: %v\n", err)
-	}
+	return nil
 }
 
 func (s *SingBoxService) marshalConfig(config SingBoxConfig) ([]byte, error) {
@@ -2346,20 +2360,30 @@ func (s *SingBoxService) generateWireGuardEndpoint(config *models.WireGuardConfi
 
 // Start starts the single sing-box process
 func (s *SingBoxService) Start() error {
-	if err := s.Stop(); err != nil {
-		return err
-	}
-
-	configPath := filepath.Join(s.configDir, "config.json")
-
-	if _, err := os.Stat(configPath); err != nil {
+	configJSON, err := os.ReadFile(s.configPath())
+	if err != nil {
 		if os.IsNotExist(err) {
-			return fmt.Errorf("config file not found: %s", configPath)
+			return fmt.Errorf("config file not found: %s", s.configPath())
 		}
+		return fmt.Errorf("failed to read config file: %w", err)
+	}
+	return s.ApplyConfig(configJSON)
+}
+
+func (s *SingBoxService) startProcessLocked(configHash string) error {
+	configPath := s.configPath()
+	if _, err := os.Stat(configPath); err != nil {
 		return fmt.Errorf("failed to access config file: %w", err)
 	}
 	if err := os.Chmod(configPath, 0o600); err != nil {
 		return fmt.Errorf("failed to secure config file permissions: %w", err)
+	}
+
+	s.mu.RLock()
+	processExists := s.process != nil
+	s.mu.RUnlock()
+	if processExists {
+		return fmt.Errorf("sing-box process is already running")
 	}
 
 	singBoxBinary, err := s.resolveSingBoxBinary()
@@ -2367,45 +2391,47 @@ func (s *SingBoxService) Start() error {
 		return err
 	}
 	cmd := exec.Command(singBoxBinary, "run", "-c", configPath)
-	// Tie the child to the manager process where the OS supports it, so even a
-	// SIGKILL'ed manager cannot leave an orphaned sing-box behind.
 	configureSysProcAttr(cmd)
-
-	logPath := filepath.Join(s.configDir, "singbox.log")
-	logFile, err := os.OpenFile(logPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
+	stdout, stderr, logCloser, err := s.openProcessLog()
 	if err != nil {
-		return err
+		return fmt.Errorf("failed to open sing-box log output: %w", err)
 	}
-	if err := logFile.Chmod(0o600); err != nil {
-		_ = logFile.Close()
-		return err
-	}
-	cmd.Stdout = logFile
-	cmd.Stderr = logFile
+	cmd.Stdout = stdout
+	cmd.Stderr = stderr
 
 	if err := cmd.Start(); err != nil {
-		logFile.Close()
+		_ = logCloser.Close()
 		return err
 	}
 
 	done := make(chan struct{})
+	startedAt := time.Now()
 	s.mu.Lock()
 	s.processGeneration++
 	generation := s.processGeneration
 	s.process = cmd
-	s.logFile = logFile
+	s.logCloser = logCloser
 	s.processDone = done
 	s.processErr = nil
+	s.processStartedAt = startedAt
 	s.stopRequested = false
+	applyStage := s.runtimeStatus.ApplyStage
+	desiredHash := s.runtimeStatus.DesiredConfigHash
+	if desiredHash == "" {
+		desiredHash = configHash
+	}
 	s.runtimeStatus = SingBoxRuntimeStatus{
-		State:     "starting",
-		Running:   true,
-		PID:       cmd.Process.Pid,
-		StartedAt: time.Now().Unix(),
+		State:             "starting",
+		Running:           true,
+		PID:               cmd.Process.Pid,
+		StartedAt:         startedAt.Unix(),
+		ApplyStage:        applyStage,
+		DesiredConfigHash: desiredHash,
+		RecoveryAttempts:  s.recoveryAttempts,
 	}
 	s.mu.Unlock()
 
-	go s.watchProcess(cmd, logFile, done, generation)
+	go s.watchProcess(cmd, logCloser, done, generation)
 
 	timer := time.NewTimer(singBoxStartupGrace())
 	defer timer.Stop()
@@ -2434,9 +2460,9 @@ func (s *SingBoxService) Start() error {
 	s.runtimeStatus.Running = true
 	s.runtimeStatus.Degraded = false
 	s.runtimeStatus.Message = ""
+	s.runtimeStatus.ActiveConfigHash = configHash
+	s.runtimeStatus.NextRetryAt = 0
 	s.mu.Unlock()
-
-	s.saveLastGoodConfig()
 	return nil
 }
 
@@ -2455,20 +2481,26 @@ func singBoxStartupGrace() time.Duration {
 
 func (s *SingBoxService) watchProcess(
 	cmd *exec.Cmd,
-	logFile *os.File,
+	logCloser io.Closer,
 	done chan struct{},
 	generation uint64,
 ) {
 	err := cmd.Wait()
-	exitedAt := time.Now().Unix()
+	exited := time.Now()
+	exitedAt := exited.Unix()
+	shouldRecover := false
 
 	s.mu.Lock()
 	if s.process == cmd && s.processGeneration == generation {
 		expected := s.stopRequested
+		startedAt := s.processStartedAt
+		desiredHash := s.runtimeStatus.DesiredConfigHash
+		applyStage := s.runtimeStatus.ApplyStage
 		s.process = nil
-		s.logFile = nil
+		s.logCloser = nil
 		s.processDone = nil
 		s.processErr = err
+		s.processStartedAt = time.Time{}
 		s.stopRequested = false
 		if expected {
 			s.runtimeStatus = SingBoxRuntimeStatus{
@@ -2476,26 +2508,35 @@ func (s *SingBoxService) watchProcess(
 				LastExitAt: exitedAt,
 			}
 		} else {
+			if recoveryStableWindowElapsed(startedAt, exited) {
+				s.recoveryAttempts = 0
+			}
 			message := "sing-box exited unexpectedly"
 			if err != nil {
 				message = fmt.Sprintf("sing-box exited unexpectedly: %v", err)
 			}
 			s.runtimeStatus = SingBoxRuntimeStatus{
-				State:      "degraded",
-				Degraded:   true,
-				Message:    message,
-				LastExitAt: exitedAt,
+				State:             "degraded",
+				Degraded:          true,
+				Message:           message,
+				LastExitAt:        exitedAt,
+				ApplyStage:        applyStage,
+				DesiredConfigHash: desiredHash,
+				RecoveryAttempts:  s.recoveryAttempts,
 			}
+			shouldRecover = s.desiredRunning
 		}
 	}
 	s.mu.Unlock()
 
-	_ = logFile.Close()
+	_ = logCloser.Close()
 	close(done)
+	if shouldRecover {
+		s.scheduleRecovery()
+	}
 }
 
-// Stop stops the sing-box process
-func (s *SingBoxService) Stop() error {
+func (s *SingBoxService) stopProcessLocked() error {
 	s.mu.Lock()
 	cmd := s.process
 	done := s.processDone
@@ -2505,9 +2546,6 @@ func (s *SingBoxService) Stop() error {
 	s.mu.Unlock()
 
 	if cmd == nil {
-		s.mu.Lock()
-		s.runtimeStatus = SingBoxRuntimeStatus{State: "stopped"}
-		s.mu.Unlock()
 		return nil
 	}
 
@@ -2525,6 +2563,23 @@ func (s *SingBoxService) Stop() error {
 		return fmt.Errorf("failed to stop sing-box process: %w", killErr)
 	}
 	return nil
+}
+
+// Stop stops the sing-box process and cancels pending automatic recovery.
+func (s *SingBoxService) Stop() error {
+	s.operationMu.Lock()
+	s.mu.Lock()
+	s.desiredRunning = false
+	s.cancelRecoveryLocked()
+	s.mu.Unlock()
+	err := s.stopProcessLocked()
+	s.mu.Lock()
+	lastExitAt := s.runtimeStatus.LastExitAt
+	s.runtimeStatus = SingBoxRuntimeStatus{State: "stopped", LastExitAt: lastExitAt}
+	s.mu.Unlock()
+	s.operationMu.Unlock()
+	s.recoveryWG.Wait()
+	return err
 }
 
 func (s *SingBoxService) RuntimeStatus() SingBoxRuntimeStatus {
@@ -2558,14 +2613,14 @@ func (s *SingBoxService) StartPreservedConfig() error {
 	if currentErr == nil {
 		return nil
 	}
+	if s.RuntimeStatus().Running {
+		return nil
+	}
 	lastGood, err := os.ReadFile(s.lastGoodConfigPath())
 	if err != nil {
 		return fmt.Errorf("current config failed: %v; last-good config unavailable: %w", currentErr, err)
 	}
-	if err := s.writeConfigFile(lastGood); err != nil {
-		return fmt.Errorf("current config failed: %v; failed to restore last-good config: %w", currentErr, err)
-	}
-	if err := s.Start(); err != nil {
+	if err := s.ApplyConfig(lastGood); err != nil {
 		return fmt.Errorf("current config failed: %v; last-good config failed: %w", currentErr, err)
 	}
 	return nil
@@ -2573,8 +2628,223 @@ func (s *SingBoxService) StartPreservedConfig() error {
 
 // Restart restarts the sing-box process
 func (s *SingBoxService) Restart() error {
-	if err := s.Stop(); err != nil {
-		return err
-	}
 	return s.Start()
+}
+
+func (s *SingBoxService) cancelRecoveryLocked() {
+	s.recoveryEpoch++
+	if s.recoveryCancel != nil {
+		close(s.recoveryCancel)
+		s.recoveryCancel = nil
+	}
+	s.recoveryRunning = false
+}
+
+func (s *SingBoxService) scheduleRecovery() {
+	s.mu.Lock()
+	if !s.desiredRunning || s.process != nil || s.recoveryRunning {
+		s.mu.Unlock()
+		return
+	}
+	if s.recoveryAttempts >= singBoxRecoveryMaxAttempts() {
+		s.runtimeStatus.State = "degraded"
+		s.runtimeStatus.Degraded = true
+		s.runtimeStatus.Message = fmt.Sprintf(
+			"sing-box automatic recovery exhausted after %d attempts",
+			s.recoveryAttempts,
+		)
+		s.runtimeStatus.RecoveryAttempts = s.recoveryAttempts
+		s.mu.Unlock()
+		return
+	}
+
+	s.recoveryEpoch++
+	epoch := s.recoveryEpoch
+	cancel := make(chan struct{})
+	s.recoveryCancel = cancel
+	s.recoveryRunning = true
+	s.recoveryWG.Add(1)
+	s.mu.Unlock()
+	go s.recoveryLoop(epoch, cancel)
+}
+
+func (s *SingBoxService) recoveryLoop(epoch uint64, cancel <-chan struct{}) {
+	defer func() {
+		reschedule := s.finishRecoveryLoop(epoch)
+		if reschedule {
+			// Register the replacement before decrementing the current recovery,
+			// so Stop cannot observe a zero WaitGroup between the two loops.
+			s.scheduleRecovery()
+		}
+		s.recoveryWG.Done()
+	}()
+
+	for {
+		s.mu.Lock()
+		if s.recoveryEpoch != epoch || !s.desiredRunning || s.process != nil {
+			s.mu.Unlock()
+			return
+		}
+		if s.recoveryAttempts >= singBoxRecoveryMaxAttempts() {
+			s.runtimeStatus.State = "degraded"
+			s.runtimeStatus.Degraded = true
+			s.runtimeStatus.Message = fmt.Sprintf(
+				"sing-box automatic recovery exhausted after %d attempts",
+				s.recoveryAttempts,
+			)
+			s.runtimeStatus.RecoveryAttempts = s.recoveryAttempts
+			s.runtimeStatus.NextRetryAt = 0
+			s.mu.Unlock()
+			return
+		}
+		delay := singBoxRecoveryBackoff(s.recoveryAttempts)
+		nextRetry := time.Now().Add(delay).Unix()
+		s.runtimeStatus.State = "recovering"
+		s.runtimeStatus.Degraded = true
+		s.runtimeStatus.NextRetryAt = nextRetry
+		s.runtimeStatus.RecoveryAttempts = s.recoveryAttempts
+		s.mu.Unlock()
+
+		timer := time.NewTimer(delay)
+		select {
+		case <-cancel:
+			if !timer.Stop() {
+				<-timer.C
+			}
+			return
+		case <-timer.C:
+		}
+
+		s.operationMu.Lock()
+		s.mu.Lock()
+		if s.recoveryEpoch != epoch || !s.desiredRunning || s.process != nil {
+			s.mu.Unlock()
+			s.operationMu.Unlock()
+			return
+		}
+		s.recoveryAttempts++
+		s.runtimeStatus.RecoveryAttempts = s.recoveryAttempts
+		s.runtimeStatus.NextRetryAt = 0
+		s.mu.Unlock()
+
+		err := s.recoverProcessLocked()
+		s.operationMu.Unlock()
+		if err == nil {
+			s.markRecoveryConfigMismatch()
+			return
+		}
+
+		s.mu.Lock()
+		if s.recoveryEpoch == epoch {
+			s.runtimeStatus.State = "degraded"
+			s.runtimeStatus.Degraded = true
+			s.runtimeStatus.Running = false
+			s.runtimeStatus.Message = fmt.Sprintf(
+				"sing-box automatic recovery attempt %d failed: %v",
+				s.recoveryAttempts,
+				err,
+			)
+		}
+		s.mu.Unlock()
+	}
+}
+
+func (s *SingBoxService) finishRecoveryLoop(epoch uint64) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if s.recoveryEpoch != epoch {
+		return false
+	}
+	s.recoveryRunning = false
+	s.recoveryCancel = nil
+	return s.desiredRunning && s.process == nil &&
+		s.recoveryAttempts < singBoxRecoveryMaxAttempts()
+}
+
+func (s *SingBoxService) markRecoveryConfigMismatch() {
+	s.markConfigMismatch("recovered")
+}
+
+func (s *SingBoxService) markConfigMismatch(action string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.process == nil || s.runtimeStatus.DesiredConfigHash == "" ||
+		s.runtimeStatus.ActiveConfigHash == "" ||
+		s.runtimeStatus.ActiveConfigHash == s.runtimeStatus.DesiredConfigHash {
+		return
+	}
+	s.runtimeStatus.State = "degraded"
+	s.runtimeStatus.Degraded = true
+	s.runtimeStatus.Running = true
+	s.runtimeStatus.Message = fmt.Sprintf(
+		"sing-box %s with config %s while desired config is %s; reapply the runtime from the database",
+		action,
+		s.runtimeStatus.ActiveConfigHash,
+		s.runtimeStatus.DesiredConfigHash,
+	)
+}
+
+func (s *SingBoxService) recoverProcessLocked() error {
+	current, err := os.ReadFile(s.configPath())
+	if err != nil {
+		return fmt.Errorf("read current config: %w", err)
+	}
+	currentErr := s.startProcessLocked(runtimeConfigHash(current))
+	if currentErr == nil {
+		return nil
+	}
+
+	lastGood, err := os.ReadFile(s.lastGoodConfigPath())
+	if err != nil {
+		return fmt.Errorf("current config failed: %v; read last-good: %w", currentErr, err)
+	}
+	if runtimeConfigHash(lastGood) == runtimeConfigHash(current) {
+		return currentErr
+	}
+	if err := s.writeConfigFile(lastGood); err != nil {
+		return fmt.Errorf("current config failed: %v; restore last-good: %w", currentErr, err)
+	}
+	if err := s.startProcessLocked(runtimeConfigHash(lastGood)); err != nil {
+		return fmt.Errorf("current config failed: %v; last-good failed: %w", currentErr, err)
+	}
+	return nil
+}
+
+func singBoxRecoveryMaxAttempts() int {
+	return readBoundedIntEnv("SBPM_SINGBOX_RECOVERY_MAX_ATTEMPTS", 5, 1, 100)
+}
+
+func singBoxRecoveryBackoff(attempts int) time.Duration {
+	base := readSingBoxDurationEnv("SBPM_SINGBOX_RECOVERY_BASE_DELAY", time.Second, 10*time.Millisecond, time.Minute)
+	maximum := readSingBoxDurationEnv("SBPM_SINGBOX_RECOVERY_MAX_DELAY", 30*time.Second, base, 10*time.Minute)
+	delay := base
+	for index := 0; index < attempts && delay < maximum; index++ {
+		delay *= 2
+		if delay > maximum {
+			delay = maximum
+		}
+	}
+	return delay
+}
+
+func singBoxRecoveryStableWindow() time.Duration {
+	return readSingBoxDurationEnv("SBPM_SINGBOX_RECOVERY_STABLE_WINDOW", time.Minute, 10*time.Millisecond, time.Hour)
+}
+
+func recoveryStableWindowElapsed(startedAt time.Time, exitedAt time.Time) bool {
+	return !startedAt.IsZero() && !exitedAt.Before(startedAt) &&
+		exitedAt.Sub(startedAt) >= singBoxRecoveryStableWindow()
+}
+
+func readSingBoxDurationEnv(key string, fallback time.Duration, minimum time.Duration, maximum time.Duration) time.Duration {
+	raw := strings.TrimSpace(os.Getenv(key))
+	if raw == "" {
+		return fallback
+	}
+	value, err := time.ParseDuration(raw)
+	if err != nil || value < minimum || value > maximum {
+		return fallback
+	}
+	return value
 }

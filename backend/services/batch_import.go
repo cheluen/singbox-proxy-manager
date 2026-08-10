@@ -35,8 +35,6 @@ const (
 	BatchImportSourceHTTPProxy    BatchImportSourceType = "http_proxy"
 )
 
-var subscriptionHTTPClient = &http.Client{Timeout: subscriptionFetchTimeout}
-
 type ImportItem struct {
 	Source string
 	Link   string

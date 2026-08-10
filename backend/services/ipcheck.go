@@ -142,9 +142,6 @@ func CheckProxyIPContext(
 		return nil, fmt.Errorf("proxy not ready: %w", err)
 	}
 
-	ctx, cancel := context.WithTimeout(ctx, ipCheckTotalDeadline)
-	defer cancel()
-
 	// Build proxy URL with authentication if provided
 	proxyURLStr := "http://"
 	if username != "" && password != "" {
@@ -173,7 +170,9 @@ func CheckProxyIPContext(
 
 	services := ipCheckServiceURLs()
 
-	info, err := checkWithServicesRacing(ctx, client, services)
+	info, err := runIPCheckAttempt(ctx, ipCheckTotalDeadline, func(attemptCtx context.Context) (*IPInfo, error) {
+		return checkWithServicesRacing(attemptCtx, client, services)
+	})
 	if err == nil && info != nil && info.IP != "" {
 		info.Transport = "http"
 		log.Printf("[IPCheck] Success! IP: %s, Location: %s, Latency: %dms", info.IP, info.Location, info.Latency)
@@ -183,7 +182,9 @@ func CheckProxyIPContext(
 
 	// Try with SOCKS5 if HTTP fails
 	log.Printf("[IPCheck] HTTP proxy failed (%v), trying SOCKS5...", httpErr)
-	result, socksErr := checkWithSOCKS5(ctx, proxyAddr, username, password, services)
+	result, socksErr := runIPCheckAttempt(ctx, ipCheckTotalDeadline, func(attemptCtx context.Context) (*IPInfo, error) {
+		return checkWithSOCKS5(attemptCtx, proxyAddr, username, password, services)
+	})
 	if socksErr == nil {
 		result.Transport = "socks5"
 		result.HTTPError = httpErr.Error()
@@ -193,6 +194,16 @@ func CheckProxyIPContext(
 
 	log.Printf("[IPCheck] All methods failed. Last error: %v", socksErr)
 	return nil, fmt.Errorf("all IP check methods failed - HTTP error: %v, SOCKS5 error: %v", httpErr, socksErr)
+}
+
+func runIPCheckAttempt(
+	ctx context.Context,
+	timeout time.Duration,
+	attempt func(context.Context) (*IPInfo, error),
+) (*IPInfo, error) {
+	attemptCtx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+	return attempt(attemptCtx)
 }
 
 func checkWithSOCKS5(ctx context.Context, proxyAddr string, username string, password string, services []string) (*IPInfo, error) {

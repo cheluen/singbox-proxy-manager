@@ -1,7 +1,7 @@
 FROM node:18-alpine AS frontend-builder
 WORKDIR /app/frontend
 COPY frontend/package*.json ./
-RUN npm install
+RUN npm ci
 COPY frontend/ ./
 RUN npm run build
 
@@ -73,9 +73,13 @@ COPY --from=backend-builder /app/singbox-proxy-manager ./singbox-proxy-manager
 RUN mkdir -p /app/config
 
 ENV PORT=30000
+ENV BIND_ADDRESS=0.0.0.0
 ENV CONFIG_DIR=/app/config
 ENV TZ=UTC+8
 ENV ADMIN_PASSWORD=
+ENV SBPM_SINGBOX_LOG_OUTPUT=stdout
+ENV SBPM_SINGBOX_LOG_MAX_BYTES=10485760
+ENV SBPM_SINGBOX_LOG_BACKUPS=3
 ENV DATABASE_URL=
 ENV POSTGRES_DATABASE_URL=
 ENV MYSQL_DATABASE_URL=

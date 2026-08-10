@@ -1,10 +1,13 @@
 package main
 
 import (
+	"context"
 	"database/sql"
+	"errors"
 	"os"
 	"strings"
 	"testing"
+	"time"
 
 	appdb "sb-proxy/backend/database"
 	"sb-proxy/backend/models"
@@ -69,6 +72,7 @@ func runDatabaseIntegrationContract(t *testing.T, db *sql.DB) {
 	if err := models.InitDB(db); err != nil {
 		t.Fatalf("init db (%s): %v", dialect, err)
 	}
+	verifyInstanceLeaseContract(t, db)
 
 	// Keep the payload above MySQL TEXT's 64 KiB limit. Protocol configs can
 	// legitimately grow this large (for example, a WireGuard endpoint with
@@ -111,9 +115,35 @@ func runDatabaseIntegrationContract(t *testing.T, db *sql.DB) {
 	}
 }
 
+func verifyInstanceLeaseContract(t *testing.T, db *sql.DB) {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+
+	first, err := appdb.AcquireInstanceLease(ctx, db)
+	if err != nil {
+		t.Fatalf("acquire first instance lease: %v", err)
+	}
+	if _, err := appdb.AcquireInstanceLease(ctx, db); !errors.Is(err, appdb.ErrManagerInstanceActive) {
+		_ = first.Release(context.Background())
+		t.Fatalf("second manager was not rejected: %v", err)
+	}
+	if err := first.Release(ctx); err != nil {
+		t.Fatalf("release first instance lease: %v", err)
+	}
+
+	second, err := appdb.AcquireInstanceLease(ctx, db)
+	if err != nil {
+		t.Fatalf("acquire instance lease after handoff: %v", err)
+	}
+	if err := second.Release(ctx); err != nil {
+		t.Fatalf("release handoff instance lease: %v", err)
+	}
+}
+
 func resetApplicationTables(t *testing.T, db *sql.DB) {
 	t.Helper()
-	for _, table := range []string{"admin_sessions", "proxy_nodes", "settings"} {
+	for _, table := range []string{"admin_sessions", "proxy_nodes", "settings", "manager_instance_lock"} {
 		if _, err := db.Exec("DROP TABLE IF EXISTS " + table); err != nil {
 			t.Fatalf("drop %s: %v", table, err)
 		}

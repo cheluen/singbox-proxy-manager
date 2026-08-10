@@ -100,3 +100,68 @@ func TestLogoutRevokesCurrentSession(t *testing.T) {
 		t.Fatalf("expected session to be revoked")
 	}
 }
+
+func TestCreateAdminSessionCleansExpiredAndInvalidGenerationSessions(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	h := newTestHandler(t, nil)
+
+	var generation int64
+	if err := h.db.QueryRow("SELECT auth_generation FROM settings WHERE singleton_key = 1").Scan(&generation); err != nil {
+		t.Fatalf("query auth generation: %v", err)
+	}
+	now := time.Now().Unix()
+	for _, session := range []struct {
+		hash       string
+		generation int64
+		expiresAt  int64
+	}{
+		{hash: "expired", generation: generation, expiresAt: now - 1},
+		{hash: "stale-generation", generation: generation + 1, expiresAt: now + 3600},
+		{hash: "current", generation: generation, expiresAt: now + 3600},
+	} {
+		if _, err := h.db.Exec(
+			"INSERT INTO admin_sessions (token_hash, auth_generation, expires_at) VALUES (?, ?, ?)",
+			session.hash,
+			session.generation,
+			session.expiresAt,
+		); err != nil {
+			t.Fatalf("seed session %q: %v", session.hash, err)
+		}
+	}
+
+	if _, _, err := h.createAdminSession(nil); err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+	var count int
+	if err := h.db.QueryRow("SELECT COUNT(*) FROM admin_sessions").Scan(&count); err != nil {
+		t.Fatalf("count sessions: %v", err)
+	}
+	if count != 2 {
+		t.Fatalf("expected current seed plus new session, got %d rows", count)
+	}
+}
+
+func TestAdminSessionExpiresAtBoundary(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	h := newTestHandler(t, nil)
+	var generation int64
+	if err := h.db.QueryRow("SELECT auth_generation FROM settings WHERE singleton_key = 1").Scan(&generation); err != nil {
+		t.Fatalf("query auth generation: %v", err)
+	}
+	token := "expires-now"
+	if _, err := h.db.Exec(
+		"INSERT INTO admin_sessions (token_hash, auth_generation, expires_at) VALUES (?, ?, ?)",
+		hashSessionToken(token),
+		generation,
+		time.Now().Unix(),
+	); err != nil {
+		t.Fatalf("seed boundary session: %v", err)
+	}
+	valid, err := h.isValidAdminSession(token)
+	if err != nil {
+		t.Fatalf("validate boundary session: %v", err)
+	}
+	if valid {
+		t.Fatalf("session remained valid at its expiration timestamp")
+	}
+}

@@ -11,6 +11,7 @@ import (
 	"io/fs"
 	"log"
 	"mime"
+	"net"
 	"net/http"
 	"net/textproto"
 	"os"
@@ -35,6 +36,7 @@ import (
 const (
 	defaultConfigDir            = "./config"
 	defaultPort                 = "30000"
+	defaultBindAddress          = "0.0.0.0"
 	defaultTZ                   = "UTC+8"
 	defaultTimezoneLocationName = "Asia/Shanghai"
 )
@@ -206,6 +208,11 @@ func parseUTCOffsetLocation(raw string) (*time.Location, string, bool) {
 func main() {
 	loadRuntimeEnvironment()
 
+	bindAddress := configuredBindAddress()
+	if err := validateAdminPasswordForBindAddress(bindAddress); err != nil {
+		log.Fatalf("Unsafe management listener configuration: %v", err)
+	}
+
 	// Get config directory from environment or use default
 	configDir := os.Getenv("CONFIG_DIR")
 	if configDir == "" {
@@ -223,10 +230,18 @@ func main() {
 		log.Fatalf("Failed to open database: %v", err)
 	}
 	defer db.Close()
+	leaseAcquireCtx, cancelLeaseAcquire := context.WithTimeout(context.Background(), 15*time.Second)
+	instanceLease, err := appdb.AcquireInstanceLease(leaseAcquireCtx, db)
+	cancelLeaseAcquire()
+	if err != nil {
+		log.Fatalf("Failed to acquire the single-instance database lease: %v", err)
+	}
+	leaseMonitorCtx, cancelLeaseMonitor := context.WithCancel(context.Background())
+	leaseErrors := instanceLease.Monitor(leaseMonitorCtx)
 
 	// Initialize database schema
 	if err := models.InitDB(db); err != nil {
-		log.Fatalf("Failed to initialize database: %v", err)
+		fatalWithInstanceLease(instanceLease, cancelLeaseMonitor, db, "Failed to initialize database: %v", err)
 	}
 
 	// Initialize sing-box service
@@ -239,7 +254,7 @@ func main() {
 	r := gin.Default()
 	trustedProxies := parseCommaListEnv("TRUSTED_PROXIES")
 	if err := r.SetTrustedProxies(trustedProxies); err != nil {
-		log.Fatalf("Invalid TRUSTED_PROXIES: %v", err)
+		fatalWithInstanceLease(instanceLease, cancelLeaseMonitor, db, "Invalid TRUSTED_PROXIES: %v", err)
 	}
 	r.Use(apiSecurityHeadersMiddleware())
 	r.Use(apiRequestBodyLimitMiddleware(int64(readIntEnv("API_MAX_BODY_BYTES", 1<<20))))
@@ -288,7 +303,7 @@ func main() {
 		authorized.DELETE("/nodes/:id", handler.DeleteNode)
 		authorized.GET("/nodes/:id/export", handler.ExportNode)
 		authorized.POST("/nodes/reorder", handler.ReorderNodes)
-		authorized.GET("/nodes/:id/check-ip", handler.CheckNodeIP)
+		registerNodeIPCheckRoute(authorized, handler)
 		authorized.POST("/nodes/batch-auth", handler.BatchSetAuth)
 
 		// Share link parsing
@@ -298,12 +313,13 @@ func main() {
 		authorized.GET("/settings", handler.GetSettings)
 		authorized.PUT("/settings", handler.UpdateSettings)
 		authorized.GET("/runtime/status", handler.GetRuntimeStatus)
+		authorized.POST("/runtime/restart", handler.RestartRuntime)
 		authorized.POST("/logout", handler.Logout)
 	}
 
 	// Serve frontend static files
 	if err := registerFrontendRoutes(r, "./frontend/dist", version.Version()); err != nil {
-		log.Fatalf("Failed to register frontend routes: %v", err)
+		fatalWithInstanceLease(instanceLease, cancelLeaseMonitor, db, "Failed to register frontend routes: %v", err)
 	}
 
 	// Start sing-box only after the web stack is fully prepared.
@@ -315,9 +331,10 @@ func main() {
 		port = defaultPort
 	}
 
-	log.Printf("Server starting on port %s", port)
+	listenAddress := net.JoinHostPort(bindAddress, port)
+	log.Printf("Server starting on %s", listenAddress)
 	srv := &http.Server{
-		Addr:              ":" + port,
+		Addr:              listenAddress,
 		Handler:           r,
 		ReadHeaderTimeout: readDurationEnv("HTTP_READ_HEADER_TIMEOUT", 5*time.Second),
 		ReadTimeout:       readDurationEnv("HTTP_READ_TIMEOUT", 15*time.Second),
@@ -348,6 +365,17 @@ func main() {
 			log.Printf("HTTP server shutdown error: %v", err)
 		}
 		cancel()
+	case leaseErr, ok := <-leaseErrors:
+		if !ok {
+			leaseErr = errors.New("database lease monitor stopped unexpectedly")
+		}
+		log.Printf("Lost single-instance database lease, shutting down: %v", leaseErr)
+		exitCode = 1
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		if err := srv.Shutdown(shutdownCtx); err != nil {
+			log.Printf("HTTP server shutdown error: %v", err)
+		}
+		cancel()
 	}
 
 	// Stop the sing-box child after the HTTP server has drained: in-flight API
@@ -357,11 +385,70 @@ func main() {
 	} else {
 		log.Println("Sing-box stopped")
 	}
+	cancelLeaseMonitor()
+	leaseReleaseCtx, cancelLeaseRelease := context.WithTimeout(context.Background(), 5*time.Second)
+	if err := instanceLease.Release(leaseReleaseCtx); err != nil {
+		log.Printf("Failed to release single-instance database lease: %v", err)
+		exitCode = 1
+	}
+	cancelLeaseRelease()
 
 	if exitCode != 0 {
 		db.Close()
 		os.Exit(exitCode)
 	}
+}
+
+func registerNodeIPCheckRoute(routes *gin.RouterGroup, handler *api.Handler) {
+	routes.POST("/nodes/:id/check-ip", handler.CheckNodeIP)
+}
+
+func fatalWithInstanceLease(
+	lease *appdb.InstanceLease,
+	cancelMonitor context.CancelFunc,
+	db *sql.DB,
+	format string,
+	args ...interface{},
+) {
+	if cancelMonitor != nil {
+		cancelMonitor()
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	if lease != nil {
+		_ = lease.Release(ctx)
+	}
+	cancel()
+	if db != nil {
+		_ = db.Close()
+	}
+	log.Fatalf(format, args...)
+}
+
+func configuredBindAddress() string {
+	address := strings.TrimSpace(os.Getenv("BIND_ADDRESS"))
+	if address == "" {
+		return defaultBindAddress
+	}
+	return strings.Trim(address, "[]")
+}
+
+func validateAdminPasswordForBindAddress(bindAddress string) error {
+	if strings.TrimSpace(os.Getenv("ADMIN_PASSWORD")) != "" {
+		return nil
+	}
+
+	normalized := strings.TrimSpace(strings.Trim(bindAddress, "[]"))
+	if strings.EqualFold(normalized, "localhost") {
+		return nil
+	}
+	if ip := net.ParseIP(normalized); ip != nil && ip.IsLoopback() {
+		return nil
+	}
+
+	return fmt.Errorf(
+		"ADMIN_PASSWORD must be set when BIND_ADDRESS=%q is not an explicit loopback address",
+		bindAddress,
+	)
 }
 
 // startSingBoxFromDatabase generates the unified config from the current
@@ -399,19 +486,20 @@ func startSingBoxFromDatabase(db *sql.DB, singBoxService *services.SingBoxServic
 		return
 	}
 
-	if err := singBoxService.GenerateGlobalConfig(nodes); err != nil {
-		log.Printf("Failed to generate global config: %v", err)
-		singBoxService.MarkDegraded(err)
+	runtimeApplier := services.NewRuntimeApplier(singBoxService)
+	if err := runtimeApplier.Apply(nodes); err != nil {
+		applyErr := err
+		if !singBoxService.RuntimeStatus().Running {
+			if recoveryErr := singBoxService.StartPreservedConfig(); recoveryErr != nil {
+				applyErr = fmt.Errorf("%v; preserved runtime recovery failed: %w", err, recoveryErr)
+			}
+		}
+		log.Printf("Failed to apply database state to sing-box: %v", applyErr)
+		singBoxService.MarkDegraded(applyErr)
+		logSingBoxDependencyGuideIfNeeded(applyErr, configDir)
 		return
 	}
-
-	if err := singBoxService.Start(); err != nil {
-		log.Printf("Failed to start sing-box: %v", err)
-		singBoxService.MarkDegraded(err)
-		logSingBoxDependencyGuideIfNeeded(err, configDir)
-	} else {
-		log.Println("Sing-box started successfully")
-	}
+	log.Println("Sing-box started successfully")
 }
 
 func ensureSecureConfigDir(configDir string) error {

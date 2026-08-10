@@ -5,6 +5,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -104,6 +105,38 @@ func TestSetupAdminPasswordConcurrentCASCreatesOneSession(t *testing.T) {
 	}
 	if sessionCount != 1 {
 		t.Fatalf("expected exactly one committed setup session, got %d", sessionCount)
+	}
+}
+
+func TestSetupAdminPasswordRejectsExistingPasswordBeforeBcrypt(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	handler := newTestHandler(t, nil)
+	if _, err := handler.db.Exec(`
+		UPDATE settings
+		SET admin_password = ?, admin_password_set = 1
+		WHERE singleton_key = 1
+	`, "$2a$10$already-configured"); err != nil {
+		t.Fatalf("seed configured password: %v", err)
+	}
+
+	hashCalled := false
+	handler.hashPassword = func(_ []byte, _ int) ([]byte, error) {
+		hashCalled = true
+		return nil, fmt.Errorf("bcrypt should not run")
+	}
+	recorder := postJSON(
+		t,
+		handler.SetupAdminPassword,
+		http.MethodPost,
+		"/api/setup/admin-password",
+		map[string]string{"password": "attacker-password"},
+		nil,
+	)
+	if recorder.Code != http.StatusConflict {
+		t.Fatalf("expected conflict, got %d body=%s", recorder.Code, recorder.Body.String())
+	}
+	if hashCalled {
+		t.Fatalf("already-configured setup request reached bcrypt")
 	}
 }
 
@@ -318,7 +351,7 @@ exec sleep 300
 		t.Fatalf("write fake sing-box: %v", err)
 	}
 	t.Setenv("SINGBOX_BINARY", fakeBinary)
-	t.Setenv("SBPM_SINGBOX_STARTUP_GRACE", "10ms")
+	t.Setenv("SBPM_SINGBOX_STARTUP_GRACE", "500ms")
 	t.Setenv("SBPM_SKIP_PORT_AVAILABILITY_CHECK", "1")
 
 	service := services.NewSingBoxService(configDir)
@@ -376,7 +409,8 @@ exec sleep 300
 		t.Fatalf("live config was not restored to last-good")
 	}
 	status := service.RuntimeStatus()
-	if !status.Running || status.Degraded {
+	if !status.Running || status.Degraded || status.ActiveConfigHash == "" ||
+		status.ActiveConfigHash != status.DesiredConfigHash {
 		t.Fatalf("last-good runtime should remain healthy after compensation: %+v", status)
 	}
 }
@@ -467,6 +501,126 @@ exec sleep 300
 	}
 }
 
+func TestRuntimeSnapshotFailureRollsBackOpenDatabaseTransaction(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	db, err := sql.Open("sqlite", ":memory:")
+	if err != nil {
+		t.Fatalf("open db: %v", err)
+	}
+	db.SetMaxOpenConns(1)
+	if err := models.InitDB(db); err != nil {
+		t.Fatalf("init db: %v", err)
+	}
+
+	fakeBinary := filepath.Join(t.TempDir(), "fake-sing-box")
+	script := `#!/bin/sh
+if [ "$1" = "check" ]; then
+  exit 0
+fi
+exec sleep 300
+`
+	if err := os.WriteFile(fakeBinary, []byte(script), 0o755); err != nil {
+		t.Fatalf("write fake sing-box: %v", err)
+	}
+	t.Setenv("SINGBOX_BINARY", fakeBinary)
+	t.Setenv("SBPM_SINGBOX_STARTUP_GRACE", "10ms")
+	t.Setenv("SBPM_SKIP_PORT_AVAILABILITY_CHECK", "1")
+
+	serviceWriteErr := fmt.Errorf("last-good volume is read-only")
+	serviceConfigDir := t.TempDir()
+	service := services.NewSingBoxService(
+		serviceConfigDir,
+		services.WithLastGoodSnapshotWriter(func(path string, content []byte) error {
+			if bytes.Contains(content, []byte("candidate.example.com")) {
+				return serviceWriteErr
+			}
+			return os.WriteFile(path, content, 0o600)
+		}),
+	)
+	handler := NewHandler(db, service)
+	nodeID := insertTestNode(t, db)
+	nodes, err := loadAllNodesFrom(context.Background(), db)
+	if err != nil {
+		t.Fatalf("load initial nodes: %v", err)
+	}
+	if err := service.GenerateGlobalConfig(nodes); err != nil {
+		t.Fatalf("generate initial config: %v", err)
+	}
+	if err := service.Start(); err != nil {
+		t.Fatalf("start initial runtime: %v", err)
+	}
+	initialLiveConfig, err := os.ReadFile(filepath.Join(serviceConfigDir, "config.json"))
+	if err != nil {
+		t.Fatalf("read initial live config: %v", err)
+	}
+	staleLastGood := bytes.Replace(
+		initialLiveConfig,
+		[]byte("example.com"),
+		[]byte("stale.example.com"),
+		1,
+	)
+	if bytes.Equal(staleLastGood, initialLiveConfig) {
+		t.Fatalf("failed to construct mismatched last-good fixture")
+	}
+	if err := os.WriteFile(
+		filepath.Join(serviceConfigDir, "config.json.last-good"),
+		staleLastGood,
+		0o600,
+	); err != nil {
+		t.Fatalf("write stale last-good fixture: %v", err)
+	}
+	t.Cleanup(func() {
+		_ = service.Stop()
+		_ = db.Close()
+	})
+	payload := map[string]interface{}{
+		"name":         "snapshot-candidate",
+		"type":         "ss",
+		"config":       `{"server":"candidate.example.com","server_port":443,"method":"aes-128-gcm","password":"p"}`,
+		"inbound_port": 30001,
+		"username":     "user",
+		"password":     "pass",
+		"auth_enabled": true,
+		"enabled":      true,
+	}
+	recorder := postJSON(
+		t,
+		handler.UpdateNode,
+		http.MethodPut,
+		"/api/nodes/"+strconv.Itoa(nodeID),
+		payload,
+		gin.Params{{Key: "id", Value: strconv.Itoa(nodeID)}},
+	)
+	if recorder.Code != http.StatusInternalServerError {
+		t.Fatalf("expected snapshot failure, got %d body=%s", recorder.Code, recorder.Body.String())
+	}
+	var storedName string
+	if err := db.QueryRow("SELECT name FROM proxy_nodes WHERE id = ?", nodeID).Scan(&storedName); err != nil {
+		t.Fatalf("query rolled-back node: %v", err)
+	}
+	if storedName == "snapshot-candidate" {
+		t.Fatalf("database transaction committed despite runtime snapshot failure")
+	}
+	restoredLiveConfig, err := os.ReadFile(filepath.Join(serviceConfigDir, "config.json"))
+	if err != nil {
+		t.Fatalf("read restored live config: %v", err)
+	}
+	if !bytes.Equal(restoredLiveConfig, initialLiveConfig) {
+		t.Fatalf("rollback did not restore the config that was actually running")
+	}
+	restoredLastGood, err := os.ReadFile(filepath.Join(serviceConfigDir, "config.json.last-good"))
+	if err != nil {
+		t.Fatalf("read healed last-good config: %v", err)
+	}
+	if !bytes.Equal(restoredLastGood, initialLiveConfig) {
+		t.Fatalf("rollback did not heal last-good to the restored runtime config")
+	}
+	status := service.RuntimeStatus()
+	if !status.Running || status.Degraded {
+		t.Fatalf("previous runtime was not restored: %+v", status)
+	}
+}
+
 func TestCancelledIPCheckDoesNotUpdateNodeStatus(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	handler := newTestHandler(t, nil)
@@ -490,7 +644,7 @@ func TestCancelledIPCheckDoesNotUpdateNodeStatus(t *testing.T) {
 	recorder := httptest.NewRecorder()
 	ginContext, _ := gin.CreateTestContext(recorder)
 	ginContext.Params = gin.Params{{Key: "id", Value: strconv.Itoa(nodeID)}}
-	ginContext.Request = httptest.NewRequest(http.MethodGet, "/api/nodes/1/check-ip", nil).WithContext(requestContext)
+	ginContext.Request = httptest.NewRequest(http.MethodPost, "/api/nodes/1/check-ip", nil).WithContext(requestContext)
 
 	done := make(chan struct{})
 	go func() {

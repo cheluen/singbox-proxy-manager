@@ -52,6 +52,7 @@ import {
 import NodeForm from './NodeForm'
 import SettingsForm from './SettingsForm'
 import BatchAuthModal from './BatchAuthModal'
+import ReplaceNodeModal from './ReplaceNodeModal'
 import { OFFICIAL_GITHUB_URL } from '../constants/project'
 
 const { Header, Content } = Layout
@@ -425,6 +426,7 @@ function Dashboard({ onLogout }) {
   const isMobile = !screens.md
   const [nodes, setNodes] = useState([])
   const nodesRef = useRef(nodes)
+  const loadNodesRequestRef = useRef({ sequence: 0, controller: null })
   const nodeIPCheckRunsRef = useRef(new Map())
   const [loading, setLoading] = useState(false)
   const [appVersion, setAppVersion] = useState('')
@@ -445,8 +447,6 @@ function Dashboard({ onLogout }) {
   const [exportLoading, setExportLoading] = useState(false)
   const [replaceVisible, setReplaceVisible] = useState(false)
   const [replaceNode, setReplaceNode] = useState(null)
-  const [replaceLink, setReplaceLink] = useState('')
-  const [replaceUpdateName, setReplaceUpdateName] = useState(true)
   const [replaceLoading, setReplaceLoading] = useState(false)
   const [dedupLoading, setDedupLoading] = useState(false)
   const [autoCheckAfterCreate, setAutoCheckAfterCreate] = useState(false)
@@ -456,6 +456,7 @@ function Dashboard({ onLogout }) {
   const [nodeUpdating, setNodeUpdating] = useState({})
   const [portPinUpdating, setPortPinUpdating] = useState({})
   const [runtimeStatus, setRuntimeStatus] = useState(null)
+  const [runtimeRestarting, setRuntimeRestarting] = useState(false)
   const nodesViewportRef = useRef(null)
   const tableContainerRef = useRef(null)
   const virtualDragMetaRef = useRef(null)
@@ -997,6 +998,22 @@ function Dashboard({ onLogout }) {
     }
   }
 
+  const handleRuntimeRestart = async () => {
+    try {
+      setRuntimeRestarting(true)
+      const response = await api.post('/runtime/restart')
+      setRuntimeStatus(response.data?.status || null)
+      message.success(t('runtime_restarted'))
+    } catch (error) {
+      if (error.response?.data?.status) {
+        setRuntimeStatus(error.response.data.status)
+      }
+      message.error(error.response?.data?.error || t('server_error'))
+    } finally {
+      setRuntimeRestarting(false)
+    }
+  }
+
   useEffect(() => {
     loadNodes()
     loadVersion()
@@ -1004,7 +1021,11 @@ function Dashboard({ onLogout }) {
     loadRuntimeStatus()
 
     const runtimePoll = window.setInterval(loadRuntimeStatus, 5000)
-    return () => window.clearInterval(runtimePoll)
+    return () => {
+      window.clearInterval(runtimePoll)
+      loadNodesRequestRef.current.controller?.abort()
+      loadNodesRequestRef.current.sequence += 1
+    }
   }, [])
 
   const loadVersion = async () => {
@@ -1032,11 +1053,19 @@ function Dashboard({ onLogout }) {
 
   const loadNodes = async (options = {}) => {
     const silent = !!options?.silent
+    const previousRequest = loadNodesRequestRef.current
+    previousRequest.controller?.abort()
+    const controller = new AbortController()
+    const requestSequence = previousRequest.sequence + 1
+    loadNodesRequestRef.current = { sequence: requestSequence, controller }
     if (!silent) {
       setLoading(true)
     }
     try {
-      const response = await api.get('/nodes')
+      const response = await api.get('/nodes', { signal: controller.signal })
+      if (loadNodesRequestRef.current.sequence !== requestSequence) {
+        return
+      }
       const nextNodes = response.data || []
       const prevNodes = Array.isArray(nodesRef.current) ? nodesRef.current : []
 
@@ -1086,9 +1115,13 @@ function Dashboard({ onLogout }) {
         prev.filter((id) => nextIdSet.has(String(id)))
       )
     } catch (error) {
-      message.error(t('network_error'))
+      const obsolete = loadNodesRequestRef.current.sequence !== requestSequence
+      if (!obsolete && error?.code !== 'ERR_CANCELED') {
+        message.error(t('network_error'))
+      }
     } finally {
-      if (!silent) {
+      if (loadNodesRequestRef.current.sequence === requestSequence) {
+        loadNodesRequestRef.current.controller = null
         setLoading(false)
       }
     }
@@ -1377,7 +1410,7 @@ function Dashboard({ onLogout }) {
         const controller = new AbortController()
         run.controllers.add(controller)
         try {
-          const response = await api.get(`/nodes/${id}/check-ip`, {
+          const response = await api.post(`/nodes/${id}/check-ip`, null, {
             signal: controller.signal,
           })
           applyNodeIPInfo(id, response.data)
@@ -1652,12 +1685,10 @@ function Dashboard({ onLogout }) {
 
   const openReplaceModal = (node) => {
     setReplaceNode(node)
-    setReplaceLink('')
-    setReplaceUpdateName(true)
     setReplaceVisible(true)
   }
 
-  const handleConfirmReplace = async () => {
+  const handleConfirmReplace = async (replaceLink, replaceUpdateName) => {
     if (!replaceNode?.id) return
     if (!replaceLink.trim()) {
       message.warning(t('enter_share_link'))
@@ -1673,7 +1704,6 @@ function Dashboard({ onLogout }) {
       message.success(t('node_replaced'))
       setReplaceVisible(false)
       setReplaceNode(null)
-      setReplaceLink('')
       await loadNodes({ silent: true })
     } catch (error) {
       message.error(error.response?.data?.error || t('server_error'))
@@ -2272,6 +2302,7 @@ function Dashboard({ onLogout }) {
                 size="small"
                 icon={<SwapOutlined />}
                 onClick={() => openReplaceModal(record)}
+                data-testid={`replace-node-${record.id}`}
               />
             </Tooltip>
             <Tooltip title={t('edit')}>
@@ -2509,6 +2540,17 @@ function Dashboard({ onLogout }) {
             showIcon
             message={t('runtime_degraded')}
             description={runtimeStatus?.message || t('runtime_degraded_desc')}
+            action={(
+              <Button
+                size="small"
+                icon={<ReloadOutlined />}
+                loading={runtimeRestarting}
+                onClick={handleRuntimeRestart}
+                data-testid="runtime-restart"
+              >
+                {t('runtime_restart')}
+              </Button>
+            )}
           />
         )}
         <div className="dashboard-toolbar">
@@ -2541,6 +2583,7 @@ function Dashboard({ onLogout }) {
                 icon={<ReloadOutlined />}
                 onClick={() => loadNodes()}
                 loading={loading}
+                data-testid="nodes-refresh"
               >
                 {t('refresh')}
               </Button>
@@ -2811,36 +2854,16 @@ function Dashboard({ onLogout }) {
         />
       </Modal>
 
-      <Modal
-        title={t('replace')}
+      <ReplaceNodeModal
         open={replaceVisible}
+        nodeId={replaceNode?.id}
+        loading={replaceLoading}
         onCancel={() => {
           setReplaceVisible(false)
           setReplaceNode(null)
-          setReplaceLink('')
         }}
-        onOk={handleConfirmReplace}
-        okText={t('confirm')}
-        cancelText={t('cancel')}
-        confirmLoading={replaceLoading}
-        width={700}
-      >
-        <Space direction="vertical" style={{ width: '100%' }} size="middle">
-          <div>{t('replace_desc')}</div>
-          <Input
-            placeholder={t('enter_share_link')}
-            value={replaceLink}
-            onChange={(e) => setReplaceLink(e.target.value)}
-            allowClear
-          />
-          <Checkbox
-            checked={replaceUpdateName}
-            onChange={(e) => setReplaceUpdateName(e.target.checked)}
-          >
-            {t('replace_update_name')}
-          </Checkbox>
-        </Space>
-      </Modal>
+        onConfirm={handleConfirmReplace}
+      />
 
       <Modal
         title={t('settings')}

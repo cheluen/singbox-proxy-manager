@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"sb-proxy/backend/api"
 	frontendassets "sb-proxy/frontend"
 
 	"github.com/gin-gonic/gin"
@@ -38,6 +39,50 @@ func writeTestFrontendDist(t *testing.T) string {
 	}
 
 	return distDir
+}
+
+func TestValidateAdminPasswordForBindAddress(t *testing.T) {
+	t.Setenv("ADMIN_PASSWORD", "")
+	for _, address := range []string{"127.0.0.1", "::1", "[::1]", "localhost", "LOCALHOST"} {
+		if err := validateAdminPasswordForBindAddress(address); err != nil {
+			t.Fatalf("loopback address %q should allow local password setup: %v", address, err)
+		}
+	}
+	for _, address := range []string{"0.0.0.0", "::", "192.168.1.10", "panel.example.com"} {
+		if err := validateAdminPasswordForBindAddress(address); err == nil {
+			t.Fatalf("non-loopback address %q must require ADMIN_PASSWORD", address)
+		}
+	}
+
+	t.Setenv("ADMIN_PASSWORD", "configured-password")
+	if err := validateAdminPasswordForBindAddress("0.0.0.0"); err != nil {
+		t.Fatalf("configured password should allow external listener: %v", err)
+	}
+}
+
+func TestConfiguredBindAddressDefaultsToExternalWildcard(t *testing.T) {
+	t.Setenv("BIND_ADDRESS", "")
+	if got := configuredBindAddress(); got != defaultBindAddress {
+		t.Fatalf("configuredBindAddress()=%q want=%q", got, defaultBindAddress)
+	}
+}
+
+func TestNodeIPCheckRouteUsesPostOnly(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	router := gin.New()
+	registerNodeIPCheckRoute(router.Group("/api"), api.NewHandler(nil, nil))
+
+	postRecorder := httptest.NewRecorder()
+	router.ServeHTTP(postRecorder, httptest.NewRequest(http.MethodPost, "/api/nodes/not-an-id/check-ip", nil))
+	if postRecorder.Code != http.StatusBadRequest {
+		t.Fatalf("POST route was not registered: status=%d", postRecorder.Code)
+	}
+
+	getRecorder := httptest.NewRecorder()
+	router.ServeHTTP(getRecorder, httptest.NewRequest(http.MethodGet, "/api/nodes/not-an-id/check-ip", nil))
+	if getRecorder.Code != http.StatusNotFound {
+		t.Fatalf("legacy GET route remains active: status=%d", getRecorder.Code)
+	}
 }
 
 func TestRegisterFrontendRoutesServesIndexWithRevalidateHeaders(t *testing.T) {

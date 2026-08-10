@@ -466,6 +466,7 @@ proxies:
 }
 
 func TestBatchImportAuditHTTPProxyAndSubscriptionDisambiguation(t *testing.T) {
+	useLoopbackSubscriptionClientForTest(t)
 	proxyCfg := &models.HTTPProxyConfig{
 		Server: "127.0.0.1", ServerPort: 65534, Path: "/proxy", DialerOptions: models.DialerOptions{Detour: "selector"},
 	}
@@ -532,6 +533,7 @@ func TestBatchImportAuditHTTPProxyAndSubscriptionDisambiguation(t *testing.T) {
 }
 
 func TestBatchImportAuditSubscriptionHTTPFailuresNeverBecomeProxyNodes(t *testing.T) {
+	useLoopbackSubscriptionClientForTest(t)
 	for _, status := range []int{http.StatusNotFound, http.StatusInternalServerError} {
 		t.Run(http.StatusText(status), func(t *testing.T) {
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
@@ -551,6 +553,7 @@ func TestBatchImportAuditSubscriptionHTTPFailuresNeverBecomeProxyNodes(t *testin
 }
 
 func TestBatchImportAuditHTMLSubscriptionCannotImportPageLinks(t *testing.T) {
+	useLoopbackSubscriptionClientForTest(t)
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
 		_, _ = w.Write([]byte("<!doctype html><html><body>\nhttp://127.0.0.1:8080\n</body></html>"))
@@ -567,6 +570,7 @@ func TestBatchImportAuditHTMLSubscriptionCannotImportPageLinks(t *testing.T) {
 }
 
 func TestBatchImportAuditMislabelledBOMHTMLCannotImportPageLinks(t *testing.T) {
+	useLoopbackSubscriptionClientForTest(t)
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 		_, _ = w.Write([]byte("\uFEFF \n<head><title>not a subscription</title></head>\nhttp://127.0.0.1:8080"))

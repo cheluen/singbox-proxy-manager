@@ -154,6 +154,8 @@ export default {
   port_pin_remove_hint: 'Click to unpin (ports are not reassigned immediately)',
   runtime_degraded: 'sing-box runtime failure',
   runtime_degraded_desc: 'The proxy kernel stopped or entered a degraded state. Check the runtime log.',
+  runtime_restart: 'Restart runtime',
+  runtime_restarted: 'sing-box restarted',
   ip_check_started: 'IP check started',
   auth_updated: 'Authentication updated',
   tcp_reuse_auth_required_hint: 'This node has no inbound username/password, so TCP reuse cannot work until auth is configured.',
