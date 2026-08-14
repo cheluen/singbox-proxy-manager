@@ -206,8 +206,9 @@ func TestDeleteReferencedNodeLeavesDatabaseUnchanged(t *testing.T) {
 	targetID := insertTestNodeWithPortAndOrder(t, handler.db, "detour-target", 30001, 0)
 	insertTestNodeWithPortAndOrder(t, handler.db, "dependent", 30002, 1)
 	if _, err := handler.db.Exec(
-		`UPDATE proxy_nodes SET config = ? WHERE name = 'dependent'`,
+		`UPDATE proxy_nodes SET config = ?, upstream_mode = ? WHERE name = 'dependent'`,
 		`{"server":"example.com","server_port":443,"method":"aes-128-gcm","password":"p","detour":"detour-target"}`,
+		models.UpstreamModeLegacy,
 	); err != nil {
 		t.Fatalf("configure detour: %v", err)
 	}

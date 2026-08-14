@@ -138,6 +138,93 @@ func TestInitDBProxyNodeTCPReuseEnabledDefaultsToTrue(t *testing.T) {
 	}
 }
 
+func TestInitDBProxyNodeUpstreamModeDefaultsToGlobal(t *testing.T) {
+	t.Setenv("ADMIN_PASSWORD", "")
+	db, err := sql.Open("sqlite", ":memory:")
+	if err != nil {
+		t.Fatalf("open db: %v", err)
+	}
+	defer db.Close()
+	if err := InitDB(db); err != nil {
+		t.Fatalf("init db: %v", err)
+	}
+	if _, err := db.Exec(`
+		INSERT INTO proxy_nodes (name, type, config, inbound_port, sort_order, enabled)
+		VALUES ('node1', 'direct', '{}', 30001, 0, 1)
+	`); err != nil {
+		t.Fatalf("insert proxy node: %v", err)
+	}
+	var mode string
+	if err := db.QueryRow("SELECT upstream_mode FROM proxy_nodes LIMIT 1").Scan(&mode); err != nil {
+		t.Fatalf("query upstream mode: %v", err)
+	}
+	if mode != UpstreamModeGlobal {
+		t.Fatalf("upstream mode=%q want %q", mode, UpstreamModeGlobal)
+	}
+}
+
+func TestInitDBMigratesLegacyUpstreamModesWithoutChangingDetours(t *testing.T) {
+	t.Setenv("ADMIN_PASSWORD", "")
+	db, err := sql.Open("sqlite", ":memory:")
+	if err != nil {
+		t.Fatalf("open db: %v", err)
+	}
+	defer db.Close()
+	if _, err := db.Exec(`
+		CREATE TABLE proxy_nodes (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			name TEXT NOT NULL,
+			type TEXT NOT NULL,
+			config TEXT NOT NULL,
+			inbound_port INTEGER NOT NULL,
+			username TEXT DEFAULT '',
+			password TEXT DEFAULT '',
+			sort_order INTEGER NOT NULL,
+			node_ip TEXT DEFAULT '',
+			location TEXT DEFAULT '',
+			country_code TEXT DEFAULT '',
+			latency INTEGER DEFAULT 0,
+			enabled INTEGER DEFAULT 1,
+			created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+			updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+		)
+	`); err != nil {
+		t.Fatalf("create legacy nodes: %v", err)
+	}
+	if _, err := db.Exec(`
+		INSERT INTO proxy_nodes (name, type, config, inbound_port, sort_order)
+		VALUES
+			('plain', 'direct', '{}', 30001, 0),
+			('chained', 'direct', '{"detour":"direct"}', 30002, 1)
+	`); err != nil {
+		t.Fatalf("seed legacy nodes: %v", err)
+	}
+	if err := InitDB(db); err != nil {
+		t.Fatalf("migrate db: %v", err)
+	}
+	rows, err := db.Query("SELECT name, upstream_mode FROM proxy_nodes ORDER BY sort_order")
+	if err != nil {
+		t.Fatalf("query migrated modes: %v", err)
+	}
+	defer rows.Close()
+	want := []struct{ name, mode string }{{"plain", UpstreamModeGlobal}, {"chained", UpstreamModeLegacy}}
+	for index := 0; rows.Next(); index++ {
+		if index >= len(want) {
+			t.Fatal("unexpected migrated row")
+		}
+		var name, mode string
+		if err := rows.Scan(&name, &mode); err != nil {
+			t.Fatalf("scan migrated mode: %v", err)
+		}
+		if name != want[index].name || mode != want[index].mode {
+			t.Fatalf("row %d=(%q,%q) want (%q,%q)", index, name, mode, want[index].name, want[index].mode)
+		}
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatalf("iterate migrated modes: %v", err)
+	}
+}
+
 func TestInitDBMigratesDuplicateLegacySettingsToSingleton(t *testing.T) {
 	t.Setenv("ADMIN_PASSWORD", "")
 

@@ -34,16 +34,19 @@ type Handler struct {
 }
 
 type nodeUpsertRequest struct {
-	Name            string `json:"name"`
-	Remark          string `json:"remark"`
-	Type            string `json:"type"`
-	Config          string `json:"config"`
-	InboundPort     int    `json:"inbound_port"`
-	Username        string `json:"username"`
-	Password        string `json:"password"`
-	AuthEnabled     *bool  `json:"auth_enabled,omitempty"`
-	Enabled         bool   `json:"enabled"`
-	TCPReuseEnabled *bool  `json:"tcp_reuse_enabled"`
+	Name            string  `json:"name"`
+	Remark          string  `json:"remark"`
+	Type            string  `json:"type"`
+	Config          string  `json:"config"`
+	InboundPort     int     `json:"inbound_port"`
+	Username        string  `json:"username"`
+	Password        string  `json:"password"`
+	AuthEnabled     *bool   `json:"auth_enabled,omitempty"`
+	Enabled         bool    `json:"enabled"`
+	TCPReuseEnabled *bool   `json:"tcp_reuse_enabled"`
+	UpstreamMode    *string `json:"upstream_mode,omitempty"`
+	UpstreamType    *string `json:"upstream_type,omitempty"`
+	UpstreamConfig  *string `json:"upstream_config,omitempty"`
 }
 
 func NewHandler(db *sql.DB, singBoxService *services.SingBoxService) *Handler {
@@ -177,21 +180,65 @@ func nextAvailableInboundPort(startPort int, usedPorts map[int]struct{}) (int, e
 
 func nodeFromUpsertRequest(req nodeUpsertRequest) models.ProxyNode {
 	node := models.ProxyNode{
-		Name:        req.Name,
-		Remark:      req.Remark,
-		Type:        req.Type,
-		Config:      req.Config,
-		InboundPort: req.InboundPort,
-		Username:    req.Username,
-		Password:    req.Password,
-		Enabled:     req.Enabled,
+		Name:         req.Name,
+		Remark:       req.Remark,
+		Type:         strings.ToLower(strings.TrimSpace(req.Type)),
+		Config:       strings.TrimSpace(req.Config),
+		InboundPort:  req.InboundPort,
+		Username:     req.Username,
+		Password:     req.Password,
+		Enabled:      req.Enabled,
+		UpstreamMode: models.UpstreamModeGlobal,
 	}
 	if req.TCPReuseEnabled != nil {
 		node.TCPReuseEnabled = *req.TCPReuseEnabled
 	} else {
 		node.TCPReuseEnabled = true
 	}
+	if req.UpstreamMode != nil {
+		node.UpstreamMode = *req.UpstreamMode
+	}
+	if req.UpstreamType != nil {
+		node.UpstreamType = *req.UpstreamType
+	}
+	if req.UpstreamConfig != nil {
+		node.UpstreamConfig = *req.UpstreamConfig
+	}
 	return node
+}
+
+func (h *Handler) validateNodeUpstream(node *models.ProxyNode, allowLegacy bool) error {
+	if node == nil {
+		return fmt.Errorf("proxy node is required")
+	}
+	mode, err := models.NormalizeUpstreamMode(node.UpstreamMode)
+	if err != nil {
+		return err
+	}
+	if mode == models.UpstreamModeLegacy && !allowLegacy {
+		return fmt.Errorf("legacy upstream mode is reserved for migrated or imported nodes")
+	}
+	node.UpstreamMode = mode
+	node.UpstreamType = strings.ToLower(strings.TrimSpace(node.UpstreamType))
+	node.UpstreamConfig = strings.TrimSpace(node.UpstreamConfig)
+	hasType := strings.TrimSpace(node.UpstreamType) != ""
+	hasConfig := strings.TrimSpace(node.UpstreamConfig) != ""
+	if hasType != hasConfig {
+		return fmt.Errorf("upstream type and config must be provided together")
+	}
+	if mode == models.UpstreamModeCustom && !hasType {
+		return fmt.Errorf("custom upstream proxy is required")
+	}
+	if hasType {
+		if h.singBoxService == nil {
+			return fmt.Errorf("sing-box service is unavailable")
+		}
+		return h.singBoxService.ValidateUpstreamDefinition(models.ProxyDefinition{
+			Type:   node.UpstreamType,
+			Config: node.UpstreamConfig,
+		})
+	}
+	return nil
 }
 
 // loadAllNodes reads every proxy node from the database ordered by sort_order.
@@ -487,6 +534,10 @@ func (h *Handler) CreateNode(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
+	if err := h.validateNodeUpstream(&req, false); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
 
 	h.nodeWriteMu.Lock()
 	defer h.nodeWriteMu.Unlock()
@@ -531,11 +582,13 @@ func (h *Handler) CreateNode(c *gin.Context) {
 			result, err := tx.ExecContext(ctx, `
 				INSERT INTO proxy_nodes (
 					name, remark, type, config, inbound_port, inbound_port_pinned,
-					username, password, tcp_reuse_enabled, sort_order, latency, enabled
+					username, password, tcp_reuse_enabled, upstream_mode, upstream_type,
+					upstream_config, sort_order, latency, enabled
 				)
-				VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+				VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 			`, req.Name, req.Remark, req.Type, req.Config, req.InboundPort, false,
-				req.Username, req.Password, req.TCPReuseEnabled, req.SortOrder, 0, req.Enabled)
+				req.Username, req.Password, req.TCPReuseEnabled, req.UpstreamMode,
+				req.UpstreamType, req.UpstreamConfig, req.SortOrder, 0, req.Enabled)
 			if err != nil {
 				return err
 			}
@@ -550,6 +603,10 @@ func (h *Handler) CreateNode(c *gin.Context) {
 	if mutationErr != nil {
 		if requestErr != nil {
 			c.JSON(http.StatusBadRequest, gin.H{"error": requestErr.Error()})
+			return
+		}
+		if services.IsUpstreamValidationError(mutationErr) {
+			c.JSON(http.StatusBadRequest, gin.H{"error": mutationErr.Error()})
 			return
 		}
 		c.JSON(http.StatusInternalServerError, singboxUpdateError(mutationErr))
@@ -626,7 +683,12 @@ func (h *Handler) BatchImportNodes(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "database error"})
 		return
 	}
-	if err := h.validateNodeSet(existingNodes); err != nil {
+	runtimeSettings, err := loadRuntimeSettingsFrom(c.Request.Context(), h.db)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "database error"})
+		return
+	}
+	if err := h.validateNodeSet(existingNodes, runtimeSettings); err != nil {
 		c.JSON(http.StatusInternalServerError, singboxUpdateError(fmt.Errorf("existing node set is invalid: %w", err)))
 		return
 	}
@@ -707,6 +769,7 @@ func (h *Handler) BatchImportNodes(c *gin.Context) {
 				Username:        username,
 				Password:        password,
 				TCPReuseEnabled: true,
+				UpstreamMode:    importedUpstreamMode(configJSON),
 				SortOrder:       nextOrder,
 				Enabled:         true,
 			},
@@ -717,7 +780,7 @@ func (h *Handler) BatchImportNodes(c *gin.Context) {
 		usedInboundPorts[inboundPort] = struct{}{}
 	}
 
-	validCandidates, rejectedCandidates := h.selectValidBatchCandidates(existingNodes, candidates)
+	validCandidates, rejectedCandidates := h.selectValidBatchCandidates(existingNodes, candidates, runtimeSettings)
 	for candidate, validationErr := range rejectedCandidates {
 		candidate.result["success"] = false
 		candidate.result["error"] = fmt.Sprintf("sing-box validation failed: %v", validationErr)
@@ -754,7 +817,7 @@ func (h *Handler) BatchImportNodes(c *gin.Context) {
 		nextOrder++
 		usedInboundPorts[inboundPort] = struct{}{}
 	}
-	validCandidates, finalRejected := h.selectValidBatchCandidates(existingNodes, portValidCandidates)
+	validCandidates, finalRejected := h.selectValidBatchCandidates(existingNodes, portValidCandidates, runtimeSettings)
 	for candidate, validationErr := range finalRejected {
 		candidate.result["success"] = false
 		candidate.result["error"] = fmt.Sprintf("sing-box validation failed: %v", validationErr)
@@ -782,12 +845,13 @@ func (h *Handler) BatchImportNodes(c *gin.Context) {
 		ApplyRuntime: true,
 		Mutate: func(ctx context.Context, tx *sql.Tx) error {
 			stmt, err := tx.PrepareContext(ctx, `
-				INSERT INTO proxy_nodes (
-					name, remark, type, config, inbound_port, inbound_port_pinned,
-					username, password, tcp_reuse_enabled, sort_order, latency, enabled
-				)
-				VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-			`)
+					INSERT INTO proxy_nodes (
+						name, remark, type, config, inbound_port, inbound_port_pinned,
+						username, password, tcp_reuse_enabled, upstream_mode, upstream_type,
+						upstream_config, sort_order, latency, enabled
+					)
+					VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+				`)
 			if err != nil {
 				return err
 			}
@@ -807,6 +871,9 @@ func (h *Handler) BatchImportNodes(c *gin.Context) {
 					node.Username,
 					node.Password,
 					node.TCPReuseEnabled,
+					node.UpstreamMode,
+					node.UpstreamType,
+					node.UpstreamConfig,
 					node.SortOrder,
 					0,
 					node.Enabled,
@@ -867,8 +934,8 @@ func appendBatchCandidateNodes(existing []models.ProxyNode, candidates []*batchI
 	return nodes
 }
 
-func (h *Handler) validateNodeSet(nodes []models.ProxyNode) error {
-	configJSON, err := h.singBoxService.BuildGlobalConfig(nodes)
+func (h *Handler) validateNodeSet(nodes []models.ProxyNode, settings models.Settings) error {
+	configJSON, err := h.singBoxService.BuildGlobalConfig(nodes, settings)
 	if err != nil {
 		return err
 	}
@@ -878,6 +945,7 @@ func (h *Handler) validateNodeSet(nodes []models.ProxyNode) error {
 func (h *Handler) selectValidBatchCandidates(
 	existing []models.ProxyNode,
 	candidates []*batchImportCandidate,
+	settings models.Settings,
 ) ([]*batchImportCandidate, map[*batchImportCandidate]error) {
 	rejected := make(map[*batchImportCandidate]error)
 	if len(candidates) == 0 {
@@ -897,7 +965,7 @@ func (h *Handler) selectValidBatchCandidates(
 		for _, group := range subset {
 			trial = append(trial, group...)
 		}
-		err := h.validateNodeSet(appendBatchCandidateNodes(existing, trial))
+		err := h.validateNodeSet(appendBatchCandidateNodes(existing, trial), settings)
 		if err == nil {
 			for _, group := range subset {
 				for _, candidate := range group {
@@ -908,7 +976,7 @@ func (h *Handler) selectValidBatchCandidates(
 			return
 		}
 		if len(subset) == 1 {
-			groupAccepted, groupRejected := h.selectValidDependencyGroup(existing, accepted, subset[0], err)
+			groupAccepted, groupRejected := h.selectValidDependencyGroup(existing, accepted, subset[0], settings, err)
 			for _, candidate := range groupAccepted {
 				accepted = append(accepted, candidate)
 				acceptedSet[candidate] = struct{}{}
@@ -939,6 +1007,7 @@ func (h *Handler) selectValidDependencyGroup(
 	existing []models.ProxyNode,
 	accepted []*batchImportCandidate,
 	group []*batchImportCandidate,
+	settings models.Settings,
 	groupErr error,
 ) ([]*batchImportCandidate, map[*batchImportCandidate]error) {
 	groupByName := make(map[string][]*batchImportCandidate, len(group))
@@ -990,7 +1059,7 @@ func (h *Handler) selectValidDependencyGroup(
 			trial = append(trial, accepted...)
 			trial = append(trial, selected...)
 			trial = append(trial, candidate)
-			if err := h.validateNodeSet(appendBatchCandidateNodes(existing, trial)); err != nil {
+			if err := h.validateNodeSet(appendBatchCandidateNodes(existing, trial), settings); err != nil {
 				rejected[candidate] = err
 				continue
 			}
@@ -1011,6 +1080,16 @@ func batchImportCandidateDetour(candidate *batchImportCandidate) string {
 		return ""
 	}
 	return strings.TrimSpace(config.Detour)
+}
+
+func importedUpstreamMode(configJSON []byte) string {
+	var config struct {
+		Detour string `json:"detour"`
+	}
+	if json.Unmarshal(configJSON, &config) == nil && strings.TrimSpace(config.Detour) != "" {
+		return models.UpstreamModeLegacy
+	}
+	return models.UpstreamModeGlobal
 }
 
 func batchImportDependencyGroups(candidates []*batchImportCandidate) [][]*batchImportCandidate {
@@ -1112,6 +1191,22 @@ func (h *Handler) UpdateNode(c *gin.Context) {
 			if payload.TCPReuseEnabled == nil {
 				req.TCPReuseEnabled = prev.TCPReuseEnabled
 			}
+			if payload.UpstreamMode == nil {
+				req.UpstreamMode = prev.UpstreamMode
+			}
+			if payload.UpstreamType == nil {
+				req.UpstreamType = prev.UpstreamType
+			}
+			if payload.UpstreamConfig == nil {
+				req.UpstreamConfig = prev.UpstreamConfig
+			}
+			previousMode, _ := models.NormalizeUpstreamMode(prev.UpstreamMode)
+			nextMode, _ := models.NormalizeUpstreamMode(req.UpstreamMode)
+			allowLegacy := previousMode == models.UpstreamModeLegacy && nextMode == models.UpstreamModeLegacy
+			if err := h.validateNodeUpstream(&req, allowLegacy); err != nil {
+				requestErr = err
+				return err
+			}
 			req.SortOrder = prev.SortOrder
 			req.InboundPortPinned = prev.InboundPortPinned
 
@@ -1154,11 +1249,13 @@ func (h *Handler) UpdateNode(c *gin.Context) {
 			result, err := tx.ExecContext(ctx, `
 				UPDATE proxy_nodes
 				SET name = ?, remark = ?, type = ?, config = ?, inbound_port = ?,
-				    username = ?, password = ?, tcp_reuse_enabled = ?, enabled = ?,
+				    username = ?, password = ?, tcp_reuse_enabled = ?, upstream_mode = ?,
+				    upstream_type = ?, upstream_config = ?, enabled = ?,
 				    updated_at = CURRENT_TIMESTAMP
 				WHERE id = ?
 			`, req.Name, req.Remark, req.Type, req.Config, req.InboundPort, req.Username,
-				req.Password, req.TCPReuseEnabled, req.Enabled, id)
+				req.Password, req.TCPReuseEnabled, req.UpstreamMode, req.UpstreamType,
+				req.UpstreamConfig, req.Enabled, id)
 			if err != nil {
 				return err
 			}
@@ -1188,6 +1285,10 @@ func (h *Handler) UpdateNode(c *gin.Context) {
 		}
 		if requestErr != nil {
 			c.JSON(http.StatusBadRequest, gin.H{"error": requestErr.Error()})
+			return
+		}
+		if services.IsUpstreamValidationError(mutationErr) {
+			c.JSON(http.StatusBadRequest, gin.H{"error": mutationErr.Error()})
 			return
 		}
 		c.JSON(http.StatusInternalServerError, singboxUpdateError(mutationErr))
@@ -1671,21 +1772,19 @@ func (h *Handler) BatchSetAuth(c *gin.Context) {
 
 // GetSettings returns current settings
 func (h *Handler) GetSettings(c *gin.Context) {
-	var settings models.Settings
-	err := h.db.QueryRowContext(c.Request.Context(), `
-		SELECT id, start_port, preserve_inbound_ports
-		FROM settings
-		WHERE singleton_key = 1
-	`).Scan(&settings.ID, &settings.StartPort, &settings.PreserveInboundPorts)
+	settings, err := loadRuntimeSettingsFrom(c.Request.Context(), h.db)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "database error"})
 		return
 	}
 
 	c.JSON(http.StatusOK, gin.H{
-		"start_port":             settings.StartPort,
-		"preserve_inbound_ports": settings.PreserveInboundPorts,
-		"admin_password_locked":  strings.TrimSpace(os.Getenv("ADMIN_PASSWORD")) != "",
+		"start_port":              settings.StartPort,
+		"preserve_inbound_ports":  settings.PreserveInboundPorts,
+		"global_upstream_enabled": settings.GlobalUpstreamEnabled,
+		"global_upstream_type":    settings.GlobalUpstreamType,
+		"global_upstream_config":  settings.GlobalUpstreamConfig,
+		"admin_password_locked":   strings.TrimSpace(os.Getenv("ADMIN_PASSWORD")) != "",
 	})
 }
 
@@ -1724,9 +1823,12 @@ func (h *Handler) RestartRuntime(c *gin.Context) {
 // UpdateSettings updates settings
 func (h *Handler) UpdateSettings(c *gin.Context) {
 	var req struct {
-		StartPort            *int    `json:"start_port,omitempty"`
-		AdminPassword        *string `json:"admin_password,omitempty"`
-		PreserveInboundPorts *bool   `json:"preserve_inbound_ports,omitempty"`
+		StartPort             *int    `json:"start_port,omitempty"`
+		AdminPassword         *string `json:"admin_password,omitempty"`
+		PreserveInboundPorts  *bool   `json:"preserve_inbound_ports,omitempty"`
+		GlobalUpstreamEnabled *bool   `json:"global_upstream_enabled,omitempty"`
+		GlobalUpstreamType    *string `json:"global_upstream_type,omitempty"`
+		GlobalUpstreamConfig  *string `json:"global_upstream_config,omitempty"`
 	}
 
 	if err := c.BindJSON(&req); err != nil {
@@ -1767,21 +1869,8 @@ func (h *Handler) UpdateSettings(c *gin.Context) {
 	h.nodeWriteMu.Lock()
 	defer h.nodeWriteMu.Unlock()
 
-	var previous models.Settings
-	if err := h.db.QueryRowContext(c.Request.Context(), `
-		SELECT id, singleton_key, admin_password, admin_password_set, auth_generation,
-		       start_port, preserve_inbound_ports
-		FROM settings
-		WHERE singleton_key = 1
-	`).Scan(
-		&previous.ID,
-		&previous.SingletonKey,
-		&previous.AdminPassword,
-		&previous.AdminPasswordSet,
-		&previous.AuthGeneration,
-		&previous.StartPort,
-		&previous.PreserveInboundPorts,
-	); err != nil {
+	previous, err := loadRuntimeSettingsFrom(c.Request.Context(), h.db)
+	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to query settings"})
 		return
 	}
@@ -1794,17 +1883,56 @@ func (h *Handler) UpdateSettings(c *gin.Context) {
 	if req.PreserveInboundPorts != nil {
 		nextPreserveInboundPorts = *req.PreserveInboundPorts
 	}
+	nextGlobalUpstreamEnabled := previous.GlobalUpstreamEnabled
+	if req.GlobalUpstreamEnabled != nil {
+		nextGlobalUpstreamEnabled = *req.GlobalUpstreamEnabled
+	}
+	nextGlobalUpstreamType := previous.GlobalUpstreamType
+	if req.GlobalUpstreamType != nil {
+		nextGlobalUpstreamType = strings.ToLower(strings.TrimSpace(*req.GlobalUpstreamType))
+	}
+	nextGlobalUpstreamConfig := previous.GlobalUpstreamConfig
+	if req.GlobalUpstreamConfig != nil {
+		nextGlobalUpstreamConfig = strings.TrimSpace(*req.GlobalUpstreamConfig)
+	}
+	globalDefinitionRequested := req.GlobalUpstreamType != nil || req.GlobalUpstreamConfig != nil
+	if nextGlobalUpstreamEnabled || globalDefinitionRequested {
+		hasType := nextGlobalUpstreamType != ""
+		hasConfig := nextGlobalUpstreamConfig != ""
+		if hasType != hasConfig {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "global upstream type and config must be provided together"})
+			return
+		}
+		if nextGlobalUpstreamEnabled && !hasType {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "global upstream proxy is required when enabled"})
+			return
+		}
+		if hasType {
+			if err := h.singBoxService.ValidateUpstreamDefinition(models.ProxyDefinition{
+				Type: nextGlobalUpstreamType, Config: nextGlobalUpstreamConfig,
+			}); err != nil {
+				c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+				return
+			}
+		}
+	}
 	portSettingsChanged := nextStartPort != previous.StartPort ||
 		nextPreserveInboundPorts != previous.PreserveInboundPorts
+	globalSettingsChanged := nextGlobalUpstreamEnabled != previous.GlobalUpstreamEnabled ||
+		nextGlobalUpstreamType != previous.GlobalUpstreamType ||
+		nextGlobalUpstreamConfig != previous.GlobalUpstreamConfig
 	passwordChanged := req.AdminPassword != nil
-	if !portSettingsChanged && !passwordChanged {
+	if !portSettingsChanged && !globalSettingsChanged && !passwordChanged {
 		c.JSON(http.StatusOK, gin.H{"message": "settings unchanged", "changed": false})
 		return
 	}
 	shouldReassignInboundPorts := !nextPreserveInboundPorts && portSettingsChanged
+	globalRuntimeChanged := nextGlobalUpstreamEnabled != previous.GlobalUpstreamEnabled ||
+		(nextGlobalUpstreamEnabled && (nextGlobalUpstreamType != previous.GlobalUpstreamType ||
+			nextGlobalUpstreamConfig != previous.GlobalUpstreamConfig))
 
 	_, mutationErr := h.nodeMutations.Execute(c.Request.Context(), NodeMutationOperation{
-		ApplyRuntime: shouldReassignInboundPorts,
+		ApplyRuntime: shouldReassignInboundPorts || globalRuntimeChanged,
 		Mutate: func(ctx context.Context, tx *sql.Tx) error {
 			if passwordChanged {
 				if _, err := tx.ExecContext(ctx, `
@@ -1812,16 +1940,22 @@ func (h *Handler) UpdateSettings(c *gin.Context) {
 					SET admin_password = ?, admin_password_set = 1,
 					    auth_generation = auth_generation + 1,
 					    start_port = ?, preserve_inbound_ports = ?,
+					    global_upstream_enabled = ?, global_upstream_type = ?,
+					    global_upstream_config = ?,
 					    updated_at = CURRENT_TIMESTAMP
 					WHERE singleton_key = 1
-				`, hashedPassword, nextStartPort, nextPreserveInboundPorts); err != nil {
+				`, hashedPassword, nextStartPort, nextPreserveInboundPorts,
+					nextGlobalUpstreamEnabled, nextGlobalUpstreamType, nextGlobalUpstreamConfig); err != nil {
 					return err
 				}
 			} else if _, err := tx.ExecContext(ctx, `
 				UPDATE settings
-				SET start_port = ?, preserve_inbound_ports = ?, updated_at = CURRENT_TIMESTAMP
+				SET start_port = ?, preserve_inbound_ports = ?,
+				    global_upstream_enabled = ?, global_upstream_type = ?,
+				    global_upstream_config = ?, updated_at = CURRENT_TIMESTAMP
 				WHERE singleton_key = 1
-			`, nextStartPort, nextPreserveInboundPorts); err != nil {
+			`, nextStartPort, nextPreserveInboundPorts, nextGlobalUpstreamEnabled,
+				nextGlobalUpstreamType, nextGlobalUpstreamConfig); err != nil {
 				return err
 			}
 
@@ -1832,6 +1966,10 @@ func (h *Handler) UpdateSettings(c *gin.Context) {
 		},
 	})
 	if mutationErr != nil {
+		if services.IsUpstreamValidationError(mutationErr) {
+			c.JSON(http.StatusBadRequest, gin.H{"error": mutationErr.Error()})
+			return
+		}
 		c.JSON(http.StatusInternalServerError, gin.H{
 			"error": fmt.Sprintf("failed to update settings consistently: %v", mutationErr),
 		})
@@ -2036,13 +2174,21 @@ func (h *Handler) ReplaceNode(c *gin.Context) {
 			if updateName {
 				nextName = name
 			}
+			nextUpstreamMode := previous.UpstreamMode
+			previousMode, normalizeErr := models.NormalizeUpstreamMode(previous.UpstreamMode)
+			if normalizeErr != nil {
+				return normalizeErr
+			}
+			if previousMode == models.UpstreamModeLegacy {
+				nextUpstreamMode = importedUpstreamMode(configJSON)
+			}
 			_, err = tx.ExecContext(ctx, `
 				UPDATE proxy_nodes
-				SET name = ?, type = ?, config = ?,
+				SET name = ?, type = ?, config = ?, upstream_mode = ?,
 				    node_ip = '', location = '', country_code = '', latency = 0,
 				    updated_at = CURRENT_TIMESTAMP
 				WHERE id = ?
-			`, nextName, proxyType, string(configJSON), id)
+			`, nextName, proxyType, string(configJSON), nextUpstreamMode, id)
 			return err
 		},
 	})

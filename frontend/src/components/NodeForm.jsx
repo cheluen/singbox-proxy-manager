@@ -1,5 +1,19 @@
 import React, { useEffect, useState } from 'react'
-import { Form, Input, Select, Button, Switch, Space, InputNumber, message, Collapse } from 'antd'
+import {
+  Alert,
+  Button,
+  Collapse,
+  Form,
+  Input,
+  InputNumber,
+  message,
+  Modal,
+  Segmented,
+  Select,
+  Space,
+  Switch,
+} from 'antd'
+import { EditOutlined, PlusOutlined } from '@ant-design/icons'
 import { useTranslation } from 'react-i18next'
 import api from '../utils/api'
 
@@ -271,16 +285,33 @@ const hydrateNativeCompatibilityForForm = (type, config) => {
   return normalized
 }
 
-function NodeForm({ node, onSave, onCancel }) {
+function NodeForm({ node, onSave, onCancel, variant = 'node', formName }) {
   const { t, i18n } = useTranslation()
   const [form] = Form.useForm()
   const [proxyType, setProxyType] = useState(node?.type || 'ss')
   const [loading, setLoading] = useState(false)
   const [preserveInboundPorts, setPreserveInboundPorts] = useState(false)
+  const [upstreamEditorOpen, setUpstreamEditorOpen] = useState(false)
+  const [customUpstream, setCustomUpstream] = useState(() => ({
+    type: node?.upstream_type || '',
+    config: node?.upstream_config || '',
+  }))
   const authEnabled = Form.useWatch('auth_enabled', form)
+  const upstreamMode = Form.useWatch('upstream_mode', form)
   const isChineseMode = i18n.language?.startsWith('zh')
+  const isUpstreamEditor = variant === 'upstream'
 
   useEffect(() => {
+    if (isUpstreamEditor) return
+    setCustomUpstream({
+      type: node?.upstream_type || '',
+      config: node?.upstream_config || '',
+    })
+  }, [isUpstreamEditor, node?.id, node?.upstream_type, node?.upstream_config])
+
+  useEffect(() => {
+    if (isUpstreamEditor) return undefined
+
     let cancelled = false
 
     const loadSettings = async () => {
@@ -299,7 +330,7 @@ function NodeForm({ node, onSave, onCancel }) {
     return () => {
       cancelled = true
     }
-  }, [])
+  }, [isUpstreamEditor])
 
   const withHint = (label, zhHint) => {
     if (!isChineseMode || !zhHint) {
@@ -320,6 +351,22 @@ function NodeForm({ node, onSave, onCancel }) {
     try {
       // Build config object based on proxy type
       const config = buildConfig(proxyType, values)
+
+      if (isUpstreamEditor) {
+        await onSave({
+          type: proxyType,
+          config: JSON.stringify(config),
+        })
+        return
+      }
+
+      const selectedUpstreamMode = values.upstream_mode || 'global'
+      if (
+        selectedUpstreamMode === 'custom' &&
+        (!customUpstream.type || !customUpstream.config)
+      ) {
+        throw new Error(t('upstream_custom_required'))
+      }
       
       await onSave({
         name: values.name,
@@ -331,6 +378,9 @@ function NodeForm({ node, onSave, onCancel }) {
         username: values.auth_enabled ? values.username || '' : '',
         password: values.auth_enabled ? values.password || '' : '',
         enabled: values.enabled !== false,
+        upstream_mode: selectedUpstreamMode,
+        upstream_type: customUpstream.type,
+        upstream_config: customUpstream.config,
       })
     } catch (error) {
       message.error(error?.message || t('invalid_config'))
@@ -538,7 +588,11 @@ function NodeForm({ node, onSave, onCancel }) {
           interface_name: values.wireguard_interface_name || '',
           mtu: values.wireguard_mtu || 0,
           workers: values.wireguard_workers || 0,
-          detour: values.wireguard_detour || '',
+	          detour:
+	            isUpstreamEditor ||
+	            (node?.upstream_mode || (initialConfig.detour ? 'legacy' : 'global')) !== 'legacy'
+	              ? ''
+	              : initialConfig.detour || '',
 	          domain_resolver: values.wireguard_domain_resolver || '',
 	          domain_resolver_strategy: values.wireguard_domain_resolver_strategy || '',
 	          domain_resolver_options:
@@ -570,6 +624,8 @@ function NodeForm({ node, onSave, onCancel }) {
   }
 
 	  const initialConfig = node ? parseConfig(node.config) : {}
+	  const initialUpstreamMode =
+	    node?.upstream_mode || (initialConfig.detour ? 'legacy' : 'global')
 	  const normalizedConfig = hydrateNativeCompatibilityForForm(node?.type, initialConfig)
   if (Array.isArray(normalizedConfig.alpn)) {
     normalizedConfig.alpn = normalizedConfig.alpn.join(',')
@@ -697,7 +753,6 @@ function NodeForm({ node, onSave, onCancel }) {
     wireguard_interface_name: node?.type === 'wireguard' ? normalizedConfig.interface_name || '' : '',
     wireguard_mtu: node?.type === 'wireguard' ? normalizedConfig.mtu || 0 : 0,
     wireguard_workers: node?.type === 'wireguard' ? normalizedConfig.workers || 0 : 0,
-    wireguard_detour: node?.type === 'wireguard' ? normalizedConfig.detour || '' : '',
     wireguard_domain_resolver: node?.type === 'wireguard' ? normalizedConfig.domain_resolver || '' : '',
     wireguard_domain_resolver_strategy:
       node?.type === 'wireguard' ? normalizedConfig.domain_resolver_strategy || '' : '',
@@ -708,6 +763,7 @@ function NodeForm({ node, onSave, onCancel }) {
         : false,
     wireguard_connect_timeout: node?.type === 'wireguard' ? normalizedConfig.connect_timeout || '' : '',
     wireguard_peers_json: node?.type === 'wireguard' ? normalizedConfig.wireguard_peers_json || '' : '',
+    upstream_mode: initialUpstreamMode,
   }
 
   const renderSSFields = () => (
@@ -1106,9 +1162,6 @@ function NodeForm({ node, onSave, onCancel }) {
       <Form.Item label={withHint('Workers', '工作线程数')} name="wireguard_workers">
         <InputNumber min={0} max={128} style={{ width: '100%' }} />
       </Form.Item>
-      <Form.Item label={withHint('Detour', '拨号绕行出站标签')} name="wireguard_detour">
-        <Input placeholder="selector" />
-      </Form.Item>
       <Form.Item label={withHint('Domain Resolver', '域名解析器标签')} name="wireguard_domain_resolver">
         <Input placeholder="local" />
       </Form.Item>
@@ -1180,23 +1233,48 @@ function NodeForm({ node, onSave, onCancel }) {
     }
   }
 
+  const upstreamTypeLabel = proxyTypes.find((type) => type.value === customUpstream.type)?.label
+  const customUpstreamConfigured = Boolean(customUpstream.type && customUpstream.config)
+  const upstreamModeOptions = [
+    { label: t('upstream_follow_global'), value: 'global' },
+    { label: t('upstream_custom'), value: 'custom' },
+    { label: t('upstream_direct'), value: 'none' },
+  ]
+  if (initialUpstreamMode === 'legacy') {
+    upstreamModeOptions.push({ label: t('upstream_legacy'), value: 'legacy' })
+  }
+
+  const handleCustomUpstreamSave = async (definition) => {
+    setCustomUpstream(definition)
+    setUpstreamEditorOpen(false)
+  }
+
   return (
     <Form
       form={form}
       layout="vertical"
       initialValues={initialValues}
       onFinish={handleSubmit}
+      data-testid={isUpstreamEditor ? 'upstream-editor' : 'node-form'}
+      name={formName}
     >
-      <Form.Item
-        label={withHint('Node Name', '节点名称')}
-        name="name"
-        rules={[{ required: true, message: 'Please enter node name' }]}
-      >
-        <Input />
-      </Form.Item>
+      {!isUpstreamEditor && (
+        <Form.Item
+          label={withHint('Node Name', '节点名称')}
+          name="name"
+          rules={[{ required: true, message: 'Please enter node name' }]}
+        >
+          <Input />
+        </Form.Item>
+      )}
 
       <Form.Item label={withHint('Proxy Type', '代理协议类型')} required>
-        <Select value={proxyType} onChange={handleProxyTypeChange}>
+        <Select
+          id={isUpstreamEditor ? `${formName || 'upstream'}_proxy_type` : 'proxy_type'}
+          value={proxyType}
+          onChange={handleProxyTypeChange}
+          virtual={false}
+        >
           {proxyTypes.map((type) => (
             <Option key={type.value} value={type.value}>
               {type.label}
@@ -1223,38 +1301,40 @@ function NodeForm({ node, onSave, onCancel }) {
         <InputNumber min={1} max={65535} style={{ width: '100%' }} />
       </Form.Item>
 
-      <Form.Item
-        label={withHint('Inbound Port', '本地监听端口')}
-        name="inbound_port"
-        extra={
-          preserveInboundPorts
-            ? withExtraHint(
-                'Leave as 0 for auto-assignment based on node order',
-                '填 0 按节点顺序自动分配'
-              )
-            : node?.inbound_port_pinned
+      {!isUpstreamEditor && (
+        <Form.Item
+          label={withHint('Inbound Port', '本地监听端口')}
+          name="inbound_port"
+          extra={
+            preserveInboundPorts
               ? withExtraHint(
-                  'This port is pinned and can be changed without automatic reassignment',
-                  '该节点端口已固定，可在此手动修改且不会参与自动重排'
+                  'Leave as 0 for auto-assignment based on node order',
+                  '填 0 按节点顺序自动分配'
                 )
-              : withExtraHint(
-                  'Managed by system order (enable Preserve Inbound Ports in Settings to edit)',
-                  '当前未开启保留入站端口：端口由系统按顺序分配，无法手动修改；如需修改请先在系统设置开启“保留入站端口”'
-                )
-        }
-      >
-        <InputNumber
-          min={0}
-          max={65535}
-          style={{ width: '100%' }}
-          placeholder="0 (auto)"
-          disabled={!preserveInboundPorts && !node?.inbound_port_pinned}
-        />
-      </Form.Item>
+              : node?.inbound_port_pinned
+                ? withExtraHint(
+                    'This port is pinned and can be changed without automatic reassignment',
+                    '该节点端口已固定，可在此手动修改且不会参与自动重排'
+                  )
+                : withExtraHint(
+                    'Managed by system order (enable Preserve Inbound Ports in Settings to edit)',
+                    '当前未开启保留入站端口：端口由系统按顺序分配，无法手动修改；如需修改请先在系统设置开启“保留入站端口”'
+                  )
+          }
+        >
+          <InputNumber
+            min={0}
+            max={65535}
+            style={{ width: '100%' }}
+            placeholder="0 (auto)"
+            disabled={!preserveInboundPorts && !node?.inbound_port_pinned}
+          />
+        </Form.Item>
+      )}
 
       {renderConfigFields()}
 
-      {node && node.type === proxyType && (
+      {node?.config && node.type === proxyType && (
         <Collapse
           ghost
           size="small"
@@ -1286,27 +1366,89 @@ function NodeForm({ node, onSave, onCancel }) {
         />
       )}
 
-      <Form.Item
-        label={withHint('Inbound Authentication', '入站认证')}
-        name="auth_enabled"
-        valuePropName="checked"
-        extra={withExtraHint(
-          'Disable explicitly to expose this inbound without authentication',
-          '只有明确关闭后，该入站才会以无认证方式开放'
-        )}
-      >
-        <Switch
-          checkedChildren={withHint('Enabled', '启用')}
-          unCheckedChildren={withHint('Disabled', '关闭')}
-          onChange={(enabled) => {
-            if (!enabled) {
-              form.setFieldsValue({ username: '', password: '' })
-            }
-          }}
-        />
-      </Form.Item>
+      {!isUpstreamEditor && (
+        <>
+          <Form.Item
+            label={t('upstream_mode')}
+            name="upstream_mode"
+            extra={t('upstream_mode_desc')}
+          >
+            <Segmented
+              block
+              options={upstreamModeOptions}
+              data-testid="node-upstream-mode"
+            />
+          </Form.Item>
 
-      {authEnabled && (
+          {upstreamMode === 'legacy' && (
+            <Alert
+              type="warning"
+              showIcon
+              message={t('upstream_legacy_warning')}
+              style={{ marginBottom: 16 }}
+            />
+          )}
+
+          {upstreamMode === 'custom' && (
+            <Form.Item
+              label={t('upstream_custom_proxy')}
+              required
+              validateStatus={customUpstreamConfigured ? undefined : 'error'}
+              help={customUpstreamConfigured ? undefined : t('upstream_custom_required')}
+            >
+              <Button
+                icon={customUpstreamConfigured ? <EditOutlined /> : <PlusOutlined />}
+                onClick={() => setUpstreamEditorOpen(true)}
+                data-testid="node-upstream-configure"
+              >
+                {customUpstreamConfigured
+                  ? `${t('upstream_edit')} · ${upstreamTypeLabel || customUpstream.type}`
+                  : t('upstream_configure')}
+              </Button>
+            </Form.Item>
+          )}
+
+          <Modal
+            title={t('upstream_custom_proxy')}
+            open={upstreamEditorOpen}
+            footer={null}
+            width={720}
+            destroyOnHidden
+            onCancel={() => setUpstreamEditorOpen(false)}
+          >
+            <NodeForm
+              key={`${customUpstream.type}:${customUpstream.config}`}
+              variant="upstream"
+              formName="node_upstream"
+              node={customUpstreamConfigured ? customUpstream : null}
+              onSave={handleCustomUpstreamSave}
+              onCancel={() => setUpstreamEditorOpen(false)}
+            />
+          </Modal>
+
+          <Form.Item
+            label={withHint('Inbound Authentication', '入站认证')}
+            name="auth_enabled"
+            valuePropName="checked"
+            extra={withExtraHint(
+              'Disable explicitly to expose this inbound without authentication',
+              '只有明确关闭后，该入站才会以无认证方式开放'
+            )}
+          >
+            <Switch
+              checkedChildren={withHint('Enabled', '启用')}
+              unCheckedChildren={withHint('Disabled', '关闭')}
+              onChange={(enabled) => {
+                if (!enabled) {
+                  form.setFieldsValue({ username: '', password: '' })
+                }
+              }}
+            />
+          </Form.Item>
+        </>
+      )}
+
+      {!isUpstreamEditor && authEnabled && (
         <Form.Item label={withHint('Authentication Credentials', '认证凭据')} required>
           <Space.Compact style={{ width: '100%' }}>
             <Form.Item
@@ -1355,16 +1497,18 @@ function NodeForm({ node, onSave, onCancel }) {
         </Form.Item>
       )}
 
-      <Form.Item label={withHint('Node Status', '节点启用状态')} name="enabled" valuePropName="checked">
-        <Switch checkedChildren="Enabled" unCheckedChildren="Disabled" />
-      </Form.Item>
+      {!isUpstreamEditor && (
+        <Form.Item label={withHint('Node Status', '节点启用状态')} name="enabled" valuePropName="checked">
+          <Switch checkedChildren="Enabled" unCheckedChildren="Disabled" />
+        </Form.Item>
+      )}
 
       <Form.Item>
         <Space>
           <Button type="primary" htmlType="submit" loading={loading}>
-            Save
+            {t('save')}
           </Button>
-          <Button onClick={onCancel}>Cancel</Button>
+          <Button onClick={onCancel}>{t('cancel')}</Button>
         </Space>
       </Form.Item>
     </Form>

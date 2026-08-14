@@ -29,6 +29,9 @@ type ProxyNode struct {
 	Password          string `json:"password"`
 	// TCPReuseEnabled controls whether username+route-number routing can target this node.
 	TCPReuseEnabled bool      `json:"tcp_reuse_enabled"`
+	UpstreamMode    string    `json:"upstream_mode"`
+	UpstreamType    string    `json:"upstream_type"`
+	UpstreamConfig  string    `json:"upstream_config"`
 	SortOrder       int       `json:"sort_order"`
 	NodeIP          string    `json:"node_ip"`
 	Location        string    `json:"location"`
@@ -37,6 +40,31 @@ type ProxyNode struct {
 	Enabled         bool      `json:"enabled"`
 	CreatedAt       time.Time `json:"created_at"`
 	UpdatedAt       time.Time `json:"updated_at"`
+}
+
+const (
+	UpstreamModeLegacy = "legacy"
+	UpstreamModeNone   = "none"
+	UpstreamModeGlobal = "global"
+	UpstreamModeCustom = "custom"
+)
+
+type ProxyDefinition struct {
+	Type   string `json:"type"`
+	Config string `json:"config"`
+}
+
+func NormalizeUpstreamMode(raw string) (string, error) {
+	mode := strings.ToLower(strings.TrimSpace(raw))
+	if mode == "" {
+		return UpstreamModeLegacy, nil
+	}
+	switch mode {
+	case UpstreamModeLegacy, UpstreamModeNone, UpstreamModeGlobal, UpstreamModeCustom:
+		return mode, nil
+	default:
+		return "", fmt.Errorf("unsupported upstream mode: %s", raw)
+	}
 }
 
 // NativeOptions preserves a native sing-box options object without narrowing
@@ -410,15 +438,18 @@ type WireGuardConfig struct {
 
 // Settings represents global settings
 type Settings struct {
-	ID                   int       `json:"id"`
-	SingletonKey         int       `json:"-"`
-	AdminPassword        string    `json:"admin_password"`
-	AdminPasswordSet     int       `json:"admin_password_set"`
-	AuthGeneration       int64     `json:"-"`
-	StartPort            int       `json:"start_port"`
-	PreserveInboundPorts bool      `json:"preserve_inbound_ports"`
-	CreatedAt            time.Time `json:"created_at"`
-	UpdatedAt            time.Time `json:"updated_at"`
+	ID                    int       `json:"id"`
+	SingletonKey          int       `json:"-"`
+	AdminPassword         string    `json:"admin_password"`
+	AdminPasswordSet      int       `json:"admin_password_set"`
+	AuthGeneration        int64     `json:"-"`
+	StartPort             int       `json:"start_port"`
+	PreserveInboundPorts  bool      `json:"preserve_inbound_ports"`
+	GlobalUpstreamEnabled bool      `json:"global_upstream_enabled"`
+	GlobalUpstreamType    string    `json:"global_upstream_type"`
+	GlobalUpstreamConfig  string    `json:"global_upstream_config"`
+	CreatedAt             time.Time `json:"created_at"`
+	UpdatedAt             time.Time `json:"updated_at"`
 }
 
 // InitDB initializes the database
@@ -442,13 +473,27 @@ func InitDB(db *sql.DB) error {
 				log.Printf("Failed to hash initial admin password: %v", err)
 				return err
 			}
-			_, err = db.Exec("INSERT INTO settings (singleton_key, admin_password, admin_password_set, auth_generation, start_port, preserve_inbound_ports) VALUES (?, ?, ?, ?, ?, ?)", 1, string(hashedPassword), 1, 1, 30001, false)
+			_, err = db.Exec(`
+				INSERT INTO settings (
+					singleton_key, admin_password, admin_password_set, auth_generation,
+					start_port, preserve_inbound_ports, global_upstream_enabled,
+					global_upstream_type, global_upstream_config
+				)
+				VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+			`, 1, string(hashedPassword), 1, 1, 30001, false, false, "", "")
 			if err != nil {
 				return err
 			}
 			log.Println("Admin password is managed by ADMIN_PASSWORD (env) and has been hashed")
 		} else {
-			_, err = db.Exec("INSERT INTO settings (singleton_key, admin_password, admin_password_set, auth_generation, start_port, preserve_inbound_ports) VALUES (?, ?, ?, ?, ?, ?)", 1, "", 0, 0, 30001, false)
+			_, err = db.Exec(`
+				INSERT INTO settings (
+					singleton_key, admin_password, admin_password_set, auth_generation,
+					start_port, preserve_inbound_ports, global_upstream_enabled,
+					global_upstream_type, global_upstream_config
+				)
+				VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+			`, 1, "", 0, 0, 30001, false, false, "", "")
 			if err != nil {
 				return err
 			}
@@ -547,8 +592,11 @@ func createSchema(db *sql.DB, dialect appdb.Dialect) error {
 			return err
 		}
 	}
+	if err := normalizeStoredUpstreamModes(db); err != nil {
+		return err
+	}
 	if dialect == appdb.DialectMySQL {
-		if err := ensureMySQLConfigLongText(db); err != nil {
+		if err := ensureMySQLLongTextColumns(db); err != nil {
 			return err
 		}
 	}
@@ -560,6 +608,58 @@ func createSchema(db *sql.DB, dialect appdb.Dialect) error {
 		return err
 	}
 	return ensureUniqueIndex(db, dialect, "idx_admin_sessions_token_hash", "admin_sessions", "token_hash")
+}
+
+func normalizeStoredUpstreamModes(db *sql.DB) error {
+	rows, err := db.Query(`
+		SELECT id, config
+		FROM proxy_nodes
+		WHERE upstream_mode = ? OR upstream_mode = ''
+	`, UpstreamModeLegacy)
+	if err != nil {
+		return err
+	}
+	type candidate struct {
+		id     int
+		config string
+	}
+	candidates := make([]candidate, 0)
+	for rows.Next() {
+		var item candidate
+		if err := rows.Scan(&item.id, &item.config); err != nil {
+			_ = rows.Close()
+			return err
+		}
+		candidates = append(candidates, item)
+	}
+	if err := rows.Err(); err != nil {
+		_ = rows.Close()
+		return err
+	}
+	if err := rows.Close(); err != nil {
+		return err
+	}
+
+	for _, item := range candidates {
+		var dialFields struct {
+			Detour string `json:"detour"`
+		}
+		if err := json.Unmarshal([]byte(item.config), &dialFields); err != nil {
+			continue
+		}
+		if strings.TrimSpace(dialFields.Detour) != "" {
+			continue
+		}
+		if _, err := db.Exec(
+			"UPDATE proxy_nodes SET upstream_mode = ? WHERE id = ? AND (upstream_mode = ? OR upstream_mode = '')",
+			UpstreamModeGlobal,
+			item.id,
+			UpstreamModeLegacy,
+		); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func normalizeSettingsSingleton(db *sql.DB) error {
@@ -576,23 +676,50 @@ func normalizeSettingsSingleton(db *sql.DB) error {
 	return err
 }
 
-func ensureMySQLConfigLongText(db *sql.DB) error {
-	var dataType string
-	err := db.QueryRow(`
-		SELECT data_type
-		FROM information_schema.columns
-		WHERE table_schema = DATABASE()
-		  AND table_name = 'proxy_nodes'
-		  AND column_name = 'config'
-	`).Scan(&dataType)
-	if err != nil {
-		return err
+func ensureMySQLLongTextColumns(db *sql.DB) error {
+	columns := []struct {
+		table string
+		name  string
+	}{
+		{table: "proxy_nodes", name: "config"},
+		{table: "proxy_nodes", name: "upstream_config"},
+		{table: "settings", name: "global_upstream_config"},
 	}
-	if strings.EqualFold(strings.TrimSpace(dataType), "longtext") {
-		return nil
+	for _, column := range columns {
+		var dataType, isNullable string
+		var defaultValue sql.NullString
+		err := db.QueryRow(`
+			SELECT data_type, is_nullable, column_default
+			FROM information_schema.columns
+			WHERE table_schema = DATABASE()
+			  AND table_name = ?
+			  AND column_name = ?
+		`, column.table, column.name).Scan(&dataType, &isNullable, &defaultValue)
+		if err != nil {
+			return err
+		}
+		if _, err := db.Exec(fmt.Sprintf(
+			"UPDATE %s SET %s = '' WHERE %s IS NULL",
+			column.table,
+			column.name,
+			column.name,
+		)); err != nil {
+			return err
+		}
+		if strings.EqualFold(strings.TrimSpace(dataType), "longtext") &&
+			strings.EqualFold(strings.TrimSpace(isNullable), "NO") &&
+			!defaultValue.Valid {
+			continue
+		}
+		if _, err := db.Exec(fmt.Sprintf(
+			"ALTER TABLE %s MODIFY COLUMN %s LONGTEXT NOT NULL",
+			column.table,
+			column.name,
+		)); err != nil {
+			return err
+		}
 	}
-	_, err = db.Exec("ALTER TABLE proxy_nodes MODIFY COLUMN config LONGTEXT NOT NULL")
-	return err
+	return nil
 }
 
 type migrationColumn struct {
@@ -616,6 +743,9 @@ func schemaStatements(dialect appdb.Dialect) []string {
 				username TEXT NOT NULL DEFAULT '',
 				password TEXT NOT NULL DEFAULT '',
 				tcp_reuse_enabled BOOLEAN NOT NULL DEFAULT TRUE,
+				upstream_mode TEXT NOT NULL DEFAULT 'global',
+				upstream_type TEXT NOT NULL DEFAULT '',
+				upstream_config TEXT NOT NULL DEFAULT '',
 				sort_order INTEGER NOT NULL,
 				node_ip TEXT NOT NULL DEFAULT '',
 				location TEXT NOT NULL DEFAULT '',
@@ -633,6 +763,9 @@ func schemaStatements(dialect appdb.Dialect) []string {
 				auth_generation BIGINT NOT NULL DEFAULT 0,
 				start_port INTEGER DEFAULT 10000,
 				preserve_inbound_ports BOOLEAN NOT NULL DEFAULT FALSE,
+				global_upstream_enabled BOOLEAN NOT NULL DEFAULT FALSE,
+				global_upstream_type TEXT NOT NULL DEFAULT '',
+				global_upstream_config TEXT NOT NULL DEFAULT '',
 				created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
 				updated_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
 			)`,
@@ -659,6 +792,9 @@ func schemaStatements(dialect appdb.Dialect) []string {
 				username VARCHAR(255) NOT NULL DEFAULT '',
 				password VARCHAR(255) NOT NULL DEFAULT '',
 				tcp_reuse_enabled BOOLEAN NOT NULL DEFAULT TRUE,
+				upstream_mode VARCHAR(16) NOT NULL DEFAULT 'global',
+				upstream_type VARCHAR(64) NOT NULL DEFAULT '',
+				upstream_config LONGTEXT NOT NULL,
 				sort_order INTEGER NOT NULL,
 				node_ip VARCHAR(255) NOT NULL DEFAULT '',
 				location VARCHAR(255) NOT NULL DEFAULT '',
@@ -676,6 +812,9 @@ func schemaStatements(dialect appdb.Dialect) []string {
 				auth_generation BIGINT NOT NULL DEFAULT 0,
 				start_port INTEGER DEFAULT 10000,
 				preserve_inbound_ports BOOLEAN NOT NULL DEFAULT FALSE,
+				global_upstream_enabled BOOLEAN NOT NULL DEFAULT FALSE,
+				global_upstream_type VARCHAR(64) NOT NULL DEFAULT '',
+				global_upstream_config LONGTEXT NOT NULL,
 				created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
 				updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
 			)`,
@@ -702,6 +841,9 @@ func schemaStatements(dialect appdb.Dialect) []string {
 				username TEXT DEFAULT '',
 				password TEXT DEFAULT '',
 				tcp_reuse_enabled INTEGER NOT NULL DEFAULT 1,
+				upstream_mode TEXT NOT NULL DEFAULT 'global',
+				upstream_type TEXT NOT NULL DEFAULT '',
+				upstream_config TEXT NOT NULL DEFAULT '',
 				sort_order INTEGER NOT NULL,
 				node_ip TEXT DEFAULT '',
 				location TEXT DEFAULT '',
@@ -719,6 +861,9 @@ func schemaStatements(dialect appdb.Dialect) []string {
 				auth_generation INTEGER NOT NULL DEFAULT 0,
 				start_port INTEGER DEFAULT 10000,
 				preserve_inbound_ports INTEGER NOT NULL DEFAULT 0,
+				global_upstream_enabled INTEGER NOT NULL DEFAULT 0,
+				global_upstream_type TEXT NOT NULL DEFAULT '',
+				global_upstream_config TEXT NOT NULL DEFAULT '',
 				created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
 				updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
 			)`,
@@ -742,10 +887,16 @@ func migrationColumns(dialect appdb.Dialect) []migrationColumn {
 			{Table: "proxy_nodes", Name: "remark", AlterSQL: "ALTER TABLE proxy_nodes ADD COLUMN remark TEXT NOT NULL DEFAULT ''"},
 			{Table: "proxy_nodes", Name: "tcp_reuse_enabled", AlterSQL: "ALTER TABLE proxy_nodes ADD COLUMN tcp_reuse_enabled BOOLEAN NOT NULL DEFAULT TRUE"},
 			{Table: "proxy_nodes", Name: "inbound_port_pinned", AlterSQL: "ALTER TABLE proxy_nodes ADD COLUMN inbound_port_pinned BOOLEAN NOT NULL DEFAULT FALSE"},
+			{Table: "proxy_nodes", Name: "upstream_mode", AlterSQL: "ALTER TABLE proxy_nodes ADD COLUMN upstream_mode TEXT NOT NULL DEFAULT 'legacy'"},
+			{Table: "proxy_nodes", Name: "upstream_type", AlterSQL: "ALTER TABLE proxy_nodes ADD COLUMN upstream_type TEXT NOT NULL DEFAULT ''"},
+			{Table: "proxy_nodes", Name: "upstream_config", AlterSQL: "ALTER TABLE proxy_nodes ADD COLUMN upstream_config TEXT NOT NULL DEFAULT ''"},
 			{Table: "settings", Name: "singleton_key", AlterSQL: "ALTER TABLE settings ADD COLUMN singleton_key SMALLINT NOT NULL DEFAULT 1"},
 			{Table: "settings", Name: "admin_password_set", AlterSQL: "ALTER TABLE settings ADD COLUMN admin_password_set INTEGER DEFAULT 0"},
 			{Table: "settings", Name: "auth_generation", AlterSQL: "ALTER TABLE settings ADD COLUMN auth_generation BIGINT NOT NULL DEFAULT 0"},
 			{Table: "settings", Name: "preserve_inbound_ports", AlterSQL: "ALTER TABLE settings ADD COLUMN preserve_inbound_ports BOOLEAN NOT NULL DEFAULT FALSE"},
+			{Table: "settings", Name: "global_upstream_enabled", AlterSQL: "ALTER TABLE settings ADD COLUMN global_upstream_enabled BOOLEAN NOT NULL DEFAULT FALSE"},
+			{Table: "settings", Name: "global_upstream_type", AlterSQL: "ALTER TABLE settings ADD COLUMN global_upstream_type TEXT NOT NULL DEFAULT ''"},
+			{Table: "settings", Name: "global_upstream_config", AlterSQL: "ALTER TABLE settings ADD COLUMN global_upstream_config TEXT NOT NULL DEFAULT ''"},
 			{Table: "admin_sessions", Name: "auth_generation", AlterSQL: "ALTER TABLE admin_sessions ADD COLUMN auth_generation BIGINT NOT NULL DEFAULT 0"},
 		}
 	case appdb.DialectMySQL:
@@ -753,10 +904,16 @@ func migrationColumns(dialect appdb.Dialect) []migrationColumn {
 			{Table: "proxy_nodes", Name: "remark", AlterSQL: "ALTER TABLE proxy_nodes ADD COLUMN remark VARCHAR(1024) NOT NULL DEFAULT ''"},
 			{Table: "proxy_nodes", Name: "tcp_reuse_enabled", AlterSQL: "ALTER TABLE proxy_nodes ADD COLUMN tcp_reuse_enabled BOOLEAN NOT NULL DEFAULT TRUE"},
 			{Table: "proxy_nodes", Name: "inbound_port_pinned", AlterSQL: "ALTER TABLE proxy_nodes ADD COLUMN inbound_port_pinned BOOLEAN NOT NULL DEFAULT FALSE"},
+			{Table: "proxy_nodes", Name: "upstream_mode", AlterSQL: "ALTER TABLE proxy_nodes ADD COLUMN upstream_mode VARCHAR(16) NOT NULL DEFAULT 'legacy'"},
+			{Table: "proxy_nodes", Name: "upstream_type", AlterSQL: "ALTER TABLE proxy_nodes ADD COLUMN upstream_type VARCHAR(64) NOT NULL DEFAULT ''"},
+			{Table: "proxy_nodes", Name: "upstream_config", AlterSQL: "ALTER TABLE proxy_nodes ADD COLUMN upstream_config LONGTEXT NULL"},
 			{Table: "settings", Name: "singleton_key", AlterSQL: "ALTER TABLE settings ADD COLUMN singleton_key SMALLINT NOT NULL DEFAULT 1"},
 			{Table: "settings", Name: "admin_password_set", AlterSQL: "ALTER TABLE settings ADD COLUMN admin_password_set INTEGER DEFAULT 0"},
 			{Table: "settings", Name: "auth_generation", AlterSQL: "ALTER TABLE settings ADD COLUMN auth_generation BIGINT NOT NULL DEFAULT 0"},
 			{Table: "settings", Name: "preserve_inbound_ports", AlterSQL: "ALTER TABLE settings ADD COLUMN preserve_inbound_ports BOOLEAN NOT NULL DEFAULT FALSE"},
+			{Table: "settings", Name: "global_upstream_enabled", AlterSQL: "ALTER TABLE settings ADD COLUMN global_upstream_enabled BOOLEAN NOT NULL DEFAULT FALSE"},
+			{Table: "settings", Name: "global_upstream_type", AlterSQL: "ALTER TABLE settings ADD COLUMN global_upstream_type VARCHAR(64) NOT NULL DEFAULT ''"},
+			{Table: "settings", Name: "global_upstream_config", AlterSQL: "ALTER TABLE settings ADD COLUMN global_upstream_config LONGTEXT NULL"},
 			{Table: "admin_sessions", Name: "auth_generation", AlterSQL: "ALTER TABLE admin_sessions ADD COLUMN auth_generation BIGINT NOT NULL DEFAULT 0"},
 		}
 	default:
@@ -764,10 +921,16 @@ func migrationColumns(dialect appdb.Dialect) []migrationColumn {
 			{Table: "proxy_nodes", Name: "remark", AlterSQL: "ALTER TABLE proxy_nodes ADD COLUMN remark TEXT DEFAULT ''"},
 			{Table: "proxy_nodes", Name: "tcp_reuse_enabled", AlterSQL: "ALTER TABLE proxy_nodes ADD COLUMN tcp_reuse_enabled INTEGER NOT NULL DEFAULT 1"},
 			{Table: "proxy_nodes", Name: "inbound_port_pinned", AlterSQL: "ALTER TABLE proxy_nodes ADD COLUMN inbound_port_pinned INTEGER NOT NULL DEFAULT 0"},
+			{Table: "proxy_nodes", Name: "upstream_mode", AlterSQL: "ALTER TABLE proxy_nodes ADD COLUMN upstream_mode TEXT NOT NULL DEFAULT 'legacy'"},
+			{Table: "proxy_nodes", Name: "upstream_type", AlterSQL: "ALTER TABLE proxy_nodes ADD COLUMN upstream_type TEXT NOT NULL DEFAULT ''"},
+			{Table: "proxy_nodes", Name: "upstream_config", AlterSQL: "ALTER TABLE proxy_nodes ADD COLUMN upstream_config TEXT NOT NULL DEFAULT ''"},
 			{Table: "settings", Name: "singleton_key", AlterSQL: "ALTER TABLE settings ADD COLUMN singleton_key INTEGER NOT NULL DEFAULT 1"},
 			{Table: "settings", Name: "admin_password_set", AlterSQL: "ALTER TABLE settings ADD COLUMN admin_password_set INTEGER DEFAULT 0"},
 			{Table: "settings", Name: "auth_generation", AlterSQL: "ALTER TABLE settings ADD COLUMN auth_generation INTEGER NOT NULL DEFAULT 0"},
 			{Table: "settings", Name: "preserve_inbound_ports", AlterSQL: "ALTER TABLE settings ADD COLUMN preserve_inbound_ports INTEGER NOT NULL DEFAULT 0"},
+			{Table: "settings", Name: "global_upstream_enabled", AlterSQL: "ALTER TABLE settings ADD COLUMN global_upstream_enabled INTEGER NOT NULL DEFAULT 0"},
+			{Table: "settings", Name: "global_upstream_type", AlterSQL: "ALTER TABLE settings ADD COLUMN global_upstream_type TEXT NOT NULL DEFAULT ''"},
+			{Table: "settings", Name: "global_upstream_config", AlterSQL: "ALTER TABLE settings ADD COLUMN global_upstream_config TEXT NOT NULL DEFAULT ''"},
 			{Table: "admin_sessions", Name: "auth_generation", AlterSQL: "ALTER TABLE admin_sessions ADD COLUMN auth_generation INTEGER NOT NULL DEFAULT 0"},
 		}
 	}
@@ -856,8 +1019,16 @@ func ensureUniqueIndex(db *sql.DB, dialect appdb.Dialect, indexName string, tabl
 
 // ParseConfig parses the config string based on proxy type
 func (p *ProxyNode) ParseConfig() (interface{}, error) {
+	if p == nil {
+		return nil, fmt.Errorf("proxy node is nil")
+	}
+	return (ProxyDefinition{Type: p.Type, Config: p.Config}).ParseConfig()
+}
+
+func (p ProxyDefinition) ParseConfig() (interface{}, error) {
 	var config interface{}
-	switch p.Type {
+	proxyType := strings.ToLower(strings.TrimSpace(p.Type))
+	switch proxyType {
 	case "direct":
 		config = &DirectConfig{}
 	case "ss":
@@ -887,18 +1058,18 @@ func (p *ProxyNode) ParseConfig() (interface{}, error) {
 	decoder := json.NewDecoder(strings.NewReader(p.Config))
 	decoder.DisallowUnknownFields()
 	if err := decoder.Decode(config); err != nil {
-		return nil, fmt.Errorf("invalid %s config: %w", p.Type, err)
+		return nil, fmt.Errorf("invalid %s config: %w", proxyType, err)
 	}
 	if err := decoder.Decode(&struct{}{}); err != io.EOF {
 		if err == nil {
-			return nil, fmt.Errorf("invalid %s config: trailing JSON value", p.Type)
+			return nil, fmt.Errorf("invalid %s config: trailing JSON value", proxyType)
 		}
-		return nil, fmt.Errorf("invalid %s config: %w", p.Type, err)
+		return nil, fmt.Errorf("invalid %s config: %w", proxyType, err)
 	}
 
 	var rawFields map[string]json.RawMessage
 	if err := json.Unmarshal([]byte(p.Config), &rawFields); err != nil {
-		return nil, fmt.Errorf("invalid %s config: %w", p.Type, err)
+		return nil, fmt.Errorf("invalid %s config: %w", proxyType, err)
 	}
 	reconcileNativeCompatibilityFields(config, rawFields)
 	return config, nil

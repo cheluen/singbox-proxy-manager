@@ -144,6 +144,7 @@ jobs:
           - test:e2e:version-update
           - test:e2e:nodeform-config-preservation
           - test:e2e:dashboard-concurrency-replace
+          - test:e2e:upstream-proxy
     steps:
       - uses: actions/checkout@v4
 
@@ -177,6 +178,66 @@ jobs:
         run: npm run ${{ matrix.script }}
         working-directory: frontend
 
+  test-upstream-full-stack:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Install and build frontend
+        run: |
+          npm ci
+          npm run build
+        working-directory: frontend
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+
+      - name: Install pinned sing-box test kernel
+        run: |
+          archive="sing-box-${SINGBOX_VERSION}-linux-amd64.tar.gz"
+          curl --fail --location --silent --show-error \
+            --output "${RUNNER_TEMP}/${archive}" \
+            "https://github.com/SagerNet/sing-box/releases/download/v${SINGBOX_VERSION}/${archive}"
+          echo "${SINGBOX_LINUX_AMD64_SHA256}  ${RUNNER_TEMP}/${archive}" | sha256sum --check --strict
+          tar --extract --gzip --file "${RUNNER_TEMP}/${archive}" --directory "${RUNNER_TEMP}"
+          binary="${RUNNER_TEMP}/sing-box-${SINGBOX_VERSION}-linux-amd64/sing-box"
+          chmod +x "${binary}"
+          echo "SINGBOX_TEST_BINARY=${binary}" >> "${GITHUB_ENV}"
+
+      - name: Build backend for full-stack test
+        run: CGO_ENABLED=0 go build -tags frontend_dist -o "${RUNNER_TEMP}/sbpm-upstream-e2e-backend" ./backend
+
+      - name: Resolve browser path
+        run: |
+          if command -v google-chrome >/dev/null 2>&1; then
+            echo "PUPPETEER_EXECUTABLE_PATH=$(command -v google-chrome)" >> "$GITHUB_ENV"
+          elif command -v google-chrome-stable >/dev/null 2>&1; then
+            echo "PUPPETEER_EXECUTABLE_PATH=$(command -v google-chrome-stable)" >> "$GITHUB_ENV"
+          elif command -v chromium-browser >/dev/null 2>&1; then
+            echo "PUPPETEER_EXECUTABLE_PATH=$(command -v chromium-browser)" >> "$GITHUB_ENV"
+          elif command -v chromium >/dev/null 2>&1; then
+            echo "PUPPETEER_EXECUTABLE_PATH=$(command -v chromium)" >> "$GITHUB_ENV"
+          else
+            echo "::error::No Chrome/Chromium executable found on runner."
+            exit 1
+          fi
+
+      - name: Run live upstream full-stack regression
+        run: npm run test:e2e:full-stack-upstream
+        working-directory: frontend
+        env:
+          SBPM_E2E_BACKEND_BINARY: ${{ runner.temp }}/sbpm-upstream-e2e-backend
+
   test-system-local-deploy:
     runs-on: ubuntu-latest
     needs:
@@ -186,6 +247,7 @@ jobs:
       - test-backend
       - test-frontend-build
       - test-frontend-e2e
+      - test-upstream-full-stack
     steps:
       - uses: actions/checkout@v4
 

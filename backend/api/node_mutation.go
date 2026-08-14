@@ -11,8 +11,15 @@ import (
 
 const proxyNodeSelectColumns = `
 	id, name, remark, type, config, inbound_port, inbound_port_pinned,
-	username, password, tcp_reuse_enabled, sort_order, node_ip, location,
-	country_code, latency, enabled, created_at, updated_at
+	username, password, tcp_reuse_enabled, upstream_mode, upstream_type,
+	upstream_config, sort_order, node_ip, location, country_code, latency,
+	enabled, created_at, updated_at
+`
+
+const runtimeSettingsSelectColumns = `
+	id, singleton_key, admin_password, admin_password_set, auth_generation,
+	start_port, preserve_inbound_ports, global_upstream_enabled,
+	global_upstream_type, global_upstream_config, created_at, updated_at
 `
 
 type rowScanner interface {
@@ -40,6 +47,9 @@ func scanProxyNode(scanner rowScanner) (models.ProxyNode, error) {
 		&node.Username,
 		&node.Password,
 		&node.TCPReuseEnabled,
+		&node.UpstreamMode,
+		&node.UpstreamType,
+		&node.UpstreamConfig,
 		&node.SortOrder,
 		&node.NodeIP,
 		&node.Location,
@@ -83,6 +93,29 @@ func loadNodeByIDFrom(ctx context.Context, queryer nodeQueryRower, id int) (mode
 		FROM proxy_nodes
 		WHERE id = ?
 	`, id))
+}
+
+func loadRuntimeSettingsFrom(ctx context.Context, queryer nodeQueryRower) (models.Settings, error) {
+	var settings models.Settings
+	err := queryer.QueryRowContext(ctx, `
+		SELECT `+runtimeSettingsSelectColumns+`
+		FROM settings
+		WHERE singleton_key = 1
+	`).Scan(
+		&settings.ID,
+		&settings.SingletonKey,
+		&settings.AdminPassword,
+		&settings.AdminPasswordSet,
+		&settings.AuthGeneration,
+		&settings.StartPort,
+		&settings.PreserveInboundPorts,
+		&settings.GlobalUpstreamEnabled,
+		&settings.GlobalUpstreamType,
+		&settings.GlobalUpstreamConfig,
+		&settings.CreatedAt,
+		&settings.UpdatedAt,
+	)
+	return settings, err
 }
 
 type NodeMutationOperation struct {
@@ -129,7 +162,11 @@ func (coordinator *NodeMutationCoordinator) Execute(
 		if err != nil {
 			return nil, err
 		}
-		runtimePlan, err = coordinator.runtimeApplier.Prepare(candidateNodes)
+		settings, err := loadRuntimeSettingsFrom(ctx, tx)
+		if err != nil {
+			return nil, err
+		}
+		runtimePlan, err = coordinator.runtimeApplier.Prepare(candidateNodes, settings)
 		if err != nil {
 			return nil, err
 		}

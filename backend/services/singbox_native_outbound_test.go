@@ -752,8 +752,9 @@ func TestBuildGlobalConfigResolvesDetourAndLocalDNS(t *testing.T) {
 		t.Fatalf("local DNS server was not generated: %#v", dns)
 	}
 	outbounds := generated["outbounds"].([]interface{})
-	if outbounds[1].(map[string]interface{})["detour"] != "node-1-out" {
-		t.Fatalf("detour name was not resolved: %#v", outbounds[1])
+	resolved := outbounds[1].(map[string]interface{})
+	if resolved["type"] != "selector" || resolved["default"] != "node-1-out" {
+		t.Fatalf("direct detour name was not resolved through a selector: %#v", resolved)
 	}
 
 	// Existing generated tags are also valid native references.
@@ -769,8 +770,8 @@ func TestBuildGlobalConfigResolvesDetourAndLocalDNS(t *testing.T) {
 	if err != nil {
 		t.Fatalf("built-in direct detour: %v", err)
 	}
-	if !strings.Contains(string(configJSON), `"detour": "direct"`) {
-		t.Fatalf("detour direct was not preserved: %s", configJSON)
+	if strings.Contains(string(configJSON), `"detour": "direct"`) {
+		t.Fatalf("built-in direct detour should normalize to direct dialing: %s", configJSON)
 	}
 }
 

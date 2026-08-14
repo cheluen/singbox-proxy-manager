@@ -1081,6 +1081,9 @@ function Dashboard({ onLogout }) {
         if ((prev?.username ?? '') !== (next?.username ?? '')) return false
         if ((prev?.password ?? '') !== (next?.password ?? '')) return false
         if ((prev?.tcp_reuse_enabled ?? true) !== (next?.tcp_reuse_enabled ?? true)) return false
+        if ((prev?.upstream_mode ?? 'global') !== (next?.upstream_mode ?? 'global')) return false
+        if ((prev?.upstream_type ?? '') !== (next?.upstream_type ?? '')) return false
+        if ((prev?.upstream_config ?? '') !== (next?.upstream_config ?? '')) return false
         if ((prev?.sort_order ?? 0) !== (next?.sort_order ?? 0)) return false
         if ((prev?.node_ip ?? '') !== (next?.node_ip ?? '')) return false
         if ((prev?.location ?? '') !== (next?.location ?? '')) return false

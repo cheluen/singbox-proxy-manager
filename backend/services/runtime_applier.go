@@ -43,11 +43,11 @@ func NewRuntimeApplier(service *SingBoxService) *RuntimeApplier {
 	return &RuntimeApplier{service: service}
 }
 
-func (a *RuntimeApplier) Prepare(nodes []models.ProxyNode) (*RuntimePlan, error) {
+func (a *RuntimeApplier) Prepare(nodes []models.ProxyNode, settings ...models.Settings) (*RuntimePlan, error) {
 	if a == nil || a.service == nil {
 		return nil, fmt.Errorf("runtime applier is not configured")
 	}
-	configJSON, err := a.service.BuildGlobalConfig(nodes)
+	configJSON, err := a.service.BuildGlobalConfig(nodes, settings...)
 	if err != nil {
 		return nil, fmt.Errorf("runtime build stage failed: %w", err)
 	}
@@ -60,8 +60,8 @@ func (a *RuntimeApplier) Prepare(nodes []models.ProxyNode) (*RuntimePlan, error)
 	}, nil
 }
 
-func (a *RuntimeApplier) Apply(nodes []models.ProxyNode) error {
-	plan, err := a.Prepare(nodes)
+func (a *RuntimeApplier) Apply(nodes []models.ProxyNode, settings ...models.Settings) error {
+	plan, err := a.Prepare(nodes, settings...)
 	if err != nil {
 		return err
 	}

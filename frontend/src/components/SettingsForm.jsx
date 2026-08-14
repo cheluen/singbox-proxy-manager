@@ -1,7 +1,9 @@
 import React, { useState, useEffect } from 'react'
-import { Form, Input, InputNumber, Button, message, Divider, Alert, Switch, Modal } from 'antd'
+import { Form, Input, InputNumber, Button, message, Divider, Alert, Switch, Modal, Space } from 'antd'
+import { EditOutlined, PlusOutlined } from '@ant-design/icons'
 import { useTranslation } from 'react-i18next'
 import api from '../utils/api'
+import NodeForm from './NodeForm'
 
 function SettingsForm({ onClose, onUpdated, onPasswordChanged }) {
   const { t } = useTranslation()
@@ -11,6 +13,9 @@ function SettingsForm({ onClose, onUpdated, onPasswordChanged }) {
   const [settingsData, setSettingsData] = useState(null)
   const [adminPasswordLocked, setAdminPasswordLocked] = useState(false)
   const [initialPreserveInboundPorts, setInitialPreserveInboundPorts] = useState(false)
+  const [upstreamEditorOpen, setUpstreamEditorOpen] = useState(false)
+  const [globalUpstream, setGlobalUpstream] = useState({ type: '', config: '' })
+  const globalUpstreamEnabled = Form.useWatch('global_upstream_enabled', form)
 
   useEffect(() => {
     let cancelled = false
@@ -22,6 +27,10 @@ function SettingsForm({ onClose, onUpdated, onPasswordChanged }) {
         setSettingsData(response.data)
         setAdminPasswordLocked(Boolean(response.data?.admin_password_locked))
         setInitialPreserveInboundPorts(Boolean(response.data?.preserve_inbound_ports))
+        setGlobalUpstream({
+          type: response.data?.global_upstream_type || '',
+          config: response.data?.global_upstream_config || '',
+        })
       } catch (error) {
         if (cancelled) return
         message.error(t('settings_load_failed'))
@@ -81,6 +90,23 @@ function SettingsForm({ onClose, onUpdated, onPasswordChanged }) {
       if (!adminPasswordLocked && values.admin_password) {
         updateData.admin_password = values.admin_password
       }
+      if (
+        values.global_upstream_enabled !== undefined &&
+        Boolean(values.global_upstream_enabled) !== Boolean(settingsData?.global_upstream_enabled)
+      ) {
+        updateData.global_upstream_enabled = Boolean(values.global_upstream_enabled)
+      }
+      if (globalUpstream.type !== (settingsData?.global_upstream_type || '')) {
+        updateData.global_upstream_type = globalUpstream.type
+      }
+      if (globalUpstream.config !== (settingsData?.global_upstream_config || '')) {
+        updateData.global_upstream_config = globalUpstream.config
+      }
+
+      if (values.global_upstream_enabled && (!globalUpstream.type || !globalUpstream.config)) {
+        message.error(t('upstream_global_required'))
+        return
+      }
 
       if (
         initialPreserveInboundPorts &&
@@ -113,7 +139,7 @@ function SettingsForm({ onClose, onUpdated, onPasswordChanged }) {
       message.success(t('settings_updated'))
       onClose()
     } catch (error) {
-      message.error(t('settings_update_failed'))
+      message.error(error.response?.data?.error || t('settings_update_failed'))
     } finally {
       setLoading(false)
     }
@@ -123,11 +149,18 @@ function SettingsForm({ onClose, onUpdated, onPasswordChanged }) {
     return <div style={{ padding: 16, textAlign: 'center' }}>{t('loading')}</div>
   }
 
+  const globalUpstreamConfigured = Boolean(globalUpstream.type && globalUpstream.config)
+  const handleGlobalUpstreamSave = async (definition) => {
+    setGlobalUpstream(definition)
+    setUpstreamEditorOpen(false)
+  }
+
   return (
     <Form
       form={form}
       layout="vertical"
       onFinish={handleSubmit}
+      data-testid="settings-form"
     >
       <Form.Item
         label={t('start_port')}
@@ -149,6 +182,58 @@ function SettingsForm({ onClose, onUpdated, onPasswordChanged }) {
       >
         <Switch checkedChildren={t('enabled')} unCheckedChildren={t('default')} />
       </Form.Item>
+
+      <Divider />
+
+      <Form.Item
+        label={t('upstream_global')}
+        name="global_upstream_enabled"
+        valuePropName="checked"
+        extra={t('upstream_global_desc')}
+      >
+        <Switch
+          checkedChildren={t('enabled')}
+          unCheckedChildren={t('disabled')}
+          data-testid="global-upstream-enabled"
+        />
+      </Form.Item>
+
+      <Form.Item
+        label={t('upstream_global_proxy')}
+        required={Boolean(globalUpstreamEnabled)}
+        validateStatus={globalUpstreamEnabled && !globalUpstreamConfigured ? 'error' : undefined}
+        help={globalUpstreamEnabled && !globalUpstreamConfigured ? t('upstream_global_required') : undefined}
+      >
+        <Space wrap>
+          <Button
+            icon={globalUpstreamConfigured ? <EditOutlined /> : <PlusOutlined />}
+            onClick={() => setUpstreamEditorOpen(true)}
+            data-testid="global-upstream-configure"
+          >
+            {globalUpstreamConfigured
+              ? `${t('upstream_edit')} · ${globalUpstream.type}`
+              : t('upstream_configure')}
+          </Button>
+        </Space>
+      </Form.Item>
+
+      <Modal
+        title={t('upstream_global_proxy')}
+        open={upstreamEditorOpen}
+        footer={null}
+        width={720}
+        destroyOnHidden
+        onCancel={() => setUpstreamEditorOpen(false)}
+      >
+        <NodeForm
+          key={`${globalUpstream.type}:${globalUpstream.config}`}
+          variant="upstream"
+          formName="global_upstream"
+          node={globalUpstreamConfigured ? globalUpstream : null}
+          onSave={handleGlobalUpstreamSave}
+          onCancel={() => setUpstreamEditorOpen(false)}
+        />
+      </Modal>
 
       <Divider />
 

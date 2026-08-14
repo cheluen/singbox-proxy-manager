@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -57,6 +58,26 @@ var (
 	ErrSingBoxBinaryNotFound      = errors.New("sing-box binary not found")
 	ErrSingBoxBinaryNotExecutable = errors.New("sing-box binary is not executable")
 )
+
+type UpstreamValidationError struct {
+	message string
+}
+
+func (e *UpstreamValidationError) Error() string {
+	if e == nil {
+		return "invalid upstream proxy"
+	}
+	return e.message
+}
+
+func IsUpstreamValidationError(err error) bool {
+	var target *UpstreamValidationError
+	return errors.As(err, &target)
+}
+
+func upstreamValidationErrorf(format string, args ...interface{}) error {
+	return &UpstreamValidationError{message: fmt.Sprintf(format, args...)}
+}
 
 func (s *SingBoxService) resolveSingBoxBinary() (string, error) {
 	if explicit := strings.TrimSpace(os.Getenv("SINGBOX_BINARY")); explicit != "" {
@@ -232,16 +253,25 @@ type tcpReuseRoute struct {
 }
 
 type parsedEnabledNode struct {
-	Node        *models.ProxyNode
-	Config      interface{}
-	InboundTag  string
-	OutboundTag string
+	Node               *models.ProxyNode
+	Config             interface{}
+	InboundTag         string
+	OutboundTag        string
+	UpstreamMode       string
+	ManagedUpstreamTag string
+}
+
+type parsedUpstreamProxy struct {
+	Definition models.ProxyDefinition
+	Config     interface{}
+	Tag        string
+	OwnerID    int
 }
 
 // BuildGlobalConfig renders the unified sing-box configuration for all enabled
 // nodes and returns it as JSON without touching the filesystem or the running
 // process, so callers can validate it before applying.
-func (s *SingBoxService) BuildGlobalConfig(nodes []models.ProxyNode) ([]byte, error) {
+func (s *SingBoxService) BuildGlobalConfig(nodes []models.ProxyNode, settings ...models.Settings) ([]byte, error) {
 	config := SingBoxConfig{
 		Log: LogConfig{
 			Level:     "info",
@@ -259,6 +289,15 @@ func (s *SingBoxService) BuildGlobalConfig(nodes []models.ProxyNode) ([]byte, er
 	if err != nil {
 		return nil, err
 	}
+	var runtimeSettings models.Settings
+	if len(settings) > 0 {
+		runtimeSettings = settings[0]
+	}
+	upstreams, upstreamNeedsLocalDNS, err := s.prepareManagedUpstreams(parsedNodes, runtimeSettings)
+	if err != nil {
+		return nil, err
+	}
+	needsLocalDNS = needsLocalDNS || upstreamNeedsLocalDNS
 	if needsLocalDNS {
 		config.DNS = &DNSConfig{
 			Servers: []DNSServer{{Type: "local", Tag: "local"}},
@@ -285,6 +324,25 @@ func (s *SingBoxService) BuildGlobalConfig(nodes []models.ProxyNode) ([]byte, er
 	}
 
 	directInboundRoutes := make([]RouteRule, 0, len(parsedNodes))
+	for _, upstream := range upstreams {
+		if upstream.Definition.Type == "wireguard" {
+			wireGuardConfig, ok := upstream.Config.(*models.WireGuardConfig)
+			if !ok {
+				return nil, fmt.Errorf("failed to generate upstream endpoint %q: unexpected config type %T", upstream.Tag, upstream.Config)
+			}
+			endpoint, err := s.generateWireGuardEndpoint(wireGuardConfig, upstream.Tag)
+			if err != nil {
+				return nil, fmt.Errorf("failed to generate upstream endpoint %q: %w", upstream.Tag, err)
+			}
+			config.Endpoints = append(config.Endpoints, endpoint)
+			continue
+		}
+		outbound, err := s.generateOutboundFromConfig(upstream.Definition.Type, upstream.Config, upstream.Tag)
+		if err != nil {
+			return nil, fmt.Errorf("failed to generate upstream outbound %q: %w", upstream.Tag, err)
+		}
+		config.Outbounds = append(config.Outbounds, outbound)
+	}
 
 	// Generate inbounds and outbounds for each enabled node.
 	for _, parsedNode := range parsedNodes {
@@ -319,10 +377,28 @@ func (s *SingBoxService) BuildGlobalConfig(nodes []models.ProxyNode) ([]byte, er
 
 		config.Inbounds = append(config.Inbounds, inbound)
 
-		// WireGuard is generated as an endpoint (sing-box 1.11+ format): the
-		// legacy wireguard outbound is rejected by sing-box 1.12+ at startup
-		// and removed in 1.13. Endpoint tags remain routable like outbounds.
-		if node.Type == "wireguard" {
+		// A direct outbound cannot use detour in sing-box. A single-choice
+		// selector preserves the node's stable outbound tag while delegating
+		// its traffic to the managed upstream.
+		if parsedNode.ManagedUpstreamTag != "" {
+			if node.Type != "direct" {
+				return nil, fmt.Errorf(
+					"failed to generate outbound for node %d: managed selector is only valid for direct nodes",
+					node.ID,
+				)
+			}
+			config.Outbounds = append(config.Outbounds, OutboundConfig{
+				Type: "selector",
+				Tag:  outboundTag,
+				Extra: map[string]interface{}{
+					"outbounds": []string{parsedNode.ManagedUpstreamTag},
+					"default":   parsedNode.ManagedUpstreamTag,
+				},
+			})
+		} else if node.Type == "wireguard" {
+			// WireGuard is generated as an endpoint (sing-box 1.11+ format): the
+			// legacy wireguard outbound is rejected by sing-box 1.12+ at startup
+			// and removed in 1.13. Endpoint tags remain routable like outbounds.
 			wireGuardConfig, ok := parsedNode.Config.(*models.WireGuardConfig)
 			if !ok {
 				return nil, fmt.Errorf("failed to generate endpoint for node %d: unexpected config type %T", node.ID, parsedNode.Config)
@@ -368,8 +444,8 @@ func (s *SingBoxService) BuildGlobalConfig(nodes []models.ProxyNode) ([]byte, er
 // GenerateGlobalConfig renders and writes the unified configuration file for
 // all enabled nodes. It performs no kernel validation; use BuildGlobalConfig +
 // ValidateConfig + ApplyConfig when replacing the config of a running service.
-func (s *SingBoxService) GenerateGlobalConfig(nodes []models.ProxyNode) error {
-	configJSON, err := s.BuildGlobalConfig(nodes)
+func (s *SingBoxService) GenerateGlobalConfig(nodes []models.ProxyNode, settings ...models.Settings) error {
+	configJSON, err := s.BuildGlobalConfig(nodes, settings...)
 	if err != nil {
 		return err
 	}
@@ -595,12 +671,20 @@ func prepareEnabledNodes(nodes []models.ProxyNode) ([]parsedEnabledNode, bool, e
 		if err != nil {
 			return nil, false, fmt.Errorf("failed to parse config for node %d: %w", node.ID, err)
 		}
+		upstreamMode, err := models.NormalizeUpstreamMode(node.UpstreamMode)
+		if err != nil {
+			return nil, false, upstreamValidationErrorf("node %d has invalid upstream mode %q", node.ID, node.UpstreamMode)
+		}
+		if upstreamMode != models.UpstreamModeLegacy {
+			setConfigDetour(parsedConfig, "")
+		}
 		parsedIndex := len(parsedNodes)
 		parsedNodes = append(parsedNodes, parsedEnabledNode{
-			Node:        node,
-			Config:      parsedConfig,
-			InboundTag:  fmt.Sprintf("node-%d-in", node.ID),
-			OutboundTag: fmt.Sprintf("node-%d-out", node.ID),
+			Node:         node,
+			Config:       parsedConfig,
+			InboundTag:   fmt.Sprintf("node-%d-in", node.ID),
+			OutboundTag:  fmt.Sprintf("node-%d-out", node.ID),
+			UpstreamMode: upstreamMode,
 		})
 		idToIndex[node.ID] = parsedIndex
 
@@ -617,7 +701,7 @@ func prepareEnabledNodes(nodes []models.ProxyNode) ([]parsedEnabledNode, bool, e
 		detour := strings.TrimSpace(configDetour(parsedNode.Config))
 		if detour != "" {
 			if detour == "direct" {
-				setConfigDetour(parsedNode.Config, "direct")
+				setConfigDetour(parsedNode.Config, "")
 				// "direct" is a reserved built-in tag, even if a node has that name.
 			} else {
 				targetIndex, exists := tagToIndex[detour]
@@ -641,7 +725,12 @@ func prepareEnabledNodes(nodes []models.ProxyNode) ([]parsedEnabledNode, bool, e
 				if targetIndex == index {
 					return nil, false, fmt.Errorf("node %d detour must not reference itself (%q)", parsedNode.Node.ID, detour)
 				}
-				setConfigDetour(parsedNode.Config, parsedNodes[targetIndex].OutboundTag)
+				if parsedNode.Node.Type == "direct" {
+					setConfigDetour(parsedNode.Config, "")
+					parsedNode.ManagedUpstreamTag = parsedNodes[targetIndex].OutboundTag
+				} else {
+					setConfigDetour(parsedNode.Config, parsedNodes[targetIndex].OutboundTag)
+				}
 				detourEdges[index] = targetIndex
 			}
 		}
@@ -708,6 +797,405 @@ func setConfigDetour(config interface{}, detour string) {
 	if wireGuard, ok := config.(*models.WireGuardConfig); ok {
 		wireGuard.Detour = detour
 	}
+}
+
+const globalUpstreamTag = "managed-upstream-global"
+
+type upstreamPortRange struct {
+	start int
+	end   int
+}
+
+type upstreamDialTarget struct {
+	host  string
+	ports []upstreamPortRange
+}
+
+func (s *SingBoxService) ValidateUpstreamDefinition(definition models.ProxyDefinition) error {
+	_, _, err := s.parseManagedUpstreamDefinition(definition)
+	return err
+}
+
+func (s *SingBoxService) parseManagedUpstreamDefinition(
+	definition models.ProxyDefinition,
+) (models.ProxyDefinition, interface{}, error) {
+	definition.Type = strings.ToLower(strings.TrimSpace(definition.Type))
+	definition.Config = strings.TrimSpace(definition.Config)
+	if definition.Type == "" {
+		return models.ProxyDefinition{}, nil, upstreamValidationErrorf("upstream proxy type is required")
+	}
+	if definition.Config == "" {
+		return models.ProxyDefinition{}, nil, upstreamValidationErrorf("upstream proxy config is required")
+	}
+
+	parsedConfig, err := definition.ParseConfig()
+	if err != nil {
+		return models.ProxyDefinition{}, nil, upstreamValidationErrorf("invalid upstream proxy: %v", err)
+	}
+	if detour := strings.TrimSpace(configDetour(parsedConfig)); detour != "" {
+		return models.ProxyDefinition{}, nil, upstreamValidationErrorf(
+			"upstream proxy must not define a nested detour (%q)",
+			detour,
+		)
+	}
+	setConfigDetour(parsedConfig, "")
+
+	if definition.Type == "wireguard" {
+		wireGuardConfig, ok := parsedConfig.(*models.WireGuardConfig)
+		if !ok {
+			return models.ProxyDefinition{}, nil, upstreamValidationErrorf(
+				"invalid upstream proxy config type %T",
+				parsedConfig,
+			)
+		}
+		if _, err := s.generateWireGuardEndpoint(wireGuardConfig, "managed-upstream-validation"); err != nil {
+			return models.ProxyDefinition{}, nil, upstreamValidationErrorf("invalid upstream proxy: %v", err)
+		}
+	} else if _, err := s.generateOutboundFromConfig(definition.Type, parsedConfig, "managed-upstream-validation"); err != nil {
+		return models.ProxyDefinition{}, nil, upstreamValidationErrorf("invalid upstream proxy: %v", err)
+	}
+	return definition, parsedConfig, nil
+}
+
+func (s *SingBoxService) prepareManagedUpstreams(
+	nodes []parsedEnabledNode,
+	settings models.Settings,
+) ([]parsedUpstreamProxy, bool, error) {
+	upstreams := make([]parsedUpstreamProxy, 0, len(nodes)+1)
+	inboundPorts := make(map[int]*models.ProxyNode, len(nodes))
+	for index := range nodes {
+		inboundPorts[nodes[index].Node.InboundPort] = nodes[index].Node
+	}
+	localHosts := managerLocalHosts()
+	needsLocalDNS := false
+
+	prepare := func(
+		definition models.ProxyDefinition,
+		tag string,
+		ownerID int,
+		scope string,
+	) (parsedUpstreamProxy, error) {
+		normalized, parsedConfig, err := s.parseManagedUpstreamDefinition(definition)
+		if err != nil {
+			return parsedUpstreamProxy{}, fmt.Errorf("%s: %w", scope, err)
+		}
+		if err := validateUpstreamInboundCollisions(parsedConfig, inboundPorts, localHosts, scope); err != nil {
+			return parsedUpstreamProxy{}, err
+		}
+		resolver, err := configDomainResolverValue(parsedConfig)
+		if err != nil {
+			return parsedUpstreamProxy{}, upstreamValidationErrorf("%s has invalid domain_resolver: %v", scope, err)
+		}
+		usesLocal, err := validateGeneratedDomainResolver(resolver)
+		if err != nil {
+			return parsedUpstreamProxy{}, upstreamValidationErrorf("%s has invalid domain_resolver: %v", scope, err)
+		}
+		needsLocalDNS = needsLocalDNS || usesLocal
+		return parsedUpstreamProxy{
+			Definition: normalized,
+			Config:     parsedConfig,
+			Tag:        tag,
+			OwnerID:    ownerID,
+		}, nil
+	}
+
+	var global *parsedUpstreamProxy
+	if settings.GlobalUpstreamEnabled {
+		prepared, err := prepare(models.ProxyDefinition{
+			Type:   settings.GlobalUpstreamType,
+			Config: settings.GlobalUpstreamConfig,
+		}, globalUpstreamTag, 0, "global upstream proxy")
+		if err != nil {
+			return nil, false, err
+		}
+		global = &prepared
+		globalIdentity, err := canonicalProxyIdentity(global.Definition, global.Config)
+		if err != nil {
+			return nil, false, upstreamValidationErrorf("failed to compare global upstream proxy: %v", err)
+		}
+		for index := range nodes {
+			nodeIdentity, err := canonicalProxyIdentity(
+				models.ProxyDefinition{Type: nodes[index].Node.Type, Config: nodes[index].Node.Config},
+				nodes[index].Config,
+			)
+			if err != nil {
+				return nil, false, upstreamValidationErrorf("failed to compare node %d outbound: %v", nodes[index].Node.ID, err)
+			}
+			if globalIdentity == nodeIdentity {
+				return nil, false, upstreamValidationErrorf(
+					"global upstream proxy must not be identical to node %d outbound",
+					nodes[index].Node.ID,
+				)
+			}
+		}
+		upstreams = append(upstreams, prepared)
+	}
+
+	for index := range nodes {
+		node := &nodes[index]
+		switch node.UpstreamMode {
+		case models.UpstreamModeLegacy, models.UpstreamModeNone:
+			continue
+		case models.UpstreamModeGlobal:
+			if global != nil {
+				applyManagedUpstream(node, *global)
+			}
+		case models.UpstreamModeCustom:
+			tag := fmt.Sprintf("node-%d-upstream", node.Node.ID)
+			prepared, err := prepare(models.ProxyDefinition{
+				Type:   node.Node.UpstreamType,
+				Config: node.Node.UpstreamConfig,
+			}, tag, node.Node.ID, fmt.Sprintf("node %d custom upstream proxy", node.Node.ID))
+			if err != nil {
+				return nil, false, err
+			}
+			upstreamIdentity, err := canonicalProxyIdentity(prepared.Definition, prepared.Config)
+			if err != nil {
+				return nil, false, upstreamValidationErrorf("failed to compare node %d custom upstream proxy: %v", node.Node.ID, err)
+			}
+			nodeIdentity, err := canonicalProxyIdentity(
+				models.ProxyDefinition{Type: node.Node.Type, Config: node.Node.Config},
+				node.Config,
+			)
+			if err != nil {
+				return nil, false, upstreamValidationErrorf("failed to compare node %d outbound: %v", node.Node.ID, err)
+			}
+			if upstreamIdentity == nodeIdentity {
+				return nil, false, upstreamValidationErrorf(
+					"node %d custom upstream proxy must not be identical to its outbound",
+					node.Node.ID,
+				)
+			}
+			applyManagedUpstream(node, prepared)
+			upstreams = append(upstreams, prepared)
+		default:
+			return nil, false, upstreamValidationErrorf(
+				"node %d has invalid upstream mode %q",
+				node.Node.ID,
+				node.UpstreamMode,
+			)
+		}
+	}
+	return upstreams, needsLocalDNS, nil
+}
+
+func applyManagedUpstream(node *parsedEnabledNode, upstream parsedUpstreamProxy) {
+	if node.Node.Type == "direct" {
+		node.ManagedUpstreamTag = upstream.Tag
+		setConfigDetour(node.Config, "")
+		return
+	}
+	if upstream.Definition.Type == "direct" && directUpstreamIsEmpty(upstream.Config) {
+		setConfigDetour(node.Config, "")
+		return
+	}
+	setConfigDetour(node.Config, upstream.Tag)
+}
+
+func directUpstreamIsEmpty(config interface{}) bool {
+	directConfig, ok := config.(*models.DirectConfig)
+	if !ok {
+		return false
+	}
+	data, err := json.Marshal(directConfig)
+	if err != nil {
+		return false
+	}
+	var fields map[string]interface{}
+	if err := json.Unmarshal(data, &fields); err != nil {
+		return false
+	}
+	delete(fields, "detour")
+	return len(fields) == 0
+}
+
+func canonicalProxyIdentity(definition models.ProxyDefinition, parsedConfig interface{}) (string, error) {
+	data, err := json.Marshal(parsedConfig)
+	if err != nil {
+		return "", err
+	}
+	var normalized map[string]interface{}
+	if err := json.Unmarshal(data, &normalized); err != nil {
+		return "", err
+	}
+	delete(normalized, "detour")
+	data, err = json.Marshal(normalized)
+	if err != nil {
+		return "", err
+	}
+	return canonicalProxyType(definition.Type) + "\n" + string(data), nil
+}
+
+func canonicalProxyType(raw string) string {
+	proxyType := strings.ToLower(strings.TrimSpace(raw))
+	if proxyType == "socks5h" {
+		return "socks5"
+	}
+	return proxyType
+}
+
+func validateUpstreamInboundCollisions(
+	parsedConfig interface{},
+	inboundPorts map[int]*models.ProxyNode,
+	localHosts map[string]struct{},
+	scope string,
+) error {
+	targets, err := upstreamDialTargets(parsedConfig)
+	if err != nil {
+		return upstreamValidationErrorf("%s has invalid dial target: %v", scope, err)
+	}
+	for _, target := range targets {
+		if !isManagerLocalHost(target.host, localHosts) {
+			continue
+		}
+		for inboundPort, node := range inboundPorts {
+			for _, portRange := range target.ports {
+				if inboundPort < portRange.start || inboundPort > portRange.end {
+					continue
+				}
+				return upstreamValidationErrorf(
+					"%s must not dial local inbound port %d (node %d); route-number authentication cannot bypass this recursion guard",
+					scope,
+					inboundPort,
+					node.ID,
+				)
+			}
+		}
+	}
+	return nil
+}
+
+func upstreamDialTargets(config interface{}) ([]upstreamDialTarget, error) {
+	single := func(host string, port int) []upstreamDialTarget {
+		if strings.TrimSpace(host) == "" || port <= 0 {
+			return nil
+		}
+		return []upstreamDialTarget{{host: host, ports: []upstreamPortRange{{start: port, end: port}}}}
+	}
+	switch typed := config.(type) {
+	case *models.DirectConfig:
+		host := strings.TrimSpace(typed.OverrideAddress)
+		if host == "" {
+			return nil, nil
+		}
+		ports := []upstreamPortRange{{start: 1, end: 65535}}
+		if typed.OverridePort > 0 {
+			ports = []upstreamPortRange{{start: typed.OverridePort, end: typed.OverridePort}}
+		}
+		return []upstreamDialTarget{{host: host, ports: ports}}, nil
+	case *models.SSConfig:
+		return single(typed.Server, typed.ServerPort), nil
+	case *models.VLESSConfig:
+		return single(typed.Server, typed.ServerPort), nil
+	case *models.VMESSConfig:
+		return single(typed.Server, typed.ServerPort), nil
+	case *models.TrojanConfig:
+		return single(typed.Server, typed.ServerPort), nil
+	case *models.TUICConfig:
+		return single(typed.Server, typed.ServerPort), nil
+	case *models.AnyTLSConfig:
+		return single(typed.Server, typed.ServerPort), nil
+	case *models.SOCKS5Config:
+		return single(typed.Server, typed.ServerPort), nil
+	case *models.HTTPProxyConfig:
+		return single(typed.Server, typed.ServerPort), nil
+	case *models.Hysteria2Config:
+		ports := make([]upstreamPortRange, 0, len(typed.ServerPorts)+1)
+		if typed.ServerPort > 0 {
+			ports = append(ports, upstreamPortRange{start: typed.ServerPort, end: typed.ServerPort})
+		}
+		for _, rawPort := range typed.ServerPorts {
+			portRange, err := parseUpstreamPortRange(rawPort)
+			if err != nil {
+				return nil, err
+			}
+			ports = append(ports, portRange)
+		}
+		if strings.TrimSpace(typed.Server) == "" || len(ports) == 0 {
+			return nil, nil
+		}
+		return []upstreamDialTarget{{host: typed.Server, ports: ports}}, nil
+	case *models.WireGuardConfig:
+		if len(typed.Peers) == 0 {
+			return single(typed.Server, typed.ServerPort), nil
+		}
+		targets := make([]upstreamDialTarget, 0, len(typed.Peers))
+		for _, peer := range typed.Peers {
+			targets = append(targets, single(peer.Server, peer.ServerPort)...)
+		}
+		return targets, nil
+	default:
+		return nil, fmt.Errorf("unsupported config type %T", config)
+	}
+}
+
+func parseUpstreamPortRange(raw string) (upstreamPortRange, error) {
+	value := strings.TrimSpace(strings.Replace(raw, "-", ":", 1))
+	parts := strings.Split(value, ":")
+	if len(parts) == 1 {
+		port, err := strconv.Atoi(parts[0])
+		if err != nil || port < 1 || port > 65535 {
+			return upstreamPortRange{}, fmt.Errorf("invalid port %q", raw)
+		}
+		return upstreamPortRange{start: port, end: port}, nil
+	}
+	if len(parts) != 2 {
+		return upstreamPortRange{}, fmt.Errorf("invalid port range %q", raw)
+	}
+	start, startErr := strconv.Atoi(strings.TrimSpace(parts[0]))
+	end, endErr := strconv.Atoi(strings.TrimSpace(parts[1]))
+	if startErr != nil || endErr != nil || start < 1 || end > 65535 || start > end {
+		return upstreamPortRange{}, fmt.Errorf("invalid port range %q", raw)
+	}
+	return upstreamPortRange{start: start, end: end}, nil
+}
+
+func managerLocalHosts() map[string]struct{} {
+	hosts := map[string]struct{}{}
+	if hostname, err := os.Hostname(); err == nil {
+		hostname = strings.ToLower(strings.TrimSuffix(strings.TrimSpace(hostname), "."))
+		if hostname != "" {
+			hosts[hostname] = struct{}{}
+		}
+	}
+	if addresses, err := net.InterfaceAddrs(); err == nil {
+		for _, address := range addresses {
+			var raw string
+			switch typed := address.(type) {
+			case *net.IPNet:
+				raw = typed.IP.String()
+			case *net.IPAddr:
+				raw = typed.IP.String()
+			default:
+				raw = strings.SplitN(address.String(), "/", 2)[0]
+			}
+			if ip := net.ParseIP(strings.TrimSpace(raw)); ip != nil {
+				hosts[ip.String()] = struct{}{}
+			}
+		}
+	}
+	return hosts
+}
+
+func isManagerLocalHost(raw string, localHosts map[string]struct{}) bool {
+	host := strings.ToLower(strings.TrimSuffix(strings.TrimSpace(raw), "."))
+	host = strings.TrimPrefix(host, "[")
+	host = strings.TrimSuffix(host, "]")
+	if zoneIndex := strings.LastIndex(host, "%"); zoneIndex > 0 {
+		host = host[:zoneIndex]
+	}
+	if host == "localhost" || host == "localhost.localdomain" || strings.HasSuffix(host, ".localhost") {
+		return true
+	}
+	if ip := net.ParseIP(host); ip != nil {
+		if ip.IsLoopback() || ip.IsUnspecified() {
+			return true
+		}
+		_, exists := localHosts[ip.String()]
+		return exists
+	}
+	_, exists := localHosts[host]
+	return exists
 }
 
 func configDomainResolverValue(config interface{}) (interface{}, error) {

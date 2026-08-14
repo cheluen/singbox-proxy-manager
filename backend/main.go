@@ -457,7 +457,8 @@ func validateAdminPasswordForBindAddress(bindAddress string) error {
 func startSingBoxFromDatabase(db *sql.DB, singBoxService *services.SingBoxService, configDir string) {
 	rows, err := db.Query(`
 		SELECT id, name, remark, type, config, inbound_port, inbound_port_pinned, username, password, tcp_reuse_enabled,
-		       sort_order, node_ip, location, country_code, latency, enabled, created_at, updated_at
+		       upstream_mode, upstream_type, upstream_config, sort_order, node_ip, location,
+		       country_code, latency, enabled, created_at, updated_at
 		FROM proxy_nodes
 		ORDER BY sort_order ASC
 	`)
@@ -473,8 +474,9 @@ func startSingBoxFromDatabase(db *sql.DB, singBoxService *services.SingBoxServic
 		if err := rows.Scan(
 			&node.ID, &node.Name, &node.Remark, &node.Type, &node.Config, &node.InboundPort,
 			&node.InboundPortPinned, &node.Username, &node.Password, &node.TCPReuseEnabled,
-			&node.SortOrder, &node.NodeIP, &node.Location, &node.CountryCode, &node.Latency,
-			&node.Enabled, &node.CreatedAt, &node.UpdatedAt,
+			&node.UpstreamMode, &node.UpstreamType, &node.UpstreamConfig, &node.SortOrder,
+			&node.NodeIP, &node.Location, &node.CountryCode, &node.Latency, &node.Enabled,
+			&node.CreatedAt, &node.UpdatedAt,
 		); err != nil {
 			startPreservedConfigAfterDatabaseFailure(singBoxService, fmt.Errorf("failed to scan proxy node: %w", err), configDir)
 			return
@@ -485,9 +487,27 @@ func startSingBoxFromDatabase(db *sql.DB, singBoxService *services.SingBoxServic
 		startPreservedConfigAfterDatabaseFailure(singBoxService, fmt.Errorf("failed while reading proxy nodes: %w", err), configDir)
 		return
 	}
+	if err := rows.Close(); err != nil {
+		startPreservedConfigAfterDatabaseFailure(singBoxService, fmt.Errorf("failed to close proxy node query: %w", err), configDir)
+		return
+	}
+
+	var settings models.Settings
+	if err := db.QueryRow(`
+		SELECT global_upstream_enabled, global_upstream_type, global_upstream_config
+		FROM settings
+		WHERE singleton_key = 1
+	`).Scan(
+		&settings.GlobalUpstreamEnabled,
+		&settings.GlobalUpstreamType,
+		&settings.GlobalUpstreamConfig,
+	); err != nil {
+		startPreservedConfigAfterDatabaseFailure(singBoxService, fmt.Errorf("failed to query runtime settings: %w", err), configDir)
+		return
+	}
 
 	runtimeApplier := services.NewRuntimeApplier(singBoxService)
-	if err := runtimeApplier.Apply(nodes); err != nil {
+	if err := runtimeApplier.Apply(nodes, settings); err != nil {
 		applyErr := err
 		if !singBoxService.RuntimeStatus().Running {
 			if recoveryErr := singBoxService.StartPreservedConfig(); recoveryErr != nil {
