@@ -359,6 +359,23 @@ const clickSegment = async (page, label) => {
   )
 }
 
+const openUpstreamEditor = async (page, triggerSelector) => {
+  await page.waitForSelector(triggerSelector, { visible: true, timeout: 10000 })
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    await page.click(triggerSelector)
+    try {
+      await page.waitForSelector('[data-testid="upstream-editor"]', {
+        visible: true,
+        timeout: 3000,
+      })
+      return
+    } catch {
+      await sleep(200)
+    }
+  }
+  throw new Error(`Upstream editor did not open from ${triggerSelector}`)
+}
+
 const saveUpstreamEditor = async (page) => {
   await page.$eval('[data-testid="upstream-editor"] button[type="submit"]', (button) => button.click())
   await page.waitForSelector('[data-testid="upstream-editor"]', { hidden: true, timeout: 10000 })
@@ -412,8 +429,7 @@ const run = async () => {
 
     stage = 'settings'
     await clickSettings(page)
-    await page.click('[data-testid="global-upstream-configure"]')
-    await page.waitForSelector('[data-testid="upstream-editor"]', { visible: true, timeout: 10000 })
+    await openUpstreamEditor(page, '[data-testid="global-upstream-configure"]')
     stage = 'global proxy type'
     await selectOption(page, 'global_upstream_proxy_type', 'SOCKS5')
     stage = 'global proxy fields'
@@ -444,8 +460,7 @@ const run = async () => {
     assert(defaultMode === 'Follow Global', `Existing global mode was not selected: ${defaultMode}`)
     stage = 'select custom mode'
     await clickSegment(page, 'Custom')
-    await page.click('[data-testid="node-upstream-configure"]')
-    await page.waitForSelector('[data-testid="upstream-editor"]', { visible: true, timeout: 10000 })
+    await openUpstreamEditor(page, '[data-testid="node-upstream-configure"]')
     stage = 'custom proxy type'
     await selectOption(page, 'node_upstream_proxy_type', 'HTTP Proxy')
     await setInput(page, '#node_upstream_server', '198.51.100.11')
