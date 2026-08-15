@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"log"
 	"net"
 	"os"
 	"os/exec"
@@ -63,7 +64,11 @@ func (s *SingBoxService) checkUpstreamIPContext(
 	if err != nil {
 		return nil, fmt.Errorf("create isolated upstream check directory: %w", err)
 	}
-	defer os.RemoveAll(tempDir)
+	defer func() {
+		if cleanupErr := os.RemoveAll(tempDir); cleanupErr != nil {
+			log.Printf("[UpstreamIPCheck] Failed to remove temporary directory %s: %v", tempDir, cleanupErr)
+		}
+	}()
 	if err := os.Chmod(tempDir, 0o700); err != nil {
 		return nil, fmt.Errorf("secure isolated upstream check directory: %w", err)
 	}
