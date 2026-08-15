@@ -209,9 +209,6 @@ func main() {
 	loadRuntimeEnvironment()
 
 	bindAddress := configuredBindAddress()
-	if err := validateAdminPasswordForBindAddress(bindAddress); err != nil {
-		log.Fatalf("Unsafe management listener configuration: %v", err)
-	}
 
 	// Get config directory from environment or use default
 	configDir := os.Getenv("CONFIG_DIR")
@@ -242,6 +239,9 @@ func main() {
 	// Initialize database schema
 	if err := models.InitDB(db); err != nil {
 		fatalWithInstanceLease(instanceLease, cancelLeaseMonitor, db, "Failed to initialize database: %v", err)
+	}
+	if err := models.ReconcileAdminPassword(db, os.Getenv("ADMIN_PASSWORD")); err != nil {
+		fatalWithInstanceLease(instanceLease, cancelLeaseMonitor, db, "Failed to initialize administrator authentication: %v", err)
 	}
 
 	// Initialize sing-box service
@@ -297,6 +297,7 @@ func main() {
 		authorized.POST("/nodes/batch-delete", handler.BatchDeleteNodes)
 		authorized.POST("/nodes/batch-export", handler.BatchExportNodes)
 		authorized.PUT("/nodes/:id", handler.UpdateNode)
+		authorized.PUT("/nodes/:id/upstream", handler.UpdateNodeUpstream)
 		authorized.PUT("/nodes/:id/remark", handler.UpdateNodeRemark)
 		authorized.PUT("/nodes/:id/port-pin", handler.SetNodeInboundPortPinned)
 		authorized.PUT("/nodes/:id/replace", handler.ReplaceNode)
@@ -312,6 +313,7 @@ func main() {
 		// Settings
 		authorized.GET("/settings", handler.GetSettings)
 		authorized.PUT("/settings", handler.UpdateSettings)
+		authorized.POST("/settings/upstream/check-ip", handler.CheckGlobalUpstreamIP)
 		authorized.GET("/runtime/status", handler.GetRuntimeStatus)
 		authorized.POST("/runtime/restart", handler.RestartRuntime)
 		authorized.POST("/logout", handler.Logout)
@@ -430,25 +432,6 @@ func configuredBindAddress() string {
 		return defaultBindAddress
 	}
 	return strings.Trim(address, "[]")
-}
-
-func validateAdminPasswordForBindAddress(bindAddress string) error {
-	if strings.TrimSpace(os.Getenv("ADMIN_PASSWORD")) != "" {
-		return nil
-	}
-
-	normalized := strings.TrimSpace(strings.Trim(bindAddress, "[]"))
-	if strings.EqualFold(normalized, "localhost") {
-		return nil
-	}
-	if ip := net.ParseIP(normalized); ip != nil && ip.IsLoopback() {
-		return nil
-	}
-
-	return fmt.Errorf(
-		"ADMIN_PASSWORD must be set when BIND_ADDRESS=%q is not an explicit loopback address",
-		bindAddress,
-	)
 }
 
 // startSingBoxFromDatabase generates the unified config from the current

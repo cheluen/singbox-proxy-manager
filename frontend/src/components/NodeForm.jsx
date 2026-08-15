@@ -1,19 +1,15 @@
 import React, { useEffect, useState } from 'react'
 import {
-  Alert,
   Button,
   Collapse,
   Form,
   Input,
   InputNumber,
   message,
-  Modal,
-  Segmented,
   Select,
   Space,
   Switch,
 } from 'antd'
-import { EditOutlined, PlusOutlined } from '@ant-design/icons'
 import { useTranslation } from 'react-i18next'
 import api from '../utils/api'
 
@@ -291,23 +287,9 @@ function NodeForm({ node, onSave, onCancel, variant = 'node', formName }) {
   const [proxyType, setProxyType] = useState(node?.type || 'ss')
   const [loading, setLoading] = useState(false)
   const [preserveInboundPorts, setPreserveInboundPorts] = useState(false)
-  const [upstreamEditorOpen, setUpstreamEditorOpen] = useState(false)
-  const [customUpstream, setCustomUpstream] = useState(() => ({
-    type: node?.upstream_type || '',
-    config: node?.upstream_config || '',
-  }))
   const authEnabled = Form.useWatch('auth_enabled', form)
-  const upstreamMode = Form.useWatch('upstream_mode', form)
   const isChineseMode = i18n.language?.startsWith('zh')
   const isUpstreamEditor = variant === 'upstream'
-
-  useEffect(() => {
-    if (isUpstreamEditor) return
-    setCustomUpstream({
-      type: node?.upstream_type || '',
-      config: node?.upstream_config || '',
-    })
-  }, [isUpstreamEditor, node?.id, node?.upstream_type, node?.upstream_config])
 
   useEffect(() => {
     if (isUpstreamEditor) return undefined
@@ -360,14 +342,6 @@ function NodeForm({ node, onSave, onCancel, variant = 'node', formName }) {
         return
       }
 
-      const selectedUpstreamMode = values.upstream_mode || 'global'
-      if (
-        selectedUpstreamMode === 'custom' &&
-        (!customUpstream.type || !customUpstream.config)
-      ) {
-        throw new Error(t('upstream_custom_required'))
-      }
-      
       await onSave({
         name: values.name,
         remark: node?.remark || '',
@@ -378,9 +352,6 @@ function NodeForm({ node, onSave, onCancel, variant = 'node', formName }) {
         username: values.auth_enabled ? values.username || '' : '',
         password: values.auth_enabled ? values.password || '' : '',
         enabled: values.enabled !== false,
-        upstream_mode: selectedUpstreamMode,
-        upstream_type: customUpstream.type,
-        upstream_config: customUpstream.config,
       })
     } catch (error) {
       message.error(error?.message || t('invalid_config'))
@@ -590,7 +561,7 @@ function NodeForm({ node, onSave, onCancel, variant = 'node', formName }) {
           workers: values.wireguard_workers || 0,
 	          detour:
 	            isUpstreamEditor ||
-	            (node?.upstream_mode || (initialConfig.detour ? 'legacy' : 'global')) !== 'legacy'
+	            (node?.upstream_mode || (initialConfig.detour ? 'legacy' : 'none')) !== 'legacy'
 	              ? ''
 	              : initialConfig.detour || '',
 	          domain_resolver: values.wireguard_domain_resolver || '',
@@ -624,8 +595,6 @@ function NodeForm({ node, onSave, onCancel, variant = 'node', formName }) {
   }
 
 	  const initialConfig = node ? parseConfig(node.config) : {}
-	  const initialUpstreamMode =
-	    node?.upstream_mode || (initialConfig.detour ? 'legacy' : 'global')
 	  const normalizedConfig = hydrateNativeCompatibilityForForm(node?.type, initialConfig)
   if (Array.isArray(normalizedConfig.alpn)) {
     normalizedConfig.alpn = normalizedConfig.alpn.join(',')
@@ -763,7 +732,6 @@ function NodeForm({ node, onSave, onCancel, variant = 'node', formName }) {
         : false,
     wireguard_connect_timeout: node?.type === 'wireguard' ? normalizedConfig.connect_timeout || '' : '',
     wireguard_peers_json: node?.type === 'wireguard' ? normalizedConfig.wireguard_peers_json || '' : '',
-    upstream_mode: initialUpstreamMode,
   }
 
   const renderSSFields = () => (
@@ -1233,22 +1201,6 @@ function NodeForm({ node, onSave, onCancel, variant = 'node', formName }) {
     }
   }
 
-  const upstreamTypeLabel = proxyTypes.find((type) => type.value === customUpstream.type)?.label
-  const customUpstreamConfigured = Boolean(customUpstream.type && customUpstream.config)
-  const upstreamModeOptions = [
-    { label: t('upstream_follow_global'), value: 'global' },
-    { label: t('upstream_custom'), value: 'custom' },
-    { label: t('upstream_direct'), value: 'none' },
-  ]
-  if (initialUpstreamMode === 'legacy') {
-    upstreamModeOptions.push({ label: t('upstream_legacy'), value: 'legacy' })
-  }
-
-  const handleCustomUpstreamSave = async (definition) => {
-    setCustomUpstream(definition)
-    setUpstreamEditorOpen(false)
-  }
-
   return (
     <Form
       form={form}
@@ -1368,64 +1320,6 @@ function NodeForm({ node, onSave, onCancel, variant = 'node', formName }) {
 
       {!isUpstreamEditor && (
         <>
-          <Form.Item
-            label={t('upstream_mode')}
-            name="upstream_mode"
-            extra={t('upstream_mode_desc')}
-          >
-            <Segmented
-              block
-              options={upstreamModeOptions}
-              data-testid="node-upstream-mode"
-            />
-          </Form.Item>
-
-          {upstreamMode === 'legacy' && (
-            <Alert
-              type="warning"
-              showIcon
-              message={t('upstream_legacy_warning')}
-              style={{ marginBottom: 16 }}
-            />
-          )}
-
-          {upstreamMode === 'custom' && (
-            <Form.Item
-              label={t('upstream_custom_proxy')}
-              required
-              validateStatus={customUpstreamConfigured ? undefined : 'error'}
-              help={customUpstreamConfigured ? undefined : t('upstream_custom_required')}
-            >
-              <Button
-                icon={customUpstreamConfigured ? <EditOutlined /> : <PlusOutlined />}
-                onClick={() => setUpstreamEditorOpen(true)}
-                data-testid="node-upstream-configure"
-              >
-                {customUpstreamConfigured
-                  ? `${t('upstream_edit')} · ${upstreamTypeLabel || customUpstream.type}`
-                  : t('upstream_configure')}
-              </Button>
-            </Form.Item>
-          )}
-
-          <Modal
-            title={t('upstream_custom_proxy')}
-            open={upstreamEditorOpen}
-            footer={null}
-            width={720}
-            destroyOnHidden
-            onCancel={() => setUpstreamEditorOpen(false)}
-          >
-            <NodeForm
-              key={`${customUpstream.type}:${customUpstream.config}`}
-              variant="upstream"
-              formName="node_upstream"
-              node={customUpstreamConfigured ? customUpstream : null}
-              onSave={handleCustomUpstreamSave}
-              onCancel={() => setUpstreamEditorOpen(false)}
-            />
-          </Modal>
-
           <Form.Item
             label={withHint('Inbound Authentication', '入站认证')}
             name="auth_enabled"

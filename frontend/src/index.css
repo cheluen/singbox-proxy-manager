@@ -741,7 +741,7 @@ body {
 
   .node-row-actions.ant-space {
     display: grid;
-    grid-template-columns: repeat(2, 32px);
+    grid-template-columns: repeat(3, 32px);
     justify-content: center;
     gap: 4px !important;
   }

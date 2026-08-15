@@ -12,7 +12,6 @@ function Login({ onLogin }) {
   const [loading, setLoading] = useState(false)
   const [loadingStatus, setLoadingStatus] = useState(true)
   const [setupRequired, setSetupRequired] = useState(false)
-  const [adminPasswordLocked, setAdminPasswordLocked] = useState(false)
 
   useEffect(() => {
     let ignore = false
@@ -20,9 +19,8 @@ function Login({ onLogin }) {
       try {
         const response = await api.get('/auth/status')
         if (ignore) return
-        const { setup_required, admin_password_locked } = response.data || {}
+        const { setup_required } = response.data || {}
         setSetupRequired(Boolean(setup_required))
-        setAdminPasswordLocked(Boolean(admin_password_locked))
       } catch (error) {
         // Fallback to normal login form if status endpoint is unavailable.
       } finally {
@@ -121,7 +119,7 @@ function Login({ onLogin }) {
           </div>
           {loadingStatus ? (
             <div className="login-loading">{t('loading')}</div>
-          ) : setupRequired && !adminPasswordLocked ? (
+          ) : setupRequired ? (
             <Form onFinish={handleSetup} size="large" layout="vertical">
               <div className="login-hint">{t('setup_required')}</div>
               <Form.Item
@@ -129,7 +127,18 @@ function Login({ onLogin }) {
                 label={t('new_password')}
                 rules={[
                   { required: true, message: t('enter_password') },
-                  { min: 8, message: t('password_min_8') },
+                  {
+                    validator: (_, value) => {
+                      if (!value) return Promise.resolve()
+                      if ([...value].length < 8) {
+                        return Promise.reject(new Error(t('password_min_8')))
+                      }
+                      if (new TextEncoder().encode(value).length > 72) {
+                        return Promise.reject(new Error(t('password_max_72_bytes')))
+                      }
+                      return Promise.resolve()
+                    },
+                  },
                 ]}
               >
                 <Input.Password prefix={<LockOutlined />} placeholder={t('new_password')} />
@@ -160,9 +169,6 @@ function Login({ onLogin }) {
             </Form>
           ) : (
             <Form onFinish={handleLogin} size="large" layout="vertical">
-              {adminPasswordLocked ? (
-                <div className="login-hint">{t('admin_password_locked_hint')}</div>
-              ) : null}
               <Form.Item
                 name="password"
                 label={t('password')}

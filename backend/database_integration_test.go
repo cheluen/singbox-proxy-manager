@@ -108,11 +108,13 @@ func runDatabaseIntegrationContract(t *testing.T, db *sql.DB) {
 		INSERT INTO proxy_nodes (
 			name, remark, type, config, inbound_port, username, password,
 			tcp_reuse_enabled, upstream_mode, upstream_type, upstream_config,
-			sort_order, latency, enabled
+			upstream_ip, upstream_location, upstream_country_code,
+			upstream_latency, upstream_error, sort_order, latency, enabled
 		)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 	`, "integration-socks5h", "remote-db", "socks5h", largeConfig, 31001, "user", "pass",
-		true, models.UpstreamModeCustom, "socks5", largeUpstreamConfig, 0, 0, true)
+		true, models.UpstreamModeCustom, "socks5", largeUpstreamConfig,
+		"198.51.100.40", "Upstream Integration", "UI", 45, "", 0, 0, true)
 	if err != nil {
 		t.Fatalf("insert node (%s): %v", dialect, err)
 	}
@@ -120,14 +122,17 @@ func runDatabaseIntegrationContract(t *testing.T, db *sql.DB) {
 	var node models.ProxyNode
 	if err := db.QueryRow(`
 		SELECT id, name, remark, type, config, inbound_port, username, password, tcp_reuse_enabled,
-		       upstream_mode, upstream_type, upstream_config, sort_order, node_ip, location,
-		       country_code, latency, enabled, created_at, updated_at
+		       upstream_mode, upstream_type, upstream_config, upstream_ip, upstream_location,
+		       upstream_country_code, upstream_latency, upstream_error, sort_order, node_ip,
+		       location, country_code, latency, enabled, created_at, updated_at
 		FROM proxy_nodes WHERE name = ?
 	`, "integration-socks5h").Scan(
 		&node.ID, &node.Name, &node.Remark, &node.Type, &node.Config, &node.InboundPort,
 		&node.Username, &node.Password, &node.TCPReuseEnabled, &node.UpstreamMode,
-		&node.UpstreamType, &node.UpstreamConfig, &node.SortOrder, &node.NodeIP, &node.Location,
-		&node.CountryCode, &node.Latency, &node.Enabled, &node.CreatedAt, &node.UpdatedAt,
+		&node.UpstreamType, &node.UpstreamConfig, &node.UpstreamIP, &node.UpstreamLocation,
+		&node.UpstreamCountryCode, &node.UpstreamLatency, &node.UpstreamError, &node.SortOrder,
+		&node.NodeIP, &node.Location, &node.CountryCode, &node.Latency, &node.Enabled,
+		&node.CreatedAt, &node.UpdatedAt,
 	); err != nil {
 		t.Fatalf("query node (%s): %v", dialect, err)
 	}
@@ -139,6 +144,9 @@ func runDatabaseIntegrationContract(t *testing.T, db *sql.DB) {
 	}
 	if node.UpstreamMode != models.UpstreamModeCustom || node.UpstreamType != "socks5" || node.UpstreamConfig != largeUpstreamConfig {
 		t.Fatalf("upstream config was not preserved by %s: mode=%q type=%q got=%d want=%d", dialect, node.UpstreamMode, node.UpstreamType, len(node.UpstreamConfig), len(largeUpstreamConfig))
+	}
+	if node.UpstreamIP != "198.51.100.40" || node.UpstreamLocation != "Upstream Integration" || node.UpstreamCountryCode != "UI" || node.UpstreamLatency != 45 || node.UpstreamError != "" {
+		t.Fatalf("upstream IP check state was not preserved by %s: %+v", dialect, node)
 	}
 
 	var preserve bool
@@ -169,9 +177,20 @@ func verifyUpstreamMigrationContract(t *testing.T, db *sql.DB, largeUpstreamConf
 		{table: "proxy_nodes", name: "upstream_mode"},
 		{table: "proxy_nodes", name: "upstream_type"},
 		{table: "proxy_nodes", name: "upstream_config"},
+		{table: "proxy_nodes", name: "upstream_ip"},
+		{table: "proxy_nodes", name: "upstream_location"},
+		{table: "proxy_nodes", name: "upstream_country_code"},
+		{table: "proxy_nodes", name: "upstream_latency"},
+		{table: "proxy_nodes", name: "upstream_error"},
+		{table: "settings", name: "admin_password_env_fingerprint"},
 		{table: "settings", name: "global_upstream_enabled"},
 		{table: "settings", name: "global_upstream_type"},
 		{table: "settings", name: "global_upstream_config"},
+		{table: "settings", name: "global_upstream_ip"},
+		{table: "settings", name: "global_upstream_location"},
+		{table: "settings", name: "global_upstream_country_code"},
+		{table: "settings", name: "global_upstream_latency"},
+		{table: "settings", name: "global_upstream_error"},
 	} {
 		if _, err := db.Exec("ALTER TABLE " + column.table + " DROP COLUMN " + column.name); err != nil {
 			t.Fatalf("drop legacy migration column %s.%s (%s): %v", column.table, column.name, dialect, err)
@@ -213,29 +232,56 @@ func verifyUpstreamMigrationContract(t *testing.T, db *sql.DB, largeUpstreamConf
 
 	if _, err := db.Exec(`
 		UPDATE proxy_nodes
-		SET upstream_mode = ?, upstream_type = 'socks5', upstream_config = ?
+		SET upstream_mode = ?, upstream_type = 'socks5', upstream_config = ?,
+		    upstream_ip = '198.51.100.41', upstream_location = 'Migrated Upstream',
+		    upstream_country_code = 'MU', upstream_latency = 46, upstream_error = ''
 		WHERE name = 'integration-socks5h'
 	`, models.UpstreamModeCustom, largeUpstreamConfig); err != nil {
 		t.Fatalf("write migrated node upstream config (%s): %v", dialect, err)
 	}
 	if _, err := db.Exec(`
 		UPDATE settings
-		SET global_upstream_enabled = ?, global_upstream_type = 'socks5', global_upstream_config = ?
+		SET global_upstream_enabled = ?, global_upstream_type = 'socks5', global_upstream_config = ?,
+		    global_upstream_ip = '198.51.100.42', global_upstream_location = 'Migrated Global',
+		    global_upstream_country_code = 'MG', global_upstream_latency = 47,
+		    global_upstream_error = ''
 		WHERE singleton_key = 1
 	`, true, largeUpstreamConfig); err != nil {
 		t.Fatalf("write migrated global upstream config (%s): %v", dialect, err)
 	}
-	var nodeConfig, globalConfig string
+	var nodeConfig, nodeUpstreamIP, globalConfig, globalUpstreamIP, passwordFingerprint string
+	var nodeUpstreamLatency, globalUpstreamLatency int
 	if err := db.QueryRow(`
-		SELECT node.upstream_config, singleton.global_upstream_config
+		SELECT node.upstream_config, node.upstream_ip, node.upstream_latency,
+		       singleton.global_upstream_config, singleton.global_upstream_ip,
+		       singleton.global_upstream_latency, singleton.admin_password_env_fingerprint
 		FROM proxy_nodes AS node
 		CROSS JOIN settings AS singleton
 		WHERE node.name = 'integration-socks5h' AND singleton.singleton_key = 1
-	`).Scan(&nodeConfig, &globalConfig); err != nil {
+	`).Scan(
+		&nodeConfig,
+		&nodeUpstreamIP,
+		&nodeUpstreamLatency,
+		&globalConfig,
+		&globalUpstreamIP,
+		&globalUpstreamLatency,
+		&passwordFingerprint,
+	); err != nil {
 		t.Fatalf("read migrated upstream configs (%s): %v", dialect, err)
 	}
 	if nodeConfig != largeUpstreamConfig || globalConfig != largeUpstreamConfig {
 		t.Fatalf("migrated upstream LONGTEXT truncated on %s: node=%d global=%d want=%d", dialect, len(nodeConfig), len(globalConfig), len(largeUpstreamConfig))
+	}
+	if nodeUpstreamIP != "198.51.100.41" || nodeUpstreamLatency != 46 || globalUpstreamIP != "198.51.100.42" || globalUpstreamLatency != 47 || passwordFingerprint != "" {
+		t.Fatalf(
+			"migrated password/upstream check fields failed on %s: node=%q/%d global=%q/%d fingerprint=%q",
+			dialect,
+			nodeUpstreamIP,
+			nodeUpstreamLatency,
+			globalUpstreamIP,
+			globalUpstreamLatency,
+			passwordFingerprint,
+		)
 	}
 	if dialect == appdb.DialectMySQL {
 		verifyMySQLLongTextContract(t, db)

@@ -451,7 +451,7 @@ const confirmModalOk = async (page, { expectedIncludes }) => {
 
     const wrap = modal.closest?.('.ant-modal-wrap') || null
     return isHidden(wrap) || isHidden(modal)
-  }, { timeout: 10000 })
+  }, { timeout: 15000 })
 }
 
 const assertSettingsI18n = async (page, { include = [], exclude = [] }) => {

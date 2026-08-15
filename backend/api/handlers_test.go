@@ -156,6 +156,162 @@ func TestCheckNodeIPSuccessUpdatesNode(t *testing.T) {
 	}
 }
 
+func TestCheckNodeIPAlsoPersistsCustomUpstreamResult(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	handler := newTestHandler(t, func(proxyAddr, username, password string) (*services.IPInfo, error) {
+		return &services.IPInfo{IP: "203.0.113.20", Location: "Final", CountryCode: "FN", Latency: 80}, nil
+	})
+	handler.checkUpstreamIP = func(_ context.Context, definition models.ProxyDefinition) (*services.IPInfo, error) {
+		if definition.Type != "socks5" || !strings.Contains(definition.Config, "upstream.example.com") {
+			t.Fatalf("unexpected upstream definition: %+v", definition)
+		}
+		return &services.IPInfo{IP: "198.51.100.10", Location: "Upstream", CountryCode: "UP", Latency: 35}, nil
+	}
+	nodeID := insertTestNode(t, handler.db)
+	if _, err := handler.db.Exec(`
+		UPDATE proxy_nodes
+		SET upstream_mode = 'custom', upstream_type = 'socks5',
+		    upstream_config = '{"server":"upstream.example.com","server_port":1080}'
+		WHERE id = ?
+	`, nodeID); err != nil {
+		t.Fatalf("configure custom upstream: %v", err)
+	}
+
+	recorder := postJSON(
+		t,
+		handler.CheckNodeIP,
+		http.MethodPost,
+		"/api/nodes/"+strconv.Itoa(nodeID)+"/check-ip",
+		nil,
+		ginParams("id", strconv.Itoa(nodeID)),
+	)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("check node and upstream: status=%d body=%s", recorder.Code, recorder.Body.String())
+	}
+	var payload struct {
+		IP       string `json:"ip"`
+		Upstream struct {
+			IP      string `json:"ip"`
+			Latency int    `json:"latency"`
+		} `json:"upstream"`
+	}
+	if err := json.Unmarshal(recorder.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("decode combined check response: %v", err)
+	}
+	if payload.IP != "203.0.113.20" || payload.Upstream.IP != "198.51.100.10" || payload.Upstream.Latency != 35 {
+		t.Fatalf("unexpected combined check response: %+v", payload)
+	}
+
+	var upstreamIP, upstreamLocation, upstreamCountry, upstreamError string
+	var upstreamLatency int
+	if err := handler.db.QueryRow(`
+		SELECT upstream_ip, upstream_location, upstream_country_code,
+		       upstream_latency, upstream_error
+		FROM proxy_nodes WHERE id = ?
+	`, nodeID).Scan(&upstreamIP, &upstreamLocation, &upstreamCountry, &upstreamLatency, &upstreamError); err != nil {
+		t.Fatalf("query upstream check result: %v", err)
+	}
+	if upstreamIP != "198.51.100.10" || upstreamLocation != "Upstream" || upstreamCountry != "UP" || upstreamLatency != 35 || upstreamError != "" {
+		t.Fatalf("unexpected persisted upstream check: ip=%q location=%q country=%q latency=%d error=%q", upstreamIP, upstreamLocation, upstreamCountry, upstreamLatency, upstreamError)
+	}
+}
+
+func TestCheckNodeIPReturnsFinalSuccessWhenCustomUpstreamCheckFails(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	handler := newTestHandler(t, func(proxyAddr, username, password string) (*services.IPInfo, error) {
+		return &services.IPInfo{IP: "203.0.113.21", Location: "Final", Latency: 90}, nil
+	})
+	handler.checkUpstreamIP = func(context.Context, models.ProxyDefinition) (*services.IPInfo, error) {
+		return nil, fmt.Errorf("upstream handshake failed")
+	}
+	nodeID := insertTestNode(t, handler.db)
+	if _, err := handler.db.Exec(`
+		UPDATE proxy_nodes
+		SET upstream_mode = 'custom', upstream_type = 'socks5',
+		    upstream_config = '{"server":"upstream.example.com","server_port":1080}',
+		    upstream_ip = '192.0.2.1', upstream_latency = 10
+		WHERE id = ?
+	`, nodeID); err != nil {
+		t.Fatalf("configure custom upstream: %v", err)
+	}
+
+	recorder := postJSON(
+		t,
+		handler.CheckNodeIP,
+		http.MethodPost,
+		"/api/nodes/"+strconv.Itoa(nodeID)+"/check-ip",
+		nil,
+		ginParams("id", strconv.Itoa(nodeID)),
+	)
+	if recorder.Code != http.StatusOK || !strings.Contains(recorder.Body.String(), "upstream handshake failed") {
+		t.Fatalf("final success did not preserve upstream failure detail: status=%d body=%s", recorder.Code, recorder.Body.String())
+	}
+	var upstreamIP, upstreamError string
+	if err := handler.db.QueryRow("SELECT upstream_ip, upstream_error FROM proxy_nodes WHERE id = ?", nodeID).Scan(&upstreamIP, &upstreamError); err != nil {
+		t.Fatalf("query failed upstream result: %v", err)
+	}
+	if upstreamIP != "" || upstreamError != "upstream handshake failed" {
+		t.Fatalf("stale upstream status was not replaced: ip=%q error=%q", upstreamIP, upstreamError)
+	}
+}
+
+func TestCheckNodeIPHandlesEmptyCheckerResults(t *testing.T) {
+	t.Run("final exit", func(t *testing.T) {
+		handler := newTestHandler(t, func(string, string, string) (*services.IPInfo, error) {
+			return nil, nil
+		})
+		nodeID := insertTestNode(t, handler.db)
+		recorder := postJSON(
+			t,
+			handler.CheckNodeIP,
+			http.MethodPost,
+			"/api/nodes/"+strconv.Itoa(nodeID)+"/check-ip",
+			nil,
+			ginParams("id", strconv.Itoa(nodeID)),
+		)
+		if recorder.Code != http.StatusBadGateway || !strings.Contains(recorder.Body.String(), "node IP check returned no result") {
+			t.Fatalf("unexpected empty final result response: status=%d body=%s", recorder.Code, recorder.Body.String())
+		}
+	})
+
+	t.Run("custom upstream", func(t *testing.T) {
+		handler := newTestHandler(t, func(string, string, string) (*services.IPInfo, error) {
+			return &services.IPInfo{IP: "203.0.113.22", Location: "Final", Latency: 91}, nil
+		})
+		handler.checkUpstreamIP = func(context.Context, models.ProxyDefinition) (*services.IPInfo, error) {
+			return nil, nil
+		}
+		nodeID := insertTestNode(t, handler.db)
+		if _, err := handler.db.Exec(`
+			UPDATE proxy_nodes
+			SET upstream_mode = 'custom', upstream_type = 'socks5',
+			    upstream_config = '{"server":"upstream.example.com","server_port":1080}'
+			WHERE id = ?
+		`, nodeID); err != nil {
+			t.Fatalf("configure custom upstream: %v", err)
+		}
+
+		recorder := postJSON(
+			t,
+			handler.CheckNodeIP,
+			http.MethodPost,
+			"/api/nodes/"+strconv.Itoa(nodeID)+"/check-ip",
+			nil,
+			ginParams("id", strconv.Itoa(nodeID)),
+		)
+		if recorder.Code != http.StatusOK || !strings.Contains(recorder.Body.String(), "upstream IP check returned no result") {
+			t.Fatalf("unexpected empty upstream result response: status=%d body=%s", recorder.Code, recorder.Body.String())
+		}
+		var upstreamError string
+		if err := handler.db.QueryRow("SELECT upstream_error FROM proxy_nodes WHERE id = ?", nodeID).Scan(&upstreamError); err != nil {
+			t.Fatalf("query empty upstream result: %v", err)
+		}
+		if upstreamError != "upstream IP check returned no result" {
+			t.Fatalf("unexpected persisted empty upstream result: %q", upstreamError)
+		}
+	})
+}
+
 func TestCheckNodeIPDatabaseFailureReturns500(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	handler := newTestHandler(t, nil)

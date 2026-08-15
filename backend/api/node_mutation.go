@@ -12,14 +12,17 @@ import (
 const proxyNodeSelectColumns = `
 	id, name, remark, type, config, inbound_port, inbound_port_pinned,
 	username, password, tcp_reuse_enabled, upstream_mode, upstream_type,
-	upstream_config, sort_order, node_ip, location, country_code, latency,
+	upstream_config, upstream_ip, upstream_location, upstream_country_code,
+	upstream_latency, upstream_error, sort_order, node_ip, location, country_code, latency,
 	enabled, created_at, updated_at
 `
 
 const runtimeSettingsSelectColumns = `
 	id, singleton_key, admin_password, admin_password_set, auth_generation,
 	start_port, preserve_inbound_ports, global_upstream_enabled,
-	global_upstream_type, global_upstream_config, created_at, updated_at
+	global_upstream_type, global_upstream_config, global_upstream_ip,
+	global_upstream_location, global_upstream_country_code, global_upstream_latency,
+	global_upstream_error, created_at, updated_at
 `
 
 type rowScanner interface {
@@ -50,6 +53,11 @@ func scanProxyNode(scanner rowScanner) (models.ProxyNode, error) {
 		&node.UpstreamMode,
 		&node.UpstreamType,
 		&node.UpstreamConfig,
+		&node.UpstreamIP,
+		&node.UpstreamLocation,
+		&node.UpstreamCountryCode,
+		&node.UpstreamLatency,
+		&node.UpstreamError,
 		&node.SortOrder,
 		&node.NodeIP,
 		&node.Location,
@@ -112,6 +120,11 @@ func loadRuntimeSettingsFrom(ctx context.Context, queryer nodeQueryRower) (model
 		&settings.GlobalUpstreamEnabled,
 		&settings.GlobalUpstreamType,
 		&settings.GlobalUpstreamConfig,
+		&settings.GlobalUpstreamIP,
+		&settings.GlobalUpstreamLocation,
+		&settings.GlobalUpstreamCountryCode,
+		&settings.GlobalUpstreamLatency,
+		&settings.GlobalUpstreamError,
 		&settings.CreatedAt,
 		&settings.UpdatedAt,
 	)

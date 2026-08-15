@@ -4,7 +4,6 @@ import (
 	"context"
 	"crypto/rand"
 	"crypto/sha256"
-	"crypto/subtle"
 	"database/sql"
 	"encoding/base64"
 	"encoding/hex"
@@ -38,13 +37,6 @@ func normalizeAuthToken(headerValue string) string {
 		return strings.TrimSpace(token[7:])
 	}
 	return token
-}
-
-func constantTimeEqual(expected string, actual string) bool {
-	if len(expected) != len(actual) {
-		return false
-	}
-	return subtle.ConstantTimeCompare([]byte(expected), []byte(actual)) == 1
 }
 
 func hashSessionToken(token string) string {

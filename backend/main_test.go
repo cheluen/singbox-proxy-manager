@@ -41,25 +41,6 @@ func writeTestFrontendDist(t *testing.T) string {
 	return distDir
 }
 
-func TestValidateAdminPasswordForBindAddress(t *testing.T) {
-	t.Setenv("ADMIN_PASSWORD", "")
-	for _, address := range []string{"127.0.0.1", "::1", "[::1]", "localhost", "LOCALHOST"} {
-		if err := validateAdminPasswordForBindAddress(address); err != nil {
-			t.Fatalf("loopback address %q should allow local password setup: %v", address, err)
-		}
-	}
-	for _, address := range []string{"0.0.0.0", "::", "192.168.1.10", "panel.example.com"} {
-		if err := validateAdminPasswordForBindAddress(address); err == nil {
-			t.Fatalf("non-loopback address %q must require ADMIN_PASSWORD", address)
-		}
-	}
-
-	t.Setenv("ADMIN_PASSWORD", "configured-password")
-	if err := validateAdminPasswordForBindAddress("0.0.0.0"); err != nil {
-		t.Fatalf("configured password should allow external listener: %v", err)
-	}
-}
-
 func TestConfiguredBindAddressDefaultsToExternalWildcard(t *testing.T) {
 	t.Setenv("BIND_ADDRESS", "")
 	if got := configuredBindAddress(); got != defaultBindAddress {

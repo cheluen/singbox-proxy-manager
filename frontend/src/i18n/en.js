@@ -34,8 +34,7 @@ export default {
   setup_success: 'Admin password set successfully',
   setup_failed: 'Setup failed',
   login_subtitle: 'Manage node configs, auth, and forwarding status in one place',
-  admin_password_locked_hint: 'Admin password is managed by ADMIN_PASSWORD environment variable',
-  admin_password_locked_desc: 'ADMIN_PASSWORD is set for this deployment, so the admin password cannot be changed in the panel. Update the environment variable and restart the service to change it.',
+  password_max_72_bytes: 'Password must not exceed 72 bytes',
   
   // Navigation
   nodes: 'Node Management',
@@ -100,6 +99,20 @@ export default {
   upstream_configure: 'Configure Upstream',
   upstream_edit: 'Edit Upstream',
   upstream_custom_required: 'Configure a custom upstream proxy for this node first',
+  upstream_link_placeholder: 'Paste a supported proxy connection URI',
+  upstream_link_parsed: 'Connection URI parsed; adjust the fields as needed',
+  upstream_info: 'Upstream Proxy',
+  upstream_policy: 'Policy',
+  upstream_address: 'Server Address',
+  upstream_saved: 'Upstream proxy settings updated',
+  upstream_ip: 'Upstream IP',
+  upstream_location: 'Upstream Location',
+  upstream_latency: 'Upstream Latency',
+  upstream_check_error: 'Upstream Check Error',
+  upstream_check_ip: 'Check the upstream proxy exit IP',
+  upstream_check_success: 'Upstream IP check completed',
+  upstream_check_save_first: 'Save the upstream configuration before checking it',
+  check_ip: 'Check IP',
   
   // Batch Operations
   batch_import_title: 'Batch Import Nodes',

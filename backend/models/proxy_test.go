@@ -3,6 +3,8 @@ package models
 import (
 	"database/sql"
 	"encoding/json"
+	"errors"
+	"strings"
 	"testing"
 	"time"
 
@@ -10,9 +12,7 @@ import (
 	_ "modernc.org/sqlite"
 )
 
-func TestInitDB_AdminPasswordFromEnvOverridesExisting(t *testing.T) {
-	t.Setenv("ADMIN_PASSWORD", "")
-
+func TestReconcileAdminPasswordChangedEnvironmentOverridesDatabaseAndRevokesSessions(t *testing.T) {
 	db, err := sql.Open("sqlite", ":memory:")
 	if err != nil {
 		t.Fatalf("open db: %v", err)
@@ -23,13 +23,9 @@ func TestInitDB_AdminPasswordFromEnvOverridesExisting(t *testing.T) {
 		t.Fatalf("init db (first): %v", err)
 	}
 
-	oldPassword := "old-password-123"
-	oldHash, err := bcrypt.GenerateFromPassword([]byte(oldPassword), bcrypt.DefaultCost)
-	if err != nil {
-		t.Fatalf("hash old: %v", err)
-	}
-	if _, err := db.Exec("UPDATE settings SET admin_password = ?, admin_password_set = 1, updated_at = CURRENT_TIMESTAMP", string(oldHash)); err != nil {
-		t.Fatalf("set old password: %v", err)
+	oldEnvironmentPassword := "old-environment-password-123"
+	if err := ReconcileAdminPassword(db, oldEnvironmentPassword); err != nil {
+		t.Fatalf("reconcile initial environment password: %v", err)
 	}
 
 	future := time.Now().Add(24 * time.Hour).Unix()
@@ -42,25 +38,24 @@ func TestInitDB_AdminPasswordFromEnvOverridesExisting(t *testing.T) {
 		t.Fatalf("seed session: %v", err)
 	}
 
-	newPassword := "new-password-456"
-	t.Setenv("ADMIN_PASSWORD", newPassword)
-	if err := InitDB(db); err != nil {
-		t.Fatalf("init db (second): %v", err)
+	newEnvironmentPassword := "new-environment-password-456"
+	if err := ReconcileAdminPassword(db, newEnvironmentPassword); err != nil {
+		t.Fatalf("reconcile changed environment password: %v", err)
 	}
 
 	var currentHash string
-	var currentSet int
-	if err := db.QueryRow("SELECT admin_password, admin_password_set FROM settings LIMIT 1").Scan(&currentHash, &currentSet); err != nil {
+	var fingerprint string
+	if err := db.QueryRow("SELECT admin_password, admin_password_env_fingerprint FROM settings LIMIT 1").Scan(&currentHash, &fingerprint); err != nil {
 		t.Fatalf("query settings: %v", err)
 	}
-	if currentSet != 1 {
-		t.Fatalf("expected admin_password_set=1, got %d", currentSet)
-	}
-	if err := bcrypt.CompareHashAndPassword([]byte(currentHash), []byte(newPassword)); err != nil {
+	if err := bcrypt.CompareHashAndPassword([]byte(currentHash), []byte(newEnvironmentPassword)); err != nil {
 		t.Fatalf("expected stored hash to match new env password: %v", err)
 	}
-	if err := bcrypt.CompareHashAndPassword([]byte(currentHash), []byte(oldPassword)); err == nil {
+	if err := bcrypt.CompareHashAndPassword([]byte(currentHash), []byte(oldEnvironmentPassword)); err == nil {
 		t.Fatalf("expected stored hash to no longer match old password")
+	}
+	if err := bcrypt.CompareHashAndPassword([]byte(fingerprint), []byte(newEnvironmentPassword)); err != nil {
+		t.Fatalf("expected fingerprint to track changed environment password: %v", err)
 	}
 
 	var sessionCount int
@@ -72,10 +67,7 @@ func TestInitDB_AdminPasswordFromEnvOverridesExisting(t *testing.T) {
 	}
 }
 
-func TestInitDB_AdminPasswordFromEnvDoesNotRevokeSessionsWhenUnchanged(t *testing.T) {
-	password := "stable-password-123"
-	t.Setenv("ADMIN_PASSWORD", password)
-
+func TestReconcileAdminPasswordUnchangedEnvironmentPreservesPanelPasswordAndSessions(t *testing.T) {
 	db, err := sql.Open("sqlite", ":memory:")
 	if err != nil {
 		t.Fatalf("open db: %v", err)
@@ -84,6 +76,22 @@ func TestInitDB_AdminPasswordFromEnvDoesNotRevokeSessionsWhenUnchanged(t *testin
 
 	if err := InitDB(db); err != nil {
 		t.Fatalf("init db (first): %v", err)
+	}
+	environmentPassword := "stable-environment-password-123"
+	if err := ReconcileAdminPassword(db, environmentPassword); err != nil {
+		t.Fatalf("reconcile initial environment password: %v", err)
+	}
+
+	panelPassword := "admin123"
+	panelHash, err := bcrypt.GenerateFromPassword([]byte(panelPassword), bcrypt.DefaultCost)
+	if err != nil {
+		t.Fatalf("hash panel password: %v", err)
+	}
+	if _, err := db.Exec(
+		"UPDATE settings SET admin_password = ?, auth_generation = auth_generation + 1 WHERE singleton_key = 1",
+		string(panelHash),
+	); err != nil {
+		t.Fatalf("simulate panel password change: %v", err)
 	}
 
 	future := time.Now().Add(24 * time.Hour).Unix()
@@ -96,8 +104,16 @@ func TestInitDB_AdminPasswordFromEnvDoesNotRevokeSessionsWhenUnchanged(t *testin
 		t.Fatalf("seed session: %v", err)
 	}
 
-	if err := InitDB(db); err != nil {
-		t.Fatalf("init db (second): %v", err)
+	if err := ReconcileAdminPassword(db, environmentPassword); err != nil {
+		t.Fatalf("reconcile unchanged environment password: %v", err)
+	}
+
+	var storedHash string
+	if err := db.QueryRow("SELECT admin_password FROM settings WHERE singleton_key = 1").Scan(&storedHash); err != nil {
+		t.Fatalf("query panel password: %v", err)
+	}
+	if err := bcrypt.CompareHashAndPassword([]byte(storedHash), []byte(panelPassword)); err != nil {
+		t.Fatalf("unchanged environment password overwrote panel password: %v", err)
 	}
 
 	var sessionCount int
@@ -107,6 +123,177 @@ func TestInitDB_AdminPasswordFromEnvDoesNotRevokeSessionsWhenUnchanged(t *testin
 	if sessionCount != 1 {
 		t.Fatalf("expected sessions to remain when env password unchanged, got %d", sessionCount)
 	}
+}
+
+func TestReconcileAdminPasswordStartupRules(t *testing.T) {
+	t.Run("empty database requires environment password", func(t *testing.T) {
+		db, err := sql.Open("sqlite", ":memory:")
+		if err != nil {
+			t.Fatalf("open db: %v", err)
+		}
+		defer db.Close()
+		if err := InitDB(db); err != nil {
+			t.Fatalf("init db: %v", err)
+		}
+		if err := ReconcileAdminPassword(db, ""); !errors.Is(err, ErrAdminPasswordRequired) {
+			t.Fatalf("expected ErrAdminPasswordRequired, got %v", err)
+		}
+	})
+
+	t.Run("database password works without environment password", func(t *testing.T) {
+		db, err := sql.Open("sqlite", ":memory:")
+		if err != nil {
+			t.Fatalf("open db: %v", err)
+		}
+		defer db.Close()
+		if err := InitDB(db); err != nil {
+			t.Fatalf("init db: %v", err)
+		}
+		hash, err := bcrypt.GenerateFromPassword([]byte("database-password-123"), bcrypt.DefaultCost)
+		if err != nil {
+			t.Fatalf("hash database password: %v", err)
+		}
+		if _, err := db.Exec("UPDATE settings SET admin_password = ?, admin_password_set = 0", string(hash)); err != nil {
+			t.Fatalf("seed database password: %v", err)
+		}
+		if err := ReconcileAdminPassword(db, ""); err != nil {
+			t.Fatalf("reconcile database-only password: %v", err)
+		}
+		var passwordSet int
+		if err := db.QueryRow("SELECT admin_password_set FROM settings").Scan(&passwordSet); err != nil {
+			t.Fatalf("query password state: %v", err)
+		}
+		if passwordSet != 1 {
+			t.Fatalf("expected valid database password to self-heal password_set, got %d", passwordSet)
+		}
+	})
+
+	t.Run("legacy database records fingerprint without overwriting", func(t *testing.T) {
+		db, err := sql.Open("sqlite", ":memory:")
+		if err != nil {
+			t.Fatalf("open db: %v", err)
+		}
+		defer db.Close()
+		if err := InitDB(db); err != nil {
+			t.Fatalf("init db: %v", err)
+		}
+		databasePassword := "database-password-123"
+		hash, err := bcrypt.GenerateFromPassword([]byte(databasePassword), bcrypt.DefaultCost)
+		if err != nil {
+			t.Fatalf("hash database password: %v", err)
+		}
+		if _, err := db.Exec("UPDATE settings SET admin_password = ?, admin_password_set = 1", string(hash)); err != nil {
+			t.Fatalf("seed legacy database password: %v", err)
+		}
+		environmentPassword := "different-environment-password-456"
+		if err := ReconcileAdminPassword(db, environmentPassword); err != nil {
+			t.Fatalf("reconcile legacy database: %v", err)
+		}
+		var storedHash, fingerprint string
+		if err := db.QueryRow("SELECT admin_password, admin_password_env_fingerprint FROM settings").Scan(&storedHash, &fingerprint); err != nil {
+			t.Fatalf("query reconciled database: %v", err)
+		}
+		if err := bcrypt.CompareHashAndPassword([]byte(storedHash), []byte(databasePassword)); err != nil {
+			t.Fatalf("legacy database password was overwritten: %v", err)
+		}
+		if err := bcrypt.CompareHashAndPassword([]byte(fingerprint), []byte(environmentPassword)); err != nil {
+			t.Fatalf("environment fingerprint was not recorded: %v", err)
+		}
+	})
+
+	t.Run("environment password preserves exact bytes", func(t *testing.T) {
+		db, err := sql.Open("sqlite", ":memory:")
+		if err != nil {
+			t.Fatalf("open db: %v", err)
+		}
+		defer db.Close()
+		if err := InitDB(db); err != nil {
+			t.Fatalf("init db: %v", err)
+		}
+		environmentPassword := "  exact-environment-password  "
+		if err := ReconcileAdminPassword(db, environmentPassword); err != nil {
+			t.Fatalf("reconcile exact environment password: %v", err)
+		}
+		var storedHash, fingerprint string
+		if err := db.QueryRow("SELECT admin_password, admin_password_env_fingerprint FROM settings").Scan(&storedHash, &fingerprint); err != nil {
+			t.Fatalf("query exact environment password: %v", err)
+		}
+		if err := bcrypt.CompareHashAndPassword([]byte(storedHash), []byte(environmentPassword)); err != nil {
+			t.Fatalf("stored password did not preserve surrounding spaces: %v", err)
+		}
+		if err := bcrypt.CompareHashAndPassword([]byte(fingerprint), []byte(environmentPassword)); err != nil {
+			t.Fatalf("fingerprint did not preserve surrounding spaces: %v", err)
+		}
+		if err := bcrypt.CompareHashAndPassword([]byte(storedHash), []byte(strings.TrimSpace(environmentPassword))); err == nil {
+			t.Fatal("stored password unexpectedly matched a trimmed environment value")
+		}
+	})
+
+	t.Run("fingerprinted legacy literal remains stable", func(t *testing.T) {
+		db, err := sql.Open("sqlite", ":memory:")
+		if err != nil {
+			t.Fatalf("open db: %v", err)
+		}
+		defer db.Close()
+		if err := InitDB(db); err != nil {
+			t.Fatalf("init db: %v", err)
+		}
+		if err := ReconcileAdminPassword(db, "admin123"); err != nil {
+			t.Fatalf("reconcile initial environment password: %v", err)
+		}
+		if _, err := db.Exec(`
+			INSERT INTO admin_sessions (token_hash, auth_generation, expires_at, user_agent, ip)
+			SELECT 'stable-session', auth_generation, ?, '', '' FROM settings
+		`, time.Now().Add(time.Hour).Unix()); err != nil {
+			t.Fatalf("seed stable session: %v", err)
+		}
+		if err := ReconcileAdminPassword(db, "admin123"); err != nil {
+			t.Fatalf("reconcile unchanged fingerprinted password: %v", err)
+		}
+		var sessionCount int
+		if err := db.QueryRow("SELECT COUNT(*) FROM admin_sessions").Scan(&sessionCount); err != nil {
+			t.Fatalf("count stable sessions: %v", err)
+		}
+		if sessionCount != 1 {
+			t.Fatalf("unchanged fingerprinted password revoked sessions: %d", sessionCount)
+		}
+	})
+
+	t.Run("unfingerprinted legacy default is invalid", func(t *testing.T) {
+		db, err := sql.Open("sqlite", ":memory:")
+		if err != nil {
+			t.Fatalf("open db: %v", err)
+		}
+		defer db.Close()
+		if err := InitDB(db); err != nil {
+			t.Fatalf("init db: %v", err)
+		}
+		legacyHash, err := bcrypt.GenerateFromPassword([]byte("admin123"), bcrypt.DefaultCost)
+		if err != nil {
+			t.Fatalf("hash legacy default: %v", err)
+		}
+		if _, err := db.Exec("UPDATE settings SET admin_password = ?, admin_password_set = 1", string(legacyHash)); err != nil {
+			t.Fatalf("seed legacy default: %v", err)
+		}
+		if err := ReconcileAdminPassword(db, ""); !errors.Is(err, ErrAdminPasswordRequired) {
+			t.Fatalf("expected legacy default to require recovery, got %v", err)
+		}
+	})
+
+	t.Run("environment password rejects bcrypt overflow", func(t *testing.T) {
+		db, err := sql.Open("sqlite", ":memory:")
+		if err != nil {
+			t.Fatalf("open db: %v", err)
+		}
+		defer db.Close()
+		if err := InitDB(db); err != nil {
+			t.Fatalf("init db: %v", err)
+		}
+		err = ReconcileAdminPassword(db, strings.Repeat("x", BcryptMaxPasswordBytes+1))
+		if err == nil || !strings.Contains(err.Error(), "72 bytes") {
+			t.Fatalf("expected bcrypt length error, got %v", err)
+		}
+	})
 }
 
 func TestInitDBProxyNodeTCPReuseEnabledDefaultsToTrue(t *testing.T) {
@@ -138,7 +325,7 @@ func TestInitDBProxyNodeTCPReuseEnabledDefaultsToTrue(t *testing.T) {
 	}
 }
 
-func TestInitDBProxyNodeUpstreamModeDefaultsToGlobal(t *testing.T) {
+func TestInitDBProxyNodeUpstreamModeDefaultsToDirect(t *testing.T) {
 	t.Setenv("ADMIN_PASSWORD", "")
 	db, err := sql.Open("sqlite", ":memory:")
 	if err != nil {
@@ -158,8 +345,8 @@ func TestInitDBProxyNodeUpstreamModeDefaultsToGlobal(t *testing.T) {
 	if err := db.QueryRow("SELECT upstream_mode FROM proxy_nodes LIMIT 1").Scan(&mode); err != nil {
 		t.Fatalf("query upstream mode: %v", err)
 	}
-	if mode != UpstreamModeGlobal {
-		t.Fatalf("upstream mode=%q want %q", mode, UpstreamModeGlobal)
+	if mode != UpstreamModeNone {
+		t.Fatalf("upstream mode=%q want %q", mode, UpstreamModeNone)
 	}
 }
 
@@ -266,6 +453,9 @@ func TestInitDBMigratesDuplicateLegacySettingsToSingleton(t *testing.T) {
 
 	if err := InitDB(db); err != nil {
 		t.Fatalf("migrate legacy database: %v", err)
+	}
+	if err := ReconcileAdminPassword(db, ""); err != nil {
+		t.Fatalf("reconcile migrated password: %v", err)
 	}
 
 	var count int

@@ -13,6 +13,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 
 	"github.com/gin-gonic/gin"
 	"golang.org/x/crypto/bcrypt"
@@ -30,6 +31,7 @@ type Handler struct {
 	passwordSetupMu sync.Mutex
 	nodeMutations   *NodeMutationCoordinator
 	checkProxyIP    func(context.Context, string, string, string) (*services.IPInfo, error)
+	checkUpstreamIP func(context.Context, models.ProxyDefinition) (*services.IPInfo, error)
 	hashPassword    func([]byte, int) ([]byte, error)
 }
 
@@ -51,12 +53,13 @@ type nodeUpsertRequest struct {
 
 func NewHandler(db *sql.DB, singBoxService *services.SingBoxService) *Handler {
 	return &Handler{
-		db:             db,
-		singBoxService: singBoxService,
-		loginLimiter:   newLoginRateLimiterFromEnv(),
-		nodeMutations:  NewNodeMutationCoordinator(db, singBoxService),
-		checkProxyIP:   services.CheckProxyIPContext,
-		hashPassword:   bcrypt.GenerateFromPassword,
+		db:              db,
+		singBoxService:  singBoxService,
+		loginLimiter:    newLoginRateLimiterFromEnv(),
+		nodeMutations:   NewNodeMutationCoordinator(db, singBoxService),
+		checkProxyIP:    services.CheckProxyIPContext,
+		checkUpstreamIP: singBoxService.CheckUpstreamIPContext,
+		hashPassword:    bcrypt.GenerateFromPassword,
 	}
 }
 
@@ -188,7 +191,7 @@ func nodeFromUpsertRequest(req nodeUpsertRequest) models.ProxyNode {
 		Username:     req.Username,
 		Password:     req.Password,
 		Enabled:      req.Enabled,
-		UpstreamMode: models.UpstreamModeGlobal,
+		UpstreamMode: models.UpstreamModeNone,
 	}
 	if req.TCPReuseEnabled != nil {
 		node.TCPReuseEnabled = *req.TCPReuseEnabled
@@ -293,46 +296,31 @@ func (h *Handler) Login(c *gin.Context) {
 		}
 	}
 
-	envPassword := strings.TrimSpace(os.Getenv("ADMIN_PASSWORD"))
 	var authGeneration int64
-	if envPassword != "" {
-		if !constantTimeEqual(envPassword, req.Password) {
-			if h.loginLimiter != nil {
-				h.loginLimiter.OnFailure(ip, now)
-			}
-			c.JSON(http.StatusUnauthorized, gin.H{"error": "invalid password"})
-			return
-		}
-		if err := h.db.QueryRowContext(c.Request.Context(), "SELECT auth_generation FROM settings WHERE singleton_key = 1").Scan(&authGeneration); err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "database error"})
-			return
-		}
-	} else {
-		var settings models.Settings
-		err := h.db.QueryRowContext(c.Request.Context(), `
+	var settings models.Settings
+	err := h.db.QueryRowContext(c.Request.Context(), `
 			SELECT id, admin_password, admin_password_set, auth_generation
 			FROM settings
 			WHERE singleton_key = 1
 		`).Scan(&settings.ID, &settings.AdminPassword, &settings.AdminPasswordSet, &settings.AuthGeneration)
-		if err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "database error"})
-			return
-		}
-		if settings.AdminPasswordSet == 0 || strings.TrimSpace(settings.AdminPassword) == "" {
-			c.JSON(http.StatusPreconditionRequired, gin.H{"error": "admin password not set", "setup_required": true})
-			return
-		}
-
-		// Compare password using bcrypt only (no plaintext fallback for security)
-		if err := bcrypt.CompareHashAndPassword([]byte(settings.AdminPassword), []byte(req.Password)); err != nil {
-			if h.loginLimiter != nil {
-				h.loginLimiter.OnFailure(ip, now)
-			}
-			c.JSON(http.StatusUnauthorized, gin.H{"error": "invalid password"})
-			return
-		}
-		authGeneration = settings.AuthGeneration
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "database error"})
+		return
 	}
+	if settings.AdminPasswordSet == 0 || strings.TrimSpace(settings.AdminPassword) == "" {
+		c.JSON(http.StatusPreconditionRequired, gin.H{"error": "admin password not set", "setup_required": true})
+		return
+	}
+
+	// Compare password using bcrypt only (no plaintext fallback for security)
+	if err := bcrypt.CompareHashAndPassword([]byte(settings.AdminPassword), []byte(req.Password)); err != nil {
+		if h.loginLimiter != nil {
+			h.loginLimiter.OnFailure(ip, now)
+		}
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "invalid password"})
+		return
+	}
+	authGeneration = settings.AuthGeneration
 
 	if h.loginLimiter != nil {
 		h.loginLimiter.OnSuccess(ip)
@@ -355,35 +343,24 @@ func (h *Handler) Login(c *gin.Context) {
 	})
 }
 
-// AuthStatus returns whether setup is required and whether admin password is locked by env.
+// AuthStatus returns whether initial password setup is required.
 func (h *Handler) AuthStatus(c *gin.Context) {
-	locked := strings.TrimSpace(os.Getenv("ADMIN_PASSWORD")) != ""
-	setupRequired := false
-
-	if !locked {
-		var set int
-		var hash string
-		err := h.db.QueryRowContext(c.Request.Context(), "SELECT admin_password, admin_password_set FROM settings WHERE singleton_key = 1").Scan(&hash, &set)
-		if err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "database error"})
-			return
-		}
-		setupRequired = set == 0 || strings.TrimSpace(hash) == ""
-	}
-
-	c.JSON(http.StatusOK, gin.H{
-		"admin_password_locked": locked,
-		"setup_required":        setupRequired,
-	})
-}
-
-// SetupAdminPassword sets the initial admin password when ADMIN_PASSWORD is not set.
-func (h *Handler) SetupAdminPassword(c *gin.Context) {
-	if strings.TrimSpace(os.Getenv("ADMIN_PASSWORD")) != "" {
-		c.JSON(http.StatusConflict, gin.H{"error": "admin password is managed by ADMIN_PASSWORD"})
+	var set int
+	var hash string
+	err := h.db.QueryRowContext(c.Request.Context(), "SELECT admin_password, admin_password_set FROM settings WHERE singleton_key = 1").Scan(&hash, &set)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "database error"})
 		return
 	}
 
+	c.JSON(http.StatusOK, gin.H{
+		"admin_password_locked": false,
+		"setup_required":        set == 0 || strings.TrimSpace(hash) == "",
+	})
+}
+
+// SetupAdminPassword sets the initial admin password for an unconfigured database.
+func (h *Handler) SetupAdminPassword(c *gin.Context) {
 	h.passwordSetupMu.Lock()
 	defer h.passwordSetupMu.Unlock()
 
@@ -414,6 +391,10 @@ func (h *Handler) SetupAdminPassword(c *gin.Context) {
 	}
 	if len([]rune(req.Password)) < 8 {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "password must be at least 8 characters"})
+		return
+	}
+	if len([]byte(req.Password)) > models.BcryptMaxPasswordBytes {
+		c.JSON(http.StatusBadRequest, gin.H{"error": fmt.Sprintf("password must not exceed %d bytes", models.BcryptMaxPasswordBytes)})
 		return
 	}
 
@@ -1089,7 +1070,7 @@ func importedUpstreamMode(configJSON []byte) string {
 	if json.Unmarshal(configJSON, &config) == nil && strings.TrimSpace(config.Detour) != "" {
 		return models.UpstreamModeLegacy
 	}
-	return models.UpstreamModeGlobal
+	return models.UpstreamModeNone
 }
 
 func batchImportDependencyGroups(candidates []*batchImportCandidate) [][]*batchImportCandidate {
@@ -1175,6 +1156,7 @@ func (h *Handler) UpdateNode(c *gin.Context) {
 	defer h.nodeWriteMu.Unlock()
 
 	var prev models.ProxyNode
+	var upstreamChanged bool
 	var requestErr error
 	var notFound bool
 	_, mutationErr := h.nodeMutations.Execute(c.Request.Context(), NodeMutationOperation{
@@ -1207,6 +1189,9 @@ func (h *Handler) UpdateNode(c *gin.Context) {
 				requestErr = err
 				return err
 			}
+			upstreamChanged = req.UpstreamMode != prev.UpstreamMode ||
+				req.UpstreamType != prev.UpstreamType ||
+				req.UpstreamConfig != prev.UpstreamConfig
 			req.SortOrder = prev.SortOrder
 			req.InboundPortPinned = prev.InboundPortPinned
 
@@ -1267,6 +1252,16 @@ func (h *Handler) UpdateNode(c *gin.Context) {
 				notFound = true
 				return sql.ErrNoRows
 			}
+			if upstreamChanged {
+				if _, err := tx.ExecContext(ctx, `
+					UPDATE proxy_nodes
+					SET upstream_ip = '', upstream_location = '', upstream_country_code = '',
+					    upstream_latency = 0, upstream_error = ''
+					WHERE id = ?
+				`, id); err != nil {
+					return err
+				}
+			}
 			if !preserveInboundPorts && !prev.InboundPortPinned {
 				if err := reassignAutomaticPortsTx(ctx, tx, startPort); err != nil {
 					return err
@@ -1296,6 +1291,103 @@ func (h *Handler) UpdateNode(c *gin.Context) {
 	}
 
 	c.JSON(http.StatusOK, req)
+}
+
+// UpdateNodeUpstream updates only a node's managed upstream policy and definition.
+func (h *Handler) UpdateNodeUpstream(c *gin.Context) {
+	id, err := strconv.Atoi(c.Param("id"))
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid id"})
+		return
+	}
+
+	var req struct {
+		Mode   string `json:"upstream_mode"`
+		Type   string `json:"upstream_type"`
+		Config string `json:"upstream_config"`
+	}
+	if err := c.BindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid request"})
+		return
+	}
+
+	h.nodeWriteMu.Lock()
+	defer h.nodeWriteMu.Unlock()
+
+	var requestErr error
+	var notFound bool
+	candidateNodes, mutationErr := h.nodeMutations.Execute(c.Request.Context(), NodeMutationOperation{
+		ApplyRuntime: true,
+		Mutate: func(ctx context.Context, tx *sql.Tx) error {
+			node, err := loadNodeByIDFrom(ctx, tx, id)
+			if err != nil {
+				if errors.Is(err, sql.ErrNoRows) {
+					notFound = true
+				}
+				return err
+			}
+			previousMode, _ := models.NormalizeUpstreamMode(node.UpstreamMode)
+			previousType := node.UpstreamType
+			previousConfig := node.UpstreamConfig
+			node.UpstreamMode = req.Mode
+			node.UpstreamType = req.Type
+			node.UpstreamConfig = req.Config
+			nextMode, _ := models.NormalizeUpstreamMode(node.UpstreamMode)
+			allowLegacy := previousMode == models.UpstreamModeLegacy && nextMode == models.UpstreamModeLegacy
+			if err := h.validateNodeUpstream(&node, allowLegacy); err != nil {
+				requestErr = err
+				return err
+			}
+
+			result, err := tx.ExecContext(ctx, `
+				UPDATE proxy_nodes
+				SET upstream_mode = ?, upstream_type = ?, upstream_config = ?,
+				    updated_at = CURRENT_TIMESTAMP
+				WHERE id = ?
+			`, node.UpstreamMode, node.UpstreamType, node.UpstreamConfig, id)
+			if err != nil {
+				return err
+			}
+			affected, err := result.RowsAffected()
+			if err != nil {
+				return err
+			}
+			if affected != 1 {
+				notFound = true
+				return sql.ErrNoRows
+			}
+			if node.UpstreamMode != previousMode || node.UpstreamType != previousType || node.UpstreamConfig != previousConfig {
+				if _, err := tx.ExecContext(ctx, `
+					UPDATE proxy_nodes
+					SET upstream_ip = '', upstream_location = '', upstream_country_code = '',
+					    upstream_latency = 0, upstream_error = ''
+					WHERE id = ?
+				`, id); err != nil {
+					return err
+				}
+			}
+			return nil
+		},
+	})
+	if mutationErr != nil {
+		switch {
+		case notFound:
+			c.JSON(http.StatusNotFound, gin.H{"error": "node not found"})
+		case requestErr != nil || services.IsUpstreamValidationError(mutationErr):
+			c.JSON(http.StatusBadRequest, gin.H{"error": mutationErr.Error()})
+		default:
+			c.JSON(http.StatusInternalServerError, singboxUpdateError(mutationErr))
+		}
+		return
+	}
+
+	for _, node := range candidateNodes {
+		if node.ID == id {
+			c.JSON(http.StatusOK, node)
+			return
+		}
+	}
+	c.JSON(http.StatusInternalServerError, gin.H{"error": "updated node missing from runtime snapshot"})
 }
 
 func (h *Handler) UpdateNodeRemark(c *gin.Context) {
@@ -1612,7 +1704,134 @@ func (h *Handler) ReorderNodes(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"message": "nodes reordered"})
 }
 
-// CheckNodeIP checks the IP and location of a proxy node
+type upstreamCheckOutcome struct {
+	info *services.IPInfo
+	err  error
+}
+
+var errUpstreamDefinitionChanged = errors.New("upstream proxy changed during IP check")
+
+func verifyConditionalCheckUpdate(result sql.Result, targetStillMatches func() (bool, error)) error {
+	affected, err := result.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if affected == 1 {
+		return nil
+	}
+	if affected > 1 {
+		return fmt.Errorf("upstream check update affected %d rows", affected)
+	}
+	matches, err := targetStillMatches()
+	if err != nil {
+		return err
+	}
+	if matches {
+		// MySQL reports changed rows rather than matched rows by default. An
+		// identical repeated result can therefore produce zero affected rows.
+		return nil
+	}
+	return errUpstreamDefinitionChanged
+}
+
+func ipInfoPayload(info *services.IPInfo) gin.H {
+	if info == nil {
+		return gin.H{}
+	}
+	return gin.H{
+		"ip":           info.IP,
+		"country":      info.Country,
+		"country_code": info.CountryCode,
+		"city":         info.City,
+		"region":       info.Region,
+		"location":     info.Location,
+		"latency":      info.Latency,
+		"transport":    info.Transport,
+		"http_error":   info.HTTPError,
+	}
+}
+
+func boundedCheckError(err error) string {
+	if err == nil {
+		return ""
+	}
+	message := strings.ToValidUTF8(err.Error(), "?")
+	const maxBytes = 2000
+	for len(message) > maxBytes {
+		_, size := utf8.DecodeLastRuneInString(message)
+		if size <= 0 {
+			return message[:maxBytes]
+		}
+		message = message[:len(message)-size]
+	}
+	return message
+}
+
+func (h *Handler) persistNodeUpstreamCheck(
+	ctx context.Context,
+	id int,
+	definition models.ProxyDefinition,
+	outcome upstreamCheckOutcome,
+) error {
+	h.nodeWriteMu.Lock()
+	defer h.nodeWriteMu.Unlock()
+
+	var currentMode, currentType, currentConfig string
+	err := h.db.QueryRowContext(ctx, `
+		SELECT upstream_mode, upstream_type, upstream_config
+		FROM proxy_nodes WHERE id = ?
+	`, id).Scan(&currentMode, &currentType, &currentConfig)
+	if errors.Is(err, sql.ErrNoRows) {
+		return errUpstreamDefinitionChanged
+	}
+	if err != nil {
+		return err
+	}
+	if currentMode != models.UpstreamModeCustom ||
+		currentType != definition.Type || currentConfig != definition.Config {
+		return errUpstreamDefinitionChanged
+	}
+
+	var result sql.Result
+	if outcome.err != nil {
+		result, err = h.db.ExecContext(ctx, `
+			UPDATE proxy_nodes
+			SET upstream_ip = '', upstream_location = '', upstream_country_code = '',
+			    upstream_latency = 0, upstream_error = ?, updated_at = CURRENT_TIMESTAMP
+			WHERE id = ? AND upstream_mode = ? AND upstream_type = ? AND upstream_config = ?
+		`, boundedCheckError(outcome.err), id, models.UpstreamModeCustom, definition.Type, definition.Config)
+	} else if outcome.info == nil {
+		return fmt.Errorf("upstream IP check returned no result")
+	} else {
+		result, err = h.db.ExecContext(ctx, `
+			UPDATE proxy_nodes
+			SET upstream_ip = ?, upstream_location = ?, upstream_country_code = ?,
+			    upstream_latency = ?, upstream_error = '', updated_at = CURRENT_TIMESTAMP
+			WHERE id = ? AND upstream_mode = ? AND upstream_type = ? AND upstream_config = ?
+		`, outcome.info.IP, outcome.info.Location, outcome.info.CountryCode, outcome.info.Latency,
+			id, models.UpstreamModeCustom, definition.Type, definition.Config)
+	}
+	if err != nil {
+		return err
+	}
+	return verifyConditionalCheckUpdate(result, func() (bool, error) {
+		var currentMode, currentType, currentConfig string
+		err := h.db.QueryRowContext(ctx, `
+			SELECT upstream_mode, upstream_type, upstream_config
+			FROM proxy_nodes WHERE id = ?
+		`, id).Scan(&currentMode, &currentType, &currentConfig)
+		if errors.Is(err, sql.ErrNoRows) {
+			return false, nil
+		}
+		if err != nil {
+			return false, err
+		}
+		return currentMode == models.UpstreamModeCustom &&
+			currentType == definition.Type && currentConfig == definition.Config, nil
+	})
+}
+
+// CheckNodeIP checks the final node exit and its custom upstream, when present.
 func (h *Handler) CheckNodeIP(c *gin.Context) {
 	id, err := strconv.Atoi(c.Param("id"))
 	if err != nil {
@@ -1620,72 +1839,122 @@ func (h *Handler) CheckNodeIP(c *gin.Context) {
 		return
 	}
 
-	// Get node with full info including auth
 	var node models.ProxyNode
-	var nodeName string
 	err = h.db.QueryRowContext(c.Request.Context(), `
-		SELECT id, name, inbound_port, username, password, enabled FROM proxy_nodes WHERE id = ?
-	`, id).Scan(&node.ID, &nodeName, &node.InboundPort, &node.Username, &node.Password, &node.Enabled)
+		SELECT id, name, inbound_port, username, password, enabled,
+		       upstream_mode, upstream_type, upstream_config
+		FROM proxy_nodes WHERE id = ?
+	`, id).Scan(
+		&node.ID,
+		&node.Name,
+		&node.InboundPort,
+		&node.Username,
+		&node.Password,
+		&node.Enabled,
+		&node.UpstreamMode,
+		&node.UpstreamType,
+		&node.UpstreamConfig,
+	)
 
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			c.JSON(http.StatusNotFound, gin.H{"error": "node not found"})
 			return
 		}
-		fmt.Printf("[API] Failed to load node %d: %v\n", id, err)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "database error"})
 		return
 	}
 
-	// Check if node is enabled
 	if !node.Enabled {
-		fmt.Printf("[API] Node %d (%s) is disabled, cannot check IP\n", id, nodeName)
 		c.JSON(http.StatusBadRequest, gin.H{"error": "node is disabled"})
 		return
 	}
 
-	fmt.Printf("[API] Checking IP for node %d (%s) on port %d (auth: %v)\n", id, nodeName, node.InboundPort, node.Username != "")
+	ctx := c.Request.Context()
+	customUpstream := node.UpstreamMode == models.UpstreamModeCustom
+	upstreamDefinition := models.ProxyDefinition{Type: node.UpstreamType, Config: node.UpstreamConfig}
+	var upstreamResult <-chan upstreamCheckOutcome
+	if customUpstream {
+		result := make(chan upstreamCheckOutcome, 1)
+		upstreamResult = result
+		checker := h.checkUpstreamIP
+		go func() {
+			if checker == nil {
+				result <- upstreamCheckOutcome{err: fmt.Errorf("upstream IP checker is unavailable")}
+				return
+			}
+			info, checkErr := checker(ctx, upstreamDefinition)
+			if checkErr == nil && info == nil {
+				checkErr = fmt.Errorf("upstream IP check returned no result")
+			}
+			result <- upstreamCheckOutcome{info: info, err: checkErr}
+		}()
+	}
 
-	// Check IP through the proxy with authentication
 	proxyAddr := fmt.Sprintf("localhost:%d", node.InboundPort)
-	ipInfo, err := h.checkProxyIP(c.Request.Context(), proxyAddr, node.Username, node.Password)
-	if err != nil {
-		fmt.Printf("[API] Failed to check IP for node %d: %v\n", id, err)
-		if c.Request.Context().Err() != nil {
+	ipInfo, nodeCheckErr := h.checkProxyIP(ctx, proxyAddr, node.Username, node.Password)
+	if nodeCheckErr == nil && ipInfo == nil {
+		nodeCheckErr = fmt.Errorf("node IP check returned no result")
+	}
+	upstreamOutcome := upstreamCheckOutcome{}
+	if customUpstream {
+		select {
+		case upstreamOutcome = <-upstreamResult:
+		case <-ctx.Done():
 			return
 		}
-		// Clear stale status on failure so UI can show the node as invalid
-		if _, clearErr := h.db.ExecContext(c.Request.Context(), `
-			UPDATE proxy_nodes 
+		if err := h.persistNodeUpstreamCheck(ctx, id, upstreamDefinition, upstreamOutcome); err != nil {
+			if errors.Is(err, errUpstreamDefinitionChanged) {
+				c.JSON(http.StatusConflict, gin.H{"error": err.Error()})
+				return
+			}
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to update upstream check result"})
+			return
+		}
+	}
+
+	if ctx.Err() != nil {
+		return
+	}
+	if nodeCheckErr != nil {
+		if _, clearErr := h.db.ExecContext(ctx, `
+			UPDATE proxy_nodes
 			SET node_ip = '', location = '', country_code = '', latency = 0, updated_at = CURRENT_TIMESTAMP
 			WHERE id = ?
 		`, id); clearErr != nil {
-			fmt.Printf("[API] Failed to clear node %d status after error: %v\n", id, clearErr)
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to clear node check result"})
+			return
 		}
-		c.JSON(http.StatusBadGateway, gin.H{"error": err.Error()})
+		payload := gin.H{"error": nodeCheckErr.Error()}
+		if customUpstream {
+			if upstreamOutcome.err != nil {
+				payload["upstream"] = gin.H{"error": boundedCheckError(upstreamOutcome.err)}
+			} else {
+				payload["upstream"] = ipInfoPayload(upstreamOutcome.info)
+			}
+		}
+		c.JSON(http.StatusBadGateway, payload)
 		return
 	}
 
-	fmt.Printf("[API] Successfully checked IP for node %d: %s (%s), latency: %dms\n",
-		id, ipInfo.IP, ipInfo.Location, ipInfo.Latency)
-	if c.Request.Context().Err() != nil {
-		return
-	}
-
-	// Update node with IP info, location, country code, and latency
-	_, err = h.db.ExecContext(c.Request.Context(), `
-		UPDATE proxy_nodes 
+	if _, err := h.db.ExecContext(ctx, `
+		UPDATE proxy_nodes
 		SET node_ip = ?, location = ?, country_code = ?, latency = ?, updated_at = CURRENT_TIMESTAMP
 		WHERE id = ?
-	`, ipInfo.IP, ipInfo.Location, ipInfo.CountryCode, ipInfo.Latency, id)
-
-	if err != nil {
-		fmt.Printf("[API] Failed to update node %d in database: %v\n", id, err)
+	`, ipInfo.IP, ipInfo.Location, ipInfo.CountryCode, ipInfo.Latency, id); err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to update node"})
 		return
 	}
 
-	c.JSON(http.StatusOK, ipInfo)
+	payload := ipInfoPayload(ipInfo)
+	if customUpstream {
+		if upstreamOutcome.err != nil {
+			payload["upstream"] = gin.H{"error": boundedCheckError(upstreamOutcome.err)}
+		} else {
+			payload["upstream"] = ipInfoPayload(upstreamOutcome.info)
+		}
+	}
+	c.JSON(http.StatusOK, payload)
 }
 
 // BatchSetAuth sets authentication for multiple nodes
@@ -1779,12 +2048,126 @@ func (h *Handler) GetSettings(c *gin.Context) {
 	}
 
 	c.JSON(http.StatusOK, gin.H{
-		"start_port":              settings.StartPort,
-		"preserve_inbound_ports":  settings.PreserveInboundPorts,
-		"global_upstream_enabled": settings.GlobalUpstreamEnabled,
-		"global_upstream_type":    settings.GlobalUpstreamType,
-		"global_upstream_config":  settings.GlobalUpstreamConfig,
-		"admin_password_locked":   strings.TrimSpace(os.Getenv("ADMIN_PASSWORD")) != "",
+		"start_port":                   settings.StartPort,
+		"preserve_inbound_ports":       settings.PreserveInboundPorts,
+		"global_upstream_enabled":      settings.GlobalUpstreamEnabled,
+		"global_upstream_type":         settings.GlobalUpstreamType,
+		"global_upstream_config":       settings.GlobalUpstreamConfig,
+		"global_upstream_ip":           settings.GlobalUpstreamIP,
+		"global_upstream_location":     settings.GlobalUpstreamLocation,
+		"global_upstream_country_code": settings.GlobalUpstreamCountryCode,
+		"global_upstream_latency":      settings.GlobalUpstreamLatency,
+		"global_upstream_error":        settings.GlobalUpstreamError,
+		"admin_password_locked":        false,
+	})
+}
+
+// CheckGlobalUpstreamIP checks the configured global upstream without changing
+// whether it is currently enabled for nodes.
+func (h *Handler) CheckGlobalUpstreamIP(c *gin.Context) {
+	settings, err := loadRuntimeSettingsFrom(c.Request.Context(), h.db)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "database error"})
+		return
+	}
+	if strings.TrimSpace(settings.GlobalUpstreamType) == "" || strings.TrimSpace(settings.GlobalUpstreamConfig) == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "global upstream proxy is not configured"})
+		return
+	}
+	if h.checkUpstreamIP == nil {
+		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "upstream IP checker is unavailable"})
+		return
+	}
+
+	definition := models.ProxyDefinition{
+		Type:   settings.GlobalUpstreamType,
+		Config: settings.GlobalUpstreamConfig,
+	}
+	info, checkErr := h.checkUpstreamIP(c.Request.Context(), definition)
+	if c.Request.Context().Err() != nil {
+		return
+	}
+	h.nodeWriteMu.Lock()
+	defer h.nodeWriteMu.Unlock()
+	var currentType, currentConfig string
+	if err := h.db.QueryRowContext(c.Request.Context(), `
+		SELECT global_upstream_type, global_upstream_config
+		FROM settings WHERE singleton_key = 1
+	`).Scan(&currentType, &currentConfig); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to verify global upstream configuration"})
+		return
+	}
+	if currentType != definition.Type || currentConfig != definition.Config {
+		c.JSON(http.StatusConflict, gin.H{"error": errUpstreamDefinitionChanged.Error()})
+		return
+	}
+	if checkErr == nil && info == nil {
+		checkErr = fmt.Errorf("upstream IP check returned no result")
+	}
+	if checkErr != nil {
+		message := boundedCheckError(checkErr)
+		result, err := h.db.ExecContext(c.Request.Context(), `
+			UPDATE settings
+			SET global_upstream_ip = '', global_upstream_location = '',
+			    global_upstream_country_code = '', global_upstream_latency = 0,
+			    global_upstream_error = ?, updated_at = CURRENT_TIMESTAMP
+			WHERE singleton_key = 1 AND global_upstream_type = ? AND global_upstream_config = ?
+		`, message, definition.Type, definition.Config)
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to update global upstream check result"})
+			return
+		}
+		if err := h.verifyGlobalUpstreamCheckUpdate(c.Request.Context(), result, definition); err != nil {
+			if errors.Is(err, errUpstreamDefinitionChanged) {
+				c.JSON(http.StatusConflict, gin.H{"error": err.Error()})
+				return
+			}
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to verify global upstream check result"})
+			return
+		}
+		c.JSON(http.StatusBadGateway, gin.H{"error": message})
+		return
+	}
+	result, err := h.db.ExecContext(c.Request.Context(), `
+		UPDATE settings
+		SET global_upstream_ip = ?, global_upstream_location = ?,
+		    global_upstream_country_code = ?, global_upstream_latency = ?,
+		    global_upstream_error = '', updated_at = CURRENT_TIMESTAMP
+		WHERE singleton_key = 1 AND global_upstream_type = ? AND global_upstream_config = ?
+	`, info.IP, info.Location, info.CountryCode, info.Latency, definition.Type, definition.Config)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to update global upstream check result"})
+		return
+	}
+	if err := h.verifyGlobalUpstreamCheckUpdate(c.Request.Context(), result, definition); err != nil {
+		if errors.Is(err, errUpstreamDefinitionChanged) {
+			c.JSON(http.StatusConflict, gin.H{"error": err.Error()})
+			return
+		}
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to verify global upstream check result"})
+		return
+	}
+	c.JSON(http.StatusOK, info)
+}
+
+func (h *Handler) verifyGlobalUpstreamCheckUpdate(
+	ctx context.Context,
+	result sql.Result,
+	definition models.ProxyDefinition,
+) error {
+	return verifyConditionalCheckUpdate(result, func() (bool, error) {
+		var currentType, currentConfig string
+		err := h.db.QueryRowContext(ctx, `
+			SELECT global_upstream_type, global_upstream_config
+			FROM settings WHERE singleton_key = 1
+		`).Scan(&currentType, &currentConfig)
+		if errors.Is(err, sql.ErrNoRows) {
+			return false, nil
+		}
+		if err != nil {
+			return false, err
+		}
+		return currentType == definition.Type && currentConfig == definition.Config, nil
 	})
 }
 
@@ -1838,16 +2221,16 @@ func (h *Handler) UpdateSettings(c *gin.Context) {
 
 	var hashedPassword string
 	if req.AdminPassword != nil {
-		if strings.TrimSpace(os.Getenv("ADMIN_PASSWORD")) != "" {
-			c.JSON(http.StatusConflict, gin.H{"error": "admin password is managed by ADMIN_PASSWORD"})
-			return
-		}
 		if strings.TrimSpace(*req.AdminPassword) == "" {
 			c.JSON(http.StatusBadRequest, gin.H{"error": "password is required"})
 			return
 		}
 		if len([]rune(*req.AdminPassword)) < 8 {
 			c.JSON(http.StatusBadRequest, gin.H{"error": "password must be at least 8 characters"})
+			return
+		}
+		if len([]byte(*req.AdminPassword)) > models.BcryptMaxPasswordBytes {
+			c.JSON(http.StatusBadRequest, gin.H{"error": fmt.Sprintf("password must not exceed %d bytes", models.BcryptMaxPasswordBytes)})
 			return
 		}
 
@@ -1921,6 +2304,8 @@ func (h *Handler) UpdateSettings(c *gin.Context) {
 	globalSettingsChanged := nextGlobalUpstreamEnabled != previous.GlobalUpstreamEnabled ||
 		nextGlobalUpstreamType != previous.GlobalUpstreamType ||
 		nextGlobalUpstreamConfig != previous.GlobalUpstreamConfig
+	globalDefinitionChanged := nextGlobalUpstreamType != previous.GlobalUpstreamType ||
+		nextGlobalUpstreamConfig != previous.GlobalUpstreamConfig
 	passwordChanged := req.AdminPassword != nil
 	if !portSettingsChanged && !globalSettingsChanged && !passwordChanged {
 		c.JSON(http.StatusOK, gin.H{"message": "settings unchanged", "changed": false})
@@ -1957,6 +2342,18 @@ func (h *Handler) UpdateSettings(c *gin.Context) {
 			`, nextStartPort, nextPreserveInboundPorts, nextGlobalUpstreamEnabled,
 				nextGlobalUpstreamType, nextGlobalUpstreamConfig); err != nil {
 				return err
+			}
+
+			if globalDefinitionChanged {
+				if _, err := tx.ExecContext(ctx, `
+					UPDATE settings
+					SET global_upstream_ip = '', global_upstream_location = '',
+					    global_upstream_country_code = '', global_upstream_latency = 0,
+					    global_upstream_error = ''
+					WHERE singleton_key = 1
+				`); err != nil {
+					return err
+				}
 			}
 
 			if shouldReassignInboundPorts {

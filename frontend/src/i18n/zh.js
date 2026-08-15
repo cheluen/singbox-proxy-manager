@@ -34,8 +34,7 @@ export default {
   setup_success: '管理员密码设置成功',
   setup_failed: '设置失败',
   login_subtitle: '统一管理节点配置、认证和转发状态',
-  admin_password_locked_hint: '当前管理员密码由 ADMIN_PASSWORD 环境变量管理',
-  admin_password_locked_desc: '当前部署已设置 ADMIN_PASSWORD，面板内无法修改管理员密码。如需修改，请更新部署环境变量后重启服务。',
+  password_max_72_bytes: '密码不能超过 72 字节',
   
   // Navigation
   nodes: '节点管理',
@@ -100,6 +99,20 @@ export default {
   upstream_configure: '配置前置代理',
   upstream_edit: '编辑前置代理',
   upstream_custom_required: '请先配置该节点的自定义前置代理',
+  upstream_link_placeholder: '粘贴受支持协议的代理连接串',
+  upstream_link_parsed: '连接串解析成功，可继续调整参数',
+  upstream_info: '前置代理信息',
+  upstream_policy: '代理策略',
+  upstream_address: '服务器地址',
+  upstream_saved: '前置代理设置已更新',
+  upstream_ip: '前置代理 IP',
+  upstream_location: '前置代理位置',
+  upstream_latency: '前置代理延迟',
+  upstream_check_error: '前置代理检测错误',
+  upstream_check_ip: '检测前置代理出口 IP',
+  upstream_check_success: '前置代理 IP 检测完成',
+  upstream_check_save_first: '请先保存前置代理配置后再检测',
+  check_ip: '测 IP',
   
   // Batch Operations
   batch_import_title: '批量导入节点',

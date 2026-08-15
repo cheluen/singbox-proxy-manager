@@ -282,8 +282,19 @@ const run = async () => {
     await page.click('tbody.ant-table-tbody tr[data-row-key="1"] .ant-table-row-expand-icon')
     await page.waitForSelector('tr.ant-table-expanded-row', { timeout: 10000 })
 
-    // Open remark panel (2nd panel: record + remark).
-    await page.click('tr.ant-table-expanded-row .ant-collapse-item:nth-child(2) .ant-collapse-header')
+    const remarkPanelOpened = await page.evaluate(() => {
+      const headers = Array.from(
+        document.querySelectorAll('tr.ant-table-expanded-row .ant-collapse-header')
+      )
+      const header = headers.find((candidate) => {
+        const label = (candidate.textContent || '').trim()
+        return label === 'Remark' || label === '备注'
+      })
+      if (!header) return false
+      header.click()
+      return true
+    })
+    assert(remarkPanelOpened, 'Remark panel header was not found')
     await page.waitForSelector('tr.ant-table-expanded-row .ant-collapse-item-active textarea', { timeout: 10000 })
 
     const typedRemark = 'remark-abc123'
@@ -292,8 +303,8 @@ const run = async () => {
 
     // Regression: typing should NOT auto-collapse the remark panel.
     const remarkPanelActive = await page.$eval(
-      'tr.ant-table-expanded-row .ant-collapse-item:nth-child(2)',
-      (node) => node.classList.contains('ant-collapse-item-active')
+      'tr.ant-table-expanded-row textarea',
+      (node) => node.closest('.ant-collapse-item')?.classList.contains('ant-collapse-item-active')
     )
     assert(remarkPanelActive, 'Remark panel collapsed unexpectedly after typing')
 
@@ -305,7 +316,11 @@ const run = async () => {
     )
     assert(textareaHasFocus, 'Remark textarea lost focus while typing')
 
-    await page.click('tr.ant-table-expanded-row .ant-collapse-item:nth-child(2) button.ant-btn-primary')
+    await page.$eval('tr.ant-table-expanded-row textarea', (node) => {
+      const button = node.closest('.ant-collapse-item')?.querySelector('button.ant-btn-primary')
+      if (!button) throw new Error('Remark save button was not found')
+      button.click()
+    })
     await sleep(800)
 
     const stateAfterSave = mockApi.getState()

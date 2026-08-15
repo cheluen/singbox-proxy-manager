@@ -3,15 +3,50 @@ package api
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"net/http"
+	"net/http/httptest"
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"sb-proxy/backend/models"
+	"sb-proxy/backend/services"
 
 	"github.com/gin-gonic/gin"
 )
+
+type staticSQLResult struct {
+	rowsAffected int64
+}
+
+func (result staticSQLResult) LastInsertId() (int64, error) {
+	return 0, nil
+}
+
+func (result staticSQLResult) RowsAffected() (int64, error) {
+	return result.rowsAffected, nil
+}
+
+func TestVerifyConditionalCheckUpdateHandlesMatchedRowsSemantics(t *testing.T) {
+	if err := verifyConditionalCheckUpdate(staticSQLResult{}, func() (bool, error) {
+		return true, nil
+	}); err != nil {
+		t.Fatalf("zero changed rows with an unchanged target was rejected: %v", err)
+	}
+	if err := verifyConditionalCheckUpdate(staticSQLResult{}, func() (bool, error) {
+		return false, nil
+	}); !errors.Is(err, errUpstreamDefinitionChanged) {
+		t.Fatalf("changed target was not detected: %v", err)
+	}
+	if err := verifyConditionalCheckUpdate(staticSQLResult{rowsAffected: 2}, func() (bool, error) {
+		return true, nil
+	}); err == nil {
+		t.Fatal("multi-row conditional update was accepted")
+	}
+}
 
 func TestCreateNodePersistsManagedUpstreamModes(t *testing.T) {
 	handler := newTestHandler(t, nil)
@@ -27,7 +62,7 @@ func TestCreateNodePersistsManagedUpstreamModes(t *testing.T) {
 	if err := json.Unmarshal(recorder.Body.Bytes(), &created); err != nil {
 		t.Fatalf("decode create response: %v", err)
 	}
-	if created.UpstreamMode != models.UpstreamModeGlobal {
+	if created.UpstreamMode != models.UpstreamModeNone {
 		t.Fatalf("default upstream mode=%q", created.UpstreamMode)
 	}
 
@@ -53,7 +88,7 @@ func TestCreateNodePersistsManagedUpstreamModes(t *testing.T) {
 	}
 }
 
-func TestReplaceNodeMovesLegacyNodeWithoutDetourToGlobalMode(t *testing.T) {
+func TestReplaceNodeMovesLegacyNodeWithoutDetourToDirectMode(t *testing.T) {
 	handler := newTestHandler(t, nil)
 	nodeID := insertTestNodeWithPortAndOrder(t, handler.db, "legacy", 36111, 0)
 	if _, err := handler.db.Exec(`
@@ -83,8 +118,8 @@ func TestReplaceNodeMovesLegacyNodeWithoutDetourToGlobalMode(t *testing.T) {
 	if err != nil {
 		t.Fatalf("load replaced node: %v", err)
 	}
-	if stored.UpstreamMode != models.UpstreamModeGlobal {
-		t.Fatalf("replaced legacy node mode=%q want %q", stored.UpstreamMode, models.UpstreamModeGlobal)
+	if stored.UpstreamMode != models.UpstreamModeNone {
+		t.Fatalf("replaced legacy node mode=%q want %q", stored.UpstreamMode, models.UpstreamModeNone)
 	}
 	if stored.Type != "socks5" || strings.Contains(stored.Config, `"detour"`) {
 		t.Fatalf("unexpected replacement config: type=%q config=%s", stored.Type, stored.Config)
@@ -121,7 +156,7 @@ func TestUpdateNodeRejectsLocalInboundUpstreamAndRollsBack(t *testing.T) {
 	if err != nil {
 		t.Fatalf("load rolled back node: %v", err)
 	}
-	if stored.UpstreamMode != models.UpstreamModeGlobal || stored.UpstreamType != "" {
+	if stored.UpstreamMode != models.UpstreamModeNone || stored.UpstreamType != "" {
 		t.Fatalf("failed mutation was persisted: %+v", stored)
 	}
 	if targetID == 0 {
@@ -131,7 +166,14 @@ func TestUpdateNodeRejectsLocalInboundUpstreamAndRollsBack(t *testing.T) {
 
 func TestUpdateSettingsAppliesGlobalUpstreamAndRejectsConflicts(t *testing.T) {
 	handler := newTestHandler(t, nil)
-	insertTestNodeWithPortAndOrder(t, handler.db, "node", 36201, 0)
+	nodeID := insertTestNodeWithPortAndOrder(t, handler.db, "node", 36201, 0)
+	if _, err := handler.db.Exec(
+		"UPDATE proxy_nodes SET upstream_mode = ? WHERE id = ?",
+		models.UpstreamModeGlobal,
+		nodeID,
+	); err != nil {
+		t.Fatalf("set node to follow global: %v", err)
+	}
 
 	valid := map[string]interface{}{
 		"global_upstream_enabled": true,
@@ -179,6 +221,66 @@ func TestUpdateSettingsAppliesGlobalUpstreamAndRejectsConflicts(t *testing.T) {
 	}
 }
 
+func TestUpdateNodeUpstreamChangesOnlyManagedUpstreamFields(t *testing.T) {
+	handler := newTestHandler(t, nil)
+	nodeID := insertTestNodeWithPortAndOrder(t, handler.db, "node", 36301, 0)
+	before, err := loadNodeByIDFrom(context.Background(), handler.db, nodeID)
+	if err != nil {
+		t.Fatalf("load original node: %v", err)
+	}
+
+	payload := map[string]interface{}{
+		"upstream_mode":   models.UpstreamModeCustom,
+		"upstream_type":   " SOCKS5 ",
+		"upstream_config": ` {"server":"upstream.example.com","server_port":1080} `,
+	}
+	recorder := postJSON(
+		t,
+		handler.UpdateNodeUpstream,
+		http.MethodPut,
+		"/api/nodes/"+strconv.Itoa(nodeID)+"/upstream",
+		payload,
+		ginParams("id", strconv.Itoa(nodeID)),
+	)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("update node upstream: status=%d body=%s", recorder.Code, recorder.Body.String())
+	}
+
+	after, err := loadNodeByIDFrom(context.Background(), handler.db, nodeID)
+	if err != nil {
+		t.Fatalf("load updated node: %v", err)
+	}
+	if after.UpstreamMode != models.UpstreamModeCustom || after.UpstreamType != "socks5" || !strings.Contains(after.UpstreamConfig, "upstream.example.com") {
+		t.Fatalf("unexpected managed upstream: %+v", after)
+	}
+	if after.Name != before.Name || after.Config != before.Config || after.InboundPort != before.InboundPort || after.Username != before.Username || after.Password != before.Password {
+		t.Fatalf("dedicated upstream update changed unrelated node fields: before=%+v after=%+v", before, after)
+	}
+
+	invalid := postJSON(
+		t,
+		handler.UpdateNodeUpstream,
+		http.MethodPut,
+		"/api/nodes/"+strconv.Itoa(nodeID)+"/upstream",
+		map[string]interface{}{
+			"upstream_mode":   models.UpstreamModeCustom,
+			"upstream_type":   "",
+			"upstream_config": "",
+		},
+		ginParams("id", strconv.Itoa(nodeID)),
+	)
+	if invalid.Code != http.StatusBadRequest {
+		t.Fatalf("invalid custom upstream was accepted: status=%d body=%s", invalid.Code, invalid.Body.String())
+	}
+	rolledBack, err := loadNodeByIDFrom(context.Background(), handler.db, nodeID)
+	if err != nil {
+		t.Fatalf("load rolled back node: %v", err)
+	}
+	if rolledBack.UpstreamMode != after.UpstreamMode || rolledBack.UpstreamConfig != after.UpstreamConfig {
+		t.Fatalf("invalid upstream update was persisted: %+v", rolledBack)
+	}
+}
+
 func TestUpdateSettingsCanDisableMalformedStoredGlobalUpstream(t *testing.T) {
 	handler := newTestHandler(t, nil)
 	if _, err := handler.db.Exec(`
@@ -209,6 +311,203 @@ func TestUpdateSettingsCanDisableMalformedStoredGlobalUpstream(t *testing.T) {
 	if settings.GlobalUpstreamEnabled {
 		t.Fatal("malformed global upstream remained enabled")
 	}
+}
+
+func TestCheckGlobalUpstreamIPPersistsSuccessAndFailure(t *testing.T) {
+	handler := newTestHandler(t, nil)
+	if _, err := handler.db.Exec(`
+		UPDATE settings
+		SET global_upstream_type = 'socks5',
+		    global_upstream_config = '{"server":"global.example.com","server_port":1080}'
+		WHERE singleton_key = 1
+	`); err != nil {
+		t.Fatalf("configure global upstream: %v", err)
+	}
+
+	handler.checkUpstreamIP = func(_ context.Context, definition models.ProxyDefinition) (*services.IPInfo, error) {
+		if definition.Type != "socks5" {
+			t.Fatalf("unexpected global upstream definition: %+v", definition)
+		}
+		return &services.IPInfo{IP: "198.51.100.30", Location: "Global", CountryCode: "GL", Latency: 42}, nil
+	}
+	success := postJSON(t, handler.CheckGlobalUpstreamIP, http.MethodPost, "/api/settings/upstream/check-ip", nil, nil)
+	if success.Code != http.StatusOK {
+		t.Fatalf("check global upstream: status=%d body=%s", success.Code, success.Body.String())
+	}
+	settings, err := loadRuntimeSettingsFrom(context.Background(), handler.db)
+	if err != nil {
+		t.Fatalf("load successful global check: %v", err)
+	}
+	if settings.GlobalUpstreamIP != "198.51.100.30" || settings.GlobalUpstreamLocation != "Global" || settings.GlobalUpstreamCountryCode != "GL" || settings.GlobalUpstreamLatency != 42 || settings.GlobalUpstreamError != "" {
+		t.Fatalf("unexpected successful global check: %+v", settings)
+	}
+
+	handler.checkUpstreamIP = func(context.Context, models.ProxyDefinition) (*services.IPInfo, error) {
+		return nil, fmt.Errorf("global upstream unavailable")
+	}
+	failure := postJSON(t, handler.CheckGlobalUpstreamIP, http.MethodPost, "/api/settings/upstream/check-ip", nil, nil)
+	if failure.Code != http.StatusBadGateway {
+		t.Fatalf("failed global check status=%d body=%s", failure.Code, failure.Body.String())
+	}
+	settings, err = loadRuntimeSettingsFrom(context.Background(), handler.db)
+	if err != nil {
+		t.Fatalf("load failed global check: %v", err)
+	}
+	if settings.GlobalUpstreamIP != "" || settings.GlobalUpstreamLatency != 0 || settings.GlobalUpstreamError != "global upstream unavailable" {
+		t.Fatalf("failed global check did not clear stale data: %+v", settings)
+	}
+
+	handler.checkUpstreamIP = func(context.Context, models.ProxyDefinition) (*services.IPInfo, error) {
+		return nil, nil
+	}
+	empty := postJSON(t, handler.CheckGlobalUpstreamIP, http.MethodPost, "/api/settings/upstream/check-ip", nil, nil)
+	if empty.Code != http.StatusBadGateway || !strings.Contains(empty.Body.String(), "upstream IP check returned no result") {
+		t.Fatalf("empty global check status=%d body=%s", empty.Code, empty.Body.String())
+	}
+	settings, err = loadRuntimeSettingsFrom(context.Background(), handler.db)
+	if err != nil {
+		t.Fatalf("load empty global check: %v", err)
+	}
+	if settings.GlobalUpstreamError != "upstream IP check returned no result" {
+		t.Fatalf("empty global check was not persisted: %+v", settings)
+	}
+}
+
+func TestUpstreamIPChecksDiscardResultsAfterDefinitionChanges(t *testing.T) {
+	type checkResponse struct {
+		status int
+		body   string
+	}
+
+	t.Run("node upstream", func(t *testing.T) {
+		handler := newTestHandler(t, func(string, string, string) (*services.IPInfo, error) {
+			return &services.IPInfo{IP: "203.0.113.60", Location: "Final", Latency: 50}, nil
+		})
+		handler.db.SetMaxOpenConns(1)
+		nodeID := insertTestNode(t, handler.db)
+		originalConfig := `{"server":"old.example.com","server_port":1080}`
+		if _, err := handler.db.Exec(`
+			UPDATE proxy_nodes
+			SET upstream_mode = 'custom', upstream_type = 'socks5', upstream_config = ?
+			WHERE id = ?
+		`, originalConfig, nodeID); err != nil {
+			t.Fatalf("configure original node upstream: %v", err)
+		}
+
+		started := make(chan struct{})
+		release := make(chan struct{})
+		handler.checkUpstreamIP = func(context.Context, models.ProxyDefinition) (*services.IPInfo, error) {
+			close(started)
+			<-release
+			return &services.IPInfo{IP: "198.51.100.60", Location: "Old upstream", Latency: 20}, nil
+		}
+		done := make(chan checkResponse, 1)
+		go func() {
+			recorder := httptest.NewRecorder()
+			ctx, _ := gin.CreateTestContext(recorder)
+			ctx.Params = ginParams("id", strconv.Itoa(nodeID))
+			ctx.Request, _ = http.NewRequest(http.MethodPost, "/api/nodes/"+strconv.Itoa(nodeID)+"/check-ip", nil)
+			handler.CheckNodeIP(ctx)
+			done <- checkResponse{status: recorder.Code, body: recorder.Body.String()}
+		}()
+
+		select {
+		case <-started:
+		case <-time.After(2 * time.Second):
+			t.Fatal("node upstream check did not start")
+		}
+		if _, err := handler.db.Exec(`
+			UPDATE proxy_nodes
+			SET upstream_mode = 'none', upstream_ip = '', upstream_error = ''
+			WHERE id = ?
+		`, nodeID); err != nil {
+			t.Fatalf("change node upstream during check: %v", err)
+		}
+		close(release)
+
+		var response checkResponse
+		select {
+		case response = <-done:
+		case <-time.After(2 * time.Second):
+			t.Fatal("node upstream check did not finish")
+		}
+		if response.status != http.StatusConflict || !strings.Contains(response.body, errUpstreamDefinitionChanged.Error()) {
+			t.Fatalf("stale node check response: status=%d body=%s", response.status, response.body)
+		}
+		var mode, upstreamIP, upstreamError string
+		if err := handler.db.QueryRow(`
+			SELECT upstream_mode, upstream_ip, upstream_error FROM proxy_nodes WHERE id = ?
+		`, nodeID).Scan(&mode, &upstreamIP, &upstreamError); err != nil {
+			t.Fatalf("query changed node upstream: %v", err)
+		}
+		if mode != models.UpstreamModeNone || upstreamIP != "" || upstreamError != "" {
+			t.Fatalf("stale node check overwrote changed definition: mode=%q ip=%q error=%q", mode, upstreamIP, upstreamError)
+		}
+	})
+
+	t.Run("global upstream", func(t *testing.T) {
+		handler := newTestHandler(t, nil)
+		handler.db.SetMaxOpenConns(1)
+		originalConfig := `{"server":"old-global.example.com","server_port":1080}`
+		newConfig := `{"server":"new-global.example.com","server_port":1080}`
+		if _, err := handler.db.Exec(`
+			UPDATE settings
+			SET global_upstream_type = 'socks5', global_upstream_config = ?
+			WHERE singleton_key = 1
+		`, originalConfig); err != nil {
+			t.Fatalf("configure original global upstream: %v", err)
+		}
+
+		started := make(chan struct{})
+		release := make(chan struct{})
+		handler.checkUpstreamIP = func(context.Context, models.ProxyDefinition) (*services.IPInfo, error) {
+			close(started)
+			<-release
+			return &services.IPInfo{IP: "198.51.100.61", Location: "Old global", Latency: 21}, nil
+		}
+		done := make(chan checkResponse, 1)
+		go func() {
+			recorder := httptest.NewRecorder()
+			ctx, _ := gin.CreateTestContext(recorder)
+			ctx.Request, _ = http.NewRequest(http.MethodPost, "/api/settings/upstream/check-ip", nil)
+			handler.CheckGlobalUpstreamIP(ctx)
+			done <- checkResponse{status: recorder.Code, body: recorder.Body.String()}
+		}()
+
+		select {
+		case <-started:
+		case <-time.After(2 * time.Second):
+			t.Fatal("global upstream check did not start")
+		}
+		if _, err := handler.db.Exec(`
+			UPDATE settings
+			SET global_upstream_config = ?, global_upstream_ip = '', global_upstream_error = ''
+			WHERE singleton_key = 1
+		`, newConfig); err != nil {
+			t.Fatalf("change global upstream during check: %v", err)
+		}
+		close(release)
+
+		var response checkResponse
+		select {
+		case response = <-done:
+		case <-time.After(2 * time.Second):
+			t.Fatal("global upstream check did not finish")
+		}
+		if response.status != http.StatusConflict || !strings.Contains(response.body, errUpstreamDefinitionChanged.Error()) {
+			t.Fatalf("stale global check response: status=%d body=%s", response.status, response.body)
+		}
+		var storedConfig, upstreamIP, upstreamError string
+		if err := handler.db.QueryRow(`
+			SELECT global_upstream_config, global_upstream_ip, global_upstream_error
+			FROM settings WHERE singleton_key = 1
+		`).Scan(&storedConfig, &upstreamIP, &upstreamError); err != nil {
+			t.Fatalf("query changed global upstream: %v", err)
+		}
+		if storedConfig != newConfig || upstreamIP != "" || upstreamError != "" {
+			t.Fatalf("stale global check overwrote changed definition: config=%q ip=%q error=%q", storedConfig, upstreamIP, upstreamError)
+		}
+	})
 }
 
 func ginParams(key string, value string) gin.Params {

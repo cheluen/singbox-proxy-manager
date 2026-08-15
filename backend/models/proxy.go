@@ -4,10 +4,10 @@ import (
 	"database/sql"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log"
-	"os"
 	"strings"
 	"time"
 
@@ -28,18 +28,23 @@ type ProxyNode struct {
 	Username          string `json:"username"`
 	Password          string `json:"password"`
 	// TCPReuseEnabled controls whether username+route-number routing can target this node.
-	TCPReuseEnabled bool      `json:"tcp_reuse_enabled"`
-	UpstreamMode    string    `json:"upstream_mode"`
-	UpstreamType    string    `json:"upstream_type"`
-	UpstreamConfig  string    `json:"upstream_config"`
-	SortOrder       int       `json:"sort_order"`
-	NodeIP          string    `json:"node_ip"`
-	Location        string    `json:"location"`
-	CountryCode     string    `json:"country_code"`
-	Latency         int       `json:"latency"` // in milliseconds
-	Enabled         bool      `json:"enabled"`
-	CreatedAt       time.Time `json:"created_at"`
-	UpdatedAt       time.Time `json:"updated_at"`
+	TCPReuseEnabled     bool      `json:"tcp_reuse_enabled"`
+	UpstreamMode        string    `json:"upstream_mode"`
+	UpstreamType        string    `json:"upstream_type"`
+	UpstreamConfig      string    `json:"upstream_config"`
+	UpstreamIP          string    `json:"upstream_ip"`
+	UpstreamLocation    string    `json:"upstream_location"`
+	UpstreamCountryCode string    `json:"upstream_country_code"`
+	UpstreamLatency     int       `json:"upstream_latency"`
+	UpstreamError       string    `json:"upstream_error"`
+	SortOrder           int       `json:"sort_order"`
+	NodeIP              string    `json:"node_ip"`
+	Location            string    `json:"location"`
+	CountryCode         string    `json:"country_code"`
+	Latency             int       `json:"latency"` // in milliseconds
+	Enabled             bool      `json:"enabled"`
+	CreatedAt           time.Time `json:"created_at"`
+	UpdatedAt           time.Time `json:"updated_at"`
 }
 
 const (
@@ -438,19 +443,29 @@ type WireGuardConfig struct {
 
 // Settings represents global settings
 type Settings struct {
-	ID                    int       `json:"id"`
-	SingletonKey          int       `json:"-"`
-	AdminPassword         string    `json:"admin_password"`
-	AdminPasswordSet      int       `json:"admin_password_set"`
-	AuthGeneration        int64     `json:"-"`
-	StartPort             int       `json:"start_port"`
-	PreserveInboundPorts  bool      `json:"preserve_inbound_ports"`
-	GlobalUpstreamEnabled bool      `json:"global_upstream_enabled"`
-	GlobalUpstreamType    string    `json:"global_upstream_type"`
-	GlobalUpstreamConfig  string    `json:"global_upstream_config"`
-	CreatedAt             time.Time `json:"created_at"`
-	UpdatedAt             time.Time `json:"updated_at"`
+	ID                          int       `json:"id"`
+	SingletonKey                int       `json:"-"`
+	AdminPassword               string    `json:"admin_password"`
+	AdminPasswordSet            int       `json:"admin_password_set"`
+	AdminPasswordEnvFingerprint string    `json:"-"`
+	AuthGeneration              int64     `json:"-"`
+	StartPort                   int       `json:"start_port"`
+	PreserveInboundPorts        bool      `json:"preserve_inbound_ports"`
+	GlobalUpstreamEnabled       bool      `json:"global_upstream_enabled"`
+	GlobalUpstreamType          string    `json:"global_upstream_type"`
+	GlobalUpstreamConfig        string    `json:"global_upstream_config"`
+	GlobalUpstreamIP            string    `json:"global_upstream_ip"`
+	GlobalUpstreamLocation      string    `json:"global_upstream_location"`
+	GlobalUpstreamCountryCode   string    `json:"global_upstream_country_code"`
+	GlobalUpstreamLatency       int       `json:"global_upstream_latency"`
+	GlobalUpstreamError         string    `json:"global_upstream_error"`
+	CreatedAt                   time.Time `json:"created_at"`
+	UpdatedAt                   time.Time `json:"updated_at"`
 }
+
+const BcryptMaxPasswordBytes = 72
+
+var ErrAdminPasswordRequired = errors.New("ADMIN_PASSWORD is required when the database has no valid admin password")
 
 // InitDB initializes the database
 func InitDB(db *sql.DB) error {
@@ -466,106 +481,17 @@ func InitDB(db *sql.DB) error {
 		return err
 	}
 	if count == 0 {
-		envPassword := strings.TrimSpace(os.Getenv("ADMIN_PASSWORD"))
-		if envPassword != "" {
-			hashedPassword, err := bcrypt.GenerateFromPassword([]byte(envPassword), bcrypt.DefaultCost)
-			if err != nil {
-				log.Printf("Failed to hash initial admin password: %v", err)
-				return err
-			}
-			_, err = db.Exec(`
-				INSERT INTO settings (
-					singleton_key, admin_password, admin_password_set, auth_generation,
-					start_port, preserve_inbound_ports, global_upstream_enabled,
-					global_upstream_type, global_upstream_config
-				)
-				VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-			`, 1, string(hashedPassword), 1, 1, 30001, false, false, "", "")
-			if err != nil {
-				return err
-			}
-			log.Println("Admin password is managed by ADMIN_PASSWORD (env) and has been hashed")
-		} else {
-			_, err = db.Exec(`
-				INSERT INTO settings (
-					singleton_key, admin_password, admin_password_set, auth_generation,
-					start_port, preserve_inbound_ports, global_upstream_enabled,
-					global_upstream_type, global_upstream_config
-				)
-				VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-			`, 1, "", 0, 0, 30001, false, false, "", "")
-			if err != nil {
-				return err
-			}
-			log.Println("No admin password configured; setup is required before first login")
-		}
-	} else {
-		// Self-heal legacy default password and migration state.
-		var settingsID int
-		var adminPassword string
-		var adminPasswordSet int
-		if err := db.QueryRow("SELECT id, admin_password, admin_password_set FROM settings WHERE singleton_key = 1").Scan(&settingsID, &adminPassword, &adminPasswordSet); err != nil {
+		_, err = db.Exec(`
+			INSERT INTO settings (
+				singleton_key, admin_password, admin_password_set,
+				admin_password_env_fingerprint, auth_generation,
+				start_port, preserve_inbound_ports, global_upstream_enabled,
+				global_upstream_type, global_upstream_config
+			)
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		`, 1, "", 0, "", 0, 30001, false, false, "", "")
+		if err != nil {
 			return err
-		}
-
-		// If stored admin_password is not a bcrypt hash, force reset.
-		if adminPassword != "" && !strings.HasPrefix(adminPassword, "$2") {
-			if _, err := db.Exec("UPDATE settings SET admin_password = '', admin_password_set = 0, auth_generation = auth_generation + 1, updated_at = CURRENT_TIMESTAMP WHERE id = ?", settingsID); err != nil {
-				return err
-			}
-			log.Println("Admin password storage format is invalid; setup is required")
-		} else if adminPassword != "" {
-			// If the stored hash matches the insecure legacy default, force reset.
-			if err := bcrypt.CompareHashAndPassword([]byte(adminPassword), []byte("admin123")); err == nil {
-				if _, err := db.Exec("UPDATE settings SET admin_password = '', admin_password_set = 0, auth_generation = auth_generation + 1, updated_at = CURRENT_TIMESTAMP WHERE id = ?", settingsID); err != nil {
-					return err
-				}
-				log.Println("Legacy default admin password detected; setup is required")
-			} else if adminPasswordSet == 0 {
-				// Mark as set for existing non-default password.
-				_, _ = db.Exec("UPDATE settings SET admin_password_set = 1 WHERE id = ?", settingsID)
-			}
-		} else if adminPasswordSet != 0 {
-			_, _ = db.Exec("UPDATE settings SET admin_password_set = 0, auth_generation = auth_generation + 1 WHERE id = ?", settingsID)
-		}
-
-		// If ADMIN_PASSWORD is provided, it becomes the source of truth and will forcibly
-		// overwrite the stored password on every start/restart. This guarantees recovery
-		// access even when the admin password is forgotten.
-		envPassword := strings.TrimSpace(os.Getenv("ADMIN_PASSWORD"))
-		if envPassword != "" {
-			var currentHash string
-			var currentSet int
-			if err := db.QueryRow("SELECT admin_password, admin_password_set FROM settings WHERE singleton_key = 1").Scan(&currentHash, &currentSet); err != nil {
-				return err
-			}
-
-			needReset := strings.TrimSpace(currentHash) == ""
-			if !needReset {
-				if err := bcrypt.CompareHashAndPassword([]byte(currentHash), []byte(envPassword)); err != nil {
-					needReset = true
-				}
-			}
-
-			if needReset {
-				hashedPassword, err := bcrypt.GenerateFromPassword([]byte(envPassword), bcrypt.DefaultCost)
-				if err != nil {
-					log.Printf("Failed to hash admin password from ADMIN_PASSWORD: %v", err)
-					return err
-				}
-				if _, err := db.Exec(
-					"UPDATE settings SET admin_password = ?, admin_password_set = 1, auth_generation = auth_generation + 1, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
-					string(hashedPassword),
-					settingsID,
-				); err != nil {
-					return err
-				}
-				// Revoke all sessions after password reset to force re-login.
-				_, _ = db.Exec("DELETE FROM admin_sessions")
-				log.Println("Admin password has been reset from ADMIN_PASSWORD (env); all sessions revoked")
-			} else if currentSet == 0 {
-				_, _ = db.Exec("UPDATE settings SET admin_password_set = 1 WHERE id = ?", settingsID)
-			}
 		}
 	}
 
@@ -578,6 +504,122 @@ func InitDB(db *sql.DB) error {
 	`, now)
 
 	return nil
+}
+
+// ReconcileAdminPassword applies ADMIN_PASSWORD only when its bcrypt fingerprint
+// differs from the environment value observed on the previous successful start.
+func ReconcileAdminPassword(db *sql.DB, environmentPassword string) error {
+	environmentPasswordProvided := strings.TrimSpace(environmentPassword) != ""
+	if environmentPasswordProvided && len([]byte(environmentPassword)) > BcryptMaxPasswordBytes {
+		return fmt.Errorf("ADMIN_PASSWORD must not exceed %d bytes", BcryptMaxPasswordBytes)
+	}
+
+	tx, err := db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+
+	var settingsID int
+	var storedHash string
+	var passwordSet int
+	var environmentFingerprint string
+	if err := tx.QueryRow(`
+		SELECT id, admin_password, admin_password_set, admin_password_env_fingerprint
+		FROM settings
+		WHERE singleton_key = 1
+	`).Scan(&settingsID, &storedHash, &passwordSet, &environmentFingerprint); err != nil {
+		return err
+	}
+
+	fingerprintMissing := strings.TrimSpace(environmentFingerprint) == ""
+	passwordValid := isValidAdminPasswordHash(storedHash)
+	if fingerprintMissing && isLegacyDefaultAdminPasswordHash(storedHash) {
+		passwordValid = false
+	}
+	if !environmentPasswordProvided {
+		if !passwordValid {
+			return ErrAdminPasswordRequired
+		}
+		if passwordSet == 0 {
+			if _, err := tx.Exec(
+				"UPDATE settings SET admin_password_set = 1, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
+				settingsID,
+			); err != nil {
+				return err
+			}
+		}
+		return tx.Commit()
+	}
+
+	if passwordValid && !fingerprintMissing && bcrypt.CompareHashAndPassword(
+		[]byte(environmentFingerprint),
+		[]byte(environmentPassword),
+	) == nil {
+		if passwordSet == 0 {
+			if _, err := tx.Exec(
+				"UPDATE settings SET admin_password_set = 1, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
+				settingsID,
+			); err != nil {
+				return err
+			}
+		}
+		return tx.Commit()
+	}
+
+	newFingerprint, err := bcrypt.GenerateFromPassword([]byte(environmentPassword), bcrypt.DefaultCost)
+	if err != nil {
+		return fmt.Errorf("hash ADMIN_PASSWORD fingerprint: %w", err)
+	}
+
+	if passwordValid && fingerprintMissing {
+		_, err = tx.Exec(`
+			UPDATE settings
+			SET admin_password_env_fingerprint = ?, admin_password_set = 1,
+			    updated_at = CURRENT_TIMESTAMP
+			WHERE id = ?
+		`, string(newFingerprint), settingsID)
+		if err != nil {
+			return err
+		}
+		log.Println("Recorded ADMIN_PASSWORD fingerprint for an existing database password")
+		return tx.Commit()
+	}
+
+	newPasswordHash, err := bcrypt.GenerateFromPassword([]byte(environmentPassword), bcrypt.DefaultCost)
+	if err != nil {
+		return fmt.Errorf("hash ADMIN_PASSWORD: %w", err)
+	}
+	if _, err := tx.Exec(`
+		UPDATE settings
+		SET admin_password = ?, admin_password_set = 1,
+		    admin_password_env_fingerprint = ?,
+		    auth_generation = auth_generation + 1,
+		    updated_at = CURRENT_TIMESTAMP
+		WHERE id = ?
+	`, string(newPasswordHash), string(newFingerprint), settingsID); err != nil {
+		return err
+	}
+	if _, err := tx.Exec("DELETE FROM admin_sessions"); err != nil {
+		return err
+	}
+	if err := tx.Commit(); err != nil {
+		return err
+	}
+	log.Println("Applied changed ADMIN_PASSWORD and revoked all admin sessions")
+	return nil
+}
+
+func isValidAdminPasswordHash(hash string) bool {
+	_, err := bcrypt.Cost([]byte(hash))
+	return err == nil
+}
+
+func isLegacyDefaultAdminPasswordHash(hash string) bool {
+	if !isValidAdminPasswordHash(hash) {
+		return false
+	}
+	return bcrypt.CompareHashAndPassword([]byte(hash), []byte("admin123")) == nil
 }
 
 func createSchema(db *sql.DB, dialect appdb.Dialect) error {
@@ -743,9 +785,14 @@ func schemaStatements(dialect appdb.Dialect) []string {
 				username TEXT NOT NULL DEFAULT '',
 				password TEXT NOT NULL DEFAULT '',
 				tcp_reuse_enabled BOOLEAN NOT NULL DEFAULT TRUE,
-				upstream_mode TEXT NOT NULL DEFAULT 'global',
+				upstream_mode TEXT NOT NULL DEFAULT 'none',
 				upstream_type TEXT NOT NULL DEFAULT '',
 				upstream_config TEXT NOT NULL DEFAULT '',
+				upstream_ip TEXT NOT NULL DEFAULT '',
+				upstream_location TEXT NOT NULL DEFAULT '',
+				upstream_country_code TEXT NOT NULL DEFAULT '',
+				upstream_latency INTEGER NOT NULL DEFAULT 0,
+				upstream_error TEXT NOT NULL DEFAULT '',
 				sort_order INTEGER NOT NULL,
 				node_ip TEXT NOT NULL DEFAULT '',
 				location TEXT NOT NULL DEFAULT '',
@@ -760,12 +807,18 @@ func schemaStatements(dialect appdb.Dialect) []string {
 				singleton_key SMALLINT NOT NULL DEFAULT 1,
 				admin_password TEXT NOT NULL,
 				admin_password_set INTEGER DEFAULT 0,
+				admin_password_env_fingerprint TEXT NOT NULL DEFAULT '',
 				auth_generation BIGINT NOT NULL DEFAULT 0,
 				start_port INTEGER DEFAULT 10000,
 				preserve_inbound_ports BOOLEAN NOT NULL DEFAULT FALSE,
 				global_upstream_enabled BOOLEAN NOT NULL DEFAULT FALSE,
 				global_upstream_type TEXT NOT NULL DEFAULT '',
 				global_upstream_config TEXT NOT NULL DEFAULT '',
+				global_upstream_ip TEXT NOT NULL DEFAULT '',
+				global_upstream_location TEXT NOT NULL DEFAULT '',
+				global_upstream_country_code TEXT NOT NULL DEFAULT '',
+				global_upstream_latency INTEGER NOT NULL DEFAULT 0,
+				global_upstream_error TEXT NOT NULL DEFAULT '',
 				created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
 				updated_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
 			)`,
@@ -792,9 +845,14 @@ func schemaStatements(dialect appdb.Dialect) []string {
 				username VARCHAR(255) NOT NULL DEFAULT '',
 				password VARCHAR(255) NOT NULL DEFAULT '',
 				tcp_reuse_enabled BOOLEAN NOT NULL DEFAULT TRUE,
-				upstream_mode VARCHAR(16) NOT NULL DEFAULT 'global',
+				upstream_mode VARCHAR(16) NOT NULL DEFAULT 'none',
 				upstream_type VARCHAR(64) NOT NULL DEFAULT '',
 				upstream_config LONGTEXT NOT NULL,
+				upstream_ip VARCHAR(255) NOT NULL DEFAULT '',
+				upstream_location VARCHAR(255) NOT NULL DEFAULT '',
+				upstream_country_code VARCHAR(32) NOT NULL DEFAULT '',
+				upstream_latency INTEGER NOT NULL DEFAULT 0,
+				upstream_error VARCHAR(2048) NOT NULL DEFAULT '',
 				sort_order INTEGER NOT NULL,
 				node_ip VARCHAR(255) NOT NULL DEFAULT '',
 				location VARCHAR(255) NOT NULL DEFAULT '',
@@ -809,12 +867,18 @@ func schemaStatements(dialect appdb.Dialect) []string {
 				singleton_key SMALLINT NOT NULL DEFAULT 1,
 				admin_password TEXT NOT NULL,
 				admin_password_set INTEGER DEFAULT 0,
+				admin_password_env_fingerprint VARCHAR(128) NOT NULL DEFAULT '',
 				auth_generation BIGINT NOT NULL DEFAULT 0,
 				start_port INTEGER DEFAULT 10000,
 				preserve_inbound_ports BOOLEAN NOT NULL DEFAULT FALSE,
 				global_upstream_enabled BOOLEAN NOT NULL DEFAULT FALSE,
 				global_upstream_type VARCHAR(64) NOT NULL DEFAULT '',
 				global_upstream_config LONGTEXT NOT NULL,
+				global_upstream_ip VARCHAR(255) NOT NULL DEFAULT '',
+				global_upstream_location VARCHAR(255) NOT NULL DEFAULT '',
+				global_upstream_country_code VARCHAR(32) NOT NULL DEFAULT '',
+				global_upstream_latency INTEGER NOT NULL DEFAULT 0,
+				global_upstream_error VARCHAR(2048) NOT NULL DEFAULT '',
 				created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
 				updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
 			)`,
@@ -841,9 +905,14 @@ func schemaStatements(dialect appdb.Dialect) []string {
 				username TEXT DEFAULT '',
 				password TEXT DEFAULT '',
 				tcp_reuse_enabled INTEGER NOT NULL DEFAULT 1,
-				upstream_mode TEXT NOT NULL DEFAULT 'global',
+				upstream_mode TEXT NOT NULL DEFAULT 'none',
 				upstream_type TEXT NOT NULL DEFAULT '',
 				upstream_config TEXT NOT NULL DEFAULT '',
+				upstream_ip TEXT NOT NULL DEFAULT '',
+				upstream_location TEXT NOT NULL DEFAULT '',
+				upstream_country_code TEXT NOT NULL DEFAULT '',
+				upstream_latency INTEGER NOT NULL DEFAULT 0,
+				upstream_error TEXT NOT NULL DEFAULT '',
 				sort_order INTEGER NOT NULL,
 				node_ip TEXT DEFAULT '',
 				location TEXT DEFAULT '',
@@ -858,12 +927,18 @@ func schemaStatements(dialect appdb.Dialect) []string {
 				singleton_key INTEGER NOT NULL DEFAULT 1,
 				admin_password TEXT NOT NULL,
 				admin_password_set INTEGER DEFAULT 0,
+				admin_password_env_fingerprint TEXT NOT NULL DEFAULT '',
 				auth_generation INTEGER NOT NULL DEFAULT 0,
 				start_port INTEGER DEFAULT 10000,
 				preserve_inbound_ports INTEGER NOT NULL DEFAULT 0,
 				global_upstream_enabled INTEGER NOT NULL DEFAULT 0,
 				global_upstream_type TEXT NOT NULL DEFAULT '',
 				global_upstream_config TEXT NOT NULL DEFAULT '',
+				global_upstream_ip TEXT NOT NULL DEFAULT '',
+				global_upstream_location TEXT NOT NULL DEFAULT '',
+				global_upstream_country_code TEXT NOT NULL DEFAULT '',
+				global_upstream_latency INTEGER NOT NULL DEFAULT 0,
+				global_upstream_error TEXT NOT NULL DEFAULT '',
 				created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
 				updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
 			)`,
@@ -890,13 +965,24 @@ func migrationColumns(dialect appdb.Dialect) []migrationColumn {
 			{Table: "proxy_nodes", Name: "upstream_mode", AlterSQL: "ALTER TABLE proxy_nodes ADD COLUMN upstream_mode TEXT NOT NULL DEFAULT 'legacy'"},
 			{Table: "proxy_nodes", Name: "upstream_type", AlterSQL: "ALTER TABLE proxy_nodes ADD COLUMN upstream_type TEXT NOT NULL DEFAULT ''"},
 			{Table: "proxy_nodes", Name: "upstream_config", AlterSQL: "ALTER TABLE proxy_nodes ADD COLUMN upstream_config TEXT NOT NULL DEFAULT ''"},
+			{Table: "proxy_nodes", Name: "upstream_ip", AlterSQL: "ALTER TABLE proxy_nodes ADD COLUMN upstream_ip TEXT NOT NULL DEFAULT ''"},
+			{Table: "proxy_nodes", Name: "upstream_location", AlterSQL: "ALTER TABLE proxy_nodes ADD COLUMN upstream_location TEXT NOT NULL DEFAULT ''"},
+			{Table: "proxy_nodes", Name: "upstream_country_code", AlterSQL: "ALTER TABLE proxy_nodes ADD COLUMN upstream_country_code TEXT NOT NULL DEFAULT ''"},
+			{Table: "proxy_nodes", Name: "upstream_latency", AlterSQL: "ALTER TABLE proxy_nodes ADD COLUMN upstream_latency INTEGER NOT NULL DEFAULT 0"},
+			{Table: "proxy_nodes", Name: "upstream_error", AlterSQL: "ALTER TABLE proxy_nodes ADD COLUMN upstream_error TEXT NOT NULL DEFAULT ''"},
 			{Table: "settings", Name: "singleton_key", AlterSQL: "ALTER TABLE settings ADD COLUMN singleton_key SMALLINT NOT NULL DEFAULT 1"},
 			{Table: "settings", Name: "admin_password_set", AlterSQL: "ALTER TABLE settings ADD COLUMN admin_password_set INTEGER DEFAULT 0"},
+			{Table: "settings", Name: "admin_password_env_fingerprint", AlterSQL: "ALTER TABLE settings ADD COLUMN admin_password_env_fingerprint TEXT NOT NULL DEFAULT ''"},
 			{Table: "settings", Name: "auth_generation", AlterSQL: "ALTER TABLE settings ADD COLUMN auth_generation BIGINT NOT NULL DEFAULT 0"},
 			{Table: "settings", Name: "preserve_inbound_ports", AlterSQL: "ALTER TABLE settings ADD COLUMN preserve_inbound_ports BOOLEAN NOT NULL DEFAULT FALSE"},
 			{Table: "settings", Name: "global_upstream_enabled", AlterSQL: "ALTER TABLE settings ADD COLUMN global_upstream_enabled BOOLEAN NOT NULL DEFAULT FALSE"},
 			{Table: "settings", Name: "global_upstream_type", AlterSQL: "ALTER TABLE settings ADD COLUMN global_upstream_type TEXT NOT NULL DEFAULT ''"},
 			{Table: "settings", Name: "global_upstream_config", AlterSQL: "ALTER TABLE settings ADD COLUMN global_upstream_config TEXT NOT NULL DEFAULT ''"},
+			{Table: "settings", Name: "global_upstream_ip", AlterSQL: "ALTER TABLE settings ADD COLUMN global_upstream_ip TEXT NOT NULL DEFAULT ''"},
+			{Table: "settings", Name: "global_upstream_location", AlterSQL: "ALTER TABLE settings ADD COLUMN global_upstream_location TEXT NOT NULL DEFAULT ''"},
+			{Table: "settings", Name: "global_upstream_country_code", AlterSQL: "ALTER TABLE settings ADD COLUMN global_upstream_country_code TEXT NOT NULL DEFAULT ''"},
+			{Table: "settings", Name: "global_upstream_latency", AlterSQL: "ALTER TABLE settings ADD COLUMN global_upstream_latency INTEGER NOT NULL DEFAULT 0"},
+			{Table: "settings", Name: "global_upstream_error", AlterSQL: "ALTER TABLE settings ADD COLUMN global_upstream_error TEXT NOT NULL DEFAULT ''"},
 			{Table: "admin_sessions", Name: "auth_generation", AlterSQL: "ALTER TABLE admin_sessions ADD COLUMN auth_generation BIGINT NOT NULL DEFAULT 0"},
 		}
 	case appdb.DialectMySQL:
@@ -907,13 +993,24 @@ func migrationColumns(dialect appdb.Dialect) []migrationColumn {
 			{Table: "proxy_nodes", Name: "upstream_mode", AlterSQL: "ALTER TABLE proxy_nodes ADD COLUMN upstream_mode VARCHAR(16) NOT NULL DEFAULT 'legacy'"},
 			{Table: "proxy_nodes", Name: "upstream_type", AlterSQL: "ALTER TABLE proxy_nodes ADD COLUMN upstream_type VARCHAR(64) NOT NULL DEFAULT ''"},
 			{Table: "proxy_nodes", Name: "upstream_config", AlterSQL: "ALTER TABLE proxy_nodes ADD COLUMN upstream_config LONGTEXT NULL"},
+			{Table: "proxy_nodes", Name: "upstream_ip", AlterSQL: "ALTER TABLE proxy_nodes ADD COLUMN upstream_ip VARCHAR(255) NOT NULL DEFAULT ''"},
+			{Table: "proxy_nodes", Name: "upstream_location", AlterSQL: "ALTER TABLE proxy_nodes ADD COLUMN upstream_location VARCHAR(255) NOT NULL DEFAULT ''"},
+			{Table: "proxy_nodes", Name: "upstream_country_code", AlterSQL: "ALTER TABLE proxy_nodes ADD COLUMN upstream_country_code VARCHAR(32) NOT NULL DEFAULT ''"},
+			{Table: "proxy_nodes", Name: "upstream_latency", AlterSQL: "ALTER TABLE proxy_nodes ADD COLUMN upstream_latency INTEGER NOT NULL DEFAULT 0"},
+			{Table: "proxy_nodes", Name: "upstream_error", AlterSQL: "ALTER TABLE proxy_nodes ADD COLUMN upstream_error VARCHAR(2048) NOT NULL DEFAULT ''"},
 			{Table: "settings", Name: "singleton_key", AlterSQL: "ALTER TABLE settings ADD COLUMN singleton_key SMALLINT NOT NULL DEFAULT 1"},
 			{Table: "settings", Name: "admin_password_set", AlterSQL: "ALTER TABLE settings ADD COLUMN admin_password_set INTEGER DEFAULT 0"},
+			{Table: "settings", Name: "admin_password_env_fingerprint", AlterSQL: "ALTER TABLE settings ADD COLUMN admin_password_env_fingerprint VARCHAR(128) NOT NULL DEFAULT ''"},
 			{Table: "settings", Name: "auth_generation", AlterSQL: "ALTER TABLE settings ADD COLUMN auth_generation BIGINT NOT NULL DEFAULT 0"},
 			{Table: "settings", Name: "preserve_inbound_ports", AlterSQL: "ALTER TABLE settings ADD COLUMN preserve_inbound_ports BOOLEAN NOT NULL DEFAULT FALSE"},
 			{Table: "settings", Name: "global_upstream_enabled", AlterSQL: "ALTER TABLE settings ADD COLUMN global_upstream_enabled BOOLEAN NOT NULL DEFAULT FALSE"},
 			{Table: "settings", Name: "global_upstream_type", AlterSQL: "ALTER TABLE settings ADD COLUMN global_upstream_type VARCHAR(64) NOT NULL DEFAULT ''"},
 			{Table: "settings", Name: "global_upstream_config", AlterSQL: "ALTER TABLE settings ADD COLUMN global_upstream_config LONGTEXT NULL"},
+			{Table: "settings", Name: "global_upstream_ip", AlterSQL: "ALTER TABLE settings ADD COLUMN global_upstream_ip VARCHAR(255) NOT NULL DEFAULT ''"},
+			{Table: "settings", Name: "global_upstream_location", AlterSQL: "ALTER TABLE settings ADD COLUMN global_upstream_location VARCHAR(255) NOT NULL DEFAULT ''"},
+			{Table: "settings", Name: "global_upstream_country_code", AlterSQL: "ALTER TABLE settings ADD COLUMN global_upstream_country_code VARCHAR(32) NOT NULL DEFAULT ''"},
+			{Table: "settings", Name: "global_upstream_latency", AlterSQL: "ALTER TABLE settings ADD COLUMN global_upstream_latency INTEGER NOT NULL DEFAULT 0"},
+			{Table: "settings", Name: "global_upstream_error", AlterSQL: "ALTER TABLE settings ADD COLUMN global_upstream_error VARCHAR(2048) NOT NULL DEFAULT ''"},
 			{Table: "admin_sessions", Name: "auth_generation", AlterSQL: "ALTER TABLE admin_sessions ADD COLUMN auth_generation BIGINT NOT NULL DEFAULT 0"},
 		}
 	default:
@@ -924,13 +1021,24 @@ func migrationColumns(dialect appdb.Dialect) []migrationColumn {
 			{Table: "proxy_nodes", Name: "upstream_mode", AlterSQL: "ALTER TABLE proxy_nodes ADD COLUMN upstream_mode TEXT NOT NULL DEFAULT 'legacy'"},
 			{Table: "proxy_nodes", Name: "upstream_type", AlterSQL: "ALTER TABLE proxy_nodes ADD COLUMN upstream_type TEXT NOT NULL DEFAULT ''"},
 			{Table: "proxy_nodes", Name: "upstream_config", AlterSQL: "ALTER TABLE proxy_nodes ADD COLUMN upstream_config TEXT NOT NULL DEFAULT ''"},
+			{Table: "proxy_nodes", Name: "upstream_ip", AlterSQL: "ALTER TABLE proxy_nodes ADD COLUMN upstream_ip TEXT NOT NULL DEFAULT ''"},
+			{Table: "proxy_nodes", Name: "upstream_location", AlterSQL: "ALTER TABLE proxy_nodes ADD COLUMN upstream_location TEXT NOT NULL DEFAULT ''"},
+			{Table: "proxy_nodes", Name: "upstream_country_code", AlterSQL: "ALTER TABLE proxy_nodes ADD COLUMN upstream_country_code TEXT NOT NULL DEFAULT ''"},
+			{Table: "proxy_nodes", Name: "upstream_latency", AlterSQL: "ALTER TABLE proxy_nodes ADD COLUMN upstream_latency INTEGER NOT NULL DEFAULT 0"},
+			{Table: "proxy_nodes", Name: "upstream_error", AlterSQL: "ALTER TABLE proxy_nodes ADD COLUMN upstream_error TEXT NOT NULL DEFAULT ''"},
 			{Table: "settings", Name: "singleton_key", AlterSQL: "ALTER TABLE settings ADD COLUMN singleton_key INTEGER NOT NULL DEFAULT 1"},
 			{Table: "settings", Name: "admin_password_set", AlterSQL: "ALTER TABLE settings ADD COLUMN admin_password_set INTEGER DEFAULT 0"},
+			{Table: "settings", Name: "admin_password_env_fingerprint", AlterSQL: "ALTER TABLE settings ADD COLUMN admin_password_env_fingerprint TEXT NOT NULL DEFAULT ''"},
 			{Table: "settings", Name: "auth_generation", AlterSQL: "ALTER TABLE settings ADD COLUMN auth_generation INTEGER NOT NULL DEFAULT 0"},
 			{Table: "settings", Name: "preserve_inbound_ports", AlterSQL: "ALTER TABLE settings ADD COLUMN preserve_inbound_ports INTEGER NOT NULL DEFAULT 0"},
 			{Table: "settings", Name: "global_upstream_enabled", AlterSQL: "ALTER TABLE settings ADD COLUMN global_upstream_enabled INTEGER NOT NULL DEFAULT 0"},
 			{Table: "settings", Name: "global_upstream_type", AlterSQL: "ALTER TABLE settings ADD COLUMN global_upstream_type TEXT NOT NULL DEFAULT ''"},
 			{Table: "settings", Name: "global_upstream_config", AlterSQL: "ALTER TABLE settings ADD COLUMN global_upstream_config TEXT NOT NULL DEFAULT ''"},
+			{Table: "settings", Name: "global_upstream_ip", AlterSQL: "ALTER TABLE settings ADD COLUMN global_upstream_ip TEXT NOT NULL DEFAULT ''"},
+			{Table: "settings", Name: "global_upstream_location", AlterSQL: "ALTER TABLE settings ADD COLUMN global_upstream_location TEXT NOT NULL DEFAULT ''"},
+			{Table: "settings", Name: "global_upstream_country_code", AlterSQL: "ALTER TABLE settings ADD COLUMN global_upstream_country_code TEXT NOT NULL DEFAULT ''"},
+			{Table: "settings", Name: "global_upstream_latency", AlterSQL: "ALTER TABLE settings ADD COLUMN global_upstream_latency INTEGER NOT NULL DEFAULT 0"},
+			{Table: "settings", Name: "global_upstream_error", AlterSQL: "ALTER TABLE settings ADD COLUMN global_upstream_error TEXT NOT NULL DEFAULT ''"},
 			{Table: "admin_sessions", Name: "auth_generation", AlterSQL: "ALTER TABLE admin_sessions ADD COLUMN auth_generation INTEGER NOT NULL DEFAULT 0"},
 		}
 	}

@@ -3,13 +3,91 @@ package api
 import (
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
 	"sb-proxy/backend/services"
 
 	"github.com/gin-gonic/gin"
+	"golang.org/x/crypto/bcrypt"
 )
+
+func TestLoginAndPanelPasswordChangeUseDatabaseWhenEnvironmentPasswordExists(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	t.Setenv("ADMIN_PASSWORD", "environment-password-123")
+	h := newTestHandler(t, nil)
+
+	panelPassword := "panel-password-456"
+	hash, err := bcrypt.GenerateFromPassword([]byte(panelPassword), bcrypt.DefaultCost)
+	if err != nil {
+		t.Fatalf("hash panel password: %v", err)
+	}
+	if _, err := h.db.Exec(
+		"UPDATE settings SET admin_password = ?, admin_password_set = 1 WHERE singleton_key = 1",
+		string(hash),
+	); err != nil {
+		t.Fatalf("seed panel password: %v", err)
+	}
+
+	login := postJSON(t, h.Login, http.MethodPost, "/api/login", map[string]string{"password": panelPassword}, nil)
+	if login.Code != http.StatusOK {
+		t.Fatalf("database password login failed: status=%d body=%s", login.Code, login.Body.String())
+	}
+	environmentLogin := postJSON(t, h.Login, http.MethodPost, "/api/login", map[string]string{"password": "environment-password-123"}, nil)
+	if environmentLogin.Code != http.StatusUnauthorized {
+		t.Fatalf("environment password bypassed database password: status=%d body=%s", environmentLogin.Code, environmentLogin.Body.String())
+	}
+
+	newPanelPassword := "new-panel-password-789"
+	update := postJSON(t, h.UpdateSettings, http.MethodPut, "/api/settings", map[string]string{"admin_password": newPanelPassword}, nil)
+	if update.Code != http.StatusOK {
+		t.Fatalf("panel password change was blocked by environment: status=%d body=%s", update.Code, update.Body.String())
+	}
+	var storedHash string
+	if err := h.db.QueryRow("SELECT admin_password FROM settings WHERE singleton_key = 1").Scan(&storedHash); err != nil {
+		t.Fatalf("query changed password: %v", err)
+	}
+	if err := bcrypt.CompareHashAndPassword([]byte(storedHash), []byte(newPanelPassword)); err != nil {
+		t.Fatalf("panel password was not persisted: %v", err)
+	}
+}
+
+func TestAdminPasswordEndpointsRejectBcryptOverflow(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	h := newTestHandler(t, nil)
+	overflow := strings.Repeat("x", 73)
+
+	setup := postJSON(t, h.SetupAdminPassword, http.MethodPost, "/api/setup/admin-password", map[string]string{"password": overflow}, nil)
+	if setup.Code != http.StatusBadRequest {
+		t.Fatalf("setup accepted bcrypt overflow: status=%d body=%s", setup.Code, setup.Body.String())
+	}
+	update := postJSON(t, h.UpdateSettings, http.MethodPut, "/api/settings", map[string]string{"admin_password": overflow}, nil)
+	if update.Code != http.StatusBadRequest {
+		t.Fatalf("settings accepted bcrypt overflow: status=%d body=%s", update.Code, update.Body.String())
+	}
+}
+
+func TestAdminPasswordEndpointsCountUnicodeCharacters(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	h := newTestHandler(t, nil)
+	shortUnicodePassword := strings.Repeat("\U0001F600", 4)
+
+	setup := postJSON(t, h.SetupAdminPassword, http.MethodPost, "/api/setup/admin-password", map[string]string{"password": shortUnicodePassword}, nil)
+	if setup.Code != http.StatusBadRequest {
+		t.Fatalf("setup accepted four Unicode characters: status=%d body=%s", setup.Code, setup.Body.String())
+	}
+	update := postJSON(t, h.UpdateSettings, http.MethodPut, "/api/settings", map[string]string{"admin_password": shortUnicodePassword}, nil)
+	if update.Code != http.StatusBadRequest {
+		t.Fatalf("settings accepted four Unicode characters: status=%d body=%s", update.Code, update.Body.String())
+	}
+
+	validUnicodePassword := strings.Repeat("\u754c", 8)
+	update = postJSON(t, h.UpdateSettings, http.MethodPut, "/api/settings", map[string]string{"admin_password": validUnicodePassword}, nil)
+	if update.Code != http.StatusOK {
+		t.Fatalf("settings rejected eight Unicode characters: status=%d body=%s", update.Code, update.Body.String())
+	}
+}
 
 func TestCreateAdminSession_DefaultTTLIs168Hours(t *testing.T) {
 	gin.SetMode(gin.TestMode)

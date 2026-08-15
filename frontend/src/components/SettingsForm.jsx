@@ -1,9 +1,22 @@
 import React, { useState, useEffect } from 'react'
-import { Form, Input, InputNumber, Button, message, Divider, Alert, Switch, Modal, Space } from 'antd'
-import { EditOutlined, PlusOutlined } from '@ant-design/icons'
+import {
+  Alert,
+  Button,
+  Descriptions,
+  Divider,
+  Form,
+  Input,
+  InputNumber,
+  message,
+  Modal,
+  Space,
+  Switch,
+  Tooltip,
+} from 'antd'
+import { EditOutlined, PlusOutlined, ThunderboltOutlined } from '@ant-design/icons'
 import { useTranslation } from 'react-i18next'
 import api from '../utils/api'
-import NodeForm from './NodeForm'
+import UpstreamEditor from './UpstreamEditor'
 
 function SettingsForm({ onClose, onUpdated, onPasswordChanged }) {
   const { t } = useTranslation()
@@ -11,10 +24,10 @@ function SettingsForm({ onClose, onUpdated, onPasswordChanged }) {
   const [loading, setLoading] = useState(false)
   const [loadingData, setLoadingData] = useState(true)
   const [settingsData, setSettingsData] = useState(null)
-  const [adminPasswordLocked, setAdminPasswordLocked] = useState(false)
   const [initialPreserveInboundPorts, setInitialPreserveInboundPorts] = useState(false)
   const [upstreamEditorOpen, setUpstreamEditorOpen] = useState(false)
   const [globalUpstream, setGlobalUpstream] = useState({ type: '', config: '' })
+  const [globalUpstreamChecking, setGlobalUpstreamChecking] = useState(false)
   const globalUpstreamEnabled = Form.useWatch('global_upstream_enabled', form)
 
   useEffect(() => {
@@ -25,7 +38,7 @@ function SettingsForm({ onClose, onUpdated, onPasswordChanged }) {
         const response = await api.get('/settings')
         if (cancelled) return
         setSettingsData(response.data)
-        setAdminPasswordLocked(Boolean(response.data?.admin_password_locked))
+        form.setFieldsValue(response.data)
         setInitialPreserveInboundPorts(Boolean(response.data?.preserve_inbound_ports))
         setGlobalUpstream({
           type: response.data?.global_upstream_type || '',
@@ -46,12 +59,6 @@ function SettingsForm({ onClose, onUpdated, onPasswordChanged }) {
       cancelled = true
     }
   }, [form, t])
-
-  useEffect(() => {
-    if (loadingData) return
-    if (!settingsData) return
-    form.setFieldsValue(settingsData)
-  }, [form, loadingData, settingsData])
 
   const confirmDisablePreserveInboundPorts = () =>
     new Promise((resolve) => {
@@ -87,7 +94,7 @@ function SettingsForm({ onClose, onUpdated, onPasswordChanged }) {
       ) {
         updateData.preserve_inbound_ports = Boolean(values.preserve_inbound_ports)
       }
-      if (!adminPasswordLocked && values.admin_password) {
+      if (values.admin_password) {
         updateData.admin_password = values.admin_password
       }
       if (
@@ -150,9 +157,51 @@ function SettingsForm({ onClose, onUpdated, onPasswordChanged }) {
   }
 
   const globalUpstreamConfigured = Boolean(globalUpstream.type && globalUpstream.config)
+  const globalUpstreamMatchesSaved = Boolean(
+    globalUpstreamConfigured &&
+      globalUpstream.type === (settingsData?.global_upstream_type || '') &&
+      globalUpstream.config === (settingsData?.global_upstream_config || '')
+  )
+  const hasGlobalUpstreamCheckResult = Boolean(
+    settingsData?.global_upstream_ip ||
+      settingsData?.global_upstream_location ||
+      settingsData?.global_upstream_country_code ||
+      settingsData?.global_upstream_latency ||
+      settingsData?.global_upstream_error
+  )
   const handleGlobalUpstreamSave = async (definition) => {
     setGlobalUpstream(definition)
     setUpstreamEditorOpen(false)
+  }
+  const handleGlobalUpstreamCheck = async () => {
+    if (!globalUpstreamMatchesSaved) return
+
+    setGlobalUpstreamChecking(true)
+    try {
+      const response = await api.post('/settings/upstream/check-ip')
+      setSettingsData((previous) => ({
+        ...previous,
+        global_upstream_ip: response.data?.ip || '',
+        global_upstream_location: response.data?.location || '',
+        global_upstream_country_code: response.data?.country_code || '',
+        global_upstream_latency: Number(response.data?.latency) || 0,
+        global_upstream_error: '',
+      }))
+      message.success(t('upstream_check_success'))
+    } catch (error) {
+      const errorMessage = error.response?.data?.error || t('server_error')
+      setSettingsData((previous) => ({
+        ...previous,
+        global_upstream_ip: '',
+        global_upstream_location: '',
+        global_upstream_country_code: '',
+        global_upstream_latency: 0,
+        global_upstream_error: errorMessage,
+      }))
+      message.error(errorMessage)
+    } finally {
+      setGlobalUpstreamChecking(false)
+    }
   }
 
   return (
@@ -214,8 +263,66 @@ function SettingsForm({ onClose, onUpdated, onPasswordChanged }) {
               ? `${t('upstream_edit')} · ${globalUpstream.type}`
               : t('upstream_configure')}
           </Button>
+          <Tooltip
+            title={globalUpstreamMatchesSaved ? t('upstream_check_ip') : t('upstream_check_save_first')}
+          >
+            <span>
+              <Button
+                icon={<ThunderboltOutlined />}
+                loading={globalUpstreamChecking}
+                disabled={!globalUpstreamMatchesSaved}
+                onClick={handleGlobalUpstreamCheck}
+                data-testid="global-upstream-check-ip"
+              >
+                {t('check_ip')}
+              </Button>
+            </span>
+          </Tooltip>
         </Space>
       </Form.Item>
+
+      {globalUpstreamMatchesSaved && hasGlobalUpstreamCheckResult ? (
+        <div data-testid="global-upstream-check-result" style={{ marginBottom: 16 }}>
+          {settingsData?.global_upstream_error ? (
+            <Alert
+              type="error"
+              showIcon
+              message={t('upstream_check_error')}
+              description={settingsData.global_upstream_error}
+            />
+          ) : (
+            <Descriptions
+              size="small"
+              column={1}
+              items={[
+                {
+                  key: 'ip',
+                  label: t('upstream_ip'),
+                  children: settingsData?.global_upstream_ip || '-',
+                },
+                {
+                  key: 'location',
+                  label: t('upstream_location'),
+                  children: [
+                    settingsData?.global_upstream_country_code,
+                    settingsData?.global_upstream_location,
+                  ]
+                    .filter(Boolean)
+                    .join(' ') || '-',
+                },
+                {
+                  key: 'latency',
+                  label: t('upstream_latency'),
+                  children:
+                    settingsData?.global_upstream_latency > 0
+                      ? `${settingsData.global_upstream_latency}ms`
+                      : '-',
+                },
+              ]}
+            />
+          )}
+        </div>
+      ) : null}
 
       <Modal
         title={t('upstream_global_proxy')}
@@ -225,11 +332,9 @@ function SettingsForm({ onClose, onUpdated, onPasswordChanged }) {
         destroyOnHidden
         onCancel={() => setUpstreamEditorOpen(false)}
       >
-        <NodeForm
-          key={`${globalUpstream.type}:${globalUpstream.config}`}
-          variant="upstream"
+        <UpstreamEditor
+          value={globalUpstreamConfigured ? globalUpstream : null}
           formName="global_upstream"
-          node={globalUpstreamConfigured ? globalUpstream : null}
           onSave={handleGlobalUpstreamSave}
           onCancel={() => setUpstreamEditorOpen(false)}
         />
@@ -237,24 +342,27 @@ function SettingsForm({ onClose, onUpdated, onPasswordChanged }) {
 
       <Divider />
 
-      {adminPasswordLocked ? (
-        <Alert
-          type="info"
-          showIcon
-          message={t('admin_password_locked_hint')}
-          description={t('admin_password_locked_desc')}
-          style={{ marginBottom: 16 }}
-        />
-      ) : (
-        <Form.Item
-          label={t('new_admin_password')}
-          name="admin_password"
-          extra={t('admin_password_leave_empty')}
-          rules={[{ min: 8, message: t('password_min_8') }]}
-        >
-          <Input.Password placeholder={t('admin_password_placeholder_optional')} />
-        </Form.Item>
-      )}
+      <Form.Item
+        label={t('new_admin_password')}
+        name="admin_password"
+        extra={t('admin_password_leave_empty')}
+        rules={[
+          {
+            validator: (_, value) => {
+              if (!value) return Promise.resolve()
+              if ([...value].length < 8) {
+                return Promise.reject(new Error(t('password_min_8')))
+              }
+              if (new TextEncoder().encode(value).length > 72) {
+                return Promise.reject(new Error(t('password_max_72_bytes')))
+              }
+              return Promise.resolve()
+            },
+          },
+        ]}
+      >
+        <Input.Password placeholder={t('admin_password_placeholder_optional')} />
+      </Form.Item>
 
       <Form.Item>
         <Button type="primary" htmlType="submit" loading={loading} block>

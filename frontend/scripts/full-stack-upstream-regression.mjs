@@ -263,18 +263,22 @@ const openSettings = async (page) => {
   await page.waitForSelector('[data-testid="settings-form"]', { visible: true, timeout: 10000 })
 }
 
-const openNodeEdit = async (page, nodeName) => {
-  const clicked = await page.evaluate((name) => {
-    const row = Array.from(document.querySelectorAll('tr[data-row-key]')).find((candidate) =>
-      (candidate.textContent || '').includes(name)
-    )
-    const button = row?.querySelector('.anticon-edit')?.closest('button')
-    if (!button) return false
-    button.click()
-    return true
-  }, nodeName)
-  assert(clicked, `Edit button not found for ${nodeName}`)
-  await page.waitForSelector('[data-testid="node-form"]', { visible: true, timeout: 10000 })
+const openNodeUpstream = async (page, nodeID) => {
+  const selector = `[data-testid="node-upstream-action-${nodeID}"]`
+  await page.waitForSelector(selector, { visible: true, timeout: 15000 })
+  await page.$eval(selector, (button) => button.click())
+  await page.waitForSelector('[data-testid="node-upstream-form"]', {
+    visible: true,
+    timeout: 10000,
+  })
+}
+
+const saveNodeUpstream = async (page) => {
+  await page.$eval('[data-testid="node-upstream-form"] button[type="submit"]', (button) => button.click())
+  await page.waitForSelector('[data-testid="node-upstream-form"]', {
+    hidden: true,
+    timeout: 15000,
+  })
 }
 
 const browserAPI = async (page, pathName, options = {}) =>
@@ -414,11 +418,8 @@ try {
   await setInput(page, '#name', 'full-stack-upstream-node')
   await selectOption(page, 'proxy_type', 'Direct (Local)')
   await setSwitch(page, '#auth_enabled', false)
-  const initialMode = await page.$eval(
-    '[data-testid="node-upstream-mode"] .ant-segmented-item-selected',
-    (element) => (element.textContent || '').trim()
-  )
-  assert(initialMode === 'Follow Global', `New node default mode=${initialMode}`)
+  const upstreamControlsInMainForm = await page.$('[data-testid="node-upstream-mode"]')
+  assert(!upstreamControlsInMainForm, 'Main node editor still contains upstream policy controls')
   const createResponsePromise = page.waitForResponse(
     (response) => response.url() === `${BASE_URL}/api/nodes` && response.request().method() === 'POST',
     { timeout: 15000 }
@@ -427,10 +428,24 @@ try {
   const createResponse = await createResponsePromise
   const createBody = await createResponse.json()
   assert(createResponse.status() === 201, `Create node failed (${createResponse.status()}): ${JSON.stringify(createBody)}`)
-  const inheritedNode = await waitForNodeMode(page, 'global')
+  const directNode = await waitForNodeMode(page, 'none')
 
   let generated = readGeneratedConfig(configDir)
   assert(entryByTag(generated.outbounds, 'managed-upstream-global')?.type === 'socks', 'Global upstream outbound is missing')
+  const directOutbound = entryByTag(generated.outbounds, `node-${directNode.id}-out`)
+  assert(!('detour' in directOutbound), `New node did not default to direct: ${JSON.stringify(directOutbound)}`)
+
+  await openNodeUpstream(page, directNode.id)
+  const initialMode = await page.$eval(
+    '[data-testid="node-upstream-mode"] .ant-segmented-item-selected',
+    (element) => (element.textContent || '').trim()
+  )
+  assert(initialMode === 'Direct', `New node upstream default mode=${initialMode}`)
+  await clickSegment(page, 'Follow Global')
+  await saveNodeUpstream(page)
+  const inheritedNode = await waitForNodeMode(page, 'global')
+
+  generated = readGeneratedConfig(configDir)
   const inheritedOutbound = entryByTag(generated.outbounds, `node-${inheritedNode.id}-out`)
   assert(
     inheritedOutbound?.type === 'selector' && inheritedOutbound?.default === 'managed-upstream-global',
@@ -447,7 +462,7 @@ try {
   )
 
   await sleep(500)
-  await openNodeEdit(page, 'full-stack-upstream-node')
+  await openNodeUpstream(page, inheritedNode.id)
   await clickSegment(page, 'Custom')
   await openUpstreamEditor(page, '[data-testid="node-upstream-configure"]')
   await selectOption(page, 'node_upstream_proxy_type', 'HTTP Proxy')
@@ -455,7 +470,7 @@ try {
   await setInput(page, '#node_upstream_server_port', 8080)
   await page.$eval('[data-testid="upstream-editor"] button[type="submit"]', (button) => button.click())
   await page.waitForSelector('[data-testid="upstream-editor"]', { hidden: true, timeout: 10000 })
-  await page.$eval('[data-testid="node-form"] button[type="submit"]', (button) => button.click())
+  await saveNodeUpstream(page)
   await waitForNodeMode(page, 'custom')
 
   generated = readGeneratedConfig(configDir)
@@ -467,13 +482,13 @@ try {
   )
 
   await sleep(500)
-  await openNodeEdit(page, 'full-stack-upstream-node')
+  await openNodeUpstream(page, inheritedNode.id)
   await clickSegment(page, 'Direct')
   if (ARTIFACT_DIR) {
     fs.mkdirSync(ARTIFACT_DIR, { recursive: true })
     await page.screenshot({ path: path.join(ARTIFACT_DIR, 'full-stack-upstream-node.png'), fullPage: true })
   }
-  await page.$eval('[data-testid="node-form"] button[type="submit"]', (button) => button.click())
+  await saveNodeUpstream(page)
   const bypassNode = await waitForNodeMode(page, 'none')
 
   generated = readGeneratedConfig(configDir)

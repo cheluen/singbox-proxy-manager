@@ -19,8 +19,8 @@ import {
     Select,
     AutoComplete,
     Grid,
-    Alert,
-  } from 'antd'
+  Alert,
+} from 'antd'
 import {
   LogoutOutlined,
   PlusOutlined,
@@ -40,6 +40,7 @@ import {
   FilterOutlined,
   GithubOutlined,
   ArrowUpOutlined,
+  ApiOutlined,
 } from '@ant-design/icons'
 import { useTranslation } from 'react-i18next'
 import { DragDropContext, Droppable, Draggable } from 'react-beautiful-dnd'
@@ -53,6 +54,7 @@ import NodeForm from './NodeForm'
 import SettingsForm from './SettingsForm'
 import BatchAuthModal from './BatchAuthModal'
 import ReplaceNodeModal from './ReplaceNodeModal'
+import NodeUpstreamForm from './NodeUpstreamForm'
 import { OFFICIAL_GITHUB_URL } from '../constants/project'
 
 const { Header, Content } = Layout
@@ -437,6 +439,8 @@ function Dashboard({ onLogout }) {
   const [batchImportVisible, setBatchImportVisible] = useState(false)
   const [importLinkVisible, setImportLinkVisible] = useState(false)
   const [editingNode, setEditingNode] = useState(null)
+  const [upstreamNode, setUpstreamNode] = useState(null)
+  const [upstreamVisible, setUpstreamVisible] = useState(false)
   const [selectedNodeIds, setSelectedNodeIds] = useState([])
   const [batchImportLinks, setBatchImportLinks] = useState('')
   const [batchImportSourceType, setBatchImportSourceType] = useState('auto')
@@ -1081,9 +1085,14 @@ function Dashboard({ onLogout }) {
         if ((prev?.username ?? '') !== (next?.username ?? '')) return false
         if ((prev?.password ?? '') !== (next?.password ?? '')) return false
         if ((prev?.tcp_reuse_enabled ?? true) !== (next?.tcp_reuse_enabled ?? true)) return false
-        if ((prev?.upstream_mode ?? 'global') !== (next?.upstream_mode ?? 'global')) return false
+        if ((prev?.upstream_mode ?? 'none') !== (next?.upstream_mode ?? 'none')) return false
         if ((prev?.upstream_type ?? '') !== (next?.upstream_type ?? '')) return false
         if ((prev?.upstream_config ?? '') !== (next?.upstream_config ?? '')) return false
+        if ((prev?.upstream_ip ?? '') !== (next?.upstream_ip ?? '')) return false
+        if ((prev?.upstream_location ?? '') !== (next?.upstream_location ?? '')) return false
+        if ((prev?.upstream_country_code ?? '') !== (next?.upstream_country_code ?? '')) return false
+        if ((prev?.upstream_latency ?? 0) !== (next?.upstream_latency ?? 0)) return false
+        if ((prev?.upstream_error ?? '') !== (next?.upstream_error ?? '')) return false
         if ((prev?.sort_order ?? 0) !== (next?.sort_order ?? 0)) return false
         if ((prev?.node_ip ?? '') !== (next?.node_ip ?? '')) return false
         if ((prev?.location ?? '') !== (next?.location ?? '')) return false
@@ -1261,7 +1270,7 @@ function Dashboard({ onLogout }) {
     })
   }
 
-  const applyNodeIPInfo = (id, ipInfo) => {
+  const applyNodeIPInfo = (id, ipInfo, { updateFinal = true } = {}) => {
     if (id === null || id === undefined) return
 
     const nodeIP = typeof ipInfo?.ip === 'string' ? ipInfo.ip : ''
@@ -1270,16 +1279,35 @@ function Dashboard({ onLogout }) {
       typeof ipInfo?.country_code === 'string' ? ipInfo.country_code : ''
     const latencyRaw = Number(ipInfo?.latency)
     const latency = Number.isFinite(latencyRaw) ? latencyRaw : 0
+    const hasUpstreamResult = Object.prototype.hasOwnProperty.call(ipInfo || {}, 'upstream')
+    const upstream = ipInfo?.upstream
+    const upstreamLatencyRaw = Number(upstream?.latency)
+    const upstreamFields = hasUpstreamResult
+      ? {
+          upstream_ip: typeof upstream?.ip === 'string' ? upstream.ip : '',
+          upstream_location:
+            typeof upstream?.location === 'string' ? upstream.location : '',
+          upstream_country_code:
+            typeof upstream?.country_code === 'string' ? upstream.country_code : '',
+          upstream_latency: Number.isFinite(upstreamLatencyRaw) ? upstreamLatencyRaw : 0,
+          upstream_error: typeof upstream?.error === 'string' ? upstream.error : '',
+        }
+      : null
 
     setNodes((prev) =>
       prev.map((node) =>
         String(node.id) === String(id)
           ? {
               ...node,
-              node_ip: nodeIP,
-              location,
-              country_code: countryCode,
-              latency,
+              ...(updateFinal
+                ? {
+                    node_ip: nodeIP,
+                    location,
+                    country_code: countryCode,
+                    latency,
+                  }
+                : {}),
+              ...(upstreamFields || {}),
             }
           : node
       )
@@ -1432,6 +1460,9 @@ function Dashboard({ onLogout }) {
           if (typeof statusCode === 'number' && statusCode >= 500) {
             clearNodeIPInfo(id)
           }
+          if (Object.prototype.hasOwnProperty.call(error?.response?.data || {}, 'upstream')) {
+            applyNodeIPInfo(id, error.response.data, { updateFinal: false })
+          }
           const msg = error.response?.data?.error || t('server_error')
           message.error(`ID ${id}: ${msg}`)
         } finally {
@@ -1573,6 +1604,26 @@ function Dashboard({ onLogout }) {
       config: node.config
     })
     setModalVisible(true)
+  }
+
+  const handleEditNodeUpstream = (node) => {
+    setUpstreamNode(node)
+    setUpstreamVisible(true)
+  }
+
+  const handleSaveNodeUpstream = async (values) => {
+    if (!upstreamNode?.id) return
+    const response = await api.put(`/nodes/${upstreamNode.id}/upstream`, values)
+    const updatedNode = response.data
+    setNodes((current) =>
+      current.map((node) =>
+        String(node.id) === String(upstreamNode.id) ? updatedNode : node
+      )
+    )
+    setUpstreamVisible(false)
+    setUpstreamNode(null)
+    message.success(t('upstream_saved'))
+    await loadNodes({ silent: true })
   }
 
   const handleDeleteNode = async (id) => {
@@ -1951,6 +2002,26 @@ function Dashboard({ onLogout }) {
     const expandedRowRender = (record) => {
       const saving = !!remarkSaving[record.id]
       const activeKeys = remarkPanelKeys[record.id] ?? []
+      const upstreamMode = record.upstream_mode || 'none'
+      const upstreamPolicy =
+        {
+          global: t('upstream_follow_global'),
+          custom: t('upstream_custom'),
+          none: t('upstream_direct'),
+          legacy: t('upstream_legacy'),
+        }[upstreamMode] || upstreamMode
+      let upstreamAddress = '-'
+      if (upstreamMode === 'custom' && record.upstream_config) {
+        try {
+          const config = JSON.parse(record.upstream_config)
+          const peer = Array.isArray(config.peers) ? config.peers[0] : null
+          const server = config.server || peer?.server || ''
+          const port = config.server_port || peer?.server_port || ''
+          upstreamAddress = server ? `${server}${port ? `:${port}` : ''}` : '-'
+        } catch {
+          upstreamAddress = '-'
+        }
+      }
 
       const statusText =
         record.node_ip && record.latency > 0
@@ -2057,6 +2128,71 @@ function Dashboard({ onLogout }) {
                       label: t('status'),
                       children: statusText,
                     },
+                  ]}
+                />
+              ),
+            },
+            {
+              key: 'upstream',
+              label: t('upstream_info'),
+              children: (
+                <Descriptions
+                  className="node-record-descriptions"
+                  size="small"
+                  column={isMobile ? 1 : 2}
+                  items={[
+                    {
+                      key: 'policy',
+                      label: t('upstream_policy'),
+                      children: upstreamPolicy,
+                    },
+                    {
+                      key: 'protocol',
+                      label: t('node_type'),
+                      children:
+                        upstreamMode === 'custom' && record.upstream_type
+                          ? String(record.upstream_type).toUpperCase()
+                          : '-',
+                    },
+                    {
+                      key: 'address',
+                      label: t('upstream_address'),
+                      children: upstreamAddress,
+                    },
+                    ...(upstreamMode === 'custom'
+                      ? [
+                          {
+                            key: 'upstream_ip',
+                            label: t('upstream_ip'),
+                            children: record.upstream_ip || '-',
+                          },
+                          {
+                            key: 'upstream_location',
+                            label: t('upstream_location'),
+                            children: formatCountryWithCode({
+                              location: record.upstream_location,
+                              country_code: record.upstream_country_code,
+                            }),
+                          },
+                          {
+                            key: 'upstream_latency',
+                            label: t('upstream_latency'),
+                            children:
+                              record.upstream_latency > 0
+                                ? `${record.upstream_latency}ms`
+                                : '-',
+                          },
+                          {
+                            key: 'upstream_error',
+                            label: t('upstream_check_error'),
+                            children: record.upstream_error ? (
+                              <Text type="danger">{record.upstream_error}</Text>
+                            ) : (
+                              '-'
+                            ),
+                          },
+                        ]
+                      : []),
                   ]}
                 />
               ),
@@ -2287,7 +2423,7 @@ function Dashboard({ onLogout }) {
       {
         title: t('actions'),
         key: 'actions',
-        width: isMobile ? 84 : 96,
+        width: isMobile ? 112 : 128,
         render: (_, record) => (
           <Space size={[4, 4]} wrap className="node-row-actions">
             <Tooltip title={t('export')}>
@@ -2314,6 +2450,17 @@ function Dashboard({ onLogout }) {
                 size="small"
                 icon={<EditOutlined />}
                 onClick={() => handleEditNode(record)}
+              />
+            </Tooltip>
+            <Tooltip title={t('upstream_mode')}>
+              <Button
+                type={record.upstream_mode === 'custom' ? 'primary' : 'text'}
+                size="small"
+                icon={<ApiOutlined />}
+                onClick={() => handleEditNodeUpstream(record)}
+                data-testid={`node-upstream-action-${record.id}`}
+                aria-label={t('upstream_mode')}
+                style={record.upstream_mode === 'custom' ? undefined : { color: '#8c8c8c' }}
               />
             </Tooltip>
             <Popconfirm
@@ -2779,6 +2926,28 @@ function Dashboard({ onLogout }) {
             setModalVisible(false)
             setEditingNode(null)
             setAutoCheckAfterCreate(false)
+          }}
+        />
+      </Modal>
+
+      <Modal
+        title={t('upstream_mode')}
+        open={upstreamVisible}
+        destroyOnHidden
+        footer={null}
+        width={760}
+        onCancel={() => {
+          setUpstreamVisible(false)
+          setUpstreamNode(null)
+        }}
+      >
+        <NodeUpstreamForm
+          key={`${upstreamNode?.id || 'none'}:${upstreamNode?.updated_at || ''}`}
+          node={upstreamNode}
+          onSave={handleSaveNodeUpstream}
+          onCancel={() => {
+            setUpstreamVisible(false)
+            setUpstreamNode(null)
           }}
         />
       </Modal>
