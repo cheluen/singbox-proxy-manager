@@ -43,7 +43,7 @@ func TestNormalizeMySQLDSNFromURL(t *testing.T) {
 	if err != nil {
 		t.Fatalf("normalizeMySQLDSN failed: %v", err)
 	}
-	for _, fragment := range []string{"user:pass@tcp(example.com:4000)/appdb", "charset=utf8mb4", "parseTime=true", "tls=true"} {
+	for _, fragment := range []string{"user:pass@tcp(example.com:4000)/appdb", "charset=utf8mb4", "clientFoundRows=true", "parseTime=true", "tls=true"} {
 		if !strings.Contains(dsn, fragment) {
 			t.Fatalf("dsn %q missing %q", dsn, fragment)
 		}
@@ -60,6 +60,16 @@ func TestNormalizeMySQLDSNDoesNotForceTLSForLocalhost(t *testing.T) {
 	}
 	if !strings.Contains(dsn, "parseTime=true") {
 		t.Fatalf("dsn should enable parseTime: %q", dsn)
+	}
+	if !strings.Contains(dsn, "clientFoundRows=true") {
+		t.Fatalf("dsn should report matched rows for idempotent updates: %q", dsn)
+	}
+}
+
+func TestEnsureMySQLDSNDefaultsOverridesChangedRowsMode(t *testing.T) {
+	dsn := ensureMySQLDSNDefaults("user:pass@tcp(127.0.0.1:3306)/appdb?clientFoundRows=false")
+	if !strings.Contains(dsn, "clientFoundRows=true") {
+		t.Fatalf("native dsn should force matched-row semantics: %q", dsn)
 	}
 }
 

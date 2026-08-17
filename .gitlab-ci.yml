@@ -7,6 +7,7 @@ stages:
 variables:
   DOCKER_IMAGE: $CI_REGISTRY_IMAGE
   DOCKER_TAG: $CI_COMMIT_SHORT_SHA
+  GOVULNCHECK_VERSION: v1.7.0
 
 # Go代码lint检查
 lint-backend:
@@ -45,10 +46,29 @@ lint-frontend:
       - merge_requests
   allow_failure: false
 
+# 后端可达漏洞扫描
+vulnerability-backend:
+  stage: test
+  image: golang:1.26.6
+  script:
+    - GOBIN="$CI_PROJECT_DIR/.ci-bin" go install "golang.org/x/vuln/cmd/govulncheck@$GOVULNCHECK_VERSION"
+    - CGO_ENABLED=0 go build -o "$CI_PROJECT_DIR/.ci-bin/sbpm-govulncheck-target" ./backend
+    - $CI_PROJECT_DIR/.ci-bin/govulncheck -mode=binary "$CI_PROJECT_DIR/.ci-bin/sbpm-govulncheck-target"
+  only:
+    changes:
+      - backend/**/*
+      - go.mod
+      - go.sum
+      - .gitlab-ci.yml
+    refs:
+      - main
+      - merge_requests
+  allow_failure: false
+
 # 后端Go编译测试
 test-backend:
   stage: test
-  image: golang:1.24
+  image: golang:1.26.6
   script:
     - go mod download
     - CGO_ENABLED=0 go build -o main ./backend
@@ -143,7 +163,7 @@ build-frontend-dist:
 # 构建FreeBSD完整发布包
 build-freebsd:
   stage: build
-  image: golang:1.24
+  image: golang:1.26.6
   needs:
     - job: build-frontend-dist
       artifacts: true
@@ -185,7 +205,7 @@ build-freebsd:
 # 构建Linux完整发布包
 build-linux:
   stage: build
-  image: golang:1.24
+  image: golang:1.26.6
   needs:
     - job: build-frontend-dist
       artifacts: true

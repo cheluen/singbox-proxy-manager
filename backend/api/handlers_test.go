@@ -43,6 +43,7 @@ sleep 300
 	}
 	t.Setenv("REAL_SINGBOX_BINARY", realBinary)
 	t.Setenv("SINGBOX_BINARY", wrapper)
+	t.Setenv("SINGBOX_ENV_ALLOWLIST", "REAL_SINGBOX_BINARY")
 }
 
 // newTestHandler builds a handler with in-memory sqlite and stubbed proxy checker.
@@ -326,6 +327,34 @@ func TestCheckNodeIPDatabaseFailureReturns500(t *testing.T) {
 	handler.CheckNodeIP(ctx)
 	if recorder.Code != http.StatusInternalServerError {
 		t.Fatalf("expected 500 for database failure, got %d body=%s", recorder.Code, recorder.Body.String())
+	}
+}
+
+func TestCheckNodeIPMapsExternalRateLimitToHTTP429(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	handler := newTestHandler(t, func(string, string, string) (*services.IPInfo, error) {
+		return nil, &services.IPCheckHTTPStatusError{
+			Service:    "ip-api.com",
+			StatusCode: http.StatusTooManyRequests,
+			Status:     "429 Too Many Requests",
+			RetryAfter: "23",
+		}
+	})
+	nodeID := insertTestNode(t, handler.db)
+
+	recorder := postJSON(
+		t,
+		handler.CheckNodeIP,
+		http.MethodPost,
+		fmt.Sprintf("/api/nodes/%d/check-ip", nodeID),
+		nil,
+		ginParams("id", strconv.Itoa(nodeID)),
+	)
+	if recorder.Code != http.StatusTooManyRequests || recorder.Header().Get("Retry-After") != "23" {
+		t.Fatalf("rate limit did not preserve HTTP semantics: status=%d retry=%q body=%s", recorder.Code, recorder.Header().Get("Retry-After"), recorder.Body.String())
+	}
+	if !strings.Contains(recorder.Body.String(), "rate limited") || !strings.Contains(recorder.Body.String(), "HTTP 429") {
+		t.Fatalf("rate-limit response is not actionable: %s", recorder.Body.String())
 	}
 }
 
@@ -1593,4 +1622,56 @@ func TestCreateDisabledNodeRejectsUnknownConfigField(t *testing.T) {
 	if rec.Code != http.StatusBadRequest {
 		t.Fatalf("unknown config fields must not be silently accepted, got %d body=%s", rec.Code, rec.Body.String())
 	}
+}
+
+func TestNodeMutationsRejectValuesThatMySQLWouldTruncate(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	handler := newTestHandler(t, nil)
+
+	t.Run("create name", func(t *testing.T) {
+		payload := map[string]interface{}{
+			"name":    strings.Repeat("名", maxNodeNameCharacters+1),
+			"type":    "direct",
+			"config":  `{}`,
+			"enabled": false,
+		}
+		recorder := postJSON(t, handler.CreateNode, http.MethodPost, "/api/nodes", payload, nil)
+		if recorder.Code != http.StatusBadRequest || !strings.Contains(recorder.Body.String(), "name must not exceed") {
+			t.Fatalf("overlong name was not rejected: status=%d body=%s", recorder.Code, recorder.Body.String())
+		}
+	})
+
+	nodeID := insertTestNode(t, handler.db)
+	t.Run("remark", func(t *testing.T) {
+		recorder := postJSON(
+			t,
+			handler.UpdateNodeRemark,
+			http.MethodPut,
+			fmt.Sprintf("/api/nodes/%d/remark", nodeID),
+			map[string]string{"remark": strings.Repeat("r", maxNodeRemarkCharacters+1)},
+			ginParams("id", strconv.Itoa(nodeID)),
+		)
+		if recorder.Code != http.StatusBadRequest || !strings.Contains(recorder.Body.String(), "remark must not exceed") {
+			t.Fatalf("overlong remark was not rejected: status=%d body=%s", recorder.Code, recorder.Body.String())
+		}
+	})
+
+	t.Run("batch password", func(t *testing.T) {
+		recorder := postJSON(
+			t,
+			handler.BatchSetAuth,
+			http.MethodPost,
+			"/api/nodes/batch-auth",
+			map[string]interface{}{
+				"node_ids":     []int{nodeID},
+				"username":     "user",
+				"password":     strings.Repeat("p", maxInboundCredentialCharacters+1),
+				"auth_enabled": true,
+			},
+			nil,
+		)
+		if recorder.Code != http.StatusBadRequest || !strings.Contains(recorder.Body.String(), "password must not exceed") {
+			t.Fatalf("overlong password was not rejected: status=%d body=%s", recorder.Code, recorder.Body.String())
+		}
+	})
 }

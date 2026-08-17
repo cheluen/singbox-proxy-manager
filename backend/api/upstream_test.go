@@ -373,6 +373,34 @@ func TestCheckGlobalUpstreamIPPersistsSuccessAndFailure(t *testing.T) {
 	}
 }
 
+func TestCheckGlobalUpstreamIPMapsExternalRateLimitToHTTP429(t *testing.T) {
+	handler := newTestHandler(t, nil)
+	if _, err := handler.db.Exec(`
+		UPDATE settings
+		SET global_upstream_type = 'socks5',
+		    global_upstream_config = '{"server":"global.example.com","server_port":1080}'
+		WHERE singleton_key = 1
+	`); err != nil {
+		t.Fatalf("configure global upstream: %v", err)
+	}
+	handler.checkUpstreamIP = func(context.Context, models.ProxyDefinition) (*services.IPInfo, error) {
+		return nil, &services.IPCheckHTTPStatusError{
+			Service:    "ip-api.com",
+			StatusCode: http.StatusTooManyRequests,
+			Status:     "429 Too Many Requests",
+			RetryAfter: "31",
+		}
+	}
+
+	recorder := postJSON(t, handler.CheckGlobalUpstreamIP, http.MethodPost, "/api/settings/upstream/check-ip", nil, nil)
+	if recorder.Code != http.StatusTooManyRequests || recorder.Header().Get("Retry-After") != "31" {
+		t.Fatalf("global rate limit did not preserve HTTP semantics: status=%d retry=%q body=%s", recorder.Code, recorder.Header().Get("Retry-After"), recorder.Body.String())
+	}
+	if !strings.Contains(recorder.Body.String(), "rate limited") || !strings.Contains(recorder.Body.String(), "HTTP 429") {
+		t.Fatalf("global rate-limit response is not actionable: %s", recorder.Body.String())
+	}
+}
+
 func TestUpstreamIPChecksDiscardResultsAfterDefinitionChanges(t *testing.T) {
 	type checkResponse struct {
 		status int

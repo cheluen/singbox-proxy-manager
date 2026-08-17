@@ -340,7 +340,7 @@ func main() {
 		Handler:           r,
 		ReadHeaderTimeout: readDurationEnv("HTTP_READ_HEADER_TIMEOUT", 5*time.Second),
 		ReadTimeout:       readDurationEnv("HTTP_READ_TIMEOUT", 15*time.Second),
-		WriteTimeout:      readDurationEnv("HTTP_WRITE_TIMEOUT", 30*time.Second),
+		WriteTimeout:      readDurationEnv("HTTP_WRITE_TIMEOUT", 2*time.Minute),
 		IdleTimeout:       readDurationEnv("HTTP_IDLE_TIMEOUT", 60*time.Second),
 		MaxHeaderBytes:    readIntEnv("HTTP_MAX_HEADER_BYTES", 1<<20),
 	}
@@ -578,10 +578,10 @@ func registerFrontendRoutes(r *gin.Engine, frontendDistDir string, appVersion st
 	)
 	indexContent = upsertIndexMetaTag(indexContent, "sbpm-nodes-virtual-threshold", nodesVirtualThresholdMeta)
 
-	batchCheckIPConcurrency := readIntEnv("SBPM_BATCH_CHECK_IP_CONCURRENCY", 10)
+	batchCheckIPConcurrency := readIntEnv("SBPM_BATCH_CHECK_IP_CONCURRENCY", 3)
 	if batchCheckIPConcurrency < 1 {
-		log.Printf("Invalid SBPM_BATCH_CHECK_IP_CONCURRENCY=%d, using default 10", batchCheckIPConcurrency)
-		batchCheckIPConcurrency = 10
+		log.Printf("Invalid SBPM_BATCH_CHECK_IP_CONCURRENCY=%d, using default 3", batchCheckIPConcurrency)
+		batchCheckIPConcurrency = 3
 	}
 	batchCheckIPConcurrencyMeta := fmt.Sprintf(
 		`    <meta name="sbpm-batch-check-ip-concurrency" content="%d" />`,

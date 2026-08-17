@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react'
+import { useEffect, useState } from 'react'
 import {
   Alert,
   Button,
@@ -44,12 +44,11 @@ function SettingsForm({ onClose, onUpdated, onPasswordChanged }) {
           type: response.data?.global_upstream_type || '',
           config: response.data?.global_upstream_config || '',
         })
-      } catch (error) {
+      } catch {
         if (cancelled) return
         message.error(t('settings_load_failed'))
       } finally {
-        if (cancelled) return
-        setLoadingData(false)
+        if (!cancelled) setLoadingData(false)
       }
     }
 

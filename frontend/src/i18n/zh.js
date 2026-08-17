@@ -23,8 +23,6 @@ export default {
   // Login
   login_title: '管理员登录',
   password: '密码',
-  new_password: '新密码',
-  confirm_password: '确认密码',
   login: '登录',
   setup: '设置密码',
   logout: '退出登录',

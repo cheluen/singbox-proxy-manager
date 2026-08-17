@@ -28,7 +28,7 @@ const batchCheckIPConcurrencyParsed = Number.parseInt(batchCheckIPConcurrencyRaw
 const batchCheckIPConcurrency =
   Number.isFinite(batchCheckIPConcurrencyParsed) && batchCheckIPConcurrencyParsed > 0
     ? batchCheckIPConcurrencyParsed
-    : 10
+    : 3
 
 const injectBuildMetaPlugin = () => ({
   name: 'inject-build-meta',

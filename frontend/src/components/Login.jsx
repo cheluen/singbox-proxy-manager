@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from 'react'
+import { useEffect, useState } from 'react'
 import { Form, Input, Button, Typography, message, Select } from 'antd'
 import { GithubOutlined, LockOutlined } from '@ant-design/icons'
 import { useTranslation } from 'react-i18next'
@@ -21,7 +21,7 @@ function Login({ onLogin }) {
         if (ignore) return
         const { setup_required } = response.data || {}
         setSetupRequired(Boolean(setup_required))
-      } catch (error) {
+      } catch {
         // Fallback to normal login form if status endpoint is unavailable.
       } finally {
         if (!ignore) setLoadingStatus(false)

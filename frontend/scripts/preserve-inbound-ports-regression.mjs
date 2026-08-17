@@ -100,6 +100,7 @@ const getBrowserExecutablePath = () => {
         fs.accessSync(candidate, fs.constants.X_OK)
         return candidate
       } catch {
+        // Try the next installed browser candidate.
       }
     }
   }
@@ -243,6 +244,7 @@ const startMockApi = async () => {
     try {
       primary.server.close()
     } catch {
+      // The primary listener may already have closed itself.
     }
   }
 
@@ -258,6 +260,7 @@ const waitForHttpReady = async (url, timeoutMs) => {
       const response = await fetch(url)
       if (response.status < 500) return
     } catch {
+      // Retry until the readiness deadline.
     }
     await sleep(500)
   }

@@ -11,6 +11,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 	"unicode/utf8"
 
@@ -20,12 +21,105 @@ import (
 )
 
 const (
-	maxBatchImportItems       = 2000
-	maxBatchImportFetches     = 20
-	maxBatchImportExpandDepth = 3
-	maxSubscriptionBytes      = 5 << 20 // 5MB
-	subscriptionFetchTimeout  = 15 * time.Second
+	maxBatchImportItems         = 2000
+	maxBatchImportFetches       = 20
+	maxBatchImportExpandDepth   = 3
+	maxSubscriptionBytes        = 5 << 20 // 5MB
+	subscriptionFetchTimeout    = 15 * time.Second
+	batchImportFetchConcurrency = 5
+	batchImportTotalTimeout     = 70 * time.Second
 )
+
+type batchImportExpansionState struct {
+	mu         sync.Mutex
+	visited    map[string]struct{}
+	fetchCount int
+	fetchSlots chan struct{}
+}
+
+func newBatchImportExpansionState() *batchImportExpansionState {
+	return &batchImportExpansionState{
+		visited:    make(map[string]struct{}),
+		fetchSlots: make(chan struct{}, batchImportFetchConcurrency),
+	}
+}
+
+func (s *batchImportExpansionState) reserveFetch(rawURL string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if _, exists := s.visited[rawURL]; exists {
+		return fmt.Errorf("subscription URL was already processed")
+	}
+	if s.fetchCount >= maxBatchImportFetches {
+		return fmt.Errorf("too many subscription urls (>%d)", maxBatchImportFetches)
+	}
+	s.visited[rawURL] = struct{}{}
+	s.fetchCount++
+	return nil
+}
+
+func (s *batchImportExpansionState) fetch(ctx context.Context, rawURL string) (string, error) {
+	select {
+	case s.fetchSlots <- struct{}{}:
+		defer func() { <-s.fetchSlots }()
+	case <-ctx.Done():
+		return "", ctx.Err()
+	}
+	return fetchSubscription(ctx, rawURL)
+}
+
+type batchExpansionResult struct {
+	items    []ImportItem
+	failures []ImportFailure
+	err      error
+}
+
+func expandInputsOrdered(
+	ctx context.Context,
+	inputs []string,
+	expand func(context.Context, string) ([]ImportItem, []ImportFailure, error),
+) ([]ImportItem, []ImportFailure, error) {
+	if len(inputs) == 0 {
+		return nil, nil, nil
+	}
+	results := make([]batchExpansionResult, len(inputs))
+	jobs := make(chan int, len(inputs))
+	for index := range inputs {
+		jobs <- index
+	}
+	close(jobs)
+
+	workerCount := min(len(inputs), batchImportFetchConcurrency)
+	var workers sync.WaitGroup
+	workers.Add(workerCount)
+	for worker := 0; worker < workerCount; worker++ {
+		go func() {
+			defer workers.Done()
+			for index := range jobs {
+				results[index].items, results[index].failures, results[index].err = expand(ctx, inputs[index])
+			}
+		}()
+	}
+	workers.Wait()
+
+	var items []ImportItem
+	var failures []ImportFailure
+	for index, result := range results {
+		if result.err != nil {
+			failures = append(failures, ImportFailure{
+				Source: summarizeSource(inputs[index]),
+				Error:  result.err.Error(),
+			})
+		} else {
+			items = append(items, result.items...)
+			failures = append(failures, result.failures...)
+		}
+		if len(items)+len(failures) > maxBatchImportItems {
+			return nil, nil, fmt.Errorf("too many nodes (>%d)", maxBatchImportItems)
+		}
+	}
+	return items, failures, nil
+}
 
 type BatchImportSourceType string
 
@@ -74,9 +168,28 @@ func ExpandBatchImportSourcesWithType(ctx context.Context, sources []string, sou
 	if err != nil {
 		return nil, nil, err
 	}
+	ctx, cancel := context.WithTimeout(ctx, batchImportTotalTimeout)
+	defer cancel()
 
-	visited := make(map[string]struct{})
-	fetchCount := 0
+	state := newBatchImportExpansionState()
+	if len(sources) > 1 {
+		normalizedSources := make([]string, 0, len(sources))
+		for _, source := range sources {
+			if normalized := normalizeImportText(source); normalized != "" {
+				normalizedSources = append(normalizedSources, normalized)
+			}
+		}
+		return expandInputsOrdered(ctx, normalizedSources, func(workerCtx context.Context, source string) ([]ImportItem, []ImportFailure, error) {
+			switch parsedSourceType {
+			case BatchImportSourceSubscription:
+				return expandExplicitSubscriptionSources(workerCtx, source, state)
+			case BatchImportSourceHTTPProxy:
+				return expandExplicitHTTPProxySources(source)
+			default:
+				return expandBatchImportInput(workerCtx, source, 0, true, state)
+			}
+		})
+	}
 
 	var items []ImportItem
 	var failures []ImportFailure
@@ -91,11 +204,11 @@ func ExpandBatchImportSourcesWithType(ctx context.Context, sources []string, sou
 		var expFailures []ImportFailure
 		switch parsedSourceType {
 		case BatchImportSourceSubscription:
-			expItems, expFailures, err = expandExplicitSubscriptionSources(ctx, src, visited, &fetchCount)
+			expItems, expFailures, err = expandExplicitSubscriptionSources(ctx, src, state)
 		case BatchImportSourceHTTPProxy:
 			expItems, expFailures, err = expandExplicitHTTPProxySources(src)
 		default:
-			expItems, expFailures, err = expandBatchImportInput(ctx, src, 0, true, visited, &fetchCount)
+			expItems, expFailures, err = expandBatchImportInput(ctx, src, 0, true, state)
 		}
 		if err != nil {
 			failures = append(failures, ImportFailure{
@@ -120,9 +233,11 @@ func expandBatchImportInput(
 	input string,
 	depth int,
 	allowSubscriptionFetch bool,
-	visited map[string]struct{},
-	fetchCount *int,
+	state *batchImportExpansionState,
 ) ([]ImportItem, []ImportFailure, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, nil, fmt.Errorf("batch import deadline exceeded: %w", err)
+	}
 	if depth > maxBatchImportExpandDepth {
 		return nil, nil, fmt.Errorf("subscription nesting too deep")
 	}
@@ -145,30 +260,15 @@ func expandBatchImportInput(
 	if decoded, ok, err := decodeBase64Subscription(input); err != nil {
 		return nil, nil, err
 	} else if ok {
-		return expandBatchImportInput(ctx, decoded, depth+1, false, visited, fetchCount)
+		return expandBatchImportInput(ctx, decoded, depth+1, false, state)
 	}
 
 	// 3) Multi-line share links / subscription URLs
 	lines := splitNonEmptyLines(input)
 	if len(lines) > 1 {
-		var items []ImportItem
-		var failures []ImportFailure
-		for _, line := range lines {
-			subItems, subFailures, err := expandBatchImportInput(ctx, line, depth, allowSubscriptionFetch, visited, fetchCount)
-			if err != nil {
-				failures = append(failures, ImportFailure{
-					Source: summarizeSource(line),
-					Error:  err.Error(),
-				})
-				continue
-			}
-			items = append(items, subItems...)
-			failures = append(failures, subFailures...)
-			if len(items)+len(failures) > maxBatchImportItems {
-				return nil, nil, fmt.Errorf("too many nodes (>%d)", maxBatchImportItems)
-			}
-		}
-		return items, failures, nil
+		return expandInputsOrdered(ctx, lines, func(workerCtx context.Context, line string) ([]ImportItem, []ImportFailure, error) {
+			return expandBatchImportInput(workerCtx, line, depth, allowSubscriptionFetch, state)
+		})
 	}
 
 	// 4) Single-line subscription URL or share link
@@ -185,7 +285,7 @@ func expandBatchImportInput(
 			return validatedShareLinkItem(input)
 		}
 
-		return fetchAndExpandSubscription(ctx, input, u, depth, visited, fetchCount)
+		return fetchAndExpandSubscription(ctx, input, u, depth, state)
 	}
 
 	return validatedShareLinkItem(input)
@@ -194,36 +294,24 @@ func expandBatchImportInput(
 func expandExplicitSubscriptionSources(
 	ctx context.Context,
 	input string,
-	visited map[string]struct{},
-	fetchCount *int,
+	state *batchImportExpansionState,
 ) ([]ImportItem, []ImportFailure, error) {
 	lines := splitNonEmptyLines(input)
 	if len(lines) == 0 {
 		return nil, nil, nil
 	}
 
-	var items []ImportItem
-	var failures []ImportFailure
-	for _, line := range lines {
+	return expandInputsOrdered(ctx, lines, func(workerCtx context.Context, line string) ([]ImportItem, []ImportFailure, error) {
 		if !isHTTPURL(line) {
-			failures = append(failures, ImportFailure{Source: summarizeSource(line), Error: "subscription source must be an http or https URL"})
-			continue
+			return nil, nil, fmt.Errorf("subscription source must be an http or https URL")
 		}
 		u, err := url.Parse(line)
 		if err != nil || u.Hostname() == "" {
-			failures = append(failures, ImportFailure{Source: summarizeSource(line), Error: "invalid subscription URL"})
-			continue
+			return nil, nil, fmt.Errorf("invalid subscription URL")
 		}
 		u.Scheme = strings.ToLower(u.Scheme)
-		expanded, expandedFailures, err := fetchAndExpandSubscription(ctx, line, u, 0, visited, fetchCount)
-		if err != nil {
-			failures = append(failures, ImportFailure{Source: summarizeSource(line), Error: err.Error()})
-			continue
-		}
-		items = append(items, expanded...)
-		failures = append(failures, expandedFailures...)
-	}
-	return items, failures, nil
+		return fetchAndExpandSubscription(workerCtx, line, u, 0, state)
+	})
 }
 
 func expandExplicitHTTPProxySources(input string) ([]ImportItem, []ImportFailure, error) {
@@ -254,27 +342,21 @@ func fetchAndExpandSubscription(
 	source string,
 	u *url.URL,
 	depth int,
-	visited map[string]struct{},
-	fetchCount *int,
+	state *batchImportExpansionState,
 ) ([]ImportItem, []ImportFailure, error) {
 	if u == nil || u.Hostname() == "" {
 		return nil, nil, fmt.Errorf("invalid subscription URL")
 	}
 	normalizedURL := u.String()
-	if _, ok := visited[normalizedURL]; ok {
-		return nil, nil, fmt.Errorf("subscription URL was already processed")
+	if err := state.reserveFetch(normalizedURL); err != nil {
+		return nil, nil, err
 	}
-	if *fetchCount >= maxBatchImportFetches {
-		return nil, nil, fmt.Errorf("too many subscription urls (>%d)", maxBatchImportFetches)
-	}
-	visited[normalizedURL] = struct{}{}
-	*fetchCount++
 
-	body, err := fetchSubscription(ctx, normalizedURL)
+	body, err := state.fetch(ctx, normalizedURL)
 	if err != nil {
 		return nil, nil, fmt.Errorf("subscription request failed: %w", err)
 	}
-	items, failures, err := expandBatchImportInput(ctx, body, depth+1, false, visited, fetchCount)
+	items, failures, err := expandBatchImportInput(ctx, body, depth+1, false, state)
 	if err != nil {
 		return nil, nil, fmt.Errorf("invalid subscription payload: %w", err)
 	}

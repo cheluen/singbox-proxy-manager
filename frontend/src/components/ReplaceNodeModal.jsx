@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from 'react'
+import { memo, useEffect, useState } from 'react'
 import { Checkbox, Input, Modal, Space } from 'antd'
 import { useTranslation } from 'react-i18next'
 
@@ -49,4 +49,4 @@ function ReplaceNodeModal({ open, loading, nodeId, onCancel, onConfirm }) {
   )
 }
 
-export default React.memo(ReplaceNodeModal)
+export default memo(ReplaceNodeModal)

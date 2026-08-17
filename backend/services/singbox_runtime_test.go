@@ -32,6 +32,7 @@ exit 17
 	t.Setenv("SBPM_SINGBOX_RECOVERY_MAX_DELAY", "20ms")
 	t.Setenv("SBPM_SINGBOX_RECOVERY_STABLE_WINDOW", "1s")
 	t.Setenv("SBPM_TEST_STABLE_MARKER", stableMarker)
+	t.Setenv("SINGBOX_ENV_ALLOWLIST", "SBPM_TEST_STABLE_MARKER")
 
 	service := NewSingBoxService(configDir)
 	if err := service.GenerateGlobalConfig(nil); err != nil {
@@ -112,6 +113,7 @@ exit 17
 	t.Setenv("SBPM_SINGBOX_RECOVERY_STABLE_WINDOW", "1s")
 	t.Setenv("SBPM_TEST_ACTIVE_DIR", activeDir)
 	t.Setenv("SBPM_TEST_OVERLAP_FILE", overlapPath)
+	t.Setenv("SINGBOX_ENV_ALLOWLIST", "SBPM_TEST_ACTIVE_DIR,SBPM_TEST_OVERLAP_FILE")
 
 	service := NewSingBoxService(configDir)
 	if err := service.GenerateGlobalConfig(nil); err != nil {
@@ -199,6 +201,7 @@ exec sleep 300
 	t.Setenv("SBPM_SINGBOX_RECOVERY_BASE_DELAY", "10ms")
 	t.Setenv("SBPM_SINGBOX_RECOVERY_MAX_DELAY", "10ms")
 	t.Setenv("SBPM_TEST_FIRST_BAD_RUN", firstBadRunMarker)
+	t.Setenv("SINGBOX_ENV_ALLOWLIST", "SBPM_TEST_FIRST_BAD_RUN")
 
 	badConfig := []byte(`{"generation":"bad"}`)
 	goodConfig := []byte(`{"generation":"good"}`)

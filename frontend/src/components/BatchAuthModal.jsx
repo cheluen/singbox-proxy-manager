@@ -1,8 +1,8 @@
-import React, { useEffect } from 'react'
+import { useEffect } from 'react'
 import { Modal, Form, Input, Switch } from 'antd'
 import { useTranslation } from 'react-i18next'
 
-function BatchAuthModal({ visible, selectedNodes, onClose, onSave }) {
+function BatchAuthModal({ visible, onClose, onSave }) {
   const { t } = useTranslation()
   const [form] = Form.useForm()
   const authEnabled = Form.useWatch('auth_enabled', form)

@@ -3,12 +3,139 @@ package services
 import (
 	"context"
 	"encoding/base64"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"strings"
+	"sync"
 	"testing"
+	"time"
 
 	"sb-proxy/backend/models"
 )
+
+func TestExpandBatchImportSourcesFetchesSubscriptionsWithBoundedConcurrency(t *testing.T) {
+	useLoopbackSubscriptionClientForTest(t)
+
+	var mu sync.Mutex
+	active := 0
+	maximumActive := 0
+	started := make(chan struct{}, 20)
+	release := make(chan struct{})
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		active++
+		if active > maximumActive {
+			maximumActive = active
+		}
+		mu.Unlock()
+		started <- struct{}{}
+
+		select {
+		case <-release:
+		case <-r.Context().Done():
+			return
+		}
+
+		mu.Lock()
+		active--
+		mu.Unlock()
+		_, _ = fmt.Fprintf(w, "socks5://127.0.0.1:1080#node%s", strings.TrimPrefix(r.URL.Path, "/"))
+	}))
+	t.Cleanup(server.Close)
+
+	urls := make([]string, 10)
+	for index := range urls {
+		urls[index] = fmt.Sprintf("%s/%02d", server.URL, index)
+	}
+	type expansionResult struct {
+		items    []ImportItem
+		failures []ImportFailure
+		err      error
+	}
+	done := make(chan expansionResult, 1)
+	go func() {
+		items, failures, err := ExpandBatchImportSourcesWithType(
+			context.Background(),
+			[]string{strings.Join(urls, "\n")},
+			BatchImportSourceSubscription,
+		)
+		done <- expansionResult{items: items, failures: failures, err: err}
+	}()
+
+	for count := 0; count < 2; count++ {
+		select {
+		case <-started:
+		case <-time.After(time.Second):
+			close(release)
+			result := <-done
+			t.Fatalf("subscription fetches remained serial: %+v", result)
+		}
+	}
+	close(release)
+	result := <-done
+	if result.err != nil || len(result.failures) != 0 || len(result.items) != len(urls) {
+		t.Fatalf("unexpected concurrent expansion result: items=%d failures=%+v err=%v", len(result.items), result.failures, result.err)
+	}
+	mu.Lock()
+	observedMaximum := maximumActive
+	mu.Unlock()
+	if observedMaximum < 2 || observedMaximum > batchImportFetchConcurrency {
+		t.Fatalf("unexpected maximum subscription concurrency: got %d want 2..%d", observedMaximum, batchImportFetchConcurrency)
+	}
+	for index, item := range result.items {
+		wantSuffix := fmt.Sprintf("#node%02d", index)
+		if !strings.HasSuffix(item.Link, wantSuffix) {
+			t.Fatalf("result order changed at index %d: link=%q want suffix=%q", index, item.Link, wantSuffix)
+		}
+	}
+}
+
+func TestExpandBatchImportSourcesStopsWhenRequestIsCancelled(t *testing.T) {
+	useLoopbackSubscriptionClientForTest(t)
+
+	started := make(chan struct{})
+	server := httptest.NewServer(http.HandlerFunc(func(_ http.ResponseWriter, request *http.Request) {
+		close(started)
+		<-request.Context().Done()
+	}))
+	t.Cleanup(server.Close)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	type expansionResult struct {
+		items    []ImportItem
+		failures []ImportFailure
+		err      error
+	}
+	done := make(chan expansionResult, 1)
+	go func() {
+		items, failures, err := ExpandBatchImportSourcesWithType(
+			ctx,
+			[]string{server.URL},
+			BatchImportSourceSubscription,
+		)
+		done <- expansionResult{items: items, failures: failures, err: err}
+	}()
+
+	select {
+	case <-started:
+	case <-time.After(time.Second):
+		t.Fatal("subscription request did not start")
+	}
+	cancel()
+
+	select {
+	case result := <-done:
+		if result.err != nil || len(result.items) != 0 || len(result.failures) != 1 {
+			t.Fatalf("unexpected cancellation result: items=%d failures=%+v err=%v", len(result.items), result.failures, result.err)
+		}
+		if !strings.Contains(result.failures[0].Error, context.Canceled.Error()) {
+			t.Fatalf("cancellation cause was lost: %+v", result.failures)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("batch import ignored request cancellation")
+	}
+}
 
 func useLoopbackSubscriptionClientForTest(t *testing.T) {
 	t.Helper()

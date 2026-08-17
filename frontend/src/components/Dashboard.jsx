@@ -1,4 +1,4 @@
-import React, { useMemo, useState, useEffect, useRef, useCallback, useLayoutEffect } from 'react'
+import { createContext, useContext, useMemo, useState, useEffect, useRef, useCallback, useLayoutEffect } from 'react'
 import {
     Layout,
     Typography,
@@ -61,13 +61,13 @@ const { Header, Content } = Layout
 const { Title, Text } = Typography
 const { TextArea } = Input
 
-const DragHandleContext = React.createContext({
+const DragHandleContext = createContext({
   dragHandleProps: null,
   isDragging: false,
 })
 
 function NodeDragHandle({ recordId, disabled, isDragging, title }) {
-  const dragHandleContext = React.useContext(DragHandleContext)
+  const dragHandleContext = useContext(DragHandleContext)
   const dragHandleProps = disabled ? null : dragHandleContext.dragHandleProps
   const dragging = isDragging || dragHandleContext.isDragging
 
@@ -558,6 +558,90 @@ function Dashboard({ onLogout }) {
     })
   }, [displayNodeIdSet])
 
+  const loadNodes = useCallback(async (options = {}) => {
+    const silent = !!options?.silent
+    const previousRequest = loadNodesRequestRef.current
+    previousRequest.controller?.abort()
+    const controller = new AbortController()
+    const requestSequence = previousRequest.sequence + 1
+    loadNodesRequestRef.current = { sequence: requestSequence, controller }
+    if (!silent) {
+      setLoading(true)
+    }
+    try {
+      const response = await api.get('/nodes', { signal: controller.signal })
+      if (loadNodesRequestRef.current.sequence !== requestSequence) {
+        return
+      }
+      const nextNodes = response.data || []
+      const prevNodes = Array.isArray(nodesRef.current) ? nodesRef.current : []
+
+      const isSameNode = (prev, next) => {
+        if (!prev || !next) return false
+        if (String(prev?.id) !== String(next?.id)) return false
+        if ((prev?.name ?? '') !== (next?.name ?? '')) return false
+        if ((prev?.remark ?? '') !== (next?.remark ?? '')) return false
+        if ((prev?.type ?? '') !== (next?.type ?? '')) return false
+        if ((prev?.config ?? '') !== (next?.config ?? '')) return false
+        if ((prev?.inbound_port ?? 0) !== (next?.inbound_port ?? 0)) return false
+        if (Boolean(prev?.inbound_port_pinned) !== Boolean(next?.inbound_port_pinned)) return false
+        if ((prev?.username ?? '') !== (next?.username ?? '')) return false
+        if ((prev?.password ?? '') !== (next?.password ?? '')) return false
+        if ((prev?.tcp_reuse_enabled ?? true) !== (next?.tcp_reuse_enabled ?? true)) return false
+        if ((prev?.upstream_mode ?? 'none') !== (next?.upstream_mode ?? 'none')) return false
+        if ((prev?.upstream_type ?? '') !== (next?.upstream_type ?? '')) return false
+        if ((prev?.upstream_config ?? '') !== (next?.upstream_config ?? '')) return false
+        if ((prev?.upstream_ip ?? '') !== (next?.upstream_ip ?? '')) return false
+        if ((prev?.upstream_location ?? '') !== (next?.upstream_location ?? '')) return false
+        if ((prev?.upstream_country_code ?? '') !== (next?.upstream_country_code ?? '')) return false
+        if ((prev?.upstream_latency ?? 0) !== (next?.upstream_latency ?? 0)) return false
+        if ((prev?.upstream_error ?? '') !== (next?.upstream_error ?? '')) return false
+        if ((prev?.sort_order ?? 0) !== (next?.sort_order ?? 0)) return false
+        if ((prev?.node_ip ?? '') !== (next?.node_ip ?? '')) return false
+        if ((prev?.location ?? '') !== (next?.location ?? '')) return false
+        if ((prev?.country_code ?? '') !== (next?.country_code ?? '')) return false
+        if ((prev?.latency ?? 0) !== (next?.latency ?? 0)) return false
+        if ((prev?.enabled ?? true) !== (next?.enabled ?? true)) return false
+        if ((prev?.created_at ?? '') !== (next?.created_at ?? '')) return false
+        if ((prev?.updated_at ?? '') !== (next?.updated_at ?? '')) return false
+        return true
+      }
+
+      const isSameNodeList = (prevList, nextList) => {
+        if (prevList === nextList) return true
+        if (!Array.isArray(prevList) || !Array.isArray(nextList)) return false
+        if (prevList.length !== nextList.length) return false
+        for (let i = 0; i < nextList.length; i += 1) {
+          if (!isSameNode(prevList[i], nextList[i])) return false
+        }
+        return true
+      }
+
+      if (isSameNodeList(prevNodes, nextNodes)) {
+        return
+      }
+      const nextIdSet = new Set(nextNodes.map((node) => String(node?.id)))
+
+      setNodes(nextNodes)
+      setExpandedRowKeys((prev) =>
+        prev.filter((key) => nextIdSet.has(String(key)))
+      )
+      setSelectedNodeIds((prev) =>
+        prev.filter((id) => nextIdSet.has(String(id)))
+      )
+    } catch (error) {
+      const obsolete = loadNodesRequestRef.current.sequence !== requestSequence
+      if (!obsolete && error?.code !== 'ERR_CANCELED') {
+        message.error(t('network_error'))
+      }
+    } finally {
+      if (loadNodesRequestRef.current.sequence === requestSequence) {
+        loadNodesRequestRef.current.controller = null
+        setLoading(false)
+      }
+    }
+  }, [t])
+
   const cleanupVirtualDrag = useCallback(() => {
     const meta = virtualDragMetaRef.current
     if (!meta) {
@@ -608,12 +692,12 @@ function Dashboard({ onLogout }) {
         await api.post('/nodes/reorder', { nodes: orderMap })
         message.success(t('nodes_reordered'))
         await loadNodes({ silent: true })
-      } catch (error) {
+      } catch {
         message.error(t('server_error'))
         await loadNodes({ silent: true })
       }
     },
-    [t]
+    [loadNodes, t]
   )
 
   const reorderNodesByDisplayIndex = useCallback(
@@ -668,12 +752,12 @@ function Dashboard({ onLogout }) {
         await api.post('/nodes/reorder', { nodes: orderMap })
         message.success(t('nodes_reordered'))
         await loadNodes({ silent: true })
-      } catch (error) {
+      } catch {
         message.error(t('server_error'))
         await loadNodes({ silent: true })
       }
     },
-    [reorderNodesByIndex, t]
+    [loadNodes, reorderNodesByIndex, t]
   )
 
   const reorderNodesByDisplayId = useCallback(
@@ -687,15 +771,15 @@ function Dashboard({ onLogout }) {
     [reorderNodesByDisplayIndex]
   )
 
-	  const resolveTableScrollContainer = useCallback(() => {
-	    const root = tableContainerRef.current
-	    if (!root) return null
+  const resolveTableScrollContainer = useCallback(() => {
+    const root = tableContainerRef.current
+    if (!root) return null
 
-	    const virtualHolder = root.querySelector('.ant-table-tbody-virtual-holder')
-	    if (virtualHolder) return virtualHolder
+    const virtualHolder = root.querySelector('.ant-table-tbody-virtual-holder')
+    if (virtualHolder) return virtualHolder
 
-	    const body = root.querySelector('.ant-table-body')
-	    if (body) return body
+    const body = root.querySelector('.ant-table-body')
+    if (body) return body
 
     const content = root.querySelector('.ant-table-content')
     if (content && content.scrollHeight > content.clientHeight) return content
@@ -980,7 +1064,7 @@ function Dashboard({ onLogout }) {
     }
   }, [cleanupVirtualDrag, dragSortAllowed])
 
-  const loadSettings = async (options = {}) => {
+  const loadSettings = useCallback(async (options = {}) => {
     const silent = !!options?.silent
     try {
       const response = await api.get('/settings')
@@ -991,16 +1075,16 @@ function Dashboard({ onLogout }) {
         message.error(t('settings_load_failed'))
       }
     }
-  }
+  }, [t])
 
-  const loadRuntimeStatus = async () => {
+  const loadRuntimeStatus = useCallback(async () => {
     try {
       const response = await api.get('/runtime/status')
       setRuntimeStatus(response.data || null)
     } catch {
       // A transient status request failure must not hide the last known state.
     }
-  }
+  }, [])
 
   const handleRuntimeRestart = async () => {
     try {
@@ -1018,21 +1102,7 @@ function Dashboard({ onLogout }) {
     }
   }
 
-  useEffect(() => {
-    loadNodes()
-    loadVersion()
-    loadSettings({ silent: true })
-    loadRuntimeStatus()
-
-    const runtimePoll = window.setInterval(loadRuntimeStatus, 5000)
-    return () => {
-      window.clearInterval(runtimePoll)
-      loadNodesRequestRef.current.controller?.abort()
-      loadNodesRequestRef.current.sequence += 1
-    }
-  }, [])
-
-  const loadVersion = async () => {
+  const loadVersion = useCallback(async () => {
     try {
       const response = await api.get('/version')
       const serverVersion = response.data?.version || ''
@@ -1053,91 +1123,21 @@ function Dashboard({ onLogout }) {
       setAppVersion('')
       setVersionUpdate(null)
     }
-  }
+  }, [t])
 
-  const loadNodes = async (options = {}) => {
-    const silent = !!options?.silent
-    const previousRequest = loadNodesRequestRef.current
-    previousRequest.controller?.abort()
-    const controller = new AbortController()
-    const requestSequence = previousRequest.sequence + 1
-    loadNodesRequestRef.current = { sequence: requestSequence, controller }
-    if (!silent) {
-      setLoading(true)
+  useEffect(() => {
+    loadNodes()
+    loadVersion()
+    loadSettings({ silent: true })
+    loadRuntimeStatus()
+
+    const runtimePoll = window.setInterval(loadRuntimeStatus, 5000)
+    return () => {
+      window.clearInterval(runtimePoll)
+      loadNodesRequestRef.current.controller?.abort()
+      loadNodesRequestRef.current.sequence += 1
     }
-    try {
-      const response = await api.get('/nodes', { signal: controller.signal })
-      if (loadNodesRequestRef.current.sequence !== requestSequence) {
-        return
-      }
-      const nextNodes = response.data || []
-      const prevNodes = Array.isArray(nodesRef.current) ? nodesRef.current : []
-
-      const isSameNode = (prev, next) => {
-        if (!prev || !next) return false
-        if (String(prev?.id) !== String(next?.id)) return false
-        if ((prev?.name ?? '') !== (next?.name ?? '')) return false
-        if ((prev?.remark ?? '') !== (next?.remark ?? '')) return false
-        if ((prev?.type ?? '') !== (next?.type ?? '')) return false
-        if ((prev?.config ?? '') !== (next?.config ?? '')) return false
-        if ((prev?.inbound_port ?? 0) !== (next?.inbound_port ?? 0)) return false
-        if (Boolean(prev?.inbound_port_pinned) !== Boolean(next?.inbound_port_pinned)) return false
-        if ((prev?.username ?? '') !== (next?.username ?? '')) return false
-        if ((prev?.password ?? '') !== (next?.password ?? '')) return false
-        if ((prev?.tcp_reuse_enabled ?? true) !== (next?.tcp_reuse_enabled ?? true)) return false
-        if ((prev?.upstream_mode ?? 'none') !== (next?.upstream_mode ?? 'none')) return false
-        if ((prev?.upstream_type ?? '') !== (next?.upstream_type ?? '')) return false
-        if ((prev?.upstream_config ?? '') !== (next?.upstream_config ?? '')) return false
-        if ((prev?.upstream_ip ?? '') !== (next?.upstream_ip ?? '')) return false
-        if ((prev?.upstream_location ?? '') !== (next?.upstream_location ?? '')) return false
-        if ((prev?.upstream_country_code ?? '') !== (next?.upstream_country_code ?? '')) return false
-        if ((prev?.upstream_latency ?? 0) !== (next?.upstream_latency ?? 0)) return false
-        if ((prev?.upstream_error ?? '') !== (next?.upstream_error ?? '')) return false
-        if ((prev?.sort_order ?? 0) !== (next?.sort_order ?? 0)) return false
-        if ((prev?.node_ip ?? '') !== (next?.node_ip ?? '')) return false
-        if ((prev?.location ?? '') !== (next?.location ?? '')) return false
-        if ((prev?.country_code ?? '') !== (next?.country_code ?? '')) return false
-        if ((prev?.latency ?? 0) !== (next?.latency ?? 0)) return false
-        if ((prev?.enabled ?? true) !== (next?.enabled ?? true)) return false
-        if ((prev?.created_at ?? '') !== (next?.created_at ?? '')) return false
-        if ((prev?.updated_at ?? '') !== (next?.updated_at ?? '')) return false
-        return true
-      }
-
-      const isSameNodeList = (prevList, nextList) => {
-        if (prevList === nextList) return true
-        if (!Array.isArray(prevList) || !Array.isArray(nextList)) return false
-        if (prevList.length !== nextList.length) return false
-        for (let i = 0; i < nextList.length; i += 1) {
-          if (!isSameNode(prevList[i], nextList[i])) return false
-        }
-        return true
-      }
-
-      if (isSameNodeList(prevNodes, nextNodes)) {
-        return
-      }
-      const nextIdSet = new Set(nextNodes.map((node) => String(node?.id)))
-
-      setNodes(nextNodes)
-      setExpandedRowKeys((prev) =>
-        prev.filter((key) => nextIdSet.has(String(key)))
-      )
-      setSelectedNodeIds((prev) =>
-        prev.filter((id) => nextIdSet.has(String(id)))
-      )
-    } catch (error) {
-      const obsolete = loadNodesRequestRef.current.sequence !== requestSequence
-      if (!obsolete && error?.code !== 'ERR_CANCELED') {
-        message.error(t('network_error'))
-      }
-    } finally {
-      if (loadNodesRequestRef.current.sequence === requestSequence) {
-        loadNodesRequestRef.current.controller = null
-        setLoading(false)
-      }
-    }
-  }
+  }, [loadNodes, loadRuntimeStatus, loadSettings, loadVersion])
 
   const handleLanguageChange = (lang) => {
     i18n.changeLanguage(lang)
@@ -1404,7 +1404,7 @@ function Dashboard({ onLogout }) {
       icon: <ThunderboltOutlined style={{ color: '#1890ff' }} />,
     })
 
-    const batchConcurrencyDefault = 10
+    const batchConcurrencyDefault = 3
     const batchConcurrencyMetaRaw =
       typeof document !== 'undefined'
         ? document
@@ -1549,11 +1549,15 @@ function Dashboard({ onLogout }) {
       setLoading(true)
       message.loading({ content: t('loading'), key: 'batchimport' })
 
-      const response = await api.post('/nodes/batch-import', {
-        content,
-        source_type: batchImportSourceType,
-        enabled: enableAfterImport,
-      })
+      const response = await api.post(
+        '/nodes/batch-import',
+        {
+          content,
+          source_type: batchImportSourceType,
+          enabled: enableAfterImport,
+        },
+        { timeout: 120000 }
+      )
 
       const { success = 0, failed = 0, results = [] } = response.data || {}
       const importedIds = results
@@ -1635,7 +1639,7 @@ function Dashboard({ onLogout }) {
       setExpandedRowKeys((prev) => prev.filter((key) => String(key) !== String(id)))
       setSelectedNodeIds((prev) => prev.filter((nodeId) => String(nodeId) !== String(id)))
       await loadNodes({ silent: true })
-    } catch (error) {
+    } catch {
       message.error(t('server_error'))
     }
   }
@@ -1653,7 +1657,7 @@ function Dashboard({ onLogout }) {
       message.success(t('batch_delete_success').replace('{{count}}', selectedNodeIds.length))
       setSelectedNodeIds([])
       await loadNodes({ silent: true })
-    } catch (error) {
+    } catch {
       message.error(t('server_error'))
     } finally {
       setLoading(false)
@@ -1831,7 +1835,7 @@ function Dashboard({ onLogout }) {
         tcp_reuse_enabled: node?.tcp_reuse_enabled,
       })
       message.success(t('success'))
-    } catch (error) {
+    } catch {
       message.error(t('server_error'))
       setNodes((prev) =>
         prev.map((n) =>
@@ -1906,7 +1910,7 @@ function Dashboard({ onLogout }) {
     const id = node?.id
     if (!id || preserveInboundPorts || portPinUpdating[id]) return
 
-    const nextPinned = !Boolean(node?.inbound_port_pinned)
+    const nextPinned = !node?.inbound_port_pinned
     setPortPinUpdating((prev) => ({ ...prev, [id]: true }))
     try {
       await api.put(`/nodes/${id}/port-pin`, { pinned: nextPinned })
@@ -1974,7 +1978,7 @@ function Dashboard({ onLogout }) {
         message.success(t('auth_updated'))
         setBatchAuthVisible(false)
         await loadNodes({ silent: true })
-      } catch (error) {
+      } catch {
         message.error(t('server_error'))
       }
     }
@@ -3057,7 +3061,6 @@ function Dashboard({ onLogout }) {
 
       <BatchAuthModal
         visible={batchAuthVisible}
-        selectedNodes={nodes.filter((node) => selectedNodeIdSet.has(node.id))}
         onClose={() => setBatchAuthVisible(false)}
         onSave={handleBatchSetAuth}
       />

@@ -3,6 +3,7 @@ package services
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -28,6 +29,57 @@ type IPInfo struct {
 	HTTPError   string `json:"http_error,omitempty"`
 }
 
+var ErrProxyNotReady = errors.New("proxy not ready")
+
+type IPCheckHTTPStatusError struct {
+	Service    string
+	StatusCode int
+	Status     string
+	RetryAfter string
+}
+
+func (e *IPCheckHTTPStatusError) Error() string {
+	if e == nil {
+		return "IP check service returned an HTTP error"
+	}
+	service := strings.TrimSpace(e.Service)
+	if service == "" {
+		service = "unknown service"
+	}
+	status := strings.TrimSpace(e.Status)
+	if status == "" {
+		status = http.StatusText(e.StatusCode)
+	}
+	if e.StatusCode == http.StatusTooManyRequests {
+		message := fmt.Sprintf("IP check service %s rate limited the request (HTTP 429", service)
+		if status != "" && !strings.Contains(status, "429") {
+			message += " " + status
+		}
+		message += ")"
+		if e.RetryAfter != "" {
+			message += "; retry after " + e.RetryAfter
+		}
+		return message
+	}
+	if status != "" {
+		return fmt.Sprintf("IP check service %s returned HTTP %d %s", service, e.StatusCode, status)
+	}
+	return fmt.Sprintf("IP check service %s returned HTTP %d", service, e.StatusCode)
+}
+
+func IsIPCheckRateLimited(err error) bool {
+	var statusErr *IPCheckHTTPStatusError
+	return errors.As(err, &statusErr) && statusErr.StatusCode == http.StatusTooManyRequests
+}
+
+func IPCheckRetryAfter(err error) string {
+	var statusErr *IPCheckHTTPStatusError
+	if errors.As(err, &statusErr) && statusErr.StatusCode == http.StatusTooManyRequests {
+		return statusErr.RetryAfter
+	}
+	return ""
+}
+
 const maxIPCheckResponseBytes = 1024 * 1024
 
 const (
@@ -35,7 +87,10 @@ const (
 	ipCheckServiceTimeout         = 4 * time.Second
 	ipCheckTotalDeadline          = 10 * time.Second
 	ipCheckPreferGeoWait          = 600 * time.Millisecond
+	ipCheckGlobalMaxConcurrency   = 6
 )
+
+var ipCheckGlobalSlots = make(chan struct{}, ipCheckGlobalMaxConcurrency)
 
 func ipCheckServiceURLs() []string {
 	if fromEnv := parseIPCheckServiceURLsFromEnv(); len(fromEnv) > 0 {
@@ -44,12 +99,12 @@ func ipCheckServiceURLs() []string {
 
 	return []string{
 		"https://api.ip2location.io/?format=json",
-		"http://ip-api.com/json/",
 		"https://api.ip.sb/geoip",
 		"https://ipwho.is/",
 		"https://ipapi.co/json/",
 		"https://api.myip.com",
 		"https://api64.ipify.org?format=json",
+		"http://ip-api.com/json/",
 	}
 }
 
@@ -139,7 +194,7 @@ func CheckProxyIPContext(
 	log.Printf("[IPCheck] Starting IP check for proxy: %s (auth: %v)", proxyAddr, username != "")
 
 	if err := waitForTCPReady(ctx, proxyAddr, 2*time.Second); err != nil {
-		return nil, fmt.Errorf("proxy not ready: %w", err)
+		return nil, fmt.Errorf("%w: %v", ErrProxyNotReady, err)
 	}
 
 	// Build proxy URL with authentication if provided
@@ -193,7 +248,7 @@ func CheckProxyIPContext(
 	}
 
 	log.Printf("[IPCheck] All methods failed. Last error: %v", socksErr)
-	return nil, fmt.Errorf("all IP check methods failed - HTTP error: %v, SOCKS5 error: %v", httpErr, socksErr)
+	return nil, fmt.Errorf("all IP check methods failed: %w", errors.Join(httpErr, socksErr))
 }
 
 func runIPCheckAttempt(
@@ -273,6 +328,15 @@ func hasPreferredGeoInfo(info *IPInfo) bool {
 }
 
 func checkWithServicesRacing(ctx context.Context, client *http.Client, services []string) (*IPInfo, error) {
+	return checkWithServicesRacingLimited(ctx, client, services, ipCheckGlobalSlots)
+}
+
+func checkWithServicesRacingLimited(
+	ctx context.Context,
+	client *http.Client,
+	services []string,
+	globalSlots chan struct{},
+) (*IPInfo, error) {
 	if len(services) == 0 {
 		return nil, fmt.Errorf("no ip check services configured")
 	}
@@ -291,6 +355,14 @@ func checkWithServicesRacing(ctx context.Context, client *http.Client, services 
 				return
 			}
 			defer func() { <-semaphore }()
+			if globalSlots != nil {
+				select {
+				case globalSlots <- struct{}{}:
+					defer func() { <-globalSlots }()
+				case <-ctx.Done():
+					return
+				}
+			}
 
 			reqCtx, reqCancel := context.WithTimeout(ctx, ipCheckServiceTimeout)
 			startedAt := time.Now()
@@ -324,6 +396,7 @@ func checkWithServicesRacing(ctx context.Context, client *http.Client, services 
 
 	completed := 0
 	var lastErr error
+	var rateLimitErr error
 	var ipOnlyCandidate *ipCheckServiceResult
 	var ipOnlyTimer *time.Timer
 	var ipOnlyTimerC <-chan time.Time
@@ -351,6 +424,9 @@ func checkWithServicesRacing(ctx context.Context, client *http.Client, services 
 				return ipOnlyCandidate.info, nil
 			}
 			if lastErr != nil {
+				if rateLimitErr != nil {
+					return nil, rateLimitErr
+				}
 				return nil, lastErr
 			}
 			return nil, fmt.Errorf("all ip check services failed")
@@ -364,6 +440,9 @@ func checkWithServicesRacing(ctx context.Context, client *http.Client, services 
 				return ipOnlyCandidate.info, nil
 			}
 			if lastErr != nil {
+				if rateLimitErr != nil {
+					return nil, fmt.Errorf("%v: %w", ctx.Err(), rateLimitErr)
+				}
 				return nil, fmt.Errorf("%w: %v", ctx.Err(), lastErr)
 			}
 			return nil, ctx.Err()
@@ -378,6 +457,9 @@ func checkWithServicesRacing(ctx context.Context, client *http.Client, services 
 
 			if res.err != nil {
 				lastErr = res.err
+				if IsIPCheckRateLimited(res.err) {
+					rateLimitErr = res.err
+				}
 			}
 
 			if res.err == nil && res.info != nil && res.info.IP != "" {
@@ -418,7 +500,20 @@ func checkWithService(ctx context.Context, client *http.Client, serviceURL strin
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("service returned status: %d", resp.StatusCode)
+		service := serviceURL
+		if parsed, parseErr := url.Parse(serviceURL); parseErr == nil && parsed.Hostname() != "" {
+			service = parsed.Hostname()
+		}
+		retryAfter := strings.TrimSpace(resp.Header.Get("Retry-After"))
+		if len(retryAfter) > 128 {
+			retryAfter = retryAfter[:128]
+		}
+		return nil, &IPCheckHTTPStatusError{
+			Service:    service,
+			StatusCode: resp.StatusCode,
+			Status:     http.StatusText(resp.StatusCode),
+			RetryAfter: retryAfter,
+		}
 	}
 
 	body, err := io.ReadAll(io.LimitReader(resp.Body, maxIPCheckResponseBytes+1))

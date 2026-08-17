@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -69,6 +70,73 @@ sleep 300
 	}
 	if count != 1 || proxyType != "socks5" || name != "remote-valid-socks" {
 		t.Fatalf("remote database retained wrong nodes: count=%d type=%q name=%q", count, proxyType, name)
+	}
+}
+
+func TestRemoteDatabaseRepeatedNodeSave(t *testing.T) {
+	db := openBatchImportIntegrationDatabase(t)
+	if db == nil {
+		t.Skip("remote database integration environment is not set")
+	}
+	resetBatchImportIntegrationTables(t, db)
+	t.Cleanup(func() {
+		resetBatchImportIntegrationTables(t, db)
+		_ = db.Close()
+	})
+	if err := models.InitDB(db); err != nil {
+		t.Fatalf("initialize remote database: %v", err)
+	}
+
+	fakeBinary := filepath.Join(t.TempDir(), "fake-sing-box")
+	if err := os.WriteFile(fakeBinary, []byte("#!/bin/sh\nif [ \"$1\" = \"check\" ]; then exit 0; fi\nexec sleep 300\n"), 0o755); err != nil {
+		t.Fatalf("write fake sing-box: %v", err)
+	}
+	t.Setenv("SINGBOX_BINARY", fakeBinary)
+	t.Setenv("SBPM_SKIP_PORT_AVAILABILITY_CHECK", "1")
+	t.Setenv("SBPM_SINGBOX_STARTUP_GRACE", "10ms")
+	service := services.NewSingBoxService(t.TempDir())
+	t.Cleanup(func() { _ = service.Stop() })
+	handler := NewHandler(db, service)
+
+	if _, err := db.Exec(`
+		INSERT INTO proxy_nodes (
+			name, remark, type, config, inbound_port, username, password,
+			tcp_reuse_enabled, upstream_config, sort_order, latency, enabled
+		)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+	`, "idempotent-save", "same-value", "direct", `{}`, 31001, "", "", true, "", 0, 0, false); err != nil {
+		t.Fatalf("insert node for repeated save: %v", err)
+	}
+	var nodeID int
+	if err := db.QueryRow("SELECT id FROM proxy_nodes WHERE name = ?", "idempotent-save").Scan(&nodeID); err != nil {
+		t.Fatalf("query repeated-save node: %v", err)
+	}
+
+	payload := map[string]interface{}{
+		"name":              "idempotent-save",
+		"remark":            "same-value",
+		"type":              "direct",
+		"config":            `{}`,
+		"inbound_port":      31001,
+		"username":          "",
+		"password":          "",
+		"auth_enabled":      false,
+		"enabled":           false,
+		"tcp_reuse_enabled": true,
+	}
+	for attempt := 1; attempt <= 2; attempt++ {
+		path := "/api/nodes/" + strconv.Itoa(nodeID)
+		recorder := postJSON(
+			t,
+			handler.UpdateNode,
+			http.MethodPut,
+			path,
+			payload,
+			ginParams("id", strconv.Itoa(nodeID)),
+		)
+		if recorder.Code != http.StatusOK {
+			t.Fatalf("repeated save attempt %d failed: status=%d body=%s", attempt, recorder.Code, recorder.Body.String())
+		}
 	}
 }
 

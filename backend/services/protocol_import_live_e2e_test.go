@@ -394,16 +394,22 @@ func startLiveSingBoxProcess(t *testing.T, binary string, config map[string]any)
 		t.Fatalf("open sing-box server log: %v", err)
 	}
 	command := exec.Command(binary, "run", "-c", configPath)
-	configureSysProcAttr(command)
+	processGuard, err := prepareSingBoxCommand(command)
+	if err != nil {
+		t.Fatalf("prepare sing-box process: %v", err)
+	}
 	command.Stdout = logFile
 	command.Stderr = logFile
 	if err := command.Start(); err != nil {
+		_ = processGuard.Close()
 		_ = logFile.Close()
 		t.Fatalf("start sing-box server: %v", err)
 	}
 	done := make(chan error, 1)
 	go func() {
-		done <- command.Wait()
+		waitErr := command.Wait()
+		_ = processGuard.Close()
+		done <- waitErr
 	}()
 
 	select {

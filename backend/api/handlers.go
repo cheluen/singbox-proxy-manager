@@ -33,6 +33,7 @@ type Handler struct {
 	checkProxyIP    func(context.Context, string, string, string) (*services.IPInfo, error)
 	checkUpstreamIP func(context.Context, models.ProxyDefinition) (*services.IPInfo, error)
 	hashPassword    func([]byte, int) ([]byte, error)
+	comparePassword func([]byte, []byte) error
 }
 
 type nodeUpsertRequest struct {
@@ -51,6 +52,64 @@ type nodeUpsertRequest struct {
 	UpstreamConfig  *string `json:"upstream_config,omitempty"`
 }
 
+const (
+	maxNodeNameCharacters          = 255
+	maxNodeRemarkCharacters        = 1024
+	maxNodeTypeCharacters          = 64
+	maxInboundCredentialCharacters = 255
+	maxUpstreamModeCharacters      = 16
+	maxUpstreamTypeCharacters      = 64
+	maxStoredIPCharacters          = 255
+	maxStoredLocationCharacters    = 255
+	maxStoredCountryCodeCharacters = 32
+)
+
+func validateCharacterLimit(field, value string, maximum int) error {
+	if utf8.RuneCountInString(value) > maximum {
+		return fmt.Errorf("%s must not exceed %d characters", field, maximum)
+	}
+	return nil
+}
+
+func validateNodeStorageFields(node models.ProxyNode) error {
+	checks := []struct {
+		field   string
+		value   string
+		maximum int
+	}{
+		{field: "name", value: node.Name, maximum: maxNodeNameCharacters},
+		{field: "remark", value: node.Remark, maximum: maxNodeRemarkCharacters},
+		{field: "type", value: node.Type, maximum: maxNodeTypeCharacters},
+		{field: "username", value: node.Username, maximum: maxInboundCredentialCharacters},
+		{field: "password", value: node.Password, maximum: maxInboundCredentialCharacters},
+		{field: "upstream_mode", value: node.UpstreamMode, maximum: maxUpstreamModeCharacters},
+		{field: "upstream_type", value: node.UpstreamType, maximum: maxUpstreamTypeCharacters},
+	}
+	for _, check := range checks {
+		if err := validateCharacterLimit(check.field, check.value, check.maximum); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func truncateCharacters(value string, maximum int) string {
+	if maximum <= 0 || utf8.RuneCountInString(value) <= maximum {
+		return value
+	}
+	runes := []rune(value)
+	return string(runes[:maximum])
+}
+
+func normalizeIPInfoForStorage(info *services.IPInfo) {
+	if info == nil {
+		return
+	}
+	info.IP = truncateCharacters(info.IP, maxStoredIPCharacters)
+	info.Location = truncateCharacters(info.Location, maxStoredLocationCharacters)
+	info.CountryCode = truncateCharacters(info.CountryCode, maxStoredCountryCodeCharacters)
+}
+
 func NewHandler(db *sql.DB, singBoxService *services.SingBoxService) *Handler {
 	return &Handler{
 		db:              db,
@@ -60,6 +119,7 @@ func NewHandler(db *sql.DB, singBoxService *services.SingBoxService) *Handler {
 		checkProxyIP:    services.CheckProxyIPContext,
 		checkUpstreamIP: singBoxService.CheckUpstreamIPContext,
 		hashPassword:    bcrypt.GenerateFromPassword,
+		comparePassword: bcrypt.CompareHashAndPassword,
 	}
 }
 
@@ -288,12 +348,27 @@ func (h *Handler) Login(c *gin.Context) {
 
 	ip := c.ClientIP()
 	now := time.Now()
+	var loginPermit *loginAttemptPermit
 	if h.loginLimiter != nil {
-		if ok, retryAfter := h.loginLimiter.Allow(ip, now); !ok {
-			c.Header("Retry-After", strconv.Itoa(int(retryAfter.Seconds())))
-			c.JSON(http.StatusTooManyRequests, gin.H{"error": "too many login attempts, please try again later"})
+		var retryAfter time.Duration
+		var limitErr error
+		loginPermit, retryAfter, limitErr = h.loginLimiter.Begin(c.Request.Context(), ip, now)
+		if limitErr != nil {
+			if errors.Is(limitErr, context.Canceled) || errors.Is(limitErr, context.DeadlineExceeded) {
+				return
+			}
+			if retryAfter > 0 {
+				retrySeconds := int((retryAfter + time.Second - 1) / time.Second)
+				c.Header("Retry-After", strconv.Itoa(retrySeconds))
+			}
+			message := "too many login attempts, please try again later"
+			if errors.Is(limitErr, ErrLoginCheckCapacity) {
+				message = "login verification is busy, please try again shortly"
+			}
+			c.JSON(http.StatusTooManyRequests, gin.H{"error": message})
 			return
 		}
+		defer loginPermit.Cancel()
 	}
 
 	var authGeneration int64
@@ -311,19 +386,26 @@ func (h *Handler) Login(c *gin.Context) {
 		c.JSON(http.StatusPreconditionRequired, gin.H{"error": "admin password not set", "setup_required": true})
 		return
 	}
+	if c.Request.Context().Err() != nil {
+		return
+	}
 
 	// Compare password using bcrypt only (no plaintext fallback for security)
-	if err := bcrypt.CompareHashAndPassword([]byte(settings.AdminPassword), []byte(req.Password)); err != nil {
-		if h.loginLimiter != nil {
-			h.loginLimiter.OnFailure(ip, now)
+	comparePassword := h.comparePassword
+	if comparePassword == nil {
+		comparePassword = bcrypt.CompareHashAndPassword
+	}
+	if err := comparePassword([]byte(settings.AdminPassword), []byte(req.Password)); err != nil {
+		if loginPermit != nil {
+			loginPermit.Failure(time.Now())
 		}
 		c.JSON(http.StatusUnauthorized, gin.H{"error": "invalid password"})
 		return
 	}
 	authGeneration = settings.AuthGeneration
 
-	if h.loginLimiter != nil {
-		h.loginLimiter.OnSuccess(ip)
+	if loginPermit != nil {
+		loginPermit.Success()
 	}
 
 	token, expiry, err := createAdminSessionWithGeneration(
@@ -501,6 +583,10 @@ func (h *Handler) CreateNode(c *gin.Context) {
 		return
 	}
 	req := nodeFromUpsertRequest(payload)
+	if err := validateNodeStorageFields(req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
 
 	// Validate config JSON
 	if _, err := req.ParseConfig(); err != nil {
@@ -656,8 +742,14 @@ func (h *Handler) BatchImportNodes(c *gin.Context) {
 		return
 	}
 
+	if c.Request.Context().Err() != nil {
+		return
+	}
 	h.nodeWriteMu.Lock()
 	defer h.nodeWriteMu.Unlock()
+	if c.Request.Context().Err() != nil {
+		return
+	}
 
 	existingNodes, err := h.loadAllNodes()
 	if err != nil {
@@ -755,6 +847,12 @@ func (h *Handler) BatchImportNodes(c *gin.Context) {
 				Enabled:         true,
 			},
 			result: result,
+		}
+		if err := validateNodeStorageFields(candidate.node); err != nil {
+			result["success"] = false
+			result["error"] = err.Error()
+			results = append(results, result)
+			continue
 		}
 		candidates = append(candidates, candidate)
 		nextOrder++
@@ -1135,6 +1233,10 @@ func (h *Handler) UpdateNode(c *gin.Context) {
 		return
 	}
 	req := nodeFromUpsertRequest(payload)
+	if err := validateNodeStorageFields(req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
 
 	// Validate config JSON
 	if _, err := req.ParseConfig(); err != nil {
@@ -1181,6 +1283,10 @@ func (h *Handler) UpdateNode(c *gin.Context) {
 			}
 			if payload.UpstreamConfig == nil {
 				req.UpstreamConfig = prev.UpstreamConfig
+			}
+			if err := validateNodeStorageFields(req); err != nil {
+				requestErr = err
+				return err
 			}
 			previousMode, _ := models.NormalizeUpstreamMode(prev.UpstreamMode)
 			nextMode, _ := models.NormalizeUpstreamMode(req.UpstreamMode)
@@ -1332,6 +1438,10 @@ func (h *Handler) UpdateNodeUpstream(c *gin.Context) {
 			node.UpstreamMode = req.Mode
 			node.UpstreamType = req.Type
 			node.UpstreamConfig = req.Config
+			if err := validateNodeStorageFields(node); err != nil {
+				requestErr = err
+				return err
+			}
 			nextMode, _ := models.NormalizeUpstreamMode(node.UpstreamMode)
 			allowLegacy := previousMode == models.UpstreamModeLegacy && nextMode == models.UpstreamModeLegacy
 			if err := h.validateNodeUpstream(&node, allowLegacy); err != nil {
@@ -1402,6 +1512,10 @@ func (h *Handler) UpdateNodeRemark(c *gin.Context) {
 	}
 	if err := c.BindJSON(&req); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid request"})
+		return
+	}
+	if err := validateCharacterLimit("remark", req.Remark, maxNodeRemarkCharacters); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
 
@@ -1767,6 +1881,17 @@ func boundedCheckError(err error) string {
 	return message
 }
 
+func ipCheckFailureStatus(c *gin.Context, err error) int {
+	if !services.IsIPCheckRateLimited(err) {
+		return http.StatusBadGateway
+	}
+	retryAfter := services.IPCheckRetryAfter(err)
+	if retryAfter != "" && !strings.ContainsAny(retryAfter, "\r\n") {
+		c.Header("Retry-After", retryAfter)
+	}
+	return http.StatusTooManyRequests
+}
+
 func (h *Handler) persistNodeUpstreamCheck(
 	ctx context.Context,
 	id int,
@@ -1893,6 +2018,7 @@ func (h *Handler) CheckNodeIP(c *gin.Context) {
 
 	proxyAddr := fmt.Sprintf("localhost:%d", node.InboundPort)
 	ipInfo, nodeCheckErr := h.checkProxyIP(ctx, proxyAddr, node.Username, node.Password)
+	normalizeIPInfoForStorage(ipInfo)
 	if nodeCheckErr == nil && ipInfo == nil {
 		nodeCheckErr = fmt.Errorf("node IP check returned no result")
 	}
@@ -1903,6 +2029,7 @@ func (h *Handler) CheckNodeIP(c *gin.Context) {
 		case <-ctx.Done():
 			return
 		}
+		normalizeIPInfoForStorage(upstreamOutcome.info)
 		if err := h.persistNodeUpstreamCheck(ctx, id, upstreamDefinition, upstreamOutcome); err != nil {
 			if errors.Is(err, errUpstreamDefinitionChanged) {
 				c.JSON(http.StatusConflict, gin.H{"error": err.Error()})
@@ -1925,7 +2052,7 @@ func (h *Handler) CheckNodeIP(c *gin.Context) {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to clear node check result"})
 			return
 		}
-		payload := gin.H{"error": nodeCheckErr.Error()}
+		payload := gin.H{"error": boundedCheckError(nodeCheckErr)}
 		if customUpstream {
 			if upstreamOutcome.err != nil {
 				payload["upstream"] = gin.H{"error": boundedCheckError(upstreamOutcome.err)}
@@ -1933,7 +2060,7 @@ func (h *Handler) CheckNodeIP(c *gin.Context) {
 				payload["upstream"] = ipInfoPayload(upstreamOutcome.info)
 			}
 		}
-		c.JSON(http.StatusBadGateway, payload)
+		c.JSON(ipCheckFailureStatus(c, nodeCheckErr), payload)
 		return
 	}
 
@@ -1975,6 +2102,14 @@ func (h *Handler) BatchSetAuth(c *gin.Context) {
 		return
 	}
 	if err := validateInboundCredentials(req.Username, req.Password, req.AuthEnabled); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	if err := validateCharacterLimit("username", req.Username, maxInboundCredentialCharacters); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	if err := validateCharacterLimit("password", req.Password, maxInboundCredentialCharacters); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
@@ -2084,6 +2219,7 @@ func (h *Handler) CheckGlobalUpstreamIP(c *gin.Context) {
 		Config: settings.GlobalUpstreamConfig,
 	}
 	info, checkErr := h.checkUpstreamIP(c.Request.Context(), definition)
+	normalizeIPInfoForStorage(info)
 	if c.Request.Context().Err() != nil {
 		return
 	}
@@ -2125,7 +2261,7 @@ func (h *Handler) CheckGlobalUpstreamIP(c *gin.Context) {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to verify global upstream check result"})
 			return
 		}
-		c.JSON(http.StatusBadGateway, gin.H{"error": message})
+		c.JSON(ipCheckFailureStatus(c, checkErr), gin.H{"error": message})
 		return
 	}
 	result, err := h.db.ExecContext(c.Request.Context(), `
@@ -2277,6 +2413,10 @@ func (h *Handler) UpdateSettings(c *gin.Context) {
 	nextGlobalUpstreamConfig := previous.GlobalUpstreamConfig
 	if req.GlobalUpstreamConfig != nil {
 		nextGlobalUpstreamConfig = strings.TrimSpace(*req.GlobalUpstreamConfig)
+	}
+	if err := validateCharacterLimit("global_upstream_type", nextGlobalUpstreamType, maxUpstreamTypeCharacters); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
 	}
 	globalDefinitionRequested := req.GlobalUpstreamType != nil || req.GlobalUpstreamConfig != nil
 	if nextGlobalUpstreamEnabled || globalDefinitionRequested {
@@ -2555,6 +2695,7 @@ func (h *Handler) ReplaceNode(c *gin.Context) {
 	defer h.nodeWriteMu.Unlock()
 
 	var previous models.ProxyNode
+	var requestErr error
 	var notFound bool
 	_, mutationErr := h.nodeMutations.Execute(c.Request.Context(), NodeMutationOperation{
 		ApplyRuntime: true,
@@ -2579,6 +2720,15 @@ func (h *Handler) ReplaceNode(c *gin.Context) {
 			if previousMode == models.UpstreamModeLegacy {
 				nextUpstreamMode = importedUpstreamMode(configJSON)
 			}
+			candidate := previous
+			candidate.Name = nextName
+			candidate.Type = proxyType
+			candidate.Config = string(configJSON)
+			candidate.UpstreamMode = nextUpstreamMode
+			if err := validateNodeStorageFields(candidate); err != nil {
+				requestErr = err
+				return err
+			}
 			_, err = tx.ExecContext(ctx, `
 				UPDATE proxy_nodes
 				SET name = ?, type = ?, config = ?, upstream_mode = ?,
@@ -2592,6 +2742,10 @@ func (h *Handler) ReplaceNode(c *gin.Context) {
 	if mutationErr != nil {
 		if notFound {
 			c.JSON(http.StatusNotFound, gin.H{"error": "node not found"})
+			return
+		}
+		if requestErr != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": requestErr.Error()})
 			return
 		}
 		c.JSON(http.StatusInternalServerError, singboxUpdateError(mutationErr))

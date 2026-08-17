@@ -31,6 +31,7 @@ wait
 	t.Setenv("SINGBOX_BINARY", fakeBinary)
 	t.Setenv("SBPM_SINGBOX_STARTUP_GRACE", "10ms")
 	t.Setenv("SBPM_TEST_CHILD_PID_FILE", childPIDPath)
+	t.Setenv("SINGBOX_ENV_ALLOWLIST", "SBPM_TEST_CHILD_PID_FILE")
 
 	service := NewSingBoxService(configDir)
 	if err := service.GenerateGlobalConfig(nil); err != nil {

@@ -520,7 +520,15 @@ func (s *SingBoxService) ValidateConfig(configJSON []byte) error {
 		return err
 	}
 
-	output, err := exec.Command(singBoxBinary, "check", "-c", tmpPath).CombinedOutput()
+	cmd := exec.Command(singBoxBinary, "check", "-c", tmpPath)
+	processGuard, err := prepareSingBoxCommand(cmd)
+	if err != nil {
+		return fmt.Errorf("prepare sing-box validation process: %w", err)
+	}
+	output, err := cmd.CombinedOutput()
+	if closeErr := processGuard.Close(); closeErr != nil && err == nil {
+		return fmt.Errorf("close sing-box validation process guard: %w", closeErr)
+	}
 	if err != nil {
 		detail := strings.TrimSpace(string(output))
 		if detail == "" {
@@ -2879,15 +2887,20 @@ func (s *SingBoxService) startProcessLocked(configHash string) error {
 		return err
 	}
 	cmd := exec.Command(singBoxBinary, "run", "-c", configPath)
-	configureSysProcAttr(cmd)
+	processGuard, err := prepareSingBoxCommand(cmd)
+	if err != nil {
+		return fmt.Errorf("prepare sing-box process: %w", err)
+	}
 	stdout, stderr, logCloser, err := s.openProcessLog()
 	if err != nil {
+		_ = processGuard.Close()
 		return fmt.Errorf("failed to open sing-box log output: %w", err)
 	}
 	cmd.Stdout = stdout
 	cmd.Stderr = stderr
 
 	if err := cmd.Start(); err != nil {
+		_ = processGuard.Close()
 		_ = logCloser.Close()
 		return err
 	}
@@ -2919,7 +2932,7 @@ func (s *SingBoxService) startProcessLocked(configHash string) error {
 	}
 	s.mu.Unlock()
 
-	go s.watchProcess(cmd, logCloser, done, generation)
+	go s.watchProcess(cmd, logCloser, processGuard, done, generation)
 
 	timer := time.NewTimer(singBoxStartupGrace())
 	defer timer.Stop()
@@ -2970,10 +2983,12 @@ func singBoxStartupGrace() time.Duration {
 func (s *SingBoxService) watchProcess(
 	cmd *exec.Cmd,
 	logCloser io.Closer,
+	processGuard io.Closer,
 	done chan struct{},
 	generation uint64,
 ) {
 	err := cmd.Wait()
+	_ = processGuard.Close()
 	exited := time.Now()
 	exitedAt := exited.Unix()
 	shouldRecover := false

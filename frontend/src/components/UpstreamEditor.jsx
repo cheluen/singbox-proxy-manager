@@ -1,4 +1,4 @@
-import React, { useState } from 'react'
+import { useState } from 'react'
 import { Button, Divider, Input, Space, message } from 'antd'
 import { ImportOutlined } from '@ant-design/icons'
 import { useTranslation } from 'react-i18next'

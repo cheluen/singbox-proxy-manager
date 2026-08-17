@@ -256,6 +256,12 @@ func normalizeMySQLDSN(rawURL string) (string, error) {
 		}
 		cfg.Params[key] = values[len(values)-1]
 	}
+	for key := range cfg.Params {
+		if strings.EqualFold(key, "clientFoundRows") {
+			delete(cfg.Params, key)
+		}
+	}
+	cfg.ClientFoundRows = true
 	if !hasQueryKey(query, "parseTime") {
 		cfg.Params["parseTime"] = "true"
 	}
@@ -288,6 +294,7 @@ func ensureMySQLDSNDefaults(dsn string) string {
 		cfg.Params = map[string]string{}
 	}
 	cfg.DBName = normalizeMySQLDatabaseName(cfg.DBName)
+	cfg.ClientFoundRows = true
 	if _, ok := cfg.Params["parseTime"]; !ok && !cfg.ParseTime {
 		cfg.Params["parseTime"] = "true"
 	}

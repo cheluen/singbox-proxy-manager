@@ -4,7 +4,7 @@
 
 <img src="./logo.svg" alt="SingBox Proxy Manager Logo" width="96" />
 
-![Version](https://img.shields.io/badge/version-1.7.1-blue.svg)
+![Version](https://img.shields.io/badge/version-1.7.2-blue.svg)
 ![License](https://img.shields.io/badge/license-MIT-green.svg)
 ![SingBox](https://img.shields.io/badge/sing--box-1.12.12-orange.svg)
 
@@ -174,6 +174,7 @@ CONFIG_VOLUME_HOST=./config
 TZ=UTC+8
 ADMIN_PASSWORD=
 SINGBOX_BINARY=
+SINGBOX_ENV_ALLOWLIST=                 # 额外传给 sing-box 的非敏感环境变量名，逗号分隔
 SBPM_SINGBOX_LOG_OUTPUT=stdout       # stdout、file 或 both
 SBPM_SINGBOX_LOG_MAX_BYTES=10485760
 SBPM_SINGBOX_LOG_BACKUPS=3
@@ -187,11 +188,12 @@ CORS_ALLOWED_ORIGINS=
 LOGIN_RATE_LIMIT_WINDOW_SECONDS=60
 LOGIN_RATE_LIMIT_MAX_ATTEMPTS=10
 LOGIN_RATE_LIMIT_BLOCK_SECONDS=600
+LOGIN_MAX_CONCURRENT_CHECKS=2
 ADMIN_SESSION_TTL_HOURS=168
 TRUSTED_PROXIES=
 HTTP_READ_HEADER_TIMEOUT=5s
 HTTP_READ_TIMEOUT=15s
-HTTP_WRITE_TIMEOUT=30s
+HTTP_WRITE_TIMEOUT=2m
 HTTP_IDLE_TIMEOUT=60s
 HTTP_MAX_HEADER_BYTES=1048576
 API_MAX_BODY_BYTES=1048576
@@ -221,6 +223,8 @@ SBPM_UPDATE_CHECK_TIMEOUT=5s
 > `TZ` 会作为全局服务时区参与日志与排障时间显示；默认建议使用 `UTC+8`（自动映射到上海/香港时区）。
 
 > `SINGBOX_BINARY` 可选：用于显式指定 sing-box 可执行文件路径（适合二进制部署）。
+
+> sing-box 子进程默认只继承运行所需的最小环境。确需额外变量时可通过 `SINGBOX_ENV_ALLOWLIST` 指定名称；密码、Token、数据库地址及私钥类名称即使列入也会被拒绝。Compose 部署还需将对应变量显式加入容器环境。
 
 > 如本地源码构建遇到 Go 模块下载受限，可改为：`GO_MODULE_PROXY=https://goproxy.cn,direct`，必要时再配合 `GO_SUM_DB=off`。
 
@@ -337,7 +341,7 @@ docker compose up -d
 ## 🛠️ 技术栈
 
 ### 后端
-- **语言**：Go 1.24
+- **语言**：Go 1.26.6
 - **框架**：Gin
 - **数据库**：SQLite（默认，本地存储）/ Turso（远程 libsql）/ PostgreSQL / MySQL（含 TiDB Cloud）
 - **代理核心**：sing-box 1.12.12

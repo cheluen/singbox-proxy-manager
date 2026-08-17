@@ -163,8 +163,6 @@ export default {
   admin_password_leave_empty: 'Leave empty to keep current password',
   save_settings: 'Save Settings',
   update_password: 'Update Password',
-  new_password: 'New Password',
-  confirm_password: 'Confirm Password',
   password_mismatch: 'Passwords do not match',
   settings_updated: 'Settings updated successfully',
   settings_unchanged: 'No settings changed',
@@ -219,7 +217,7 @@ export default {
   total_count: 'Total {{count}}',
   drag_sort: 'Drag Sort',
   drag_sort_hint: 'Drag the handle to reorder. Large lists automatically enable virtualization for smooth performance.',
-  drag_sort_disabled_filtered: 'Drag sorting is disabled while filters are active (enable \"Preserve Inbound Ports\" to allow drag sorting under filters).',
+  drag_sort_disabled_filtered: 'Drag sorting is disabled while filters are active (enable "Preserve Inbound Ports" to allow drag sorting under filters).',
   add_filter: 'Add Filter',
   clear_filters: 'Clear Filters'
 }

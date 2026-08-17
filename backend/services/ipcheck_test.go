@@ -2,13 +2,136 @@ package services
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
+
+func TestCheckWithServiceReturnsTypedRateLimitError(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Retry-After", "17")
+		w.WriteHeader(http.StatusTooManyRequests)
+	}))
+	t.Cleanup(server.Close)
+
+	_, err := checkWithService(context.Background(), server.Client(), server.URL)
+	var statusErr *IPCheckHTTPStatusError
+	if !errors.As(err, &statusErr) {
+		t.Fatalf("status error lost its type: %T %v", err, err)
+	}
+	if statusErr.StatusCode != http.StatusTooManyRequests || statusErr.RetryAfter != "17" || !IsIPCheckRateLimited(err) {
+		t.Fatalf("unexpected rate-limit details: %+v", statusErr)
+	}
+	if !strings.Contains(err.Error(), "rate limited") || !strings.Contains(err.Error(), "HTTP 429") {
+		t.Fatalf("rate-limit message is not actionable: %v", err)
+	}
+}
+
+func TestDefaultIPCheckServicesKeepIPAPIOutOfInitialRace(t *testing.T) {
+	t.Setenv("SBPM_IPCHECK_URLS", "")
+	services := ipCheckServiceURLs()
+	if len(services) < ipCheckServicesMaxConcurrency {
+		t.Fatalf("default service list is too short: %d", len(services))
+	}
+	for _, service := range services[:ipCheckServicesMaxConcurrency] {
+		if strings.Contains(service, "ip-api.com") {
+			t.Fatalf("rate-limited fallback service was started in the initial race: %q", service)
+		}
+	}
+}
+
+func TestCheckWithServicesRacingPreservesRateLimitOverLaterGenericErrors(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/limited" {
+			w.WriteHeader(http.StatusTooManyRequests)
+			return
+		}
+		time.Sleep(20 * time.Millisecond)
+		w.WriteHeader(http.StatusBadGateway)
+	}))
+	t.Cleanup(server.Close)
+
+	_, err := checkWithServicesRacing(context.Background(), server.Client(), []string{
+		server.URL + "/limited",
+		server.URL + "/generic",
+	})
+	if !IsIPCheckRateLimited(err) {
+		t.Fatalf("a later generic failure hid the rate-limit cause: %v", err)
+	}
+}
+
+func TestIPCheckRequestsUseGlobalConcurrencyBound(t *testing.T) {
+	globalSlots := make(chan struct{}, 2)
+
+	var mu sync.Mutex
+	active := 0
+	maximum := 0
+	started := make(chan struct{}, 4)
+	release := make(chan struct{})
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		active++
+		if active > maximum {
+			maximum = active
+		}
+		mu.Unlock()
+		started <- struct{}{}
+		select {
+		case <-release:
+		case <-r.Context().Done():
+			return
+		}
+		mu.Lock()
+		active--
+		mu.Unlock()
+		_, _ = w.Write([]byte(`{"ip":"203.0.113.7","country":"Test","cc":"TT"}`))
+	}))
+	t.Cleanup(server.Close)
+
+	done := make(chan error, 4)
+	for index := 0; index < 4; index++ {
+		go func() {
+			_, err := checkWithServicesRacingLimited(
+				context.Background(),
+				server.Client(),
+				[]string{server.URL},
+				globalSlots,
+			)
+			done <- err
+		}()
+	}
+	for count := 0; count < 2; count++ {
+		select {
+		case <-started:
+		case <-time.After(time.Second):
+			close(release)
+			t.Fatal("global IP-check slots did not start expected requests")
+		}
+	}
+	select {
+	case <-started:
+		close(release)
+		t.Fatal("more requests than the global bound reached external services")
+	case <-time.After(100 * time.Millisecond):
+	}
+	close(release)
+	for count := 0; count < 4; count++ {
+		if err := <-done; err != nil {
+			t.Fatalf("bounded IP check failed: %v", err)
+		}
+	}
+	mu.Lock()
+	observedMaximum := maximum
+	mu.Unlock()
+	if observedMaximum != 2 {
+		t.Fatalf("unexpected maximum external request concurrency: %d", observedMaximum)
+	}
+}
 
 func TestCheckWithService_SendsHeaders(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

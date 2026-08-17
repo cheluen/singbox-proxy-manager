@@ -5,7 +5,7 @@ RUN npm ci
 COPY frontend/ ./
 RUN npm run build
 
-FROM golang:1.24 AS backend-builder
+FROM golang:1.26.6 AS backend-builder
 ARG GOPROXY=https://proxy.golang.org,direct
 ARG GOSUMDB=sum.golang.org
 ENV GOPROXY=${GOPROXY}
@@ -77,6 +77,7 @@ ENV BIND_ADDRESS=0.0.0.0
 ENV CONFIG_DIR=/app/config
 ENV TZ=UTC+8
 ENV ADMIN_PASSWORD=
+ENV SINGBOX_ENV_ALLOWLIST=
 ENV SBPM_SINGBOX_LOG_OUTPUT=stdout
 ENV SBPM_SINGBOX_LOG_MAX_BYTES=10485760
 ENV SBPM_SINGBOX_LOG_BACKUPS=3

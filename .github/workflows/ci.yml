@@ -7,7 +7,8 @@ on:
     branches: [main]
 
 env:
-  GO_VERSION: "1.24.x"
+  GO_VERSION: "1.26.6"
+  GOVULNCHECK_VERSION: "v1.7.0"
   NODE_VERSION: "18"
   SINGBOX_VERSION: "1.12.12"
   SINGBOX_LINUX_AMD64_SHA256: "7c103cb2f9a7dc54cb82962043596718ed27989a478d6405f0939a9b775f889f"
@@ -29,6 +30,25 @@ jobs:
           version: v2.8.0
           working-directory: ./
           args: ./backend/...
+
+  vulnerability-backend:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+
+      - name: Install pinned govulncheck
+        run: GOBIN="${RUNNER_TEMP}/bin" go install "golang.org/x/vuln/cmd/govulncheck@${GOVULNCHECK_VERSION}"
+
+      - name: Build backend vulnerability scan target
+        run: CGO_ENABLED=0 go build -o "${RUNNER_TEMP}/sbpm-govulncheck-target" ./backend
+
+      - name: Scan reachable backend vulnerabilities
+        run: ${RUNNER_TEMP}/bin/govulncheck -mode=binary "${RUNNER_TEMP}/sbpm-govulncheck-target"
 
   lint-frontend:
     runs-on: ubuntu-latest
@@ -242,6 +262,7 @@ jobs:
     runs-on: ubuntu-latest
     needs:
       - lint-backend
+      - vulnerability-backend
       - lint-frontend
       - audit-frontend-production
       - test-backend
