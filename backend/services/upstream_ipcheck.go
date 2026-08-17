@@ -192,7 +192,7 @@ func upstreamProcessExitError(processErr error, stdout, stderr string) error {
 	if detail == "" {
 		detail = strings.TrimSpace(stdout)
 	}
-	var base error = errors.New("isolated sing-box exited before the local proxy became ready")
+	base := errors.New("isolated sing-box exited before the local proxy became ready")
 	if processErr != nil {
 		base = fmt.Errorf("%w: %v", base, processErr)
 	}

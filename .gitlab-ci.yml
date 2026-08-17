@@ -12,7 +12,7 @@ variables:
 # Go代码lint检查
 lint-backend:
   stage: lint
-  image: golangci/golangci-lint:v2.8.0
+  image: golangci/golangci-lint:v2.12.0
   script:
     - golangci-lint run ./backend/...
   only:
