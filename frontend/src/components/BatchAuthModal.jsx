@@ -1,10 +1,11 @@
-import { useEffect } from 'react'
+import { useEffect, useState } from 'react'
 import { Modal, Form, Input, Switch } from 'antd'
 import { useTranslation } from 'react-i18next'
 
 function BatchAuthModal({ visible, onClose, onSave }) {
   const { t } = useTranslation()
   const [form] = Form.useForm()
+  const [submitting, setSubmitting] = useState(false)
   const authEnabled = Form.useWatch('auth_enabled', form)
 
   useEffect(() => {
@@ -13,18 +14,33 @@ function BatchAuthModal({ visible, onClose, onSave }) {
     }
   }, [form, visible])
 
-  const handleOk = () => {
-    form.validateFields().then((values) => {
-      onSave({
+  const handleOk = async () => {
+    if (submitting) return
+
+    let values
+    try {
+      values = await form.validateFields()
+    } catch {
+      return
+    }
+
+    setSubmitting(true)
+    try {
+      const saved = await onSave({
         auth_enabled: Boolean(values.auth_enabled),
         username: values.auth_enabled ? values.username || '' : '',
         password: values.auth_enabled ? values.password || '' : '',
       })
-      form.resetFields()
-    })
+      if (saved !== false) {
+        form.resetFields()
+      }
+    } finally {
+      setSubmitting(false)
+    }
   }
 
   const handleCancel = () => {
+    if (submitting) return
     form.resetFields()
     onClose()
   }
@@ -35,6 +51,11 @@ function BatchAuthModal({ visible, onClose, onSave }) {
       open={visible}
       onOk={handleOk}
       onCancel={handleCancel}
+      confirmLoading={submitting}
+      cancelButtonProps={{ disabled: submitting }}
+      closable={!submitting}
+      keyboard={!submitting}
+      maskClosable={!submitting}
       okText={t('apply_auth')}
       cancelText={t('cancel')}
     >
@@ -80,7 +101,7 @@ function BatchAuthModal({ visible, onClose, onSave }) {
             },
           ]}
         >
-          <Input placeholder={t('enter_username')} />
+          <Input data-testid="batch-auth-username" placeholder={t('enter_username')} />
         </Form.Item>
         <Form.Item
           label={t('password')}
@@ -98,7 +119,7 @@ function BatchAuthModal({ visible, onClose, onSave }) {
             },
           ]}
         >
-          <Input.Password placeholder={t('enter_password')} />
+          <Input.Password data-testid="batch-auth-password" placeholder={t('enter_password')} />
         </Form.Item>
       </Form>
     </Modal>

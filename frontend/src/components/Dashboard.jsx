@@ -1978,8 +1978,10 @@ function Dashboard({ onLogout }) {
         message.success(t('auth_updated'))
         setBatchAuthVisible(false)
         await loadNodes({ silent: true })
-      } catch {
-        message.error(t('server_error'))
+        return true
+      } catch (error) {
+        message.error(error.response?.data?.error || t('server_error'))
+        return false
       }
     }
 
@@ -2872,6 +2874,7 @@ function Dashboard({ onLogout }) {
                   {t('batch_check_ip')}
                 </Button>
                 <Button
+                  data-testid="nodes-batch-auth"
                   onClick={() => setBatchAuthVisible(true)}
                 >
                   {t('set_auth')}

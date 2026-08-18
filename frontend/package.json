@@ -1,7 +1,7 @@
 {
   "name": "sb-proxy-frontend",
   "private": true,
-  "version": "1.7.2",
+  "version": "1.7.3",
   "type": "module",
   "scripts": {
     "dev": "vite",
@@ -13,6 +13,7 @@
     "test:e2e:dnd-virtual": "node ./scripts/dnd-reorder-virtual-regression.mjs",
     "test:e2e:preserve-ports": "node ./scripts/preserve-inbound-ports-regression.mjs",
     "test:e2e:batch-import": "node ./scripts/batch-import-regression.mjs",
+    "test:e2e:batch-auth": "node ./scripts/batch-auth-regression.mjs",
     "test:e2e:batch-check-ip-live": "node ./scripts/batch-check-ip-live-regression.mjs",
     "test:e2e:outbound-dedup": "node ./scripts/outbound-dedup-regression.mjs",
     "test:e2e:remark": "node ./scripts/remark-regression.mjs",
@@ -27,7 +28,7 @@
     "test:e2e:upstream-proxy": "node ./scripts/upstream-proxy-ui-regression.mjs",
     "test:e2e:full-stack-upstream": "node ./scripts/full-stack-upstream-regression.mjs",
     "test:e2e:full-stack-protocol-import": "node ./scripts/full-stack-protocol-import-regression.mjs",
-    "test:e2e:all": "npm run test:e2e:dnd && npm run test:e2e:dnd-virtual && npm run test:e2e:preserve-ports && npm run test:e2e:batch-import && npm run test:e2e:batch-check-ip-live && npm run test:e2e:outbound-dedup && npm run test:e2e:remark && npm run test:e2e:filter && npm run test:e2e:tcp-reuse-ui && npm run test:e2e:nodes-viewport && npm run test:e2e:version-refresh && npm run test:e2e:wireguard-ui && npm run test:e2e:version-update && npm run test:e2e:nodeform-config-preservation && npm run test:e2e:dashboard-concurrency-replace && npm run test:e2e:upstream-proxy",
+    "test:e2e:all": "npm run test:e2e:dnd && npm run test:e2e:dnd-virtual && npm run test:e2e:preserve-ports && npm run test:e2e:batch-import && npm run test:e2e:batch-auth && npm run test:e2e:batch-check-ip-live && npm run test:e2e:outbound-dedup && npm run test:e2e:remark && npm run test:e2e:filter && npm run test:e2e:tcp-reuse-ui && npm run test:e2e:nodes-viewport && npm run test:e2e:version-refresh && npm run test:e2e:wireguard-ui && npm run test:e2e:version-update && npm run test:e2e:nodeform-config-preservation && npm run test:e2e:dashboard-concurrency-replace && npm run test:e2e:upstream-proxy",
     "test:version-sync": "node ./scripts/version-consistency-regression.mjs"
   },
   "dependencies": {
