@@ -23,16 +23,10 @@ export default {
   // Login
   login_title: 'Admin Login',
   password: 'Password',
-  new_password: 'New password',
-  confirm_password: 'Confirm password',
   login: 'Login',
-  setup: 'Set password',
   logout: 'Logout',
   login_success: 'Login successful',
   login_failed: 'Login failed',
-  setup_required: 'First-time setup: please set an admin password',
-  setup_success: 'Admin password set successfully',
-  setup_failed: 'Setup failed',
   login_subtitle: 'Manage node configs, auth, and forwarding status in one place',
   password_max_72_bytes: 'Password must not exceed 72 bytes',
   
@@ -199,9 +193,7 @@ export default {
   
   // Placeholders
   enter_password: 'Please enter password',
-  enter_confirm_password: 'Please confirm password',
   password_min_8: 'Password must be at least 8 characters',
-  password_not_match: 'Passwords do not match',
   enter_node_name: 'Please enter node name',
   enter_share_link: 'Please enter share link',
   enter_username: 'Please enter username',

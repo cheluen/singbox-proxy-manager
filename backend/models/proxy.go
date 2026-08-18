@@ -443,24 +443,20 @@ type WireGuardConfig struct {
 
 // Settings represents global settings
 type Settings struct {
-	ID                          int       `json:"id"`
-	SingletonKey                int       `json:"-"`
-	AdminPassword               string    `json:"admin_password"`
-	AdminPasswordSet            int       `json:"admin_password_set"`
-	AdminPasswordEnvFingerprint string    `json:"-"`
-	AuthGeneration              int64     `json:"-"`
-	StartPort                   int       `json:"start_port"`
-	PreserveInboundPorts        bool      `json:"preserve_inbound_ports"`
-	GlobalUpstreamEnabled       bool      `json:"global_upstream_enabled"`
-	GlobalUpstreamType          string    `json:"global_upstream_type"`
-	GlobalUpstreamConfig        string    `json:"global_upstream_config"`
-	GlobalUpstreamIP            string    `json:"global_upstream_ip"`
-	GlobalUpstreamLocation      string    `json:"global_upstream_location"`
-	GlobalUpstreamCountryCode   string    `json:"global_upstream_country_code"`
-	GlobalUpstreamLatency       int       `json:"global_upstream_latency"`
-	GlobalUpstreamError         string    `json:"global_upstream_error"`
-	CreatedAt                   time.Time `json:"created_at"`
-	UpdatedAt                   time.Time `json:"updated_at"`
+	ID                        int       `json:"id"`
+	SingletonKey              int       `json:"-"`
+	StartPort                 int       `json:"start_port"`
+	PreserveInboundPorts      bool      `json:"preserve_inbound_ports"`
+	GlobalUpstreamEnabled     bool      `json:"global_upstream_enabled"`
+	GlobalUpstreamType        string    `json:"global_upstream_type"`
+	GlobalUpstreamConfig      string    `json:"global_upstream_config"`
+	GlobalUpstreamIP          string    `json:"global_upstream_ip"`
+	GlobalUpstreamLocation    string    `json:"global_upstream_location"`
+	GlobalUpstreamCountryCode string    `json:"global_upstream_country_code"`
+	GlobalUpstreamLatency     int       `json:"global_upstream_latency"`
+	GlobalUpstreamError       string    `json:"global_upstream_error"`
+	CreatedAt                 time.Time `json:"created_at"`
+	UpdatedAt                 time.Time `json:"updated_at"`
 }
 
 const BcryptMaxPasswordBytes = 72
@@ -483,13 +479,12 @@ func InitDB(db *sql.DB) error {
 	if count == 0 {
 		_, err = db.Exec(`
 			INSERT INTO settings (
-				singleton_key, admin_password, admin_password_set,
-				admin_password_env_fingerprint, auth_generation,
+				singleton_key, admin_password, admin_password_env_fingerprint, auth_generation,
 				start_port, preserve_inbound_ports, global_upstream_enabled,
 				global_upstream_type, global_upstream_config
 			)
-			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-		`, 1, "", 0, "", 0, 30001, false, false, "", "")
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+		`, 1, "", "", 0, 30001, false, false, "", "")
 		if err != nil {
 			return err
 		}
@@ -522,13 +517,12 @@ func ReconcileAdminPassword(db *sql.DB, environmentPassword string) error {
 
 	var settingsID int
 	var storedHash string
-	var passwordSet int
 	var environmentFingerprint string
 	if err := tx.QueryRow(`
-		SELECT id, admin_password, admin_password_set, admin_password_env_fingerprint
+		SELECT id, admin_password, admin_password_env_fingerprint
 		FROM settings
 		WHERE singleton_key = 1
-	`).Scan(&settingsID, &storedHash, &passwordSet, &environmentFingerprint); err != nil {
+	`).Scan(&settingsID, &storedHash, &environmentFingerprint); err != nil {
 		return err
 	}
 
@@ -541,14 +535,6 @@ func ReconcileAdminPassword(db *sql.DB, environmentPassword string) error {
 		if !passwordValid {
 			return ErrAdminPasswordRequired
 		}
-		if passwordSet == 0 {
-			if _, err := tx.Exec(
-				"UPDATE settings SET admin_password_set = 1, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
-				settingsID,
-			); err != nil {
-				return err
-			}
-		}
 		return tx.Commit()
 	}
 
@@ -556,14 +542,6 @@ func ReconcileAdminPassword(db *sql.DB, environmentPassword string) error {
 		[]byte(environmentFingerprint),
 		[]byte(environmentPassword),
 	) == nil {
-		if passwordSet == 0 {
-			if _, err := tx.Exec(
-				"UPDATE settings SET admin_password_set = 1, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
-				settingsID,
-			); err != nil {
-				return err
-			}
-		}
 		return tx.Commit()
 	}
 
@@ -575,8 +553,7 @@ func ReconcileAdminPassword(db *sql.DB, environmentPassword string) error {
 	if passwordValid && fingerprintMissing {
 		_, err = tx.Exec(`
 			UPDATE settings
-			SET admin_password_env_fingerprint = ?, admin_password_set = 1,
-			    updated_at = CURRENT_TIMESTAMP
+			SET admin_password_env_fingerprint = ?, updated_at = CURRENT_TIMESTAMP
 			WHERE id = ?
 		`, string(newFingerprint), settingsID)
 		if err != nil {
@@ -592,8 +569,7 @@ func ReconcileAdminPassword(db *sql.DB, environmentPassword string) error {
 	}
 	if _, err := tx.Exec(`
 		UPDATE settings
-		SET admin_password = ?, admin_password_set = 1,
-		    admin_password_env_fingerprint = ?,
+		SET admin_password = ?, admin_password_env_fingerprint = ?,
 		    auth_generation = auth_generation + 1,
 		    updated_at = CURRENT_TIMESTAMP
 		WHERE id = ?
@@ -806,7 +782,6 @@ func schemaStatements(dialect appdb.Dialect) []string {
 				id BIGSERIAL PRIMARY KEY,
 				singleton_key SMALLINT NOT NULL DEFAULT 1,
 				admin_password TEXT NOT NULL,
-				admin_password_set INTEGER DEFAULT 0,
 				admin_password_env_fingerprint TEXT NOT NULL DEFAULT '',
 				auth_generation BIGINT NOT NULL DEFAULT 0,
 				start_port INTEGER DEFAULT 10000,
@@ -866,7 +841,6 @@ func schemaStatements(dialect appdb.Dialect) []string {
 				id BIGINT NOT NULL AUTO_INCREMENT PRIMARY KEY,
 				singleton_key SMALLINT NOT NULL DEFAULT 1,
 				admin_password TEXT NOT NULL,
-				admin_password_set INTEGER DEFAULT 0,
 				admin_password_env_fingerprint VARCHAR(128) NOT NULL DEFAULT '',
 				auth_generation BIGINT NOT NULL DEFAULT 0,
 				start_port INTEGER DEFAULT 10000,
@@ -926,7 +900,6 @@ func schemaStatements(dialect appdb.Dialect) []string {
 				id INTEGER PRIMARY KEY AUTOINCREMENT,
 				singleton_key INTEGER NOT NULL DEFAULT 1,
 				admin_password TEXT NOT NULL,
-				admin_password_set INTEGER DEFAULT 0,
 				admin_password_env_fingerprint TEXT NOT NULL DEFAULT '',
 				auth_generation INTEGER NOT NULL DEFAULT 0,
 				start_port INTEGER DEFAULT 10000,
@@ -971,7 +944,6 @@ func migrationColumns(dialect appdb.Dialect) []migrationColumn {
 			{Table: "proxy_nodes", Name: "upstream_latency", AlterSQL: "ALTER TABLE proxy_nodes ADD COLUMN upstream_latency INTEGER NOT NULL DEFAULT 0"},
 			{Table: "proxy_nodes", Name: "upstream_error", AlterSQL: "ALTER TABLE proxy_nodes ADD COLUMN upstream_error TEXT NOT NULL DEFAULT ''"},
 			{Table: "settings", Name: "singleton_key", AlterSQL: "ALTER TABLE settings ADD COLUMN singleton_key SMALLINT NOT NULL DEFAULT 1"},
-			{Table: "settings", Name: "admin_password_set", AlterSQL: "ALTER TABLE settings ADD COLUMN admin_password_set INTEGER DEFAULT 0"},
 			{Table: "settings", Name: "admin_password_env_fingerprint", AlterSQL: "ALTER TABLE settings ADD COLUMN admin_password_env_fingerprint TEXT NOT NULL DEFAULT ''"},
 			{Table: "settings", Name: "auth_generation", AlterSQL: "ALTER TABLE settings ADD COLUMN auth_generation BIGINT NOT NULL DEFAULT 0"},
 			{Table: "settings", Name: "preserve_inbound_ports", AlterSQL: "ALTER TABLE settings ADD COLUMN preserve_inbound_ports BOOLEAN NOT NULL DEFAULT FALSE"},
@@ -999,7 +971,6 @@ func migrationColumns(dialect appdb.Dialect) []migrationColumn {
 			{Table: "proxy_nodes", Name: "upstream_latency", AlterSQL: "ALTER TABLE proxy_nodes ADD COLUMN upstream_latency INTEGER NOT NULL DEFAULT 0"},
 			{Table: "proxy_nodes", Name: "upstream_error", AlterSQL: "ALTER TABLE proxy_nodes ADD COLUMN upstream_error VARCHAR(2048) NOT NULL DEFAULT ''"},
 			{Table: "settings", Name: "singleton_key", AlterSQL: "ALTER TABLE settings ADD COLUMN singleton_key SMALLINT NOT NULL DEFAULT 1"},
-			{Table: "settings", Name: "admin_password_set", AlterSQL: "ALTER TABLE settings ADD COLUMN admin_password_set INTEGER DEFAULT 0"},
 			{Table: "settings", Name: "admin_password_env_fingerprint", AlterSQL: "ALTER TABLE settings ADD COLUMN admin_password_env_fingerprint VARCHAR(128) NOT NULL DEFAULT ''"},
 			{Table: "settings", Name: "auth_generation", AlterSQL: "ALTER TABLE settings ADD COLUMN auth_generation BIGINT NOT NULL DEFAULT 0"},
 			{Table: "settings", Name: "preserve_inbound_ports", AlterSQL: "ALTER TABLE settings ADD COLUMN preserve_inbound_ports BOOLEAN NOT NULL DEFAULT FALSE"},
@@ -1027,7 +998,6 @@ func migrationColumns(dialect appdb.Dialect) []migrationColumn {
 			{Table: "proxy_nodes", Name: "upstream_latency", AlterSQL: "ALTER TABLE proxy_nodes ADD COLUMN upstream_latency INTEGER NOT NULL DEFAULT 0"},
 			{Table: "proxy_nodes", Name: "upstream_error", AlterSQL: "ALTER TABLE proxy_nodes ADD COLUMN upstream_error TEXT NOT NULL DEFAULT ''"},
 			{Table: "settings", Name: "singleton_key", AlterSQL: "ALTER TABLE settings ADD COLUMN singleton_key INTEGER NOT NULL DEFAULT 1"},
-			{Table: "settings", Name: "admin_password_set", AlterSQL: "ALTER TABLE settings ADD COLUMN admin_password_set INTEGER DEFAULT 0"},
 			{Table: "settings", Name: "admin_password_env_fingerprint", AlterSQL: "ALTER TABLE settings ADD COLUMN admin_password_env_fingerprint TEXT NOT NULL DEFAULT ''"},
 			{Table: "settings", Name: "auth_generation", AlterSQL: "ALTER TABLE settings ADD COLUMN auth_generation INTEGER NOT NULL DEFAULT 0"},
 			{Table: "settings", Name: "preserve_inbound_ports", AlterSQL: "ALTER TABLE settings ADD COLUMN preserve_inbound_ports INTEGER NOT NULL DEFAULT 0"},

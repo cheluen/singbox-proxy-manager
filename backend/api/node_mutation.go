@@ -18,8 +18,7 @@ const proxyNodeSelectColumns = `
 `
 
 const runtimeSettingsSelectColumns = `
-	id, singleton_key, admin_password, admin_password_set, auth_generation,
-	start_port, preserve_inbound_ports, global_upstream_enabled,
+	id, singleton_key, start_port, preserve_inbound_ports, global_upstream_enabled,
 	global_upstream_type, global_upstream_config, global_upstream_ip,
 	global_upstream_location, global_upstream_country_code, global_upstream_latency,
 	global_upstream_error, created_at, updated_at
@@ -112,9 +111,6 @@ func loadRuntimeSettingsFrom(ctx context.Context, queryer nodeQueryRower) (model
 	`).Scan(
 		&settings.ID,
 		&settings.SingletonKey,
-		&settings.AdminPassword,
-		&settings.AdminPasswordSet,
-		&settings.AuthGeneration,
 		&settings.StartPort,
 		&settings.PreserveInboundPorts,
 		&settings.GlobalUpstreamEnabled,

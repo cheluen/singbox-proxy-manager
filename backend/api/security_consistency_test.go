@@ -4,14 +4,12 @@ import (
 	"bytes"
 	"context"
 	"database/sql"
-	"encoding/json"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strconv"
-	"sync"
 	"testing"
 	"time"
 
@@ -21,124 +19,6 @@ import (
 	"sb-proxy/backend/models"
 	"sb-proxy/backend/services"
 )
-
-func TestSetupAdminPasswordConcurrentCASCreatesOneSession(t *testing.T) {
-	gin.SetMode(gin.TestMode)
-	handler := newTestHandler(t, nil)
-	handler.db.SetMaxOpenConns(1)
-
-	type setupResult struct {
-		index  int
-		status int
-		token  string
-	}
-	passwords := []string{"first-password-123", "second-password-456"}
-	results := make(chan setupResult, len(passwords))
-	start := make(chan struct{})
-	var wg sync.WaitGroup
-
-	for index, password := range passwords {
-		wg.Add(1)
-		go func(index int, password string) {
-			defer wg.Done()
-			<-start
-			body, err := json.Marshal(map[string]string{"password": password})
-			if err != nil {
-				t.Errorf("marshal setup request: %v", err)
-				return
-			}
-			recorder := httptest.NewRecorder()
-			ctx, _ := gin.CreateTestContext(recorder)
-			ctx.Request = httptest.NewRequest(http.MethodPost, "/api/setup/admin-password", bytes.NewReader(body))
-			ctx.Request.Header.Set("Content-Type", "application/json")
-			handler.SetupAdminPassword(ctx)
-
-			var response struct {
-				Token string `json:"token"`
-			}
-			_ = json.Unmarshal(recorder.Body.Bytes(), &response)
-			results <- setupResult{index: index, status: recorder.Code, token: response.Token}
-		}(index, password)
-	}
-
-	close(start)
-	wg.Wait()
-	close(results)
-
-	successCount := 0
-	conflictCount := 0
-	winnerIndex := -1
-	winnerToken := ""
-	for result := range results {
-		switch result.status {
-		case http.StatusOK:
-			successCount++
-			winnerIndex = result.index
-			winnerToken = result.token
-		case http.StatusConflict:
-			conflictCount++
-		default:
-			t.Fatalf("unexpected concurrent setup status %d", result.status)
-		}
-	}
-	if successCount != 1 || conflictCount != 1 {
-		t.Fatalf("expected one success and one conflict, got success=%d conflict=%d", successCount, conflictCount)
-	}
-
-	var storedHash string
-	if err := handler.db.QueryRow("SELECT admin_password FROM settings WHERE singleton_key = 1").Scan(&storedHash); err != nil {
-		t.Fatalf("query stored password: %v", err)
-	}
-	if winnerIndex < 0 || bcrypt.CompareHashAndPassword([]byte(storedHash), []byte(passwords[winnerIndex])) != nil {
-		t.Fatalf("stored password does not match the sole successful request")
-	}
-	if winnerToken == "" {
-		t.Fatalf("successful setup response must include a session token")
-	}
-	valid, err := handler.isValidAdminSession(winnerToken)
-	if err != nil || !valid {
-		t.Fatalf("winner session should be valid: valid=%v err=%v", valid, err)
-	}
-	var sessionCount int
-	if err := handler.db.QueryRow("SELECT COUNT(*) FROM admin_sessions").Scan(&sessionCount); err != nil {
-		t.Fatalf("count sessions: %v", err)
-	}
-	if sessionCount != 1 {
-		t.Fatalf("expected exactly one committed setup session, got %d", sessionCount)
-	}
-}
-
-func TestSetupAdminPasswordRejectsExistingPasswordBeforeBcrypt(t *testing.T) {
-	gin.SetMode(gin.TestMode)
-	handler := newTestHandler(t, nil)
-	if _, err := handler.db.Exec(`
-		UPDATE settings
-		SET admin_password = ?, admin_password_set = 1
-		WHERE singleton_key = 1
-	`, "$2a$10$already-configured"); err != nil {
-		t.Fatalf("seed configured password: %v", err)
-	}
-
-	hashCalled := false
-	handler.hashPassword = func(_ []byte, _ int) ([]byte, error) {
-		hashCalled = true
-		return nil, fmt.Errorf("bcrypt should not run")
-	}
-	recorder := postJSON(
-		t,
-		handler.SetupAdminPassword,
-		http.MethodPost,
-		"/api/setup/admin-password",
-		map[string]string{"password": "attacker-password"},
-		nil,
-	)
-	if recorder.Code != http.StatusConflict {
-		t.Fatalf("expected conflict, got %d body=%s", recorder.Code, recorder.Body.String())
-	}
-	if hashCalled {
-		t.Fatalf("already-configured setup request reached bcrypt")
-	}
-}
 
 func TestNodeCredentialMutationsRejectUnpairedValues(t *testing.T) {
 	gin.SetMode(gin.TestMode)
@@ -457,7 +337,7 @@ exec sleep 300
 	}
 	if _, err := db.Exec(`
 		UPDATE settings
-		SET admin_password = ?, admin_password_set = 1, auth_generation = 7,
+		SET admin_password = ?, auth_generation = 7,
 		    start_port = 30001, preserve_inbound_ports = 0
 		WHERE singleton_key = 1
 	`, string(oldHash)); err != nil {

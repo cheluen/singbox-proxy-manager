@@ -103,7 +103,6 @@ const createMockApiServer = () => {
       sendJson(res, 200, {
         start_port: 30001,
         preserve_inbound_ports: false,
-        admin_password_locked: false,
       })
       return
     }

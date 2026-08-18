@@ -28,11 +28,9 @@ type Handler struct {
 	singBoxService  *services.SingBoxService
 	loginLimiter    *loginRateLimiter
 	nodeWriteMu     sync.Mutex
-	passwordSetupMu sync.Mutex
 	nodeMutations   *NodeMutationCoordinator
 	checkProxyIP    func(context.Context, string, string, string) (*services.IPInfo, error)
 	checkUpstreamIP func(context.Context, models.ProxyDefinition) (*services.IPInfo, error)
-	hashPassword    func([]byte, int) ([]byte, error)
 	comparePassword func([]byte, []byte) error
 }
 
@@ -118,7 +116,6 @@ func NewHandler(db *sql.DB, singBoxService *services.SingBoxService) *Handler {
 		nodeMutations:   NewNodeMutationCoordinator(db, singBoxService),
 		checkProxyIP:    services.CheckProxyIPContext,
 		checkUpstreamIP: singBoxService.CheckUpstreamIPContext,
-		hashPassword:    bcrypt.GenerateFromPassword,
 		comparePassword: bcrypt.CompareHashAndPassword,
 	}
 }
@@ -371,19 +368,15 @@ func (h *Handler) Login(c *gin.Context) {
 		defer loginPermit.Cancel()
 	}
 
+	var adminPassword string
 	var authGeneration int64
-	var settings models.Settings
 	err := h.db.QueryRowContext(c.Request.Context(), `
-			SELECT id, admin_password, admin_password_set, auth_generation
+			SELECT admin_password, auth_generation
 			FROM settings
 			WHERE singleton_key = 1
-		`).Scan(&settings.ID, &settings.AdminPassword, &settings.AdminPasswordSet, &settings.AuthGeneration)
+		`).Scan(&adminPassword, &authGeneration)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "database error"})
-		return
-	}
-	if settings.AdminPasswordSet == 0 || strings.TrimSpace(settings.AdminPassword) == "" {
-		c.JSON(http.StatusPreconditionRequired, gin.H{"error": "admin password not set", "setup_required": true})
 		return
 	}
 	if c.Request.Context().Err() != nil {
@@ -395,15 +388,13 @@ func (h *Handler) Login(c *gin.Context) {
 	if comparePassword == nil {
 		comparePassword = bcrypt.CompareHashAndPassword
 	}
-	if err := comparePassword([]byte(settings.AdminPassword), []byte(req.Password)); err != nil {
+	if err := comparePassword([]byte(adminPassword), []byte(req.Password)); err != nil {
 		if loginPermit != nil {
 			loginPermit.Failure(time.Now())
 		}
 		c.JSON(http.StatusUnauthorized, gin.H{"error": "invalid password"})
 		return
 	}
-	authGeneration = settings.AuthGeneration
-
 	if loginPermit != nil {
 		loginPermit.Success()
 	}
@@ -419,124 +410,6 @@ func (h *Handler) Login(c *gin.Context) {
 		return
 	}
 
-	c.JSON(http.StatusOK, gin.H{
-		"token":  token,
-		"expiry": expiry.Unix(),
-	})
-}
-
-// AuthStatus returns whether initial password setup is required.
-func (h *Handler) AuthStatus(c *gin.Context) {
-	var set int
-	var hash string
-	err := h.db.QueryRowContext(c.Request.Context(), "SELECT admin_password, admin_password_set FROM settings WHERE singleton_key = 1").Scan(&hash, &set)
-	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "database error"})
-		return
-	}
-
-	c.JSON(http.StatusOK, gin.H{
-		"admin_password_locked": false,
-		"setup_required":        set == 0 || strings.TrimSpace(hash) == "",
-	})
-}
-
-// SetupAdminPassword sets the initial admin password for an unconfigured database.
-func (h *Handler) SetupAdminPassword(c *gin.Context) {
-	h.passwordSetupMu.Lock()
-	defer h.passwordSetupMu.Unlock()
-
-	var passwordSet int
-	var existingHash string
-	if err := h.db.QueryRowContext(
-		c.Request.Context(),
-		"SELECT admin_password, admin_password_set FROM settings WHERE singleton_key = 1",
-	).Scan(&existingHash, &passwordSet); err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "database error"})
-		return
-	}
-	if passwordSet != 0 || strings.TrimSpace(existingHash) != "" {
-		c.JSON(http.StatusConflict, gin.H{"error": "admin password already set"})
-		return
-	}
-
-	var req struct {
-		Password string `json:"password"`
-	}
-	if err := c.BindJSON(&req); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid request"})
-		return
-	}
-	if strings.TrimSpace(req.Password) == "" {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "password is required"})
-		return
-	}
-	if len([]rune(req.Password)) < 8 {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "password must be at least 8 characters"})
-		return
-	}
-	if len([]byte(req.Password)) > models.BcryptMaxPasswordBytes {
-		c.JSON(http.StatusBadRequest, gin.H{"error": fmt.Sprintf("password must not exceed %d bytes", models.BcryptMaxPasswordBytes)})
-		return
-	}
-
-	hashPassword := h.hashPassword
-	if hashPassword == nil {
-		hashPassword = bcrypt.GenerateFromPassword
-	}
-	hashedPassword, err := hashPassword([]byte(req.Password), bcrypt.DefaultCost)
-	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to hash password"})
-		return
-	}
-	tx, err := h.db.BeginTx(c.Request.Context(), nil)
-	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "database error"})
-		return
-	}
-	defer tx.Rollback()
-
-	result, err := tx.ExecContext(c.Request.Context(), `
-		UPDATE settings
-		SET admin_password = ?,
-		    admin_password_set = 1,
-		    auth_generation = auth_generation + 1,
-		    updated_at = CURRENT_TIMESTAMP
-		WHERE singleton_key = 1 AND admin_password_set = 0 AND admin_password = ''
-	`, string(hashedPassword))
-	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to update password"})
-		return
-	}
-	affected, err := result.RowsAffected()
-	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to verify password update"})
-		return
-	}
-	if affected != 1 {
-		c.JSON(http.StatusConflict, gin.H{"error": "admin password already set"})
-		return
-	}
-
-	var authGeneration int64
-	if err := tx.QueryRowContext(c.Request.Context(), "SELECT auth_generation FROM settings WHERE singleton_key = 1").Scan(&authGeneration); err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "database error"})
-		return
-	}
-	token, expiry, err := createAdminSessionWithGeneration(
-		c.Request.Context(),
-		c,
-		tx,
-		authGeneration,
-	)
-	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to create session"})
-		return
-	}
-	if err := tx.Commit(); err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to commit password setup"})
-		return
-	}
 	c.JSON(http.StatusOK, gin.H{
 		"token":  token,
 		"expiry": expiry.Unix(),
@@ -2193,7 +2066,6 @@ func (h *Handler) GetSettings(c *gin.Context) {
 		"global_upstream_country_code": settings.GlobalUpstreamCountryCode,
 		"global_upstream_latency":      settings.GlobalUpstreamLatency,
 		"global_upstream_error":        settings.GlobalUpstreamError,
-		"admin_password_locked":        false,
 	})
 }
 
@@ -2462,7 +2334,7 @@ func (h *Handler) UpdateSettings(c *gin.Context) {
 			if passwordChanged {
 				if _, err := tx.ExecContext(ctx, `
 					UPDATE settings
-					SET admin_password = ?, admin_password_set = 1,
+					SET admin_password = ?,
 					    auth_generation = auth_generation + 1,
 					    start_port = ?, preserve_inbound_ports = ?,
 					    global_upstream_enabled = ?, global_upstream_type = ?,

@@ -153,18 +153,11 @@ func TestReconcileAdminPasswordStartupRules(t *testing.T) {
 		if err != nil {
 			t.Fatalf("hash database password: %v", err)
 		}
-		if _, err := db.Exec("UPDATE settings SET admin_password = ?, admin_password_set = 0", string(hash)); err != nil {
+		if _, err := db.Exec("UPDATE settings SET admin_password = ?", string(hash)); err != nil {
 			t.Fatalf("seed database password: %v", err)
 		}
 		if err := ReconcileAdminPassword(db, ""); err != nil {
 			t.Fatalf("reconcile database-only password: %v", err)
-		}
-		var passwordSet int
-		if err := db.QueryRow("SELECT admin_password_set FROM settings").Scan(&passwordSet); err != nil {
-			t.Fatalf("query password state: %v", err)
-		}
-		if passwordSet != 1 {
-			t.Fatalf("expected valid database password to self-heal password_set, got %d", passwordSet)
 		}
 	})
 
@@ -182,7 +175,7 @@ func TestReconcileAdminPasswordStartupRules(t *testing.T) {
 		if err != nil {
 			t.Fatalf("hash database password: %v", err)
 		}
-		if _, err := db.Exec("UPDATE settings SET admin_password = ?, admin_password_set = 1", string(hash)); err != nil {
+		if _, err := db.Exec("UPDATE settings SET admin_password = ?", string(hash)); err != nil {
 			t.Fatalf("seed legacy database password: %v", err)
 		}
 		environmentPassword := "different-environment-password-456"
@@ -272,7 +265,7 @@ func TestReconcileAdminPasswordStartupRules(t *testing.T) {
 		if err != nil {
 			t.Fatalf("hash legacy default: %v", err)
 		}
-		if _, err := db.Exec("UPDATE settings SET admin_password = ?, admin_password_set = 1", string(legacyHash)); err != nil {
+		if _, err := db.Exec("UPDATE settings SET admin_password = ?", string(legacyHash)); err != nil {
 			t.Fatalf("seed legacy default: %v", err)
 		}
 		if err := ReconcileAdminPassword(db, ""); !errors.Is(err, ErrAdminPasswordRequired) {
@@ -467,24 +460,23 @@ func TestInitDBMigratesDuplicateLegacySettingsToSingleton(t *testing.T) {
 	}
 
 	var (
-		id               int
-		singletonKey     int
-		storedHash       string
-		adminPasswordSet int
-		authGeneration   int64
-		startPort        int
+		id             int
+		singletonKey   int
+		storedHash     string
+		authGeneration int64
+		startPort      int
 	)
 	if err := db.QueryRow(`
-		SELECT id, singleton_key, admin_password, admin_password_set, auth_generation, start_port
+		SELECT id, singleton_key, admin_password, auth_generation, start_port
 		FROM settings
-	`).Scan(&id, &singletonKey, &storedHash, &adminPasswordSet, &authGeneration, &startPort); err != nil {
+	`).Scan(&id, &singletonKey, &storedHash, &authGeneration, &startPort); err != nil {
 		t.Fatalf("query migrated settings: %v", err)
 	}
 	if id != 1 || singletonKey != 1 || startPort != 31000 {
 		t.Fatalf("expected first legacy row to be retained, got id=%d singleton_key=%d start_port=%d", id, singletonKey, startPort)
 	}
-	if adminPasswordSet != 1 || authGeneration != 0 {
-		t.Fatalf("unexpected migrated auth state: password_set=%d generation=%d", adminPasswordSet, authGeneration)
+	if authGeneration != 0 {
+		t.Fatalf("unexpected migrated auth generation: %d", authGeneration)
 	}
 	if err := bcrypt.CompareHashAndPassword([]byte(storedHash), []byte("first-password-123")); err != nil {
 		t.Fatalf("expected first legacy password to be retained: %v", err)
@@ -492,9 +484,9 @@ func TestInitDBMigratesDuplicateLegacySettingsToSingleton(t *testing.T) {
 
 	if _, err := db.Exec(`
 		INSERT INTO settings (
-			singleton_key, admin_password, admin_password_set, auth_generation,
+			singleton_key, admin_password, auth_generation,
 			start_port, preserve_inbound_ports
-		) VALUES (1, '', 0, 0, 33000, 0)
+		) VALUES (1, '', 0, 33000, 0)
 	`); err == nil {
 		t.Fatal("expected singleton unique index to reject a second settings row")
 	}

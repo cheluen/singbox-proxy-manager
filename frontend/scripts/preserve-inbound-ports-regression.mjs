@@ -112,7 +112,6 @@ const createMockApiServer = () => {
   let settings = {
     start_port: 30001,
     preserve_inbound_ports: false,
-    admin_password_locked: false,
   }
   let lastReorder = null
   let lastSettingsUpdate = null

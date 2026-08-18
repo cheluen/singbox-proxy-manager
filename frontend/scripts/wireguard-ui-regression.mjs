@@ -61,16 +61,10 @@ const createMockApiServer = () => {
       return
     }
 
-    if (req.method === 'GET' && req.url === '/api/auth/status') {
-      sendJson(res, 200, { setup_required: false, admin_password_locked: false })
-      return
-    }
-
     if (req.method === 'GET' && req.url === '/api/settings') {
       sendJson(res, 200, {
         start_port: 30001,
         preserve_inbound_ports: true,
-        admin_password_locked: false,
       })
       return
     }

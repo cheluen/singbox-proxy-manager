@@ -105,7 +105,7 @@ func TestLoginHandlerSkipsCancelledRequestBeforePasswordComparison(t *testing.T)
 	handler := newTestHandler(t, nil)
 	if _, err := handler.db.Exec(`
 		UPDATE settings
-		SET admin_password = 'test-hash', admin_password_set = 1
+		SET admin_password = 'test-hash'
 		WHERE singleton_key = 1
 	`); err != nil {
 		t.Fatalf("seed login password: %v", err)
@@ -141,7 +141,7 @@ func TestLoginHandlerReservesAttemptsBeforePasswordComparison(t *testing.T) {
 	handler.db.SetMaxOpenConns(1)
 	if _, err := handler.db.Exec(`
 		UPDATE settings
-		SET admin_password = 'test-hash', admin_password_set = 1
+		SET admin_password = 'test-hash'
 		WHERE singleton_key = 1
 	`); err != nil {
 		t.Fatalf("seed login password: %v", err)

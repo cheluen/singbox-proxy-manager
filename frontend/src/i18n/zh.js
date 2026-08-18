@@ -24,13 +24,9 @@ export default {
   login_title: '管理员登录',
   password: '密码',
   login: '登录',
-  setup: '设置密码',
   logout: '退出登录',
   login_success: '登录成功',
   login_failed: '登录失败',
-  setup_required: '首次使用需要先设置管理员密码',
-  setup_success: '管理员密码设置成功',
-  setup_failed: '设置失败',
   login_subtitle: '统一管理节点配置、认证和转发状态',
   password_max_72_bytes: '密码不能超过 72 字节',
   
@@ -161,8 +157,6 @@ export default {
   admin_password_leave_empty: '留空表示保持当前密码',
   save_settings: '保存设置',
   update_password: '更新密码',
-  new_password: '新密码',
-  confirm_password: '确认密码',
   password_mismatch: '两次输入的密码不一致',
   settings_updated: '设置已更新',
   settings_unchanged: '设置没有变化',
@@ -199,9 +193,7 @@ export default {
   
   // Placeholders
   enter_password: '请输入密码',
-  enter_confirm_password: '请再次输入密码',
   password_min_8: '密码至少 8 位',
-  password_not_match: '两次输入的密码不一致',
   enter_node_name: '请输入节点名称',
   enter_share_link: '请输入分享链接',
   enter_username: '请输入用户名',

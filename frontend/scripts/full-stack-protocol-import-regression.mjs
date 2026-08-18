@@ -17,6 +17,7 @@ const SINGBOX_BINARY = process.env.SINGBOX_TEST_BINARY
 const HTTP_PORT = Number(process.env.E2E_FULL_STACK_PORT || 30126)
 const BASE_URL = `http://127.0.0.1:${HTTP_PORT}`
 const ADMIN_PASSWORD = 'full-stack-e2e-password'
+const ARTIFACT_DIR = process.env.E2E_ARTIFACT_DIR || ''
 
 const assert = (condition, message) => {
   if (!condition) throw new Error(message)
@@ -111,7 +112,14 @@ backend.stderr.on('data', (chunk) => backendLogs.push(chunk.toString()))
 
 let browser
 try {
-  await waitForHTTP(`${BASE_URL}/api/auth/status`, 30000)
+  await waitForHTTP(`${BASE_URL}/api/version`, 30000)
+  for (const legacyRoute of [
+    { method: 'GET', path: '/api/auth/status' },
+    { method: 'POST', path: '/api/setup/admin-password' },
+  ]) {
+    const response = await fetch(`${BASE_URL}${legacyRoute.path}`, { method: legacyRoute.method })
+    assert(response.status === 404, `${legacyRoute.method} ${legacyRoute.path} status=${response.status}`)
+  }
   browser = await puppeteer.launch({
     headless: true,
     executablePath: getBrowserExecutablePath(),
@@ -124,10 +132,17 @@ try {
   })
 
   const consoleErrors = []
+  const legacyAuthRequests = []
   page.on('console', (message) => {
     if (message.type() === 'error') consoleErrors.push(message.text())
   })
   page.on('pageerror', (error) => consoleErrors.push(`pageerror:${error.message}`))
+  page.on('request', (request) => {
+    const pathName = new URL(request.url()).pathname
+    if (pathName === '/api/auth/status' || pathName === '/api/setup/admin-password') {
+      legacyAuthRequests.push(`${request.method()} ${pathName}`)
+    }
+  })
 
   let batchResponse
   page.on('response', async (response) => {
@@ -144,6 +159,36 @@ try {
 
   await page.goto(BASE_URL, { waitUntil: 'networkidle2' })
   await page.waitForSelector('input[type="password"]', { visible: true, timeout: 15000 })
+  const inspectLoginLayout = () =>
+    page.evaluate(() => {
+      const passwordInputs = document.querySelectorAll('input[type="password"]')
+      const visibleButtons = Array.from(document.querySelectorAll('button')).filter((button) => {
+        const rect = button.getBoundingClientRect()
+        return rect.width > 0 && rect.height > 0
+      })
+      return {
+        passwordInputCount: passwordInputs.length,
+        visibleButtonLabels: visibleButtons.map((button) => (button.textContent || '').trim()),
+        viewportWidth: window.innerWidth,
+        documentWidth: document.documentElement.scrollWidth,
+      }
+    })
+  const desktopLogin = await inspectLoginLayout()
+  assert(desktopLogin.passwordInputCount === 1, `desktop login inputs: ${JSON.stringify(desktopLogin)}`)
+  assert(desktopLogin.visibleButtonLabels.includes('Login'), `desktop login button: ${JSON.stringify(desktopLogin)}`)
+  assert(!desktopLogin.visibleButtonLabels.includes('Set password'), `legacy setup button: ${JSON.stringify(desktopLogin)}`)
+  if (ARTIFACT_DIR) {
+    fs.mkdirSync(ARTIFACT_DIR, { recursive: true })
+    await page.screenshot({ path: path.join(ARTIFACT_DIR, 'login-desktop.png'), fullPage: true })
+  }
+  await page.setViewport({ width: 390, height: 844 })
+  const mobileLogin = await inspectLoginLayout()
+  assert(mobileLogin.passwordInputCount === 1, `mobile login inputs: ${JSON.stringify(mobileLogin)}`)
+  assert(mobileLogin.documentWidth <= mobileLogin.viewportWidth, `mobile login overflow: ${JSON.stringify(mobileLogin)}`)
+  if (ARTIFACT_DIR) {
+    await page.screenshot({ path: path.join(ARTIFACT_DIR, 'login-mobile.png'), fullPage: true })
+  }
+  await page.setViewport({ width: 1440, height: 1000 })
   await page.type('input[type="password"]', ADMIN_PASSWORD)
   await clickVisibleButton(page, 'Login')
   await page.waitForFunction(
@@ -152,6 +197,7 @@ try {
     ),
     { timeout: 15000 }
   )
+  assert(legacyAuthRequests.length === 0, `legacy auth requests: ${legacyAuthRequests.join(', ')}`)
 
   await clickVisibleButton(page, 'Batch Import')
   await page.waitForSelector('.ant-modal textarea', { visible: true, timeout: 10000 })

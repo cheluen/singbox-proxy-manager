@@ -375,7 +375,7 @@ try {
   await waitForTCP(upstreamPort, 10000)
 
   backend = startBackend()
-  await waitForHTTP(`${BASE_URL}/api/auth/status`, 30000)
+  await waitForHTTP(`${BASE_URL}/api/version`, 30000)
   browser = await puppeteer.launch({
     headless: true,
     executablePath: browserExecutable(),
@@ -507,7 +507,7 @@ try {
 
   await stopProcess(backend)
   backend = startBackend()
-  await waitForHTTP(`${BASE_URL}/api/auth/status`, 30000)
+  await waitForHTTP(`${BASE_URL}/api/version`, 30000)
   consoleErrors.length = 0
   const relogin = await fetch(`${BASE_URL}/api/login`, {
     method: 'POST',

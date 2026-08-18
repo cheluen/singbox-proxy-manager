@@ -4,7 +4,7 @@
 
 <img src="./logo.svg" alt="SingBox Proxy Manager Logo" width="96" />
 
-![Version](https://img.shields.io/badge/version-1.7.3-blue.svg)
+![Version](https://img.shields.io/badge/version-1.7.4-blue.svg)
 ![License](https://img.shields.io/badge/license-MIT-green.svg)
 ![SingBox](https://img.shields.io/badge/sing--box-1.12.12-orange.svg)
 
@@ -96,7 +96,7 @@ chmod +x singbox-proxy-manager
 cp .env.example .env
 #    强烈建议显式指定 sing-box 路径，避免 PATH 差异
 #    SINGBOX_BINARY=/absolute/path/to/sing-box
-#    外部监听必须设置 ADMIN_PASSWORD；仅本机使用可设 BIND_ADDRESS=127.0.0.1 后首次设密
+#    新数据库首次启动必须设置 ADMIN_PASSWORD，监听地址不会放宽该要求
 
 # 3) 启动
 ./singbox-proxy-manager
@@ -112,9 +112,9 @@ cp .env.example .env
 
 - 默认端口：`30000`
 - **不再提供默认密码**
-  - 若设置 `ADMIN_PASSWORD` 且不为空：登录密码为该值；面板内无法修改管理员密码（需修改环境变量并重启服务）
-  - 只有 `BIND_ADDRESS` 为 `127.0.0.1`、`::1` 或 `localhost` 时才允许不设置 `ADMIN_PASSWORD`，并通过本机面板首次设密
-  - 非回环监听未设置 `ADMIN_PASSWORD` 时服务会拒绝启动，避免首次部署被网络中的其他客户端接管
+  - 新数据库首次启动时，`ADMIN_PASSWORD` 必须为非空值；服务会先持久化安全哈希，再开放管理端口
+  - 已有数据库包含有效管理员密码哈希时，可以不设置 `ADMIN_PASSWORD`，登录密码以数据库为准
+  - 修改 `ADMIN_PASSWORD` 后重启会更新数据库密码并撤销已有会话；环境值未变化时仍可在面板内修改密码
 
 ### 2. 添加节点
 
@@ -384,8 +384,8 @@ docker compose up -d
 ## 🔒 安全建议
 
 1. **设置强管理员密码**
-   - 外部监听：必须通过环境变量 `ADMIN_PASSWORD` 配置固定密码（面板内无法修改，需改环境变量并重启）
-   - 仅本机监听：可将 `BIND_ADDRESS` 设为回环地址并暂不设置 `ADMIN_PASSWORD`，再从本机面板首次设密
+   - 新数据库首次启动前必须通过环境变量 `ADMIN_PASSWORD` 配置强密码，无论监听外部地址还是回环地址
+   - 已初始化数据库可使用数据库中保存的有效密码；修改环境变量密码后重启会撤销旧会话
 
 2. **限制访问 IP**（可选）
    ```bash

@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useState } from 'react'
 import { Form, Input, Button, Typography, message, Select } from 'antd'
 import { GithubOutlined, LockOutlined } from '@ant-design/icons'
 import { useTranslation } from 'react-i18next'
@@ -10,28 +10,6 @@ const { Title } = Typography
 function Login({ onLogin }) {
   const { t, i18n } = useTranslation()
   const [loading, setLoading] = useState(false)
-  const [loadingStatus, setLoadingStatus] = useState(true)
-  const [setupRequired, setSetupRequired] = useState(false)
-
-  useEffect(() => {
-    let ignore = false
-    async function fetchStatus() {
-      try {
-        const response = await api.get('/auth/status')
-        if (ignore) return
-        const { setup_required } = response.data || {}
-        setSetupRequired(Boolean(setup_required))
-      } catch {
-        // Fallback to normal login form if status endpoint is unavailable.
-      } finally {
-        if (!ignore) setLoadingStatus(false)
-      }
-    }
-    fetchStatus()
-    return () => {
-      ignore = true
-    }
-  }, [])
 
   const handleLogin = async (values) => {
     setLoading(true)
@@ -42,28 +20,7 @@ function Login({ onLogin }) {
       onLogin(response.data.token)
       message.success(t('login_success'))
     } catch (error) {
-      const data = error.response?.data
-      if (error.response?.status === 428 && data?.setup_required) {
-        setSetupRequired(true)
-        message.warning(t('setup_required'))
-      } else {
-        message.error(data?.error || t('login_failed'))
-      }
-    } finally {
-      setLoading(false)
-    }
-  }
-
-  const handleSetup = async (values) => {
-    setLoading(true)
-    try {
-      const response = await api.post('/setup/admin-password', {
-        password: values.password,
-      })
-      onLogin(response.data.token)
-      message.success(t('setup_success'))
-    } catch (error) {
-      message.error(error.response?.data?.error || t('setup_failed'))
+      message.error(error.response?.data?.error || t('login_failed'))
     } finally {
       setLoading(false)
     }
@@ -117,72 +74,20 @@ function Login({ onLogin }) {
               ]}
             />
           </div>
-          {loadingStatus ? (
-            <div className="login-loading">{t('loading')}</div>
-          ) : setupRequired ? (
-            <Form onFinish={handleSetup} size="large" layout="vertical">
-              <div className="login-hint">{t('setup_required')}</div>
-              <Form.Item
-                name="password"
-                label={t('new_password')}
-                rules={[
-                  { required: true, message: t('enter_password') },
-                  {
-                    validator: (_, value) => {
-                      if (!value) return Promise.resolve()
-                      if ([...value].length < 8) {
-                        return Promise.reject(new Error(t('password_min_8')))
-                      }
-                      if (new TextEncoder().encode(value).length > 72) {
-                        return Promise.reject(new Error(t('password_max_72_bytes')))
-                      }
-                      return Promise.resolve()
-                    },
-                  },
-                ]}
-              >
-                <Input.Password prefix={<LockOutlined />} placeholder={t('new_password')} />
-              </Form.Item>
-              <Form.Item
-                name="confirm_password"
-                label={t('confirm_password')}
-                dependencies={['password']}
-                rules={[
-                  { required: true, message: t('enter_confirm_password') },
-                  ({ getFieldValue }) => ({
-                    validator(_, value) {
-                      if (!value || getFieldValue('password') === value) {
-                        return Promise.resolve()
-                      }
-                      return Promise.reject(new Error(t('password_not_match')))
-                    },
-                  }),
-                ]}
-              >
-                <Input.Password prefix={<LockOutlined />} placeholder={t('confirm_password')} />
-              </Form.Item>
-              <Form.Item style={{ marginBottom: 0 }}>
-                <Button type="primary" htmlType="submit" loading={loading} block>
-                  {t('setup')}
-                </Button>
-              </Form.Item>
-            </Form>
-          ) : (
-            <Form onFinish={handleLogin} size="large" layout="vertical">
-              <Form.Item
-                name="password"
-                label={t('password')}
-                rules={[{ required: true, message: t('enter_password') }]}
-              >
-                <Input.Password prefix={<LockOutlined />} placeholder={t('password')} />
-              </Form.Item>
-              <Form.Item style={{ marginBottom: 0 }}>
-                <Button type="primary" htmlType="submit" loading={loading} block>
-                  {t('login')}
-                </Button>
-              </Form.Item>
-            </Form>
-          )}
+          <Form onFinish={handleLogin} size="large" layout="vertical">
+            <Form.Item
+              name="password"
+              label={t('password')}
+              rules={[{ required: true, message: t('enter_password') }]}
+            >
+              <Input.Password prefix={<LockOutlined />} placeholder={t('password')} />
+            </Form.Item>
+            <Form.Item style={{ marginBottom: 0 }}>
+              <Button type="primary" htmlType="submit" loading={loading} block>
+                {t('login')}
+              </Button>
+            </Form.Item>
+          </Form>
         </div>
       </div>
     </div>

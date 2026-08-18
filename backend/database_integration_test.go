@@ -96,6 +96,7 @@ func runDatabaseIntegrationContract(t *testing.T, db *sql.DB) {
 	if err := models.InitDB(db); err != nil {
 		t.Fatalf("init db (%s): %v", dialect, err)
 	}
+	verifyLegacyPasswordSetupStateAbsent(t, db)
 	verifyInstanceLeaseContract(t, db)
 
 	// Keep the payload above MySQL TEXT's 64 KiB limit. Protocol configs can
@@ -158,6 +159,57 @@ func runDatabaseIntegrationContract(t *testing.T, db *sql.DB) {
 	}
 
 	verifyUpstreamMigrationContract(t, db, largeUpstreamConfig)
+}
+
+func verifyLegacyPasswordSetupStateAbsent(t *testing.T, db *sql.DB) {
+	t.Helper()
+	dialect := appdb.DialectFor(db)
+	var count int
+	var err error
+	switch dialect {
+	case appdb.DialectPostgres:
+		err = db.QueryRow(`
+			SELECT COUNT(*) FROM information_schema.columns
+			WHERE table_schema = current_schema() AND table_name = 'settings'
+			  AND column_name = 'admin_password_set'
+		`).Scan(&count)
+	case appdb.DialectMySQL:
+		err = db.QueryRow(`
+			SELECT COUNT(*) FROM information_schema.columns
+			WHERE table_schema = DATABASE() AND table_name = 'settings'
+			  AND column_name = 'admin_password_set'
+		`).Scan(&count)
+	default:
+		rows, queryErr := db.Query("PRAGMA table_info(settings)")
+		if queryErr != nil {
+			err = queryErr
+			break
+		}
+		for rows.Next() {
+			var cid, notNull, primaryKey int
+			var name, columnType string
+			var defaultValue interface{}
+			if scanErr := rows.Scan(&cid, &name, &columnType, &notNull, &defaultValue, &primaryKey); scanErr != nil {
+				err = scanErr
+				break
+			}
+			if name == "admin_password_set" {
+				count++
+			}
+		}
+		if err == nil {
+			err = rows.Err()
+		}
+		if closeErr := rows.Close(); err == nil {
+			err = closeErr
+		}
+	}
+	if err != nil {
+		t.Fatalf("inspect settings schema (%s): %v", dialect, err)
+	}
+	if count != 0 {
+		t.Fatalf("legacy first-start state remains in new %s schema", dialect)
+	}
 }
 
 func verifyUpstreamMigrationContract(t *testing.T, db *sql.DB, largeUpstreamConfig string) {

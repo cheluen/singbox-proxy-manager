@@ -281,8 +281,6 @@ func main() {
 		}
 		c.JSON(http.StatusOK, response)
 	})
-	apiGroup.GET("/auth/status", handler.AuthStatus)
-	apiGroup.POST("/setup/admin-password", handler.SetupAdminPassword)
 	apiGroup.POST("/login", handler.Login)
 
 	// Protected routes

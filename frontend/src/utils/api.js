@@ -20,11 +20,7 @@ api.interceptors.response.use(
   (response) => response,
   (error) => {
     const requestPath = String(error.config?.url || '').split('?')[0]
-    const isPublicAuthRequest = [
-      '/login',
-      '/setup/admin-password',
-      '/auth/status',
-    ].includes(requestPath)
+    const isPublicAuthRequest = requestPath === '/login'
 
     if (error.response?.status === 401 && authToken && !isPublicAuthRequest) {
       api.setToken(null)

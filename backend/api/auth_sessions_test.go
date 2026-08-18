@@ -24,7 +24,7 @@ func TestLoginAndPanelPasswordChangeUseDatabaseWhenEnvironmentPasswordExists(t *
 		t.Fatalf("hash panel password: %v", err)
 	}
 	if _, err := h.db.Exec(
-		"UPDATE settings SET admin_password = ?, admin_password_set = 1 WHERE singleton_key = 1",
+		"UPDATE settings SET admin_password = ? WHERE singleton_key = 1",
 		string(hash),
 	); err != nil {
 		t.Fatalf("seed panel password: %v", err)
@@ -53,30 +53,22 @@ func TestLoginAndPanelPasswordChangeUseDatabaseWhenEnvironmentPasswordExists(t *
 	}
 }
 
-func TestAdminPasswordEndpointsRejectBcryptOverflow(t *testing.T) {
+func TestSettingsPasswordRejectsBcryptOverflow(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	h := newTestHandler(t, nil)
 	overflow := strings.Repeat("x", 73)
 
-	setup := postJSON(t, h.SetupAdminPassword, http.MethodPost, "/api/setup/admin-password", map[string]string{"password": overflow}, nil)
-	if setup.Code != http.StatusBadRequest {
-		t.Fatalf("setup accepted bcrypt overflow: status=%d body=%s", setup.Code, setup.Body.String())
-	}
 	update := postJSON(t, h.UpdateSettings, http.MethodPut, "/api/settings", map[string]string{"admin_password": overflow}, nil)
 	if update.Code != http.StatusBadRequest {
 		t.Fatalf("settings accepted bcrypt overflow: status=%d body=%s", update.Code, update.Body.String())
 	}
 }
 
-func TestAdminPasswordEndpointsCountUnicodeCharacters(t *testing.T) {
+func TestSettingsPasswordCountsUnicodeCharacters(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	h := newTestHandler(t, nil)
 	shortUnicodePassword := strings.Repeat("\U0001F600", 4)
 
-	setup := postJSON(t, h.SetupAdminPassword, http.MethodPost, "/api/setup/admin-password", map[string]string{"password": shortUnicodePassword}, nil)
-	if setup.Code != http.StatusBadRequest {
-		t.Fatalf("setup accepted four Unicode characters: status=%d body=%s", setup.Code, setup.Body.String())
-	}
 	update := postJSON(t, h.UpdateSettings, http.MethodPut, "/api/settings", map[string]string{"admin_password": shortUnicodePassword}, nil)
 	if update.Code != http.StatusBadRequest {
 		t.Fatalf("settings accepted four Unicode characters: status=%d body=%s", update.Code, update.Body.String())

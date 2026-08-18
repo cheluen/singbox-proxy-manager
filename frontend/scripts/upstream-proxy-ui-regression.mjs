@@ -87,7 +87,6 @@ const createMockAPI = () => {
     global_upstream_country_code: '',
     global_upstream_latency: 0,
     global_upstream_error: '',
-    admin_password_locked: false,
   }
   let nodes = [{ ...initialNode }]
   const settingUpdates = []
