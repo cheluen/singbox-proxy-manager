@@ -153,6 +153,7 @@ jobs:
           - test:e2e:dnd-virtual
           - test:e2e:preserve-ports
           - test:e2e:batch-import
+          - test:e2e:batch-auth
           - test:e2e:batch-check-ip-live
           - test:e2e:outbound-dedup
           - test:e2e:remark
