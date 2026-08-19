@@ -1,6 +1,7 @@
 package services
 
 import (
+	"context"
 	"crypto/sha256"
 	"fmt"
 	"os"
@@ -44,14 +45,22 @@ func NewRuntimeApplier(service *SingBoxService) *RuntimeApplier {
 }
 
 func (a *RuntimeApplier) Prepare(nodes []models.ProxyNode, settings ...models.Settings) (*RuntimePlan, error) {
+	return a.PrepareContext(context.Background(), nodes, settings...)
+}
+
+func (a *RuntimeApplier) PrepareContext(
+	ctx context.Context,
+	nodes []models.ProxyNode,
+	settings ...models.Settings,
+) (*RuntimePlan, error) {
 	if a == nil || a.service == nil {
 		return nil, fmt.Errorf("runtime applier is not configured")
 	}
-	configJSON, err := a.service.BuildGlobalConfig(nodes, settings...)
+	configJSON, err := a.service.BuildGlobalConfigContext(ctx, nodes, settings...)
 	if err != nil {
 		return nil, fmt.Errorf("runtime build stage failed: %w", err)
 	}
-	if err := a.service.ValidateConfig(configJSON); err != nil {
+	if err := a.service.ValidateConfigContext(ctx, configJSON); err != nil {
 		return nil, fmt.Errorf("runtime validation stage failed: %w", err)
 	}
 	return &RuntimePlan{

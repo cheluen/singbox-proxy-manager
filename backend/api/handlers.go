@@ -51,16 +51,30 @@ type nodeUpsertRequest struct {
 }
 
 const (
-	maxNodeNameCharacters          = 255
-	maxNodeRemarkCharacters        = 1024
-	maxNodeTypeCharacters          = 64
-	maxInboundCredentialCharacters = 255
-	maxUpstreamModeCharacters      = 16
-	maxUpstreamTypeCharacters      = 64
-	maxStoredIPCharacters          = 255
-	maxStoredLocationCharacters    = 255
-	maxStoredCountryCodeCharacters = 32
+	maxNodeNameCharacters               = 255
+	maxNodeRemarkCharacters             = 1024
+	maxNodeTypeCharacters               = 64
+	maxInboundCredentialCharacters      = 255
+	maxUpstreamModeCharacters           = 16
+	maxUpstreamTypeCharacters           = 64
+	maxStoredIPCharacters               = 255
+	maxStoredLocationCharacters         = 255
+	maxStoredCountryCodeCharacters      = 32
+	defaultBatchImportValidationTimeout = 45 * time.Second
+	batchImportValidationConcurrency    = 4
 )
+
+func batchImportValidationTimeout() time.Duration {
+	raw := strings.TrimSpace(os.Getenv("SBPM_BATCH_IMPORT_VALIDATION_TIMEOUT"))
+	if raw == "" {
+		return defaultBatchImportValidationTimeout
+	}
+	timeout, err := time.ParseDuration(raw)
+	if err != nil || timeout < 100*time.Millisecond || timeout > 2*time.Minute {
+		return defaultBatchImportValidationTimeout
+	}
+	return timeout
+}
 
 func validateCharacterLimit(field, value string, maximum int) error {
 	if utf8.RuneCountInString(value) > maximum {
@@ -618,30 +632,29 @@ func (h *Handler) BatchImportNodes(c *gin.Context) {
 	if c.Request.Context().Err() != nil {
 		return
 	}
+	validationCtx, cancelValidation := context.WithTimeout(
+		c.Request.Context(),
+		batchImportValidationTimeout(),
+	)
+	defer cancelValidation()
+
 	h.nodeWriteMu.Lock()
-	defer h.nodeWriteMu.Unlock()
-	if c.Request.Context().Err() != nil {
-		return
+	existingNodes, snapshotErr := loadAllNodesFrom(validationCtx, h.db)
+	var runtimeSettings models.Settings
+	var startPort int
+	if snapshotErr == nil {
+		runtimeSettings, snapshotErr = loadRuntimeSettingsFrom(validationCtx, h.db)
 	}
-
-	existingNodes, err := h.loadAllNodes()
-	if err != nil {
+	if snapshotErr == nil {
+		startPort, _, snapshotErr = getPortSettings(h.db)
+	}
+	h.nodeWriteMu.Unlock()
+	if snapshotErr != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "database error"})
 		return
 	}
-	runtimeSettings, err := loadRuntimeSettingsFrom(c.Request.Context(), h.db)
-	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "database error"})
-		return
-	}
-	if err := h.validateNodeSet(existingNodes, runtimeSettings); err != nil {
+	if err := h.validateNodeSet(validationCtx, existingNodes, runtimeSettings); err != nil {
 		c.JSON(http.StatusInternalServerError, singboxUpdateError(fmt.Errorf("existing node set is invalid: %w", err)))
-		return
-	}
-
-	startPort, _, err := getPortSettings(h.db)
-	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "database error"})
 		return
 	}
 	maxOrder, maxID, usedInboundPorts := batchImportExistingState(existingNodes)
@@ -732,7 +745,7 @@ func (h *Handler) BatchImportNodes(c *gin.Context) {
 		usedInboundPorts[inboundPort] = struct{}{}
 	}
 
-	validCandidates, rejectedCandidates := h.selectValidBatchCandidates(existingNodes, candidates, runtimeSettings)
+	validCandidates, rejectedCandidates := h.selectValidBatchCandidates(validationCtx, existingNodes, candidates, runtimeSettings)
 	for candidate, validationErr := range rejectedCandidates {
 		candidate.result["success"] = false
 		candidate.result["error"] = fmt.Sprintf("sing-box validation failed: %v", validationErr)
@@ -743,6 +756,7 @@ func (h *Handler) BatchImportNodes(c *gin.Context) {
 	maxOrder, maxID, usedInboundPorts = batchImportExistingState(existingNodes)
 	nextOrder = maxOrder + 1
 	portValidCandidates := make([]*batchImportCandidate, 0, len(validCandidates))
+	assignmentsChanged := false
 	for _, candidate := range validCandidates {
 		inboundPort, err := nextAvailableInboundPort(startPort, usedInboundPorts)
 		if err == nil {
@@ -759,20 +773,82 @@ func (h *Handler) BatchImportNodes(c *gin.Context) {
 		if err != nil {
 			candidate.result["success"] = false
 			candidate.result["error"] = err.Error()
+			assignmentsChanged = true
 			err = nil
 			continue
 		}
-		candidate.node.ID = maxID + len(portValidCandidates) + 1
+		nextID := maxID + len(portValidCandidates) + 1
+		if candidate.node.ID != nextID || candidate.node.InboundPort != inboundPort || candidate.node.SortOrder != nextOrder {
+			assignmentsChanged = true
+		}
+		candidate.node.ID = nextID
 		candidate.node.InboundPort = inboundPort
 		candidate.node.SortOrder = nextOrder
 		portValidCandidates = append(portValidCandidates, candidate)
 		nextOrder++
 		usedInboundPorts[inboundPort] = struct{}{}
 	}
-	validCandidates, finalRejected := h.selectValidBatchCandidates(existingNodes, portValidCandidates, runtimeSettings)
+	finalRejected := make(map[*batchImportCandidate]error)
+	if assignmentsChanged {
+		validCandidates, finalRejected = h.selectValidBatchCandidates(validationCtx, existingNodes, portValidCandidates, runtimeSettings)
+	} else {
+		validCandidates = portValidCandidates
+	}
 	for candidate, validationErr := range finalRejected {
 		candidate.result["success"] = false
 		candidate.result["error"] = fmt.Sprintf("sing-box validation failed: %v", validationErr)
+	}
+
+	if validationCtx.Err() != nil {
+		for _, candidate := range validCandidates {
+			candidate.result["success"] = false
+			candidate.result["error"] = fmt.Sprintf("sing-box validation failed: %v", validationCtx.Err())
+		}
+		validCandidates = nil
+	}
+
+	if len(validCandidates) > 0 {
+		h.nodeWriteMu.Lock()
+		defer h.nodeWriteMu.Unlock()
+
+		currentNodes, currentErr := loadAllNodesFrom(validationCtx, h.db)
+		var currentStartPort int
+		if currentErr == nil {
+			currentStartPort, _, currentErr = getPortSettings(h.db)
+		}
+		if currentErr != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "database error"})
+			return
+		}
+		maxOrder, maxID, usedInboundPorts = batchImportExistingState(currentNodes)
+		nextOrder = maxOrder + 1
+		currentPortValid := make([]*batchImportCandidate, 0, len(validCandidates))
+		for _, candidate := range validCandidates {
+			inboundPort, portErr := nextAvailableInboundPort(currentStartPort, usedInboundPorts)
+			if portErr == nil {
+				portErr = validateInboundPort(inboundPort)
+			}
+			if portErr == nil {
+				if _, exists := usedInboundPorts[inboundPort]; exists {
+					portErr = fmt.Errorf("inbound port already in use")
+				}
+			}
+			if portErr == nil {
+				portErr = validateInboundPortAvailable(inboundPort)
+			}
+			if portErr != nil {
+				candidate.result["success"] = false
+				candidate.result["error"] = portErr.Error()
+				continue
+			}
+			candidate.node.ID = maxID + len(currentPortValid) + 1
+			candidate.node.InboundPort = inboundPort
+			candidate.node.SortOrder = nextOrder
+			currentPortValid = append(currentPortValid, candidate)
+			nextOrder++
+			usedInboundPorts[inboundPort] = struct{}{}
+		}
+		validCandidates = currentPortValid
 	}
 
 	accepted := make(map[*batchImportCandidate]struct{}, len(validCandidates))
@@ -793,7 +869,7 @@ func (h *Handler) BatchImportNodes(c *gin.Context) {
 		return
 	}
 
-	_, mutationErr := h.nodeMutations.Execute(c.Request.Context(), NodeMutationOperation{
+	_, mutationErr := h.nodeMutations.Execute(validationCtx, NodeMutationOperation{
 		ApplyRuntime: true,
 		Mutate: func(ctx context.Context, tx *sql.Tx) error {
 			stmt, err := tx.PrepareContext(ctx, `
@@ -886,15 +962,20 @@ func appendBatchCandidateNodes(existing []models.ProxyNode, candidates []*batchI
 	return nodes
 }
 
-func (h *Handler) validateNodeSet(nodes []models.ProxyNode, settings models.Settings) error {
-	configJSON, err := h.singBoxService.BuildGlobalConfig(nodes, settings)
+func (h *Handler) validateNodeSet(
+	ctx context.Context,
+	nodes []models.ProxyNode,
+	settings models.Settings,
+) error {
+	configJSON, err := h.singBoxService.BuildGlobalConfigContext(ctx, nodes, settings)
 	if err != nil {
 		return err
 	}
-	return h.singBoxService.ValidateConfig(configJSON)
+	return h.singBoxService.ValidateConfigContext(ctx, configJSON)
 }
 
 func (h *Handler) selectValidBatchCandidates(
+	ctx context.Context,
 	existing []models.ProxyNode,
 	candidates []*batchImportCandidate,
 	settings models.Settings,
@@ -903,59 +984,137 @@ func (h *Handler) selectValidBatchCandidates(
 	if len(candidates) == 0 {
 		return nil, rejected
 	}
-	groups := batchImportDependencyGroups(candidates)
-	accepted := make([]*batchImportCandidate, 0, len(candidates))
-	acceptedSet := make(map[*batchImportCandidate]struct{}, len(candidates))
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	allErr := h.validateNodeSet(ctx, appendBatchCandidateNodes(existing, candidates), settings)
+	if allErr == nil {
+		return append([]*batchImportCandidate(nil), candidates...), rejected
+	}
+	if len(candidates) == 1 || ctx.Err() != nil {
+		for _, candidate := range candidates {
+			rejected[candidate] = allErr
+		}
+		return nil, rejected
+	}
 
-	var isolate func([][]*batchImportCandidate)
-	isolate = func(subset [][]*batchImportCandidate) {
-		if len(subset) == 0 {
-			return
+	groups := batchImportDependencyGroups(candidates)
+	type groupValidationResult struct {
+		accepted []*batchImportCandidate
+		rejected map[*batchImportCandidate]error
+	}
+	groupResults := make([]groupValidationResult, len(groups))
+	jobs := make(chan int, len(groups))
+	for index := range groups {
+		jobs <- index
+	}
+	close(jobs)
+	workerCount := min(len(groups), batchImportValidationConcurrency)
+	var workers sync.WaitGroup
+	workers.Add(workerCount)
+	for worker := 0; worker < workerCount; worker++ {
+		go func() {
+			defer workers.Done()
+			for index := range jobs {
+				group := groups[index]
+				groupErr := h.validateNodeSet(ctx, appendBatchCandidateNodes(existing, group), settings)
+				if groupErr == nil {
+					groupResults[index].accepted = append([]*batchImportCandidate(nil), group...)
+					continue
+				}
+				if len(group) == 1 {
+					groupResults[index].rejected = map[*batchImportCandidate]error{group[0]: groupErr}
+					continue
+				}
+				groupResults[index].accepted, groupResults[index].rejected = h.selectValidDependencyGroup(
+					ctx,
+					existing,
+					nil,
+					group,
+					settings,
+					groupErr,
+				)
+			}
+		}()
+	}
+	workers.Wait()
+
+	acceptedSet := make(map[*batchImportCandidate]struct{}, len(candidates))
+	for _, result := range groupResults {
+		for _, candidate := range result.accepted {
+			acceptedSet[candidate] = struct{}{}
 		}
-		trial := make([]*batchImportCandidate, 0, len(accepted)+len(candidates))
-		trial = append(trial, accepted...)
-		for _, group := range subset {
-			trial = append(trial, group...)
+		for candidate, validationErr := range result.rejected {
+			rejected[candidate] = validationErr
 		}
-		err := h.validateNodeSet(appendBatchCandidateNodes(existing, trial), settings)
-		if err == nil {
-			for _, group := range subset {
+	}
+
+	orderedAccepted := orderedBatchCandidates(candidates, acceptedSet)
+	if len(orderedAccepted) > 0 && h.validateNodeSet(
+		ctx,
+		appendBatchCandidateNodes(existing, orderedAccepted),
+		settings,
+	) != nil {
+		acceptedSet = make(map[*batchImportCandidate]struct{}, len(orderedAccepted))
+		selected := make([]*batchImportCandidate, 0, len(orderedAccepted))
+		for _, result := range groupResults {
+			group := result.accepted
+			if len(group) == 0 {
+				continue
+			}
+			trial := append(append([]*batchImportCandidate(nil), selected...), group...)
+			groupErr := h.validateNodeSet(ctx, appendBatchCandidateNodes(existing, trial), settings)
+			if groupErr == nil {
+				selected = trial
 				for _, candidate := range group {
-					accepted = append(accepted, candidate)
 					acceptedSet[candidate] = struct{}{}
 				}
+				continue
 			}
-			return
-		}
-		if len(subset) == 1 {
-			groupAccepted, groupRejected := h.selectValidDependencyGroup(existing, accepted, subset[0], settings, err)
+			groupAccepted, groupRejected := h.selectValidDependencyGroup(
+				ctx,
+				existing,
+				selected,
+				group,
+				settings,
+				groupErr,
+			)
+			selected = append(selected, groupAccepted...)
 			for _, candidate := range groupAccepted {
-				accepted = append(accepted, candidate)
 				acceptedSet[candidate] = struct{}{}
 			}
 			for candidate, validationErr := range groupRejected {
 				rejected[candidate] = validationErr
 			}
-			return
 		}
-		middle := len(subset) / 2
-		isolate(subset[:middle])
-		isolate(subset[middle:])
+		orderedAccepted = orderedBatchCandidates(candidates, acceptedSet)
 	}
-	isolate(groups)
 
-	// Dependency targets may be validated before their dependants. Preserve the
-	// user's original import order for port allocation and response ordering.
-	orderedAccepted := make([]*batchImportCandidate, 0, len(acceptedSet))
 	for _, candidate := range candidates {
-		if _, ok := acceptedSet[candidate]; ok {
-			orderedAccepted = append(orderedAccepted, candidate)
+		if _, accepted := acceptedSet[candidate]; !accepted {
+			if _, alreadyRejected := rejected[candidate]; !alreadyRejected {
+				rejected[candidate] = allErr
+			}
 		}
 	}
 	return orderedAccepted, rejected
 }
 
+func orderedBatchCandidates(
+	candidates []*batchImportCandidate,
+	accepted map[*batchImportCandidate]struct{},
+) []*batchImportCandidate {
+	ordered := make([]*batchImportCandidate, 0, len(accepted))
+	for _, candidate := range candidates {
+		if _, ok := accepted[candidate]; ok {
+			ordered = append(ordered, candidate)
+		}
+	}
+	return ordered
+}
+
 func (h *Handler) selectValidDependencyGroup(
+	ctx context.Context,
 	existing []models.ProxyNode,
 	accepted []*batchImportCandidate,
 	group []*batchImportCandidate,
@@ -1011,7 +1170,7 @@ func (h *Handler) selectValidDependencyGroup(
 			trial = append(trial, accepted...)
 			trial = append(trial, selected...)
 			trial = append(trial, candidate)
-			if err := h.validateNodeSet(appendBatchCandidateNodes(existing, trial), settings); err != nil {
+			if err := h.validateNodeSet(ctx, appendBatchCandidateNodes(existing, trial), settings); err != nil {
 				rejected[candidate] = err
 				continue
 			}

@@ -175,7 +175,7 @@ func (coordinator *NodeMutationCoordinator) Execute(
 		if err != nil {
 			return nil, err
 		}
-		runtimePlan, err = coordinator.runtimeApplier.Prepare(candidateNodes, settings)
+		runtimePlan, err = coordinator.runtimeApplier.PrepareContext(ctx, candidateNodes, settings)
 		if err != nil {
 			return nil, err
 		}

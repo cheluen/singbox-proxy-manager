@@ -16,6 +16,7 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"sb-proxy/backend/models"
 	"sb-proxy/backend/services"
@@ -1324,15 +1325,6 @@ func TestBatchSetAuthRejectsUsernameWithPlus(t *testing.T) {
 // kernel rejects unsupported node parameters.
 func newTestHandlerWithScriptedKernel(t *testing.T) *Handler {
 	t.Helper()
-
-	db, err := sql.Open("sqlite", ":memory:")
-	if err != nil {
-		t.Fatalf("open db: %v", err)
-	}
-	if err := models.InitDB(db); err != nil {
-		t.Fatalf("init db: %v", err)
-	}
-
 	script := `#!/bin/sh
 if [ "$1" = "check" ]; then
   if grep -q "BAD_MARKER\|unsupported-flow" "$3"; then
@@ -1343,12 +1335,25 @@ if [ "$1" = "check" ]; then
 fi
 sleep 300
 `
+	return newTestHandlerWithKernelScript(t, script)
+}
+
+func newTestHandlerWithKernelScript(t *testing.T, script string) *Handler {
+	t.Helper()
+	db, err := sql.Open("sqlite", ":memory:")
+	if err != nil {
+		t.Fatalf("open db: %v", err)
+	}
+	if err := models.InitDB(db); err != nil {
+		t.Fatalf("init db: %v", err)
+	}
 	fakeBinary := filepath.Join(t.TempDir(), "fake-sing-box")
 	if err := os.WriteFile(fakeBinary, []byte(script), 0o755); err != nil {
 		t.Fatalf("write fake sing-box binary: %v", err)
 	}
 	t.Setenv("SINGBOX_BINARY", fakeBinary)
 	t.Setenv("SBPM_SKIP_PORT_AVAILABILITY_CHECK", "1")
+	t.Setenv("SBPM_SINGBOX_STARTUP_GRACE", "10ms")
 	svc := services.NewSingBoxService(t.TempDir())
 	h := NewHandler(db, svc)
 	t.Cleanup(func() {
@@ -1484,6 +1489,140 @@ func TestBatchImportKeepsGoodNodeWhenKernelRejectsPeer(t *testing.T) {
 	}
 	if count != 1 || proxyType != "socks5" || name != "valid-socks" {
 		t.Fatalf("valid SOCKS node was not retained: count=%d type=%q name=%q", count, proxyType, name)
+	}
+}
+
+func TestBatchImportBadNodesUseLinearBoundedKernelChecks(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	callPath := filepath.Join(t.TempDir(), "check-calls")
+	script := fmt.Sprintf(`#!/bin/sh
+if [ "$1" = "check" ]; then
+  printf '1\n' >> %s
+  if grep -q "unsupported-flow" "$3"; then
+    echo "FATAL[0000] decode config: unknown field" >&2
+    exit 1
+  fi
+  exit 0
+fi
+sleep 300
+`, strconv.Quote(callPath))
+	handler := newTestHandlerWithKernelScript(t, script)
+
+	const itemCount = 64
+	links := make([]string, 0, itemCount)
+	for index := 0; index < itemCount; index++ {
+		links = append(links, fmt.Sprintf(
+			"vless://00000000-0000-0000-0000-%012d@bad-%d.example.test:443?security=tls&flow=unsupported-flow#bad-%d",
+			index,
+			index,
+			index,
+		))
+	}
+	recorder := postJSON(
+		t,
+		handler.BatchImportNodes,
+		http.MethodPost,
+		"/api/nodes/batch-import",
+		map[string]interface{}{"links": links, "enabled": true},
+		nil,
+	)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("batch import status=%d body=%s", recorder.Code, recorder.Body.String())
+	}
+	var response struct {
+		Success int `json:"success"`
+		Failed  int `json:"failed"`
+	}
+	if err := json.Unmarshal(recorder.Body.Bytes(), &response); err != nil {
+		t.Fatalf("decode batch response: %v", err)
+	}
+	if response.Success != 0 || response.Failed != itemCount {
+		t.Fatalf("unexpected batch result: %+v", response)
+	}
+	callData, err := os.ReadFile(callPath)
+	if err != nil {
+		t.Fatalf("read sing-box check calls: %v", err)
+	}
+	callCount := len(strings.Fields(string(callData)))
+	if callCount > itemCount+2 {
+		t.Fatalf("kernel checks=%d exceed linear bound %d", callCount, itemCount+2)
+	}
+	if callCount < itemCount+1 {
+		t.Fatalf("kernel checks=%d did not validate every rejected candidate", callCount)
+	}
+}
+
+func TestBatchImportValidationDoesNotHoldNodeWriteLock(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	t.Setenv("SBPM_SINGBOX_CHECK_TIMEOUT", "200ms")
+	t.Setenv("SBPM_SINGBOX_CHECK_CONCURRENCY", "4")
+	t.Setenv("SBPM_BATCH_IMPORT_VALIDATION_TIMEOUT", "800ms")
+	startedPath := filepath.Join(t.TempDir(), "hanging-check-started")
+	script := fmt.Sprintf(`#!/bin/sh
+if [ "$1" = "check" ]; then
+  if grep -qi "hang-marker" "$3"; then
+    touch %s
+    sleep 300
+  fi
+  exit 0
+fi
+sleep 300
+`, strconv.Quote(startedPath))
+	handler := newTestHandlerWithKernelScript(t, script)
+	handler.db.SetMaxOpenConns(1)
+
+	links := make([]string, 0, 8)
+	for index := 0; index < 8; index++ {
+		links = append(links, fmt.Sprintf("socks5://user:pass@hang-marker-%d.example.test:1080#hang-%d", index, index))
+	}
+	batchDone := make(chan *httptest.ResponseRecorder, 1)
+	go func() {
+		batchDone <- postJSON(
+			t,
+			handler.BatchImportNodes,
+			http.MethodPost,
+			"/api/nodes/batch-import",
+			map[string]interface{}{"links": links, "enabled": true},
+			nil,
+		)
+	}()
+
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		if _, err := os.Stat(startedPath); err == nil {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("hanging batch validation did not start")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	startedAt := time.Now()
+	create := postJSON(
+		t,
+		handler.CreateNode,
+		http.MethodPost,
+		"/api/nodes",
+		map[string]interface{}{
+			"name": "concurrent-create", "type": "direct", "config": `{}`, "enabled": true,
+		},
+		nil,
+	)
+	if create.Code != http.StatusCreated {
+		t.Fatalf("concurrent create status=%d body=%s", create.Code, create.Body.String())
+	}
+	if elapsed := time.Since(startedAt); elapsed > 500*time.Millisecond {
+		t.Fatalf("concurrent create waited behind batch validation for %s", elapsed)
+	}
+
+	select {
+	case recorder := <-batchDone:
+		if recorder.Code != http.StatusOK {
+			t.Fatalf("batch timeout status=%d body=%s", recorder.Code, recorder.Body.String())
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("bounded batch validation did not finish")
 	}
 }
 

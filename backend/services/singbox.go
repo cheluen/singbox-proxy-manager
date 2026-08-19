@@ -1,6 +1,7 @@
 package services
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -19,24 +20,29 @@ import (
 )
 
 type SingBoxService struct {
-	configDir         string
-	process           *exec.Cmd
-	logCloser         io.Closer
-	processDone       chan struct{}
-	processErr        error
-	processGeneration uint64
-	processStartedAt  time.Time
-	stopRequested     bool
-	desiredRunning    bool
-	recoveryRunning   bool
-	recoveryCancel    chan struct{}
-	recoveryEpoch     uint64
-	recoveryAttempts  int
-	recoveryWG        sync.WaitGroup
-	operationMu       sync.Mutex
-	writeLastGoodFile func(string, []byte) error
-	runtimeStatus     SingBoxRuntimeStatus
-	mu                sync.RWMutex
+	configDir            string
+	validationSlots      chan struct{}
+	validationTimeout    time.Duration
+	upstreamCheckSlots   chan struct{}
+	upstreamCheckTimeout time.Duration
+	resolver             netIPResolver
+	process              *exec.Cmd
+	logCloser            io.Closer
+	processDone          chan struct{}
+	processErr           error
+	processGeneration    uint64
+	processStartedAt     time.Time
+	stopRequested        bool
+	desiredRunning       bool
+	recoveryRunning      bool
+	recoveryCancel       chan struct{}
+	recoveryEpoch        uint64
+	recoveryAttempts     int
+	recoveryWG           sync.WaitGroup
+	operationMu          sync.Mutex
+	writeLastGoodFile    func(string, []byte) error
+	runtimeStatus        SingBoxRuntimeStatus
+	mu                   sync.RWMutex
 }
 
 type SingBoxRuntimeStatus struct {
@@ -157,9 +163,14 @@ func WithLastGoodSnapshotWriter(writer func(string, []byte) error) SingBoxServic
 
 func NewSingBoxService(configDir string, options ...SingBoxServiceOption) *SingBoxService {
 	service := &SingBoxService{
-		configDir:         configDir,
-		writeLastGoodFile: writeSensitiveFileAtomically,
-		runtimeStatus:     SingBoxRuntimeStatus{State: "stopped"},
+		configDir:            configDir,
+		validationSlots:      make(chan struct{}, readBoundedIntEnv("SBPM_SINGBOX_CHECK_CONCURRENCY", 4, 1, 16)),
+		validationTimeout:    readSingBoxDurationEnv("SBPM_SINGBOX_CHECK_TIMEOUT", 10*time.Second, 100*time.Millisecond, 2*time.Minute),
+		upstreamCheckSlots:   make(chan struct{}, readBoundedIntEnv("SBPM_UPSTREAM_CHECK_CONCURRENCY", 3, 1, 16)),
+		upstreamCheckTimeout: readSingBoxDurationEnv("SBPM_UPSTREAM_CHECK_TIMEOUT", 30*time.Second, time.Second, 5*time.Minute),
+		resolver:             net.DefaultResolver,
+		writeLastGoodFile:    writeSensitiveFileAtomically,
+		runtimeStatus:        SingBoxRuntimeStatus{State: "stopped"},
 	}
 	for _, option := range options {
 		if option != nil {
@@ -266,12 +277,21 @@ type parsedUpstreamProxy struct {
 	Config     interface{}
 	Tag        string
 	OwnerID    int
+	Scope      string
 }
 
 // BuildGlobalConfig renders the unified sing-box configuration for all enabled
 // nodes and returns it as JSON without touching the filesystem or the running
 // process, so callers can validate it before applying.
 func (s *SingBoxService) BuildGlobalConfig(nodes []models.ProxyNode, settings ...models.Settings) ([]byte, error) {
+	return s.BuildGlobalConfigContext(context.Background(), nodes, settings...)
+}
+
+func (s *SingBoxService) BuildGlobalConfigContext(
+	ctx context.Context,
+	nodes []models.ProxyNode,
+	settings ...models.Settings,
+) ([]byte, error) {
 	config := SingBoxConfig{
 		Log: LogConfig{
 			Level:     "info",
@@ -293,7 +313,7 @@ func (s *SingBoxService) BuildGlobalConfig(nodes []models.ProxyNode, settings ..
 	if len(settings) > 0 {
 		runtimeSettings = settings[0]
 	}
-	upstreams, upstreamNeedsLocalDNS, err := s.prepareManagedUpstreams(parsedNodes, runtimeSettings)
+	upstreams, upstreamNeedsLocalDNS, err := s.prepareManagedUpstreams(ctx, parsedNodes, runtimeSettings)
 	if err != nil {
 		return nil, err
 	}
@@ -500,6 +520,25 @@ func writeSensitiveFileAtomically(path string, content []byte) error {
 // without touching the running process or the live config file. On rejection
 // the kernel's own error output is returned so the caller can surface it.
 func (s *SingBoxService) ValidateConfig(configJSON []byte) error {
+	return s.ValidateConfigContext(context.Background(), configJSON)
+}
+
+func (s *SingBoxService) ValidateConfigContext(ctx context.Context, configJSON []byte) error {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	validationTimeout := s.validationTimeout
+	if validationTimeout <= 0 {
+		validationTimeout = 10 * time.Second
+	}
+	validationCtx, cancel := context.WithTimeout(ctx, validationTimeout)
+	defer cancel()
+	release, err := acquireExecutionSlot(validationCtx, s.validationSlots, "sing-box config validation")
+	if err != nil {
+		return err
+	}
+	defer release()
+
 	singBoxBinary, err := s.resolveSingBoxBinary()
 	if err != nil {
 		return err
@@ -520,17 +559,25 @@ func (s *SingBoxService) ValidateConfig(configJSON []byte) error {
 		return err
 	}
 
-	cmd := exec.Command(singBoxBinary, "check", "-c", tmpPath)
+	cmd := exec.CommandContext(validationCtx, singBoxBinary, "check", "-c", tmpPath)
 	processGuard, err := prepareSingBoxCommand(cmd)
 	if err != nil {
 		return fmt.Errorf("prepare sing-box validation process: %w", err)
 	}
-	output, err := cmd.CombinedOutput()
+	cmd.Cancel = func() error { return terminateProcess(cmd) }
+	cmd.WaitDelay = time.Second
+	output := newBoundedCommandOutput(maxSingBoxDiagnosticBytes)
+	cmd.Stdout = output
+	cmd.Stderr = output
+	err = cmd.Run()
 	if closeErr := processGuard.Close(); closeErr != nil && err == nil {
 		return fmt.Errorf("close sing-box validation process guard: %w", closeErr)
 	}
+	if validationCtx.Err() != nil {
+		return fmt.Errorf("sing-box config validation did not finish within %s: %w", validationTimeout, validationCtx.Err())
+	}
 	if err != nil {
-		detail := strings.TrimSpace(string(output))
+		detail := strings.TrimSpace(output.String(4096))
 		if detail == "" {
 			detail = err.Error()
 		}
@@ -866,6 +913,7 @@ func (s *SingBoxService) parseManagedUpstreamDefinition(
 }
 
 func (s *SingBoxService) prepareManagedUpstreams(
+	ctx context.Context,
 	nodes []parsedEnabledNode,
 	settings models.Settings,
 ) ([]parsedUpstreamProxy, bool, error) {
@@ -874,7 +922,6 @@ func (s *SingBoxService) prepareManagedUpstreams(
 	for index := range nodes {
 		inboundPorts[nodes[index].Node.InboundPort] = nodes[index].Node
 	}
-	localHosts := managerLocalHosts()
 	needsLocalDNS := false
 
 	prepare := func(
@@ -886,9 +933,6 @@ func (s *SingBoxService) prepareManagedUpstreams(
 		normalized, parsedConfig, err := s.parseManagedUpstreamDefinition(definition)
 		if err != nil {
 			return parsedUpstreamProxy{}, fmt.Errorf("%s: %w", scope, err)
-		}
-		if err := validateUpstreamInboundCollisions(parsedConfig, inboundPorts, localHosts, scope); err != nil {
-			return parsedUpstreamProxy{}, err
 		}
 		resolver, err := configDomainResolverValue(parsedConfig)
 		if err != nil {
@@ -904,6 +948,7 @@ func (s *SingBoxService) prepareManagedUpstreams(
 			Config:     parsedConfig,
 			Tag:        tag,
 			OwnerID:    ownerID,
+			Scope:      scope,
 		}, nil
 	}
 
@@ -984,6 +1029,9 @@ func (s *SingBoxService) prepareManagedUpstreams(
 			)
 		}
 	}
+	if err := s.validateManagedUpstreamInboundCollisions(ctx, upstreams, inboundPorts); err != nil {
+		return nil, false, err
+	}
 	return upstreams, needsLocalDNS, nil
 }
 
@@ -1040,37 +1088,6 @@ func canonicalProxyType(raw string) string {
 		return "socks5"
 	}
 	return proxyType
-}
-
-func validateUpstreamInboundCollisions(
-	parsedConfig interface{},
-	inboundPorts map[int]*models.ProxyNode,
-	localHosts map[string]struct{},
-	scope string,
-) error {
-	targets, err := upstreamDialTargets(parsedConfig)
-	if err != nil {
-		return upstreamValidationErrorf("%s has invalid dial target: %v", scope, err)
-	}
-	for _, target := range targets {
-		if !isManagerLocalHost(target.host, localHosts) {
-			continue
-		}
-		for inboundPort, node := range inboundPorts {
-			for _, portRange := range target.ports {
-				if inboundPort < portRange.start || inboundPort > portRange.end {
-					continue
-				}
-				return upstreamValidationErrorf(
-					"%s must not dial local inbound port %d (node %d); route-number authentication cannot bypass this recursion guard",
-					scope,
-					inboundPort,
-					node.ID,
-				)
-			}
-		}
-	}
-	return nil
 }
 
 func upstreamDialTargets(config interface{}) ([]upstreamDialTarget, error) {
@@ -1186,12 +1203,7 @@ func managerLocalHosts() map[string]struct{} {
 }
 
 func isManagerLocalHost(raw string, localHosts map[string]struct{}) bool {
-	host := strings.ToLower(strings.TrimSuffix(strings.TrimSpace(raw), "."))
-	host = strings.TrimPrefix(host, "[")
-	host = strings.TrimSuffix(host, "]")
-	if zoneIndex := strings.LastIndex(host, "%"); zoneIndex > 0 {
-		host = host[:zoneIndex]
-	}
+	host := normalizeManagerHost(raw)
 	if host == "localhost" || host == "localhost.localdomain" || strings.HasSuffix(host, ".localhost") {
 		return true
 	}
@@ -1204,6 +1216,16 @@ func isManagerLocalHost(raw string, localHosts map[string]struct{}) bool {
 	}
 	_, exists := localHosts[host]
 	return exists
+}
+
+func normalizeManagerHost(raw string) string {
+	host := strings.ToLower(strings.TrimSuffix(strings.TrimSpace(raw), "."))
+	host = strings.TrimPrefix(host, "[")
+	host = strings.TrimSuffix(host, "]")
+	if zoneIndex := strings.LastIndex(host, "%"); zoneIndex > 0 {
+		host = host[:zoneIndex]
+	}
+	return host
 }
 
 func configDomainResolverValue(config interface{}) (interface{}, error) {

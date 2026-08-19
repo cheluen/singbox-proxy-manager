@@ -233,6 +233,88 @@ exit 2
 	}
 }
 
+func TestCheckUpstreamIPLimitsConcurrentIsolatedProcesses(t *testing.T) {
+	t.Setenv("SBPM_UPSTREAM_CHECK_CONCURRENCY", "2")
+	t.Setenv("SBPM_UPSTREAM_CHECK_TIMEOUT", "5s")
+	tempDir := t.TempDir()
+	fakeBinary := filepath.Join(tempDir, "fake-sing-box")
+	if err := os.WriteFile(fakeBinary, []byte("#!/bin/sh\nsleep 300\n"), 0o755); err != nil {
+		t.Fatalf("write fake sing-box: %v", err)
+	}
+	t.Setenv("SINGBOX_BINARY", fakeBinary)
+	service := NewSingBoxService(t.TempDir())
+
+	const requests = 6
+	started := make(chan struct{}, requests)
+	release := make(chan struct{})
+	var active atomic.Int32
+	var maximum atomic.Int32
+	checker := func(context.Context, string, string, string) (*IPInfo, error) {
+		current := active.Add(1)
+		for {
+			observed := maximum.Load()
+			if current <= observed || maximum.CompareAndSwap(observed, current) {
+				break
+			}
+		}
+		started <- struct{}{}
+		<-release
+		active.Add(-1)
+		return &IPInfo{IP: "198.51.100.80"}, nil
+	}
+
+	errorsCh := make(chan error, requests)
+	var workers sync.WaitGroup
+	workers.Add(requests)
+	for index := 0; index < requests; index++ {
+		go func() {
+			defer workers.Done()
+			ctx, cancel := context.WithTimeout(context.Background(), 4*time.Second)
+			defer cancel()
+			_, err := service.checkUpstreamIPContext(
+				ctx,
+				models.ProxyDefinition{Type: "socks5", Config: `{"server":"192.0.2.80","server_port":1080}`},
+				checker,
+			)
+			errorsCh <- err
+		}()
+	}
+
+	for count := 0; count < 2; count++ {
+		select {
+		case <-started:
+		case <-time.After(2 * time.Second):
+			t.Fatalf("only %d upstream checks started", count)
+		}
+	}
+	select {
+	case <-started:
+		t.Fatal("more than two isolated upstream checks started concurrently")
+	case <-time.After(150 * time.Millisecond):
+	}
+	close(release)
+
+	done := make(chan struct{})
+	go func() {
+		workers.Wait()
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(3 * time.Second):
+		t.Fatal("upstream checks did not finish")
+	}
+	close(errorsCh)
+	for err := range errorsCh {
+		if err != nil {
+			t.Fatalf("upstream check failed: %v", err)
+		}
+	}
+	if got := maximum.Load(); got != 2 {
+		t.Fatalf("maximum concurrent upstream checks=%d want 2", got)
+	}
+}
+
 func toString(value interface{}) string {
 	data, _ := json.Marshal(value)
 	return string(data)

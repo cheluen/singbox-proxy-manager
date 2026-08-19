@@ -1,7 +1,6 @@
 package services
 
 import (
-	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -40,9 +39,23 @@ func (s *SingBoxService) checkUpstreamIPContext(
 	if checker == nil {
 		return nil, fmt.Errorf("upstream IP checker is unavailable")
 	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	checkTimeout := s.upstreamCheckTimeout
+	if checkTimeout <= 0 {
+		checkTimeout = 30 * time.Second
+	}
+	checkCtx, cancelCheck := context.WithTimeout(ctx, checkTimeout)
+	defer cancelCheck()
 	if err := s.ValidateUpstreamDefinition(definition); err != nil {
 		return nil, err
 	}
+	release, err := acquireExecutionSlot(checkCtx, s.upstreamCheckSlots, "upstream IP check")
+	if err != nil {
+		return nil, err
+	}
+	defer release()
 
 	binary, err := s.resolveSingBoxBinary()
 	if err != nil {
@@ -51,12 +64,12 @@ func (s *SingBoxService) checkUpstreamIPContext(
 	var lastErr error
 	usedPorts := make(map[int]struct{}, upstreamIPCheckMaxAttempts)
 	for attempt := 1; attempt <= upstreamIPCheckMaxAttempts; attempt++ {
-		info, attemptErr, retryable := s.runUpstreamIPCheckAttempt(ctx, definition, checker, binary, usedPorts)
+		info, attemptErr, retryable := s.runUpstreamIPCheckAttempt(checkCtx, definition, checker, binary, usedPorts)
 		if attemptErr == nil {
 			return info, nil
 		}
 		lastErr = attemptErr
-		if !retryable || ctx.Err() != nil {
+		if !retryable || checkCtx.Err() != nil {
 			return nil, attemptErr
 		}
 	}
@@ -75,7 +88,7 @@ func (s *SingBoxService) runUpstreamIPCheckAttempt(
 		return nil, fmt.Errorf("reserve upstream check port: %w", err), true
 	}
 	usedPorts[port] = struct{}{}
-	configJSON, err := s.BuildGlobalConfig([]models.ProxyNode{{
+	configJSON, err := s.BuildGlobalConfigContext(ctx, []models.ProxyNode{{
 		ID:             1,
 		Name:           "upstream-ip-check",
 		Type:           "direct",
@@ -112,10 +125,10 @@ func (s *SingBoxService) runUpstreamIPCheckAttempt(
 	if err != nil {
 		return nil, fmt.Errorf("prepare isolated upstream check process: %w", err), true
 	}
-	var stdout bytes.Buffer
-	var stderr bytes.Buffer
-	cmd.Stdout = &stdout
-	cmd.Stderr = &stderr
+	stdout := newBoundedCommandOutput(maxSingBoxDiagnosticBytes)
+	stderr := newBoundedCommandOutput(maxSingBoxDiagnosticBytes)
+	cmd.Stdout = stdout
+	cmd.Stderr = stderr
 	if err := cmd.Start(); err != nil {
 		_ = processGuard.Close()
 		return nil, fmt.Errorf("start isolated upstream check process: %w", err), true
@@ -167,7 +180,7 @@ func (s *SingBoxService) runUpstreamIPCheckAttempt(
 	case processErr = <-processDone:
 		processExited = true
 		cancelAttempt()
-		return nil, upstreamProcessExitError(processErr, stdout.String(), stderr.String()), true
+		return nil, upstreamProcessExitError(processErr, stdout.String(4096), stderr.String(4096)), true
 	case result := <-checkDone:
 		if result.err == nil {
 			return result.info, nil, false
@@ -175,11 +188,11 @@ func (s *SingBoxService) runUpstreamIPCheckAttempt(
 		select {
 		case processErr = <-processDone:
 			processExited = true
-			return nil, upstreamProcessExitError(processErr, stdout.String(), stderr.String()), true
+			return nil, upstreamProcessExitError(processErr, stdout.String(4096), stderr.String(4096)), true
 		default:
 		}
 		stopProcess()
-		checkErr := appendUpstreamProcessDetail(result.err, stderr.String())
+		checkErr := appendUpstreamProcessDetail(result.err, stderr.String(4096))
 		return nil, checkErr, errors.Is(result.err, ErrProxyNotReady)
 	case <-ctx.Done():
 		cancelAttempt()
