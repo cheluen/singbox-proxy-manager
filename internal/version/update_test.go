@@ -17,20 +17,47 @@ func (f roundTripFunc) RoundTrip(req *http.Request) (*http.Response, error) {
 
 func TestCompareVersions(t *testing.T) {
 	cases := []struct {
+		name  string
 		left  string
 		right string
 		want  int
 	}{
-		{left: "v1.4.0", right: "1.3.17", want: 1},
-		{left: "1.3.17", right: "1.3.17", want: 0},
-		{left: "1.3.9", right: "1.3.17", want: -1},
-		{left: "1.4.0", right: "1.4.0-beta.1", want: 1},
-		{left: "1.4.0-beta.1", right: "1.4.0", want: -1},
+		{name: "major and minor", left: "v1.4.0", right: "1.3.17", want: 1},
+		{name: "equal", left: "1.3.17", right: "1.3.17", want: 0},
+		{name: "numeric patch", left: "1.3.9", right: "1.3.17", want: -1},
+		{name: "release after prerelease", left: "1.4.0", right: "1.4.0-beta.1", want: 1},
+		{name: "prerelease before release", left: "1.4.0-beta.1", right: "1.4.0", want: -1},
+		{name: "numeric prerelease", left: "1.4.0-beta.10", right: "1.4.0-beta.2", want: 1},
+		{name: "numeric before nonnumeric identifier", left: "1.4.0-alpha.1", right: "1.4.0-alpha.beta", want: -1},
+		{name: "shorter prerelease has lower precedence", left: "1.4.0-alpha", right: "1.4.0-alpha.1", want: -1},
+		{name: "build metadata ignored", left: "1.4.0+build.10", right: "1.4.0+build.2", want: 0},
+		{name: "short version canonicalized", left: "V1.4", right: "1.4.0", want: 0},
 	}
 	for _, tc := range cases {
-		got := CompareVersions(tc.left, tc.right)
-		if (got > 0 && tc.want <= 0) || (got == 0 && tc.want != 0) || (got < 0 && tc.want >= 0) {
-			t.Fatalf("CompareVersions(%q,%q)=%d want sign %d", tc.left, tc.right, got, tc.want)
+		t.Run(tc.name, func(t *testing.T) {
+			got := CompareVersions(tc.left, tc.right)
+			if (got > 0 && tc.want <= 0) || (got == 0 && tc.want != 0) || (got < 0 && tc.want >= 0) {
+				t.Fatalf("CompareVersions(%q,%q)=%d want sign %d", tc.left, tc.right, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestCompareVersionsFollowsSemverPrereleasePrecedence(t *testing.T) {
+	versions := []string{
+		"1.0.0-alpha",
+		"1.0.0-alpha.1",
+		"1.0.0-alpha.beta",
+		"1.0.0-beta",
+		"1.0.0-beta.2",
+		"1.0.0-beta.11",
+		"1.0.0-rc.1",
+		"1.0.0",
+	}
+
+	for i := 1; i < len(versions); i++ {
+		if got := CompareVersions(versions[i-1], versions[i]); got >= 0 {
+			t.Fatalf("CompareVersions(%q,%q)=%d want < 0", versions[i-1], versions[i], got)
 		}
 	}
 }

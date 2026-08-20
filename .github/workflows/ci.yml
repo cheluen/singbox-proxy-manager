@@ -333,7 +333,10 @@ jobs:
           docker ps --filter name=sbpm-ci-ss-upstream --filter status=running --format '{{.Names}}' \
             | grep -Fx sbpm-ci-ss-upstream
 
-          curl -fsS http://127.0.0.1:38080/api/auth/status | tee /tmp/auth-status.json
+          curl -fsS http://127.0.0.1:38080/api/version --output /tmp/version.json
+          cat /tmp/version.json
+          jq -e --arg expected "$(cat internal/version/version.txt)" \
+            '.version == $expected' /tmp/version.json
           TOKEN=$(curl -fsS -X POST http://127.0.0.1:38080/api/login \
             -H 'Content-Type: application/json' \
             -d '{"password":"system-test-password"}' | jq -r '.token')

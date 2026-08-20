@@ -8,10 +8,11 @@ import (
 	"net/http"
 	"net/url"
 	"os"
-	"strconv"
 	"strings"
 	"sync"
 	"time"
+
+	"golang.org/x/mod/semver"
 )
 
 const (
@@ -172,64 +173,15 @@ func (c *UpdateChecker) fetchLatestRelease(ctx context.Context) (githubRelease, 
 }
 
 func CompareVersions(left string, right string) int {
-	l := parseComparableVersion(left)
-	r := parseComparableVersion(right)
-	maxLen := len(l.numbers)
-	if len(r.numbers) > maxLen {
-		maxLen = len(r.numbers)
-	}
-	for i := 0; i < maxLen; i++ {
-		var lv, rv int
-		if i < len(l.numbers) {
-			lv = l.numbers[i]
-		}
-		if i < len(r.numbers) {
-			rv = r.numbers[i]
-		}
-		if lv > rv {
-			return 1
-		}
-		if lv < rv {
-			return -1
-		}
-	}
-	if l.prerelease == "" && r.prerelease != "" {
-		return 1
-	}
-	if l.prerelease != "" && r.prerelease == "" {
-		return -1
-	}
-	return strings.Compare(l.prerelease, r.prerelease)
+	return semver.Compare(toSemver(left), toSemver(right))
 }
 
-type comparableVersion struct {
-	numbers    []int
-	prerelease string
-}
-
-func parseComparableVersion(value string) comparableVersion {
+func toSemver(value string) string {
 	value = normalizeVersion(value)
-	value = strings.SplitN(value, "+", 2)[0]
-	mainPart := value
-	pre := ""
-	if idx := strings.Index(mainPart, "-"); idx >= 0 {
-		pre = mainPart[idx+1:]
-		mainPart = mainPart[:idx]
+	if value == "" {
+		return ""
 	}
-	pieces := strings.Split(mainPart, ".")
-	numbers := make([]int, 0, len(pieces))
-	for _, piece := range pieces {
-		if piece == "" {
-			numbers = append(numbers, 0)
-			continue
-		}
-		value, err := strconv.Atoi(piece)
-		if err != nil {
-			break
-		}
-		numbers = append(numbers, value)
-	}
-	return comparableVersion{numbers: numbers, prerelease: pre}
+	return "v" + value
 }
 
 func normalizeVersion(value string) string {
