@@ -72,6 +72,7 @@ export default {
   copied: 'Copied',
   copy_failed: 'Copy failed, please copy manually',
   export_partial: '{{count}} nodes failed to export',
+  no_exportable_nodes: 'The selected nodes have no exportable share links',
   replace: 'Replace',
   replace_desc: 'Paste a share link to replace this node. IP/latency status will be cleared and needs re-check.',
   replace_update_name: 'Use link name to overwrite node name',

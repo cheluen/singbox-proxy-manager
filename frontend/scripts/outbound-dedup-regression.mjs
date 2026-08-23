@@ -52,6 +52,7 @@ const getBrowserExecutablePath = () => {
 
 const createMockApiServer = () => {
   let lastBatchDeletePayload = null
+  let lastBatchExportPayload = null
   let nodes = [
     {
       id: 1,
@@ -70,6 +71,9 @@ const createMockApiServer = () => {
       remark: '',
       created_at: '2026-01-01T00:00:00Z',
       updated_at: '2026-01-01T00:00:00Z',
+      upstream_mode: 'none',
+      upstream_type: '',
+      upstream_config: '',
     },
     {
       id: 2,
@@ -88,12 +92,15 @@ const createMockApiServer = () => {
       remark: '',
       created_at: '2026-01-01T00:00:00Z',
       updated_at: '2026-01-01T00:00:00Z',
+      upstream_mode: 'none',
+      upstream_type: '',
+      upstream_config: '',
     },
     {
       id: 3,
-      name: 'node-3',
+      name: 'node-3-global-upstream',
       type: 'vmess',
-      config: '{"server":"example.com","tls":false,"server_port":443}',
+      config: '{"server":"example.com","tls":true,"server_port":443}',
       inbound_port: 30003,
       username: 'u3',
       password: 'p3',
@@ -106,6 +113,72 @@ const createMockApiServer = () => {
       remark: '',
       created_at: '2026-01-01T00:00:00Z',
       updated_at: '2026-01-01T00:00:00Z',
+      upstream_mode: 'global',
+      upstream_type: '',
+      upstream_config: '',
+    },
+    {
+      id: 4,
+      name: 'node-4-custom-upstream',
+      type: 'vmess',
+      config: '{"server":"example.com","tls":true,"server_port":443}',
+      inbound_port: 30004,
+      username: 'u4',
+      password: 'p4',
+      sort_order: 3,
+      node_ip: '',
+      location: '',
+      country_code: '',
+      latency: 0,
+      enabled: true,
+      remark: '',
+      created_at: '2026-01-01T00:00:00Z',
+      updated_at: '2026-01-01T00:00:00Z',
+      upstream_mode: 'custom',
+      upstream_type: 'socks5',
+      upstream_config: '{"server":"upstream.example","server_port":1080}',
+    },
+    {
+      id: 5,
+      name: 'node-5-custom-upstream-duplicate',
+      type: 'vmess',
+      config: '{"server_port":443,"server":"example.com","tls":true}',
+      inbound_port: 30005,
+      username: 'u5',
+      password: 'p5',
+      sort_order: 4,
+      node_ip: '',
+      location: '',
+      country_code: '',
+      latency: 0,
+      enabled: true,
+      remark: '',
+      created_at: '2026-01-01T00:00:00Z',
+      updated_at: '2026-01-01T00:00:00Z',
+      upstream_mode: 'custom',
+      upstream_type: 'socks5',
+      upstream_config: '{"server_port":1080,"server":"upstream.example"}',
+    },
+    {
+      id: 6,
+      name: 'node-6-direct',
+      type: 'direct',
+      config: '{}',
+      inbound_port: 30006,
+      username: 'u6',
+      password: 'p6',
+      sort_order: 5,
+      node_ip: '',
+      location: '',
+      country_code: '',
+      latency: 0,
+      enabled: true,
+      remark: '',
+      created_at: '2026-01-01T00:00:00Z',
+      updated_at: '2026-01-01T00:00:00Z',
+      upstream_mode: 'none',
+      upstream_type: '',
+      upstream_config: '',
     },
   ]
 
@@ -147,8 +220,31 @@ const createMockApiServer = () => {
       return
     }
 
+    if (req.method === 'POST' && req.url === '/api/nodes/batch-export') {
+      let body = ''
+      req.on('data', (chunk) => {
+        body += chunk
+      })
+      req.on('end', () => {
+        const payload = JSON.parse(body || '{}')
+        lastBatchExportPayload = payload
+        const ids = Array.isArray(payload.ids) ? payload.ids.map((id) => Number(id)) : []
+        sendJson(res, 200, {
+          total: ids.length,
+          success: ids.length,
+          failed: 0,
+          results: ids.map((id) => ({
+            id,
+            success: true,
+            link: `vmess://node-${id}`,
+          })),
+        })
+      })
+      return
+    }
+
     if (req.method === 'GET' && req.url === '/api/__state') {
-      sendJson(res, 200, { nodes, lastBatchDeletePayload })
+      sendJson(res, 200, { nodes, lastBatchDeletePayload, lastBatchExportPayload })
       return
     }
 
@@ -161,7 +257,7 @@ const createMockApiServer = () => {
     sendJson(res, 404, { error: 'not found', method: req.method, url: req.url })
   })
 
-  const getState = () => ({ nodes, lastBatchDeletePayload })
+  const getState = () => ({ nodes, lastBatchDeletePayload, lastBatchExportPayload })
   return { server, getState }
 }
 
@@ -354,6 +450,9 @@ const run = async () => {
     await clickNodeCheckbox(page, 1)
     await clickNodeCheckbox(page, 2)
     await clickNodeCheckbox(page, 3)
+    await clickNodeCheckbox(page, 4)
+    await clickNodeCheckbox(page, 5)
+    await clickNodeCheckbox(page, 6)
     await sleep(300)
 
     const orderBefore = await getRowNames(page)
@@ -363,7 +462,9 @@ const run = async () => {
     await page.click('.ant-modal-confirm .ant-btn-primary')
 
     await page.waitForFunction(
-      () => !document.querySelector('tbody.ant-table-tbody tr[data-row-key="2"]'),
+      () =>
+        !document.querySelector('tbody.ant-table-tbody tr[data-row-key="2"]') &&
+        !document.querySelector('tbody.ant-table-tbody tr[data-row-key="5"]'),
       { timeout: 10000 }
     )
 
@@ -371,17 +472,54 @@ const run = async () => {
     const orderAfter = await getRowNames(page)
 
     assert(
-      JSON.stringify(orderBefore) === JSON.stringify(['node-1', 'node-2-dup-different-json-order', 'node-3']),
+      JSON.stringify(orderBefore) === JSON.stringify([
+        'node-1',
+        'node-2-dup-different-json-order',
+        'node-3-global-upstream',
+        'node-4-custom-upstream',
+        'node-5-custom-upstream-duplicate',
+        'node-6-direct',
+      ]),
       `Unexpected initial order: ${JSON.stringify(orderBefore)}`
     )
     assert(Boolean(state.lastBatchDeletePayload), 'Expected batch-delete request to be sent')
     assert(
-      JSON.stringify(state.lastBatchDeletePayload.ids) === JSON.stringify([2]),
+      JSON.stringify(state.lastBatchDeletePayload.ids) === JSON.stringify([2, 5]),
       `Unexpected batch-delete payload: ${JSON.stringify(state.lastBatchDeletePayload)}`
     )
     assert(
-      JSON.stringify(orderAfter) === JSON.stringify(['node-1', 'node-3']),
+      JSON.stringify(orderAfter) === JSON.stringify([
+        'node-1',
+        'node-3-global-upstream',
+        'node-4-custom-upstream',
+        'node-6-direct',
+      ]),
       `Unexpected order after dedup: ${JSON.stringify(orderAfter)}`
+    )
+
+    assert(
+      !(await page.$('[data-testid="export-node-6"]')),
+      'Direct node must not render a single-node export action'
+    )
+
+    await page.reload({ waitUntil: 'networkidle2' })
+    await page.waitForSelector('tbody.ant-table-tbody tr[data-row-key="6"]', { timeout: 30000 })
+    await clickNodeCheckbox(page, 6)
+    const batchExportDisabled = await page.$eval(
+      '[data-testid="nodes-batch-export"]',
+      (button) => Boolean(button.disabled)
+    )
+    assert(batchExportDisabled, 'Batch export must be disabled when only Direct nodes are selected')
+
+    await clickNodeCheckbox(page, 1)
+    await page.click('[data-testid="nodes-batch-export"]')
+    await page.waitForFunction(
+      () => document.querySelector('.ant-modal textarea')?.value === 'vmess://node-1',
+      { timeout: 5000 }
+    )
+    assert(
+      JSON.stringify(mockApi.getState().lastBatchExportPayload?.ids) === JSON.stringify([1]),
+      `Batch export included unsupported Direct nodes: ${JSON.stringify(mockApi.getState().lastBatchExportPayload)}`
     )
     assert(consoleErrors.length === 0, `Console errors: ${consoleErrors.join(' | ')}`)
 

@@ -52,6 +52,7 @@ const getBrowserExecutablePath = () => {
 
 const createMockApiServer = () => {
   let lastBatchImportPayload = null
+  let batchImportRequestCount = 0
   let nodes = []
 
   const server = http.createServer((req, res) => {
@@ -72,6 +73,7 @@ const createMockApiServer = () => {
       })
       req.on('end', () => {
         const payload = JSON.parse(body || '{}')
+        batchImportRequestCount += 1
         lastBatchImportPayload = payload
 
         if (typeof payload.content !== 'string' || payload.content.trim() === '') {
@@ -100,18 +102,20 @@ const createMockApiServer = () => {
           },
         ]
 
-        sendJson(res, 200, {
-          total: 1,
-          success: 1,
-          failed: 0,
-          results: [{ success: true, id: 1, name: 'imported-1' }],
-        })
+        setTimeout(() => {
+          sendJson(res, 200, {
+            total: 1,
+            success: 1,
+            failed: 0,
+            results: [{ success: true, id: 1, name: 'imported-1' }],
+          })
+        }, 700)
       })
       return
     }
 
     if (req.method === 'GET' && req.url === '/api/__state') {
-      sendJson(res, 200, { lastBatchImportPayload, nodes })
+      sendJson(res, 200, { lastBatchImportPayload, batchImportRequestCount, nodes })
       return
     }
 
@@ -124,7 +128,7 @@ const createMockApiServer = () => {
     sendJson(res, 404, { error: 'not found', method: req.method, url: req.url })
   })
 
-  const getState = () => ({ lastBatchImportPayload, nodes })
+  const getState = () => ({ lastBatchImportPayload, batchImportRequestCount, nodes })
   return { server, getState }
 }
 
@@ -403,11 +407,37 @@ const run = async () => {
       10000
     )
 
-    await clickButtonByText(page, 'Confirm', 5000)
-    await sleep(800)
-
+    const submitted = await page.evaluate(() => {
+      const button = document.querySelector('.ant-modal .ant-btn-primary')
+      if (!button) return false
+      button.click()
+      button.click()
+      return true
+    })
+    assert(submitted, 'Batch import confirm button was not found')
+    await page.waitForFunction(
+      () => Boolean(document.querySelector('.ant-modal .ant-btn-primary')?.disabled),
+      { timeout: 3000 }
+    )
+    await sleep(1800)
     const state = mockApi.getState()
+    const modalState = await page.evaluate(() => {
+      const textarea = document.querySelector('.ant-modal textarea')
+      return {
+        textareaPresent: Boolean(textarea),
+        textareaVisible: Boolean(textarea && textarea.getClientRects().length > 0),
+        bodyText: document.body.innerText.slice(-500),
+      }
+    })
     assert(state.lastBatchImportPayload, 'missing batch import payload')
+    assert(
+      state.batchImportRequestCount === 1,
+      `double submit sent ${state.batchImportRequestCount} batch import requests`
+    )
+    assert(
+      !modalState.textareaVisible,
+      `batch import modal remained visible: ${JSON.stringify({ state, modalState })}`
+    )
     assert(
       typeof state.lastBatchImportPayload.content === 'string' &&
         state.lastBatchImportPayload.content.trim() === content,

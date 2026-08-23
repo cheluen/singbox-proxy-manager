@@ -72,6 +72,7 @@ export default {
   copied: '已复制',
   copy_failed: '复制失败，请手动复制',
   export_partial: '{{count}} 个节点导出失败',
+  no_exportable_nodes: '所选节点没有可导出的分享链接',
   replace: '替换',
   replace_desc: '粘贴分享链接直接替换该节点的协议与配置；替换后会清空旧的IP/延迟状态，需要重新测IP。',
   replace_update_name: '使用链接中的名称覆盖当前节点名称',

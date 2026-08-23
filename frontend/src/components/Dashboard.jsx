@@ -330,6 +330,30 @@ const stableJSONStringify = (value) => {
   }
 }
 
+const stableConfigSignature = (rawConfig) => {
+  if (rawConfig === null || rawConfig === undefined) {
+    return 'null'
+  }
+
+  if (typeof rawConfig !== 'string') {
+    const normalized = stableJSONStringify(rawConfig)
+    return normalized ? `json:${normalized}` : `raw:${String(rawConfig)}`
+  }
+
+  const trimmed = rawConfig.trim()
+  if (!trimmed) {
+    return 'json:{}'
+  }
+
+  try {
+    return `json:${stableJSONStringify(JSON.parse(trimmed))}`
+  } catch {
+    return `raw:${trimmed}`
+  }
+}
+
+const isNodeExportable = (node) => String(node?.type || '').toLowerCase() !== 'direct'
+
 const normalizeFilterText = (value) => String(value ?? '').trim().toLowerCase()
 
 const parseInboundPortFilterExpression = (value) => {
@@ -430,6 +454,7 @@ function Dashboard({ onLogout }) {
   const nodesRef = useRef(nodes)
   const loadNodesRequestRef = useRef({ sequence: 0, controller: null })
   const nodeIPCheckRunsRef = useRef(new Map())
+  const batchImportSubmittingRef = useRef(false)
   const [loading, setLoading] = useState(false)
   const [appVersion, setAppVersion] = useState('')
   const [versionUpdate, setVersionUpdate] = useState(null)
@@ -445,6 +470,7 @@ function Dashboard({ onLogout }) {
   const [batchImportLinks, setBatchImportLinks] = useState('')
   const [batchImportSourceType, setBatchImportSourceType] = useState('auto')
   const [enableAfterImport, setEnableAfterImport] = useState(true)
+  const [batchImportLoading, setBatchImportLoading] = useState(false)
   const [checkingIP, setCheckingIP] = useState(false)
   const [exportVisible, setExportVisible] = useState(false)
   const [exportText, setExportText] = useState('')
@@ -474,6 +500,16 @@ function Dashboard({ onLogout }) {
   const [virtualListItemHeight, setVirtualListItemHeight] = useState(40)
 
   const selectedNodeIdSet = useMemo(() => new Set(selectedNodeIds), [selectedNodeIds])
+  const exportableSelectedNodeIds = useMemo(
+    () =>
+      nodes
+        .filter(
+          (node) => selectedNodeIdSet.has(node.id) || selectedNodeIdSet.has(String(node.id))
+        )
+        .filter(isNodeExportable)
+        .map((node) => node.id),
+    [nodes, selectedNodeIdSet]
+  )
   const nodeFiltersRef = useRef(nodeFilters)
   const preserveInboundPortsRef = useRef(preserveInboundPorts)
   const filterKeyOptions = useMemo(() => getFilterKeyOptions(t), [t])
@@ -1185,28 +1221,13 @@ function Dashboard({ onLogout }) {
   }
 
   const getOutboundSignature = (node) => {
-    const proxyType = String(node?.type || '')
-    const rawConfig = node?.config
-
-    if (rawConfig === null || rawConfig === undefined) {
-      return `${proxyType}|null`
-    }
-
-    if (typeof rawConfig !== 'string') {
-      return `${proxyType}|${stableJSONStringify(rawConfig)}`
-    }
-
-    const trimmed = rawConfig.trim()
-    if (!trimmed) {
-      return `${proxyType}|{}`
-    }
-
-    try {
-      const parsed = JSON.parse(trimmed)
-      return `${proxyType}|${stableJSONStringify(parsed)}`
-    } catch {
-      return `${proxyType}|raw:${trimmed}`
-    }
+    return stableJSONStringify({
+      type: String(node?.type || ''),
+      config: stableConfigSignature(node?.config),
+      upstream_mode: String(node?.upstream_mode || 'none'),
+      upstream_type: String(node?.upstream_type || ''),
+      upstream_config: stableConfigSignature(node?.upstream_config),
+    })
   }
 
   const computeDuplicateOutboundNodeIds = (scopeNodeIds) => {
@@ -1457,7 +1478,10 @@ function Dashboard({ onLogout }) {
           }
           failed += 1
           const statusCode = error?.response?.status
-          if (typeof statusCode === 'number' && statusCode >= 500) {
+          if (
+            typeof statusCode === 'number' &&
+            (statusCode === 429 || statusCode >= 500)
+          ) {
             clearNodeIPInfo(id)
           }
           if (Object.prototype.hasOwnProperty.call(error?.response?.data || {}, 'upstream')) {
@@ -1545,6 +1569,13 @@ function Dashboard({ onLogout }) {
       return
     }
 
+    if (batchImportSubmittingRef.current) {
+      return
+    }
+
+    batchImportSubmittingRef.current = true
+    setBatchImportLoading(true)
+
     try {
       setLoading(true)
       message.loading({ content: t('loading'), key: 'batchimport' })
@@ -1597,6 +1628,8 @@ function Dashboard({ onLogout }) {
         key: 'batchimport',
       })
     } finally {
+      batchImportSubmittingRef.current = false
+      setBatchImportLoading(false)
       setLoading(false)
     }
   }
@@ -1702,6 +1735,11 @@ function Dashboard({ onLogout }) {
   }
 
   const handleExportNode = async (node) => {
+    if (!isNodeExportable(node)) {
+      message.warning(t('no_exportable_nodes'))
+      return
+    }
+
     try {
       setExportLoading(true)
       const response = await api.get(`/nodes/${node.id}/export`)
@@ -1720,10 +1758,16 @@ function Dashboard({ onLogout }) {
       message.warning(t('select_nodes'))
       return
     }
+    if (exportableSelectedNodeIds.length === 0) {
+      message.warning(t('no_exportable_nodes'))
+      return
+    }
 
     try {
       setExportLoading(true)
-      const response = await api.post('/nodes/batch-export', { ids: selectedNodeIds })
+      const response = await api.post('/nodes/batch-export', {
+        ids: exportableSelectedNodeIds,
+      })
       const results = response.data?.results || []
       const links = results
         .filter((r) => r.success && r.link)
@@ -2432,15 +2476,18 @@ function Dashboard({ onLogout }) {
         width: isMobile ? 112 : 128,
         render: (_, record) => (
           <Space size={[4, 4]} wrap className="node-row-actions">
-            <Tooltip title={t('export')}>
-              <Button
-                type="link"
-                size="small"
-                icon={<CopyOutlined />}
-                loading={exportLoading}
-                onClick={() => handleExportNode(record)}
-              />
-            </Tooltip>
+            {isNodeExportable(record) && (
+              <Tooltip title={t('export')}>
+                <Button
+                  type="link"
+                  size="small"
+                  icon={<CopyOutlined />}
+                  loading={exportLoading}
+                  onClick={() => handleExportNode(record)}
+                  data-testid={`export-node-${record.id}`}
+                />
+              </Tooltip>
+            )}
             <Tooltip title={t('replace')}>
               <Button
                 type="link"
@@ -2863,6 +2910,7 @@ function Dashboard({ onLogout }) {
                   icon={<ExportOutlined />}
                   onClick={handleBatchExport}
                   loading={exportLoading}
+                  disabled={exportLoading || exportableSelectedNodeIds.length === 0}
                 >
                   {t('batch_export')}
                 </Button>
@@ -2980,10 +3028,19 @@ function Dashboard({ onLogout }) {
       <Modal
         title={t('batch_import_title')}
         open={batchImportVisible}
-        onCancel={() => setBatchImportVisible(false)}
+        onCancel={() => {
+          if (!batchImportSubmittingRef.current) {
+            setBatchImportVisible(false)
+          }
+        }}
         onOk={handleBatchImport}
         okText={t('confirm')}
         cancelText={t('cancel')}
+        confirmLoading={batchImportLoading}
+        okButtonProps={{ disabled: batchImportLoading }}
+        cancelButtonProps={{ disabled: batchImportLoading }}
+        closable={!batchImportLoading}
+        maskClosable={!batchImportLoading}
         width={700}
       >
         <Space direction="vertical" style={{ width: '100%' }} size="middle">
@@ -2992,6 +3049,7 @@ function Dashboard({ onLogout }) {
             id="batch-import-source-type"
             value={batchImportSourceType}
             onChange={setBatchImportSourceType}
+            disabled={batchImportLoading}
             options={[
               { value: 'auto', label: t('batch_import_source_auto') },
               { value: 'subscription', label: t('batch_import_source_subscription') },
@@ -3006,10 +3064,12 @@ function Dashboard({ onLogout }) {
             placeholder={t('paste_links')}
             value={batchImportLinks}
             onChange={(e) => setBatchImportLinks(e.target.value)}
+            disabled={batchImportLoading}
           />
           <Checkbox
             checked={enableAfterImport}
             onChange={(e) => setEnableAfterImport(e.target.checked)}
+            disabled={batchImportLoading}
           >
             {t('enable_after_import')}
           </Checkbox>

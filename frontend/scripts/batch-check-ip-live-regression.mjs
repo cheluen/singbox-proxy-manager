@@ -53,6 +53,7 @@ const getBrowserExecutablePath = () => {
 const createMockApiServer = () => {
   const checkCalls = []
   const checkResponses = []
+  let rateLimitedNodeID = null
   const nodes = [
     {
       id: 1,
@@ -140,6 +141,17 @@ const createMockApiServer = () => {
       let cancelled = false
       const timer = setTimeout(() => {
         if (cancelled) return
+        if (id === rateLimitedNodeID) {
+          updateNode(id, {
+            node_ip: '',
+            location: '',
+            country_code: '',
+            latency: 0,
+          })
+          checkResponses.push({ id, status: 429, at: Date.now() })
+          sendJson(res, 429, { error: 'IP check service rate limited the request (HTTP 429)' })
+          return
+        }
         updateNode(id, {
           node_ip: ipInfo.ip,
           location: ipInfo.location,
@@ -177,6 +189,7 @@ const createMockApiServer = () => {
   })
 
   const reset = () => {
+    rateLimitedNodeID = null
     checkCalls.length = 0
     checkResponses.length = 0
     for (const node of nodes) {
@@ -188,8 +201,20 @@ const createMockApiServer = () => {
     }
   }
 
+  const prepareRateLimit = (id) => {
+    checkCalls.length = 0
+    checkResponses.length = 0
+    rateLimitedNodeID = id
+    updateNode(id, {
+      node_ip: '9.9.9.9',
+      location: 'Old Location',
+      country_code: 'US',
+      latency: 99,
+    })
+  }
+
   const getState = () => ({ nodes, checkCalls, checkResponses })
-  return { server, getState, reset }
+  return { server, getState, reset, prepareRateLimit }
 }
 
 const tryListen = (server, options) =>
@@ -297,7 +322,8 @@ const isIgnorableConsoleError = (text) =>
   text.includes('[antd: Modal] `destroyOnClose` is deprecated') ||
   text.includes("[antd: message] Static function can not consume context like dynamic theme") ||
   text.includes("[antd: notification] Static function can not consume context like dynamic theme") ||
-  text.includes('Failed to load resource: the server responded with a status of 404 (Not Found)')
+  text.includes('Failed to load resource: the server responded with a status of 404 (Not Found)') ||
+  text.includes('Failed to load resource: the server responded with a status of 429 (Too Many Requests)')
 
 const clickButtonByText = async (page, text, timeoutMs = 10000) => {
   const deadline = Date.now() + timeoutMs
@@ -437,14 +463,36 @@ const run = async () => {
 
     assert(node1After === '1.1.1.1', `Unexpected node 1 IP cell text: ${node1After}`)
     assert(node2After === '2.2.2.2', `Unexpected node 2 IP cell text: ${node2After}`)
-    assert(consoleErrors.length === 0, `Console errors: ${consoleErrors.join(' | ')}`)
-
     const state = mockApi.getState()
     const responseOrder = state.checkResponses.map((item) => item.id)
     assert(
       JSON.stringify(responseOrder) === JSON.stringify([1, 2]),
       `Unexpected response order: ${JSON.stringify(responseOrder)}`
     )
+
+    mockApi.prepareRateLimit(1)
+    await page.reload({ waitUntil: 'networkidle2' })
+    await page.waitForFunction(
+      (sel) => (document.querySelector(sel)?.textContent || '').includes('9.9.9.9'),
+      { timeout: 5000 },
+      node1IPCell
+    )
+    await clickNodeCheckbox(page, 1)
+    await clickButtonByText(page, '批量测IP')
+    await page.waitForFunction(
+      (sel) => (document.querySelector(sel)?.textContent || '').trim() === '-',
+      { timeout: 5000 },
+      node1IPCell
+    )
+    const rateLimitedRowText = await getCellText(
+      page,
+      'tbody.ant-table-tbody tr[data-row-key="1"]'
+    )
+    assert(
+      rateLimitedRowText.includes('未检测/失效'),
+      `Rate-limited node retained its old health state: ${rateLimitedRowText}`
+    )
+    assert(consoleErrors.length === 0, `Console errors: ${consoleErrors.join(' | ')}`)
 
     console.log(
       JSON.stringify(
@@ -454,6 +502,7 @@ const run = async () => {
           node2IP: node2After,
           responseOrder,
           stopResponses,
+          rateLimitCleared: true,
         },
         null,
         2
