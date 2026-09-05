@@ -175,6 +175,40 @@ func TestBuildGlobalConfigRejectsIdenticalAndNestedUpstreams(t *testing.T) {
 	}
 }
 
+func TestGlobalUpstreamIdentityOnlyChecksFollowers(t *testing.T) {
+	service := NewSingBoxService(t.TempDir())
+	definition := `{"server":"proxy.example.com","server_port":1080,"username":"u","password":"p"}`
+	settings := models.Settings{GlobalUpstreamEnabled: true, GlobalUpstreamType: "socks5", GlobalUpstreamConfig: definition}
+	for _, mode := range []string{models.UpstreamModeNone, models.UpstreamModeLegacy, models.UpstreamModeCustom, models.UpstreamModeGlobal} {
+		t.Run(mode, func(t *testing.T) {
+			nodes := []models.ProxyNode{
+				{ID: 1, Type: "socks5", Config: definition, InboundPort: 34001, Enabled: true,
+					UpstreamMode: mode, UpstreamType: "http", UpstreamConfig: `{"server":"custom.example.com","server_port":8080}`},
+				{ID: 2, Type: "direct", Config: `{}`, InboundPort: 34002, Enabled: true, UpstreamMode: models.UpstreamModeGlobal},
+			}
+			data, err := service.BuildGlobalConfig(nodes, settings)
+			if mode == models.UpstreamModeGlobal {
+				if err == nil || !IsUpstreamValidationError(err) {
+					t.Fatalf("identical following node must be rejected: %v", err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("unrelated node must not block global upstream: %v", err)
+			}
+			config := decodeGeneratedConfig(t, data)
+			follower := generatedEntryByTag(t, config, "outbounds", "node-2-out")
+			if follower["default"] != globalUpstreamTag {
+				t.Fatalf("global follower lost its upstream: %#v", follower)
+			}
+			independent := generatedEntryByTag(t, config, "outbounds", "node-1-out")
+			if independent["detour"] == globalUpstreamTag {
+				t.Fatal("independent node unexpectedly follows global upstream")
+			}
+		})
+	}
+}
+
 func TestBuildGlobalConfigGeneratesWireGuardCustomUpstreamEndpoint(t *testing.T) {
 	service := NewSingBoxService(t.TempDir())
 	node := models.ProxyNode{

@@ -292,6 +292,15 @@ func (s *SingBoxService) BuildGlobalConfigContext(
 	nodes []models.ProxyNode,
 	settings ...models.Settings,
 ) ([]byte, error) {
+	return s.buildGlobalConfigContext(ctx, nodes, "::", settings...)
+}
+
+func (s *SingBoxService) buildGlobalConfigContext(
+	ctx context.Context,
+	nodes []models.ProxyNode,
+	listenAddress string,
+	settings ...models.Settings,
+) ([]byte, error) {
 	config := SingBoxConfig{
 		Log: LogConfig{
 			Level:     "info",
@@ -373,7 +382,7 @@ func (s *SingBoxService) BuildGlobalConfigContext(
 		inbound := InboundConfig{
 			Type:   "mixed",
 			Tag:    inboundTag,
-			Listen: "::",
+			Listen: listenAddress,
 			Port:   node.InboundPort,
 			Extra: map[string]interface{}{
 				"sniff":                      true,
@@ -967,6 +976,9 @@ func (s *SingBoxService) prepareManagedUpstreams(
 			return nil, false, upstreamValidationErrorf("failed to compare global upstream proxy: %v", err)
 		}
 		for index := range nodes {
+			if nodes[index].UpstreamMode != models.UpstreamModeGlobal {
+				continue
+			}
 			nodeIdentity, err := canonicalProxyIdentity(
 				models.ProxyDefinition{Type: nodes[index].Node.Type, Config: nodes[index].Node.Config},
 				nodes[index].Config,

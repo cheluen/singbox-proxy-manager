@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"sync"
 
 	"sb-proxy/backend/models"
 	"sb-proxy/backend/services"
@@ -133,6 +134,7 @@ type NodeMutationOperation struct {
 }
 
 type NodeMutationCoordinator struct {
+	mu             sync.Mutex
 	db             *sql.DB
 	singBoxService *services.SingBoxService
 	runtimeApplier *services.RuntimeApplier
@@ -153,46 +155,55 @@ func (coordinator *NodeMutationCoordinator) Execute(
 	if operation.Mutate == nil {
 		return nil, fmt.Errorf("node mutation callback is required")
 	}
+	coordinator.mu.Lock()
+	defer coordinator.mu.Unlock()
 
 	tx, err := coordinator.db.BeginTx(ctx, nil)
 	if err != nil {
 		return nil, err
 	}
 	defer tx.Rollback()
+	var before []nodeMutationTable
+	if operation.ApplyRuntime {
+		before, err = captureNodeMutationTables(ctx, tx)
+		if err != nil {
+			return nil, err
+		}
+	}
 
 	if err := operation.Mutate(ctx, tx); err != nil {
 		return nil, err
 	}
 
-	var candidateNodes []models.ProxyNode
-	var runtimePlan *services.RuntimePlan
-	if operation.ApplyRuntime {
-		candidateNodes, err = loadAllNodesFrom(ctx, tx)
-		if err != nil {
-			return nil, err
-		}
-		settings, err := loadRuntimeSettingsFrom(ctx, tx)
-		if err != nil {
-			return nil, err
-		}
-		runtimePlan, err = coordinator.runtimeApplier.PrepareContext(ctx, candidateNodes, settings)
-		if err != nil {
-			return nil, err
-		}
-	}
-
 	if !operation.ApplyRuntime {
-		if err := tx.Commit(); err != nil {
-			return nil, err
-		}
-		return candidateNodes, nil
+		return nil, tx.Commit()
+	}
+	candidateNodes, err := loadAllNodesFrom(ctx, tx)
+	if err != nil {
+		return nil, err
+	}
+	settings, err := loadRuntimeSettingsFrom(ctx, tx)
+	if err != nil {
+		return nil, err
+	}
+	after, err := captureNodeMutationTables(ctx, tx)
+	if err != nil {
+		return nil, err
+	}
+	// 候选数据只保留在内存中，内核校验、启动和回滚均不持有数据库事务。
+	if err := tx.Rollback(); err != nil {
+		return nil, err
+	}
+	runtimePlan, err := coordinator.runtimeApplier.PrepareContext(ctx, candidateNodes, settings)
+	if err != nil {
+		return nil, err
 	}
 
 	runtimeTransaction, err := coordinator.runtimeApplier.Begin(runtimePlan)
 	if err != nil {
 		return nil, err
 	}
-	if err := tx.Commit(); err != nil {
+	if err := coordinator.commitCandidate(ctx, before, after); err != nil {
 		if rollbackErr := runtimeTransaction.Rollback(); rollbackErr != nil {
 			coordinator.singBoxService.MarkDegraded(fmt.Errorf(
 				"database commit failed after runtime start: commit=%v rollback=%v",

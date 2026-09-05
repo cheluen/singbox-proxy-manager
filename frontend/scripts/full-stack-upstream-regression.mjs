@@ -327,7 +327,7 @@ let browser
 let upstream
 let targetServer
 
-const startBackend = () => {
+const startBackend = (overrides = {}) => {
   const child = spawn(BACKEND_BINARY, [], {
     cwd: PROJECT_ROOT,
     env: {
@@ -339,6 +339,7 @@ const startBackend = () => {
       SINGBOX_BINARY,
       SBPM_UPDATE_CHECK_DISABLED: '1',
       TZ: 'UTC',
+      ...overrides,
     },
     stdio: ['ignore', 'pipe', 'pipe'],
   })
@@ -494,6 +495,98 @@ try {
   generated = readGeneratedConfig(configDir)
   assert(!('detour' in entryByTag(generated.outbounds, `node-${bypassNode.id}-out`)), 'Direct mode still has a detour')
   assert(!entryByTag(generated.outbounds, `node-${bypassNode.id}-upstream`), 'Inactive custom upstream was generated')
+
+  const concurrentCreate = await browserAPI(page, '/api/nodes', {
+    method: 'POST',
+    body: JSON.stringify({
+      name: 'stale-tab-node', type: 'socks5',
+      config: JSON.stringify({ server: '127.0.0.1', server_port: upstreamPort }),
+      username: 'previous-user', password: 'previous-password', auth_enabled: true,
+      enabled: true, tcp_reuse_enabled: true, upstream_mode: 'none',
+    }),
+  })
+  assert(concurrentCreate.status === 201, 'Independent node matching global upstream was rejected')
+  const concurrentID = concurrentCreate.body.id
+  await page.reload({ waitUntil: 'networkidle2' })
+  const staleEnabledPage = await browser.newPage()
+  const staleReusePage = await browser.newPage()
+  for (const stalePage of [staleEnabledPage, staleReusePage]) {
+    await stalePage.setViewport({ width: 1440, height: 1000 })
+    await stalePage.goto(BASE_URL, { waitUntil: 'networkidle2' })
+    await stalePage.waitForSelector(`tr[data-row-key="${concurrentID}"] .ant-switch`)
+  }
+  await page.bringToFront()
+  await page.click(`tr[data-row-key="${concurrentID}"] .anticon-edit`)
+  await page.waitForSelector('[data-testid="node-form"]', { visible: true })
+  await setInput(page, '#name', 'rotated-node')
+  await setInput(page, '#proxy_username', 'updated-upstream-user')
+  await setInput(page, '#username', 'rotated-user')
+  await setInput(page, '#password', 'rotated-password')
+  const savedPromise = page.waitForResponse((response) =>
+    response.url() === `${BASE_URL}/api/nodes/${concurrentID}` && response.request().method() === 'PUT'
+  )
+  await page.$eval('[data-testid="node-form"] button[type="submit"]', (button) => button.click())
+  assert((await savedPromise).status() === 200, 'Editing node and rotating credentials failed')
+  await page.waitForSelector('[data-testid="node-form"]', { hidden: true })
+  const latestNode = (await browserAPI(page, `/api/nodes/${concurrentID}`)).body
+  assert(latestNode.username === 'rotated-user' && latestNode.password === 'rotated-password', 'Credential rotation was not persisted')
+  assert(JSON.parse(latestNode.config).username === 'updated-upstream-user', 'Outbound edit was not persisted')
+
+  for (const [stalePage, switchIndex, field] of [
+    [staleEnabledPage, 0, 'enabled'], [staleReusePage, 1, 'tcp_reuse_enabled'],
+  ]) {
+    await stalePage.bringToFront()
+    const responsePromise = stalePage.waitForResponse((response) =>
+      response.url() === `${BASE_URL}/api/nodes/${concurrentID}` && response.request().method() === 'PATCH'
+    )
+    const toggleState = await stalePage.$$eval(`tbody.ant-table-tbody tr[data-row-key="${concurrentID}"] .ant-switch`, (switches, index) => {
+      const toggle = switches[index]
+      return { count: switches.length, disabled: toggle?.disabled, checked: toggle?.getAttribute('aria-checked') }
+    }, switchIndex)
+    assert(toggleState.count === 2 && !toggleState.disabled, `Stale-tab toggle unavailable: ${JSON.stringify(toggleState)}`)
+    const toggleHandles = await stalePage.$$(`tbody.ant-table-tbody tr[data-row-key="${concurrentID}"] .ant-switch`)
+    await toggleHandles[switchIndex].click()
+    const response = await responsePromise.catch((error) => {
+      throw new Error(`${field} toggle response failed (${JSON.stringify(toggleState)}): ${error.message}`)
+    })
+    const submitted = JSON.parse(response.request().postData())
+    assert(Object.keys(submitted).join(',') === field && submitted[field] === false, 'Toggle submitted a stale node snapshot')
+    assert(response.status() === 200, 'Stale-tab toggle failed')
+    const stored = (await browserAPI(page, `/api/nodes/${concurrentID}`)).body
+    for (const protectedField of ['name', 'type', 'config', 'username', 'password', 'inbound_port', 'upstream_mode']) {
+      assert(stored[protectedField] === latestNode[protectedField], `Stale toggle overwrote ${protectedField}`)
+    }
+    assert(stored.enabled === false, 'TCP reuse toggle overwrote the enabled state')
+  }
+  await page.bringToFront()
+  const reenabled = await browserAPI(page, `/api/nodes/${concurrentID}`, {
+    method: 'PATCH', body: JSON.stringify({ enabled: true }),
+  })
+  assert(reenabled.status === 200, 'Re-enabling the node failed')
+  for (const protocol of ['--proxy', '--socks5-hostname']) {
+    const address = protocol === '--proxy' ? `http://127.0.0.1:${latestNode.inbound_port}` : `127.0.0.1:${latestNode.inbound_port}`
+    const forwarded = await runCommand('curl', [
+      '--fail', '--silent', '--show-error', '--max-time', '5', '--noproxy', '',
+      protocol, address, '--proxy-user', 'rotated-user:rotated-password', `http://127.0.0.1:${targetPort}/`,
+    ])
+    assert(forwarded.code === 0 && forwarded.stdout.trim() === 'sbpm-upstream-live-ok', 'Rotated credentials did not forward real traffic')
+    const rejected = await runCommand('curl', [
+      '--fail', '--silent', '--show-error', '--max-time', '5', '--noproxy', '',
+      protocol, address, '--proxy-user', 'previous-user:previous-password', `http://127.0.0.1:${targetPort}/`,
+    ])
+    assert(rejected.code !== 0, 'Old credentials became valid after a stale-tab toggle')
+  }
+  for (const viewport of [{ width: 1440, height: 1000 }, { width: 390, height: 844 }]) {
+    await page.setViewport(viewport)
+    await page.reload({ waitUntil: 'networkidle2' })
+    assert(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth), 'Dashboard overflows the viewport')
+    if (ARTIFACT_DIR) {
+      await page.screenshot({ path: path.join(ARTIFACT_DIR, `node-flags-${viewport.width}.png`), fullPage: true })
+    }
+  }
+  await staleEnabledPage.close()
+  await staleReusePage.close()
+
   await stopProcess(upstream)
   const bypassTraffic = await runCommand('curl', [
     '--fail', '--silent', '--show-error', '--noproxy', '',
@@ -505,10 +598,11 @@ try {
     `Explicit direct mode still depended on global upstream: ${bypassTraffic.stderr || bypassTraffic.stdout}`
   )
 
+  await browser.close()
+  browser = undefined
   await stopProcess(backend)
   backend = startBackend()
   await waitForHTTP(`${BASE_URL}/api/version`, 30000)
-  consoleErrors.length = 0
   const relogin = await fetch(`${BASE_URL}/api/login`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
@@ -539,6 +633,44 @@ try {
   })
   assert(check.code === 0, `Final sing-box check failed: ${check.output}`)
 
+  await stopProcess(backend)
+  const slowBinary = path.join(configDir, 'slow-sing-box')
+  const slowMarker = path.join(configDir, 'slow-validation')
+  fs.writeFileSync(slowBinary, '#!/bin/sh\nif [ "$1" = check ]; then touch "$SBPM_SLOW_MARKER"; sleep 6; fi\nexec "$SBPM_REAL_KERNEL" "$@"\n', { mode: 0o700 })
+  backend = startBackend({
+    SINGBOX_BINARY: slowBinary, SBPM_REAL_KERNEL: SINGBOX_BINARY, SBPM_SLOW_MARKER: slowMarker,
+    SINGBOX_ENV_ALLOWLIST: 'SBPM_REAL_KERNEL,SBPM_SLOW_MARKER',
+    SBPM_SINGBOX_STARTUP_GRACE: '6s', SBPM_INSTANCE_LEASE_DURATION: '5s', SBPM_INSTANCE_LEASE_HEARTBEAT: '1s',
+  })
+  await waitForHTTP(`${BASE_URL}/api/version`, 30000)
+  fs.rmSync(slowMarker, { force: true })
+  const headers = { Authorization: `Bearer ${reloginBody.token}`, 'Content-Type': 'application/json' }
+  let mutationComplete = false
+  const pendingMutation = fetch(`${BASE_URL}/api/nodes/${concurrentID}`, {
+    method: 'PATCH', headers, body: JSON.stringify({ enabled: false }),
+  }).then(async (response) => {
+    mutationComplete = true
+    return { status: response.status, body: await response.json() }
+  })
+  const slowDeadline = Date.now() + 5000
+  while (!fs.existsSync(slowMarker)) {
+    assert(Date.now() < slowDeadline, 'Slow validation did not begin')
+    await sleep(50)
+  }
+  let responsiveReads = 0
+  while (!mutationComplete) {
+    const response = await fetch(`${BASE_URL}/api/nodes`, { headers, signal: AbortSignal.timeout(1500) })
+    assert(response.status === 200, 'Manager API failed during slow runtime work')
+    await response.json()
+    responsiveReads += 1
+    await sleep(500)
+  }
+  const slowResult = await pendingMutation
+  assert(slowResult.status === 200, `Slow mutation failed with status ${slowResult.status}`)
+  assert(responsiveReads >= 15, 'Slow validation and startup were not exercised across the lease window')
+  const runtimeResponse = await fetch(`${BASE_URL}/api/runtime/status`, { headers })
+  assert(runtimeResponse.status === 200 && backend.exitCode === null, 'Manager exited after losing its lease')
+
   const unexpectedConsoleErrors = consoleErrors.filter(
     (line) =>
       !line.includes('Support for defaultProps will be removed from memo components') &&
@@ -547,11 +679,11 @@ try {
   assert(unexpectedConsoleErrors.length === 0, `Browser errors: ${unexpectedConsoleErrors.join('\n')}`)
 
   process.stdout.write(
-    `${JSON.stringify({ success: true, nodeId: bypassNode.id, persistedMode: 'none', globalType: 'socks5' })}\n`
+    `${JSON.stringify({ success: true, nodeId: bypassNode.id, persistedMode: 'none', globalType: 'socks5', staleTabFlags: true, rotatedProxyAuth: true, responsiveReads })}\n`
   )
 } catch (error) {
   throw new Error(
-    `${error.message}\nBackend logs:\n${backendLogs.join('')}\nUpstream logs:\n${upstreamLogs.join('')}`
+    `${error.stack || error.message}\nBackend logs:\n${backendLogs.join('').slice(-20000)}\nUpstream logs:\n${upstreamLogs.join('').slice(-10000)}`
   )
 } finally {
   try {

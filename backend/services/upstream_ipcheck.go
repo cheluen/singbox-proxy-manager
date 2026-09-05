@@ -2,6 +2,8 @@ package services
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"log"
@@ -88,17 +90,25 @@ func (s *SingBoxService) runUpstreamIPCheckAttempt(
 		return nil, fmt.Errorf("reserve upstream check port: %w", err), true
 	}
 	usedPorts[port] = struct{}{}
-	configJSON, err := s.BuildGlobalConfigContext(ctx, []models.ProxyNode{{
+	credentialBytes := make([]byte, 32)
+	if _, err := rand.Read(credentialBytes); err != nil {
+		return nil, fmt.Errorf("generate upstream check credentials: %w", err), false
+	}
+	username := "upstream-ip-check"
+	password := hex.EncodeToString(credentialBytes)
+	configJSON, err := s.buildGlobalConfigContext(ctx, []models.ProxyNode{{
 		ID:             1,
 		Name:           "upstream-ip-check",
 		Type:           "direct",
 		Config:         `{}`,
 		InboundPort:    port,
+		Username:       username,
+		Password:       password,
 		UpstreamMode:   models.UpstreamModeCustom,
 		UpstreamType:   definition.Type,
 		UpstreamConfig: definition.Config,
 		Enabled:        true,
-	}})
+	}}, "127.0.0.1")
 	if err != nil {
 		return nil, fmt.Errorf("build isolated upstream check config: %w", err), false
 	}
@@ -171,7 +181,7 @@ func (s *SingBoxService) runUpstreamIPCheckAttempt(
 	checkerStarted := make(chan struct{})
 	go func() {
 		close(checkerStarted)
-		info, checkErr := checker(attemptCtx, fmt.Sprintf("127.0.0.1:%d", port), "", "")
+		info, checkErr := checker(attemptCtx, fmt.Sprintf("127.0.0.1:%d", port), username, password)
 		checkDone <- checkResult{info: info, err: checkErr}
 	}()
 	<-checkerStarted

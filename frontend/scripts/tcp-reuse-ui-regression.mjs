@@ -107,7 +107,7 @@ const createMockApiServer = () => {
       return
     }
 
-    if (req.method === 'PUT' && /^\/api\/nodes\/\d+$/.test(req.url || '')) {
+    if (req.method === 'PATCH' && /^\/api\/nodes\/\d+$/.test(req.url || '')) {
       const match = req.url.match(/^\/api\/nodes\/(\d+)$/)
       const id = Number(match?.[1] || 0)
       let body = ''
@@ -332,6 +332,19 @@ const run = async () => {
       state.lastNodeUpdate.payload?.tcp_reuse_enabled === true,
       `Expected tcp_reuse_enabled=true payload, got ${JSON.stringify(state.lastNodeUpdate.payload)}`
     )
+    assert(
+      Object.keys(state.lastNodeUpdate.payload).join(',') === 'tcp_reuse_enabled',
+      'TCP reuse toggle must only submit the changed flag'
+    )
+
+    await page.$$eval('tbody.ant-table-tbody tr[data-row-key="1"] .ant-switch', (switches) => switches[0].click())
+    await page.waitForFunction(() => {
+      const toggle = document.querySelector('tbody.ant-table-tbody tr[data-row-key="1"] .ant-switch')
+      return toggle?.getAttribute('aria-checked') === 'false' && !toggle.disabled
+    })
+    const enabledUpdate = mockApi.getState().lastNodeUpdate
+    assert(enabledUpdate.payload.enabled === false, 'Enable toggle did not submit false')
+    assert(Object.keys(enabledUpdate.payload).join(',') === 'enabled', 'Enable toggle submitted a node snapshot')
 
     assert(consoleErrors.length === 0, `Unexpected console errors: ${consoleErrors.join(' | ')}`)
 

@@ -1551,6 +1551,8 @@ func (h *Handler) UpdateNodeRemark(c *gin.Context) {
 		return
 	}
 
+	h.nodeWriteMu.Lock()
+	defer h.nodeWriteMu.Unlock()
 	res, err := h.db.Exec(`
 		UPDATE proxy_nodes
 		SET remark = ?, updated_at = CURRENT_TIMESTAMP
@@ -2075,6 +2077,8 @@ func (h *Handler) CheckNodeIP(c *gin.Context) {
 	if ctx.Err() != nil {
 		return
 	}
+	h.nodeWriteMu.Lock()
+	defer h.nodeWriteMu.Unlock()
 	if nodeCheckErr != nil {
 		if _, clearErr := h.db.ExecContext(ctx, `
 			UPDATE proxy_nodes

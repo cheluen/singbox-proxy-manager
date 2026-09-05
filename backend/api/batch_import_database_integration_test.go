@@ -1,7 +1,9 @@
 package api
 
 import (
+	"context"
 	"database/sql"
+	"encoding/json"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -13,6 +15,86 @@ import (
 	"sb-proxy/backend/models"
 	"sb-proxy/backend/services"
 )
+
+func TestNodeMutationRemoteDatabaseLifecycle(t *testing.T) {
+	db := openBatchImportIntegrationDatabase(t)
+	if db == nil {
+		t.Skip("remote database integration environment is not set")
+	}
+	resetBatchImportIntegrationTables(t, db)
+	t.Cleanup(func() {
+		resetBatchImportIntegrationTables(t, db)
+		_ = db.Close()
+	})
+	if err := models.InitDB(db); err != nil {
+		t.Fatal(err)
+	}
+	useRealSingBoxForChecks(t)
+	t.Setenv("SBPM_SKIP_PORT_AVAILABILITY_CHECK", "1")
+	t.Setenv("SBPM_SINGBOX_STARTUP_GRACE", "10ms")
+	service := services.NewSingBoxService(t.TempDir())
+	t.Cleanup(func() { _ = service.Stop() })
+	handler := NewHandler(db, service)
+	var ids []int
+	for _, name := range []string{"first", "second"} {
+		response := postJSON(t, handler.CreateNode, http.MethodPost, "/api/nodes", map[string]any{
+			"name": name, "type": "direct", "config": "{}", "enabled": true,
+			"username": "integration-user", "password": "integration-password", "upstream_mode": "global",
+		}, nil)
+		if response.Code != http.StatusCreated {
+			t.Fatalf("create status=%d body=%s", response.Code, response.Body.String())
+		}
+		var node models.ProxyNode
+		if err := json.Unmarshal(response.Body.Bytes(), &node); err != nil || node.ID <= 0 {
+			t.Fatal("create did not return its reserved ID")
+		}
+		ids = append(ids, node.ID)
+	}
+	if ids[1] <= ids[0] {
+		t.Fatal("replaying reserved IDs broke sequence allocation")
+	}
+	response := postJSON(t, handler.UpdateSettings, http.MethodPut, "/api/settings", map[string]any{
+		"start_port": 32000, "preserve_inbound_ports": false, "admin_password": "integration-new-admin-password",
+		"global_upstream_enabled": true, "global_upstream_type": "socks5",
+		"global_upstream_config": `{"server":"198.51.100.9","server_port":1080}`,
+	}, nil)
+	if response.Code != http.StatusOK {
+		t.Fatalf("combined settings mutation status=%d body=%s", response.Code, response.Body.String())
+	}
+	var generation int
+	if err := db.QueryRow("SELECT auth_generation FROM settings WHERE singleton_key = 1").Scan(&generation); err != nil || generation != 1 {
+		t.Fatalf("admin generation changed incorrectly: generation=%d err=%v", generation, err)
+	}
+	for index, id := range ids {
+		node, err := loadNodeByIDFrom(context.Background(), db, id)
+		if err != nil || node.InboundPort != 32000+index {
+			t.Fatal("settings mutation did not atomically reassign node ports")
+		}
+		response = postJSON(t, handler.UpdateNodeFlags, http.MethodPatch, "/api/nodes/"+strconv.Itoa(id),
+			map[string]bool{"tcp_reuse_enabled": false}, ginParams("id", strconv.Itoa(id)))
+		if response.Code != http.StatusOK {
+			t.Fatalf("flag mutation status=%d body=%s", response.Code, response.Body.String())
+		}
+	}
+	response = postJSON(t, handler.ReorderNodes, http.MethodPost, "/api/nodes/reorder", map[string]any{
+		"nodes": []map[string]int{{"id": ids[0], "sort_order": 1}, {"id": ids[1], "sort_order": 0}},
+	}, nil)
+	if response.Code != http.StatusOK {
+		t.Fatalf("reorder status=%d body=%s", response.Code, response.Body.String())
+	}
+	first, err := loadNodeByIDFrom(context.Background(), db, ids[0])
+	if err != nil || first.SortOrder != 1 || first.InboundPort != 32001 || first.Password != "integration-password" {
+		t.Fatal("reorder changed credentials or lost the port assignment")
+	}
+	response = postJSON(t, handler.BatchDeleteNodes, http.MethodPost, "/api/nodes/batch-delete", map[string]any{"ids": ids}, nil)
+	if response.Code != http.StatusOK {
+		t.Fatalf("delete status=%d body=%s", response.Code, response.Body.String())
+	}
+	var count int
+	if err := db.QueryRow("SELECT COUNT(*) FROM proxy_nodes").Scan(&count); err != nil || count != 0 {
+		t.Fatal("deleted nodes remained after runtime commit")
+	}
+}
 
 func TestBatchImportRemoteDatabaseIntegration(t *testing.T) {
 	db := openBatchImportIntegrationDatabase(t)

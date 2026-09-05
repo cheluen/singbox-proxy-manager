@@ -161,8 +161,8 @@ exit 2
 			Config: `{"server":"upstream.example.com","server_port":1080}`,
 		},
 		func(_ context.Context, address, username, password string) (*IPInfo, error) {
-			if username != "" || password != "" {
-				t.Fatalf("isolated inbound unexpectedly uses authentication")
+			if username == "" || len(password) < 32 {
+				t.Error("isolated inbound must use one-time authentication")
 			}
 			host, port, err := net.SplitHostPort(address)
 			if err != nil || host != "127.0.0.1" || port == "" {
@@ -187,6 +187,16 @@ exit 2
 			var config map[string]interface{}
 			if err := json.Unmarshal(configJSON, &config); err != nil {
 				t.Fatalf("decode isolated config: %v", err)
+			}
+			inbound := generatedEntryByTag(t, config, "inbounds", "node-1-in")
+			if inbound["listen"] != "127.0.0.1" {
+				t.Errorf("isolated inbound is exposed beyond loopback: %v", inbound["listen"])
+			}
+			users, _ := inbound["users"].([]interface{})
+			if len(users) != 1 {
+				t.Error("isolated inbound must contain exactly one authenticated user")
+			} else if user, _ := users[0].(map[string]interface{}); user["username"] != username || user["password"] != password {
+				t.Error("checker credentials differ from isolated inbound credentials")
 			}
 			upstream := generatedEntryByTag(t, config, "outbounds", "node-1-upstream")
 			if upstream["type"] != "socks" || upstream["server"] != "upstream.example.com" {

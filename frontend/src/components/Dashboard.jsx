@@ -1866,21 +1866,15 @@ function Dashboard({ onLogout }) {
     )
 
     try {
-      await api.put(`/nodes/${node.id}`, {
-        name: node?.name ?? '',
-        remark: node?.remark ?? '',
-        type: node?.type ?? '',
-        config: typeof node?.config === 'string' ? node.config : stableJSONStringify(node?.config) || '{}',
-        inbound_port: node?.inbound_port ?? 0,
-        username: node?.username ?? '',
-        password: node?.password ?? '',
-        auth_enabled: Boolean(node?.username && node?.password),
+      const response = await api.patch(`/nodes/${node.id}`, {
         enabled: nextEnabled,
-        tcp_reuse_enabled: node?.tcp_reuse_enabled,
       })
+      setNodes((prev) => prev.map((item) =>
+        String(item.id) === String(id) ? { ...item, ...response.data } : item
+      ))
       message.success(t('success'))
-    } catch {
-      message.error(t('server_error'))
+    } catch (error) {
+      message.error(error.response?.data?.error || t('server_error'))
       setNodes((prev) =>
         prev.map((n) =>
           String(n.id) === String(id)
@@ -1920,18 +1914,12 @@ function Dashboard({ onLogout }) {
     )
 
     try {
-      await api.put(`/nodes/${node.id}`, {
-        name: node?.name ?? '',
-        remark: node?.remark ?? '',
-        type: node?.type ?? '',
-        config: typeof node?.config === 'string' ? node.config : stableJSONStringify(node?.config) || '{}',
-        inbound_port: node?.inbound_port ?? 0,
-        username: node?.username ?? '',
-        password: node?.password ?? '',
-        auth_enabled: Boolean(node?.username && node?.password),
-        enabled: node?.enabled !== false,
+      const response = await api.patch(`/nodes/${node.id}`, {
         tcp_reuse_enabled: nextTCPReuseEnabled,
       })
+      setNodes((prev) => prev.map((item) =>
+        String(item.id) === String(id) ? { ...item, ...response.data } : item
+      ))
       message.success(t('success'))
     } catch (error) {
       message.error(error.response?.data?.error || t('server_error'))
