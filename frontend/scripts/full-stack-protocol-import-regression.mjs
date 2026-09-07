@@ -1,4 +1,6 @@
 import fs from 'node:fs'
+import http from 'node:http'
+import net from 'node:net'
 import os from 'node:os'
 import path from 'node:path'
 import process from 'node:process'
@@ -24,6 +26,36 @@ const assert = (condition, message) => {
 }
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms))
+
+const listen = (server) => new Promise((resolve, reject) => {
+  server.once('error', reject)
+  server.listen(0, '127.0.0.1', () => {
+    server.off('error', reject)
+    resolve(server.address().port)
+  })
+})
+
+const closeServer = (server) => new Promise((resolve) => {
+  if (!server.listening) return resolve()
+  server.close(resolve)
+  server.closeAllConnections?.()
+})
+
+const reservePort = async () => {
+  const server = net.createServer()
+  const port = await listen(server)
+  await closeServer(server)
+  return port
+}
+
+const setInput = async (page, selector, value) => {
+  await page.$eval(selector, (input, nextValue) => {
+    const prototype = input instanceof HTMLTextAreaElement ? HTMLTextAreaElement.prototype : HTMLInputElement.prototype
+    Object.getOwnPropertyDescriptor(prototype, 'value').set.call(input, String(nextValue))
+    input.dispatchEvent(new Event('input', { bubbles: true }))
+    input.dispatchEvent(new Event('change', { bubbles: true }))
+  }, value)
+}
 
 const getBrowserExecutablePath = () => {
   if (process.env.PUPPETEER_EXECUTABLE_PATH) {
@@ -94,24 +126,32 @@ if (!BACKEND_BINARY || !SINGBOX_BINARY) {
 
 const configDir = fs.mkdtempSync(path.join(os.tmpdir(), 'sbpm-full-stack-'))
 const backendLogs = []
-const backend = spawn(BACKEND_BINARY, [], {
-  cwd: PROJECT_ROOT,
-  env: {
-    ...process.env,
-    ADMIN_PASSWORD,
-    CONFIG_DIR: configDir,
-    PORT: String(HTTP_PORT),
-    SINGBOX_BINARY,
-    SBPM_UPDATE_CHECK_DISABLED: '1',
-    TZ: 'UTC',
-  },
-  stdio: ['ignore', 'pipe', 'pipe'],
+const target = http.createServer((_request, response) => {
+  response.setHeader('Content-Type', 'application/json')
+  response.end(JSON.stringify({ ip: '203.0.113.8', country: 'Test', cc: 'TT' }))
 })
-backend.stdout.on('data', (chunk) => backendLogs.push(chunk.toString()))
-backend.stderr.on('data', (chunk) => backendLogs.push(chunk.toString()))
-
+const occupiedPortServer = net.createServer((socket) => socket.destroy())
+let backend
+let upstream
 let browser
 try {
+  const targetPort = await listen(target)
+  backend = spawn(BACKEND_BINARY, [], {
+    cwd: PROJECT_ROOT,
+    env: {
+      ...process.env,
+      ADMIN_PASSWORD,
+      CONFIG_DIR: configDir,
+      PORT: String(HTTP_PORT),
+      SINGBOX_BINARY,
+      SBPM_IPCHECK_URLS: `http://127.0.0.1:${targetPort}/ip`,
+      SBPM_UPDATE_CHECK_DISABLED: '1',
+      TZ: 'UTC',
+    },
+    stdio: ['ignore', 'pipe', 'pipe'],
+  })
+  backend.stdout.on('data', (chunk) => backendLogs.push(chunk.toString()))
+  backend.stderr.on('data', (chunk) => backendLogs.push(chunk.toString()))
   await waitForHTTP(`${BASE_URL}/api/version`, 30000)
   for (const legacyRoute of [
     { method: 'GET', path: '/api/auth/status' },
@@ -134,6 +174,7 @@ try {
   const consoleErrors = []
   const legacyAuthRequests = []
   page.on('console', (message) => {
+    if (message.location().url === `${BASE_URL}/api/nodes/batch-import` && message.text().includes('400')) return
     if (message.type() === 'error') consoleErrors.push(message.text())
   })
   page.on('pageerror', (error) => consoleErrors.push(`pageerror:${error.message}`))
@@ -229,6 +270,20 @@ try {
     `unexpected real batch-import summary: ${JSON.stringify(batchResponse.body)}`
   )
 
+  await page.waitForSelector('[data-testid="batch-import-errors"]', { visible: true })
+  const failureText = await page.$eval('[data-testid="batch-import-errors"]', (element) => element.textContent)
+  assert(failureText.includes('unsupported-flow') && failureText.includes('sing-box validation failed'), `missing failure reason: ${failureText}`)
+  assert(await page.$eval('.ant-modal textarea', (element) => element.value) === content, 'partial import erased input')
+  assert(await page.$eval('.ant-modal .ant-btn-primary', (button) => button.disabled), 'unchanged partial batch can be duplicated')
+  for (const width of [1440, 390]) {
+    await page.setViewport({ width, height: 1000 })
+    const overflow = await page.$eval('[data-testid="batch-import-errors"]', (element) => element.scrollWidth > element.clientWidth)
+    assert(!overflow, `batch failure details overflow at ${width}px`)
+    if (ARTIFACT_DIR) await page.screenshot({ path: path.join(ARTIFACT_DIR, `import-errors-${width}.png`), fullPage: true })
+  }
+  await page.setViewport({ width: 1440, height: 1000 })
+  await clickVisibleButton(page, 'Cancel')
+
   const state = await page.evaluate(async () => {
     const token = localStorage.getItem('token') || ''
     const [nodesResponse, versionResponse] = await Promise.all([
@@ -251,6 +306,165 @@ try {
   )
   assert(state.version === FRONTEND_PACKAGE.version, `frontend/backend version skew: ${JSON.stringify(state)}`)
 
+  const apiRequest = async (method, endpoint, body) => {
+    const result = await page.evaluate(async (method, endpoint, body) => {
+      const response = await fetch(`/api${endpoint}`, {
+        method,
+        headers: { Authorization: localStorage.getItem('token') || '', 'Content-Type': 'application/json' },
+        body: body === undefined ? undefined : JSON.stringify(body),
+      })
+      return { status: response.status, body: await response.json() }
+    }, method, endpoint, body)
+    assert(result.status < 400, `${method} ${endpoint}: ${JSON.stringify(result)}`)
+    return result.body
+  }
+  const runtimeOutbound = (node) => {
+    const config = JSON.parse(fs.readFileSync(path.join(configDir, 'config.json'), 'utf8'))
+    const outbound = config.outbounds.find((entry) => entry.tag === `node-${node.id}-out`)
+    assert(outbound, `missing runtime outbound for ${node.name}`)
+    return outbound
+  }
+  const saveForm = async (method, endpoint) => {
+    const responsePromise = page.waitForResponse((response) =>
+      response.request().method() === method && response.url() === `${BASE_URL}/api${endpoint}`
+    )
+    await clickVisibleButton(page, 'Save')
+    const response = await responsePromise
+    const body = await response.json()
+    assert(response.status() < 400, `form save failed: ${JSON.stringify(body)}`)
+    await page.waitForFunction(() => !Array.from(document.querySelectorAll('.ant-modal form')).some((form) => form.getBoundingClientRect().height > 0))
+    return body
+  }
+  const editNode = async (node) => {
+    await page.reload({ waitUntil: 'networkidle2' })
+    const selector = `tr[data-row-key="${node.id}"] .anticon-edit`
+    await page.waitForSelector(selector, { visible: true })
+    await page.click(selector)
+    await page.waitForSelector('#name', { visible: true })
+  }
+
+  const securityContent = `proxies:
+  - {name: pinned-trojan, type: trojan, server: proxy.example, port: 443, password: test, fingerprint: "${'ab'.repeat(32)}", client-fingerprint: chrome, skip-cert-verify: true}
+  - {name: encrypted-socks, type: socks5, server: proxy.example, port: 443, tls: true}
+`
+  await clickVisibleButton(page, 'Batch Import')
+  await page.waitForSelector('.ant-modal textarea', { visible: true })
+  await setInput(page, '.ant-modal textarea', securityContent)
+  await clickVisibleButton(page, 'Confirm')
+  await page.waitForFunction(() => document.querySelector('[data-testid="batch-import-errors"]')?.textContent.includes('SOCKS TLS'))
+  const securityErrors = await page.$eval('[data-testid="batch-import-errors"]', (element) => element.textContent)
+  assert(securityErrors.includes('certificate fingerprint pinning'), 'certificate pin rejection is missing from the UI')
+  assert(await page.$eval('.ant-modal textarea', (element) => element.value) === securityContent, 'fully failed batch erased input')
+  assert((await apiRequest('GET', '/nodes')).length === 4, 'unsafe imports were persisted')
+  await clickVisibleButton(page, 'Cancel')
+
+  const occupiedPort = await listen(occupiedPortServer)
+  const settings = await apiRequest('GET', '/settings')
+  await apiRequest('PUT', '/settings', { ...settings, start_port: occupiedPort })
+  const portBatch = await apiRequest('POST', '/nodes/batch-import', {
+    content: ['one', 'two', 'three'].map((name) => `socks5://127.0.0.1:1080#occupied-${name}`).join('\n'),
+    enabled: false,
+  })
+  assert(portBatch.success === 3 && portBatch.failed === 0, `system occupied port broke batch: ${JSON.stringify(portBatch)}`)
+  const occupiedNodes = (await apiRequest('GET', '/nodes')).filter((node) => node.name.startsWith('occupied-'))
+  assert(occupiedNodes.every((node) => node.inbound_port > occupiedPort), 'occupied port was assigned')
+  await closeServer(occupiedPortServer)
+
+  const socksPort = await reservePort()
+  const vmessPort = await reservePort()
+  const vmessUUID = '00000000-0000-0000-0000-000000000019'
+  const upstreamConfigPath = path.join(configDir, 'upstream-test.json')
+  fs.writeFileSync(upstreamConfigPath, JSON.stringify({
+    log: { level: 'error' },
+    inbounds: [
+      { type: 'socks', tag: 'socks', listen: '127.0.0.1', listen_port: socksPort },
+      { type: 'vmess', tag: 'vmess', listen: '127.0.0.1', listen_port: vmessPort, users: [{ uuid: vmessUUID }], transport: { type: 'http', path: '/new' } },
+    ],
+    outbounds: [{ type: 'direct', tag: 'direct' }],
+  }), { mode: 0o600 })
+  upstream = spawn(SINGBOX_BINARY, ['run', '-c', upstreamConfigPath], { stdio: ['ignore', 'pipe', 'pipe'] })
+  upstream.stdout.on('data', (chunk) => backendLogs.push(chunk.toString()))
+  upstream.stderr.on('data', (chunk) => backendLogs.push(chunk.toString()))
+  const chainTarget = await apiRequest('POST', '/nodes', {
+    name: 'chain-target', type: 'socks5', enabled: true, auth_enabled: false,
+    config: JSON.stringify({ server: '127.0.0.1', server_port: socksPort }),
+  })
+  await page.reload({ waitUntil: 'networkidle2' })
+  await clickVisibleButton(page, 'Import Node')
+  await page.waitForSelector('#import-link-input', { visible: true })
+  await setInput(page, '#import-link-input', `socks5://127.0.0.1:${socksPort}?detour=chain-target#single-detour`)
+  await clickVisibleButton(page, 'Parse Link')
+  await page.waitForSelector('#auth_enabled', { visible: true })
+  await page.$eval('#auth_enabled', (element) => { if (element.getAttribute('aria-checked') === 'true') element.click() })
+  const singleNode = await saveForm('POST', '/nodes')
+  const batchChain = await apiRequest('POST', '/nodes/batch-import', {
+    content: `socks5://127.0.0.1:${socksPort}?detour=chain-target#batch-detour`, enabled: true,
+  })
+  assert(batchChain.success === 1, 'batch detour import failed')
+  const chainNodes = (await apiRequest('GET', '/nodes')).filter((node) => ['single-detour', 'batch-detour'].includes(node.name))
+  for (const node of chainNodes) {
+    assert(node.upstream_mode === 'legacy', `${node.name} lost upstream mode`)
+    assert(runtimeOutbound(node).detour === `node-${chainTarget.id}-out`, `${node.name} lost runtime detour`)
+    const info = await apiRequest('POST', `/nodes/${node.id}/check-ip`)
+    assert(info.ip === '203.0.113.8' && info.transport === 'http', `real detour forwarding failed: ${JSON.stringify(info)}`)
+  }
+  assert(chainNodes.some((node) => node.id === singleNode.id) && chainNodes.length === 2, 'single/batch import mismatch')
+
+  const vmess = await apiRequest('POST', '/nodes', {
+    name: 'vmess-path-edit', type: 'vmess', enabled: true, auth_enabled: true,
+    username: ' user name ', password: ' p a+@:% ss ',
+    config: JSON.stringify({
+      server: '127.0.0.1', server_port: vmessPort, uuid: vmessUUID,
+      security: 'aes-128-gcm', network: 'http', tls: 'none', path: '/old', http_path: ['/old'],
+      transport_options: { type: 'http', path: '/old' },
+    }),
+  })
+  await editNode(vmess)
+  assert(await page.$eval('#vmess_security', (input) => input.closest('.ant-select').textContent.includes('aes-128-gcm')), 'VMess encryption is blank')
+  await setInput(page, '#path', '/new')
+  await saveForm('PUT', `/nodes/${vmess.id}`)
+  const savedVMess = await apiRequest('GET', `/nodes/${vmess.id}`)
+  assert(JSON.parse(savedVMess.config).http_path[0] === '/new', 'VMess historical path overrides edit in database')
+  assert(runtimeOutbound(vmess).transport.path === '/new', 'VMess runtime path was not updated')
+  const vmessIP = await apiRequest('POST', `/nodes/${vmess.id}/check-ip`)
+  assert(vmessIP.ip === '203.0.113.8' && vmessIP.transport === 'http' && !vmessIP.http_error, `HTTP credentials or VMess path failed: ${JSON.stringify(vmessIP)}`)
+
+  const hy2 = await apiRequest('POST', '/nodes', {
+    name: 'hy2-bandwidth-edit', type: 'hy2', enabled: true, auth_enabled: false,
+    config: JSON.stringify({ server: '127.0.0.1', server_port: 443, password: 'test', up_mbps: 10, down_mbps: 20, brutal_up_mbps: 40, brutal_down_mbps: 30 }),
+  })
+  await editNode(hy2)
+  assert(await page.$eval('#up_mbps', (input) => input.value) === '40', 'Hysteria2 did not display effective upload bandwidth')
+  await setInput(page, '#up_mbps', '90')
+  await setInput(page, '#down_mbps', '')
+  await saveForm('PUT', `/nodes/${hy2.id}`)
+  const savedHy2 = JSON.parse((await apiRequest('GET', `/nodes/${hy2.id}`)).config)
+  assert(!('brutal_up_mbps' in savedHy2) && !('brutal_down_mbps' in savedHy2), 'historical bandwidth fields survived editing')
+  assert(runtimeOutbound(hy2).up_mbps === 90 && !runtimeOutbound(hy2).down_mbps, 'Hysteria2 runtime ignored bandwidth edits')
+
+  for (const [type, field, config] of [
+    ['vless', 'flow', { uuid: vmessUUID, flow: 'xtls-rprx-vision', security: 'tls' }],
+    ['anytls', 'fingerprint', { password: 'test', fingerprint: 'chrome', tls_options: { enabled: true, utls: { enabled: true, fingerprint: 'chrome' } } }],
+  ]) {
+    const node = await apiRequest('POST', '/nodes', {
+      name: `clear-${field}`, type, enabled: true, auth_enabled: false,
+      config: JSON.stringify({ server: '127.0.0.1', server_port: 443, ...config }),
+    })
+    await editNode(node)
+    const clearButton = await page.$eval(`#${field}`, (input) => {
+      const element = input.closest('.ant-select').querySelector('.ant-select-clear')
+      element?.dispatchEvent(new MouseEvent('mousedown', { bubbles: true }))
+      element?.click()
+      return Boolean(element)
+    })
+    assert(clearButton, `missing clear control for ${field}`)
+    await saveForm('PUT', `/nodes/${node.id}`)
+    const saved = JSON.parse((await apiRequest('GET', `/nodes/${node.id}`)).config)
+    assert(saved[field] === '', `${field} did not clear in database`)
+    const outbound = runtimeOutbound(node)
+    assert(field === 'flow' ? !outbound.flow : !outbound.tls?.utls, `${field} did not clear in runtime`)
+  }
+
   const unexpectedConsoleErrors = consoleErrors.filter(
     (line) =>
       !line.includes('Support for defaultProps will be removed from memo components') &&
@@ -259,7 +473,7 @@ try {
   assert(unexpectedConsoleErrors.length === 0, `browser errors: ${unexpectedConsoleErrors.join('\n')}`)
 
   process.stdout.write(
-    `${JSON.stringify({ success: true, version: state.version, importedTypes: state.nodes.map((node) => node.type).sort() })}\n`
+    `${JSON.stringify({ success: true, version: state.version, importedTypes: state.nodes.map((node) => node.type).sort(), checked: ['failure-details', 'security-rejections', 'occupied-port', 'single-batch-detour', 'vmess-path', 'http-space-credentials', 'hy2-bandwidth', 'clear-select', 'vmess-security'] })}\n`
   )
 } catch (error) {
   throw new Error(`${error.message}\nBackend logs:\n${backendLogs.join('')}`)
@@ -270,5 +484,8 @@ try {
     // Ignore browser cleanup failures.
   }
   await stopProcess(backend)
+  await stopProcess(upstream)
+  await closeServer(occupiedPortServer)
+  await closeServer(target)
   fs.rmSync(configDir, { recursive: true, force: true })
 }

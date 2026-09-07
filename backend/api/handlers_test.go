@@ -8,6 +8,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -697,6 +698,118 @@ func TestCreateNodeAutoAssignSkipsUsedInboundPorts(t *testing.T) {
 	}
 	if inboundPort != 30002 {
 		t.Fatalf("expected inbound_port=30002, got %d", inboundPort)
+	}
+}
+
+func TestBatchImportReturnsEveryFailureWhenAllSourcesAreRejected(t *testing.T) {
+	handler := newTestHandler(t, nil)
+	recorder := postJSON(t, handler.BatchImportNodes, http.MethodPost, "/api/nodes/batch-import", map[string]interface{}{
+		"content": "proxies:\n  - {name: one, type: socks5, server: proxy.example, port: 443, tls: true}\n  - {name: two, type: trojan, server: proxy.example, port: 443, password: test, fingerprint: deadbeef, client-fingerprint: chrome}\n",
+	}, nil)
+	var result struct {
+		Total   int `json:"total"`
+		Failed  int `json:"failed"`
+		Results []struct {
+			Source  string `json:"source"`
+			Error   string `json:"error"`
+			Success bool   `json:"success"`
+		} `json:"results"`
+	}
+	if err := json.Unmarshal(recorder.Body.Bytes(), &result); err != nil {
+		t.Fatal(err)
+	}
+	if recorder.Code != http.StatusBadRequest || result.Total != 2 || result.Failed != 2 || len(result.Results) != 2 {
+		t.Fatalf("missing batch errors: status=%d body=%s", recorder.Code, recorder.Body.String())
+	}
+	for _, item := range result.Results {
+		if item.Success || item.Source == "" || item.Error == "" {
+			t.Fatalf("incomplete error detail: %+v", item)
+		}
+	}
+}
+
+func TestNextBindableInboundPortExhaustion(t *testing.T) {
+	t.Setenv("SBPM_SKIP_PORT_AVAILABILITY_CHECK", "0")
+	listener, err := net.Listen("tcp", ":65535")
+	if err != nil {
+		t.Skipf("cannot reserve final port: %v", err)
+	}
+	t.Cleanup(func() { _ = listener.Close() })
+	if port, err := nextBindableInboundPort(65535, nil); err == nil || port != 0 {
+		t.Fatalf("occupied final port was allocated: port=%d err=%v", port, err)
+	}
+	if port, err := nextBindableInboundPort(65535, map[int]struct{}{65535: {}}); err == nil || port != 0 {
+		t.Fatalf("used final port was allocated: port=%d err=%v", port, err)
+	}
+}
+
+func TestCreateNodeAutoAssignSkipsSystemOccupiedPort(t *testing.T) {
+	handler := newTestHandler(t, nil)
+	t.Setenv("SBPM_SKIP_PORT_AVAILABILITY_CHECK", "0")
+	listener, err := net.Listen("tcp", ":0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = listener.Close() })
+	startPort := listener.Addr().(*net.TCPAddr).Port
+	if _, err := handler.db.Exec("UPDATE settings SET start_port = ?, preserve_inbound_ports = 1", startPort); err != nil {
+		t.Fatal(err)
+	}
+	payload := map[string]interface{}{
+		"name": "automatic-port", "type": "direct", "config": `{}`,
+		"enabled": true, "auth_enabled": false,
+	}
+	recorder := postJSON(t, handler.CreateNode, http.MethodPost, "/api/nodes", payload, nil)
+	var node models.ProxyNode
+	if err := json.Unmarshal(recorder.Body.Bytes(), &node); err != nil {
+		t.Fatal(err)
+	}
+	if recorder.Code != http.StatusCreated || node.InboundPort <= startPort {
+		t.Fatalf("automatic port was not advanced: status=%d body=%s", recorder.Code, recorder.Body.String())
+	}
+	payload["inbound_port"] = startPort
+	recorder = postJSON(t, handler.CreateNode, http.MethodPost, "/api/nodes", payload, nil)
+	if recorder.Code != http.StatusBadRequest || !strings.Contains(recorder.Body.String(), "inbound port not available") {
+		t.Fatalf("explicit occupied port was silently reassigned: status=%d body=%s", recorder.Code, recorder.Body.String())
+	}
+}
+
+func TestBatchImportNodesAutoAssignSkipsSystemOccupiedPorts(t *testing.T) {
+	handler := newTestHandler(t, nil)
+	t.Setenv("SBPM_SKIP_PORT_AVAILABILITY_CHECK", "0")
+	listener, err := net.Listen("tcp", ":0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = listener.Close() })
+	startPort := listener.Addr().(*net.TCPAddr).Port
+	if _, err := handler.db.Exec("UPDATE settings SET start_port = ?", startPort); err != nil {
+		t.Fatal(err)
+	}
+	recorder := postJSON(t, handler.BatchImportNodes, http.MethodPost, "/api/nodes/batch-import", map[string]interface{}{
+		"content": "socks5://127.0.0.1:1080#one\nsocks5://127.0.0.1:1080#two\nsocks5://127.0.0.1:1080#three",
+		"enabled": true,
+	}, nil)
+	var result struct {
+		Success int `json:"success"`
+		Failed  int `json:"failed"`
+	}
+	if err := json.Unmarshal(recorder.Body.Bytes(), &result); err != nil {
+		t.Fatal(err)
+	}
+	if recorder.Code != http.StatusOK || result.Success != 3 || result.Failed != 0 {
+		t.Fatalf("occupied port poisoned batch: status=%d body=%s", recorder.Code, recorder.Body.String())
+	}
+	nodes, err := handler.loadAllNodes()
+	if err != nil || len(nodes) != 3 {
+		t.Fatalf("load imported nodes: count=%d err=%v", len(nodes), err)
+	}
+	ports := make(map[int]bool)
+	for _, node := range nodes {
+		if node.InboundPort <= startPort || ports[node.InboundPort] {
+			t.Fatalf("invalid assigned port: %d", node.InboundPort)
+		}
+		ports[node.InboundPort] = true
 	}
 }
 

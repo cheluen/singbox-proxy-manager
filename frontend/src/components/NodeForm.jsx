@@ -147,6 +147,8 @@ const isPlainObject = (value) =>
 const hasOwn = (value, key) =>
   Boolean(value) && Object.prototype.hasOwnProperty.call(value, key)
 
+const normalizeClearedSelect = (value) => value ?? ''
+
 const nativeStringList = (value) => {
   if (Array.isArray(value)) {
     return value.filter((item) => typeof item === 'string')
@@ -391,6 +393,12 @@ function NodeForm({ node, onSave, onCancel, variant = 'node', formName }) {
   }
 
   const finalizeFormConfig = (type, config) => {
+    if (type === 'hy2') {
+      const finalized = { ...config }
+      delete finalized.brutal_up_mbps
+      delete finalized.brutal_down_mbps
+      return finalized
+    }
     if (type !== 'vless' || config.security === 'reality') {
       return config
     }
@@ -453,6 +461,10 @@ function NodeForm({ node, onSave, onCancel, variant = 'node', formName }) {
           sni: values.sni,
           alpn: values.alpn,
           path: values.path,
+          http_path:
+            values.network === 'http' && form.isFieldTouched('path')
+              ? values.path ? [values.path] : []
+              : undefined,
           service_name: values.service_name,
         }
       
@@ -460,8 +472,8 @@ function NodeForm({ node, onSave, onCancel, variant = 'node', formName }) {
         return {
           ...config,
           password: values.hy2_password ?? '',
-          up_mbps: values.up_mbps,
-          down_mbps: values.down_mbps,
+          up_mbps: values.up_mbps ?? 0,
+          down_mbps: values.down_mbps ?? 0,
           obfs: values.obfs,
           obfs_password: values.obfs_password,
           // obfs_password is the canonical form-managed field. Clear the
@@ -596,10 +608,17 @@ function NodeForm({ node, onSave, onCancel, variant = 'node', formName }) {
 
 	  const initialConfig = node ? parseConfig(node.config) : {}
 	  const normalizedConfig = hydrateNativeCompatibilityForForm(node?.type, initialConfig)
+  if (node?.type === 'vmess' && normalizedConfig.network === 'http' && Array.isArray(normalizedConfig.http_path)) {
+    normalizedConfig.path = normalizedConfig.http_path[0] || ''
+  }
   if (Array.isArray(normalizedConfig.alpn)) {
     normalizedConfig.alpn = normalizedConfig.alpn.join(',')
   }
   if (node?.type === 'hy2') {
+    if (initialConfig.brutal_up_mbps > 0 || initialConfig.brutal_down_mbps > 0) {
+      normalizedConfig.up_mbps = initialConfig.brutal_up_mbps > 0 ? initialConfig.brutal_up_mbps : 0
+      normalizedConfig.down_mbps = initialConfig.brutal_down_mbps > 0 ? initialConfig.brutal_down_mbps : 0
+    }
     const nativeObfs = initialConfig.obfs
     if (nativeObfs && typeof nativeObfs === 'object' && !Array.isArray(nativeObfs)) {
       normalizedConfig.obfs = typeof nativeObfs.type === 'string' ? nativeObfs.type : ''
@@ -702,6 +721,7 @@ function NodeForm({ node, onSave, onCancel, variant = 'node', formName }) {
     server: normalizedConfig.server || '',
     server_port: normalizedConfig.server_port || 443,
     ...normalizedConfig,
+    vmess_security: node?.type === 'vmess' ? normalizedConfig.security || 'auto' : 'auto',
     ss_password: node?.type === 'ss' ? protocolPassword : '',
     hy2_password: node?.type === 'hy2' ? protocolPassword ?? '' : '',
     tuic_password: node?.type === 'tuic' ? protocolPassword : '',
@@ -774,7 +794,7 @@ function NodeForm({ node, onSave, onCancel, variant = 'node', formName }) {
       >
         <Input />
       </Form.Item>
-      <Form.Item label={withHint('Flow', 'VLESS 流控')} name="flow">
+      <Form.Item label={withHint('Flow', 'VLESS 流控')} name="flow" normalize={normalizeClearedSelect}>
         <Select allowClear>
           <Option value="">None</Option>
           <Option value="xtls-rprx-vision">xtls-rprx-vision</Option>
@@ -844,6 +864,7 @@ function NodeForm({ node, onSave, onCancel, variant = 'node', formName }) {
         <Select>
           <Option value="tcp">TCP</Option>
           <Option value="ws">WebSocket</Option>
+          <Option value="http">HTTP</Option>
           <Option value="grpc">gRPC</Option>
         </Select>
       </Form.Item>
@@ -978,7 +999,7 @@ function NodeForm({ node, onSave, onCancel, variant = 'node', formName }) {
       <Form.Item label={withHint('ALPN (comma-separated)', 'ALPN 列表，英文逗号分隔')} name="alpn">
         <Input placeholder="h2,http/1.1" />
       </Form.Item>
-      <Form.Item label={withHint('Fingerprint', '客户端指纹')} name="fingerprint">
+      <Form.Item label={withHint('Fingerprint', '客户端指纹')} name="fingerprint" normalize={normalizeClearedSelect}>
         <Select allowClear>
           <Option value="chrome">Chrome</Option>
           <Option value="firefox">Firefox</Option>
@@ -1133,7 +1154,7 @@ function NodeForm({ node, onSave, onCancel, variant = 'node', formName }) {
       <Form.Item label={withHint('Domain Resolver', '域名解析器标签')} name="wireguard_domain_resolver">
         <Input placeholder="local" />
       </Form.Item>
-      <Form.Item label={withHint('Resolver Strategy', '域名解析策略')} name="wireguard_domain_resolver_strategy">
+      <Form.Item label={withHint('Resolver Strategy', '域名解析策略')} name="wireguard_domain_resolver_strategy" normalize={normalizeClearedSelect}>
         <Select allowClear>
           <Option value="prefer_ipv4">prefer_ipv4</Option>
           <Option value="prefer_ipv6">prefer_ipv6</Option>

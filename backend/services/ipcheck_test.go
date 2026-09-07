@@ -2,6 +2,7 @@ package services
 
 import (
 	"context"
+	"encoding/base64"
 	"errors"
 	"fmt"
 	"net/http"
@@ -11,6 +12,32 @@ import (
 	"testing"
 	"time"
 )
+
+func TestCheckProxyIPPreservesHTTPAuthenticationCredentials(t *testing.T) {
+	for _, credentials := range [][2]string{{" user name ", " p a s s "}, {"user@%/", "p+@:%/?#"}, {"", ""}} {
+		t.Run(credentials[0], func(t *testing.T) {
+			proxy := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				want := ""
+				if credentials[0] != "" {
+					want = "Basic " + base64.StdEncoding.EncodeToString([]byte(credentials[0]+":"+credentials[1]))
+				}
+				if r.Header.Get("Proxy-Authorization") != want {
+					w.WriteHeader(http.StatusProxyAuthRequired)
+					return
+				}
+				_, _ = w.Write([]byte(`{"ip":"203.0.113.7","country":"Test","cc":"TT"}`))
+			}))
+			t.Cleanup(proxy.Close)
+			t.Setenv("SBPM_IPCHECK_URLS", "http://check.example/ip")
+			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+			defer cancel()
+			info, err := CheckProxyIPContext(ctx, strings.TrimPrefix(proxy.URL, "http://"), credentials[0], credentials[1])
+			if err != nil || info == nil || info.Transport != "http" || info.HTTPError != "" || info.IP != "203.0.113.7" {
+				t.Fatalf("HTTP proxy authentication failed: info=%+v err=%v", info, err)
+			}
+		})
+	}
+}
 
 func TestCheckWithServiceReturnsTypedRateLimitError(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {

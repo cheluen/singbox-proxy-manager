@@ -17,6 +17,52 @@ const FRONTEND_PACKAGE = JSON.parse(
 )
 
 const fixtures = [
+  ...['/new', ''].map((pathValue) => ({
+    key: pathValue ? 'vmess-http-edit' : 'vmess-http-clear',
+    type: 'vmess',
+    config: {
+      server: 'vmess.example.com', server_port: 443,
+      uuid: '00000000-0000-0000-0000-000000000009',
+      security: 'aes-128-gcm', network: 'http', tls: 'none',
+      path: '/stale', http_path: ['/old', '/other'],
+      transport_options: { type: 'http', path: '/old', host: ['cdn.example.com'] },
+    },
+    initialInputs: { path: '/old' },
+    initialSelections: { vmess_security: 'aes-128-gcm', network: 'HTTP' },
+    editInputs: { path: pathValue },
+    expectedOverrides: { path: pathValue, http_path: pathValue ? [pathValue] : [] },
+  })),
+  {
+    key: 'vless-clear-flow', type: 'vless',
+    config: {
+      server: 'vless.example.com', server_port: 443,
+      uuid: '00000000-0000-0000-0000-000000000009',
+      flow: 'xtls-rprx-vision', security: 'tls', network: 'tcp',
+    },
+    clearSelections: ['flow'],
+    expectedOverrides: { flow: '' },
+  },
+  {
+    key: 'anytls-clear-fingerprint', type: 'anytls',
+    config: {
+      server: 'anytls.example.com', server_port: 443, password: 'test-password',
+      fingerprint: 'chrome',
+      tls_options: { enabled: true, utls: { enabled: true, fingerprint: 'chrome' } },
+    },
+    clearSelections: ['fingerprint'],
+    expectedOverrides: { fingerprint: '' },
+  },
+  ...[90, ''].map((upload) => ({
+    key: upload ? 'hy2-bandwidth-edit' : 'hy2-bandwidth-clear', type: 'hy2',
+    config: {
+      server: 'hy2.example.com', server_port: 443, password: 'test-password',
+      up_mbps: 10, down_mbps: 20, brutal_up_mbps: 40, brutal_down_mbps: 30,
+    },
+    initialInputs: { up_mbps: '40', down_mbps: '30' },
+    editInputs: { up_mbps: String(upload) },
+    expectedOverrides: { up_mbps: upload || 0, down_mbps: 30 },
+    expectedAbsentFields: ['brutal_up_mbps', 'brutal_down_mbps'],
+  })),
   {
     key: 'direct',
     type: 'direct',
@@ -160,7 +206,10 @@ const fixtures = [
     expectedOverrides: {
       obfs: 'salamander',
       salamander_password: '',
+      up_mbps: 40,
+      down_mbps: 30,
     },
+    expectedAbsentFields: ['brutal_up_mbps', 'brutal_down_mbps'],
   },
   {
     key: 'tuic',
@@ -1120,6 +1169,27 @@ const run = async () => {
       await clickVisibleButton(page, 'Parse Link')
       await waitForNodeForm(page, `Imported ${fixture.key}`)
       await setInboundAuthentication(page, false)
+
+      for (const [id, expected] of Object.entries(fixture.initialInputs || {})) {
+        const actual = await page.$eval(`#${id}`, (input) => input.value)
+        if (actual !== expected) throw new Error(`${fixture.key}: ${id}=${actual}, expected ${expected}`)
+      }
+      for (const [id, expected] of Object.entries(fixture.initialSelections || {})) {
+        const actual = await page.$eval(`#${id}`, (input) =>
+          input.closest('.ant-select')?.querySelector('.ant-select-selection-item')?.textContent
+        )
+        if (actual !== expected) throw new Error(`${fixture.key}: ${id}=${actual}, expected ${expected}`)
+      }
+      for (const [id, value] of Object.entries(fixture.editInputs || {})) {
+        await setPasswordInput(page, `#${id}`, value)
+      }
+      for (const id of fixture.clearSelections || []) {
+        const clear = await page.$(`#${id}`)
+        const button = await clear.evaluateHandle((input) => input.closest('.ant-select')?.querySelector('.ant-select-clear'))
+        await button.asElement().click()
+        await button.dispose()
+        await clear.dispose()
+      }
 
       if (fixture.peerArray) {
         const hasNetworkField = await page.evaluate(() =>

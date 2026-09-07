@@ -471,6 +471,12 @@ function Dashboard({ onLogout }) {
   const [batchImportSourceType, setBatchImportSourceType] = useState('auto')
   const [enableAfterImport, setEnableAfterImport] = useState(true)
   const [batchImportLoading, setBatchImportLoading] = useState(false)
+  const [batchImportResult, setBatchImportResult] = useState(null)
+  const batchImportRetryBlocked = Boolean(
+    batchImportResult?.success > 0 &&
+    batchImportResult.content === batchImportLinks.trim() &&
+    batchImportResult.sourceType === batchImportSourceType
+  )
   const [checkingIP, setCheckingIP] = useState(false)
   const [exportVisible, setExportVisible] = useState(false)
   const [exportText, setExportText] = useState('')
@@ -1569,12 +1575,13 @@ function Dashboard({ onLogout }) {
       return
     }
 
-    if (batchImportSubmittingRef.current) {
+    if (batchImportSubmittingRef.current || batchImportRetryBlocked) {
       return
     }
 
     batchImportSubmittingRef.current = true
     setBatchImportLoading(true)
+    setBatchImportResult(null)
 
     try {
       setLoading(true)
@@ -1607,13 +1614,22 @@ function Dashboard({ onLogout }) {
       if (failed > 0) {
         message.warning({
           content: `${t('import_failed').replace('{{count}}', failed)}`,
+          key: 'batchimport',
           duration: 5,
         })
+        setBatchImportResult({
+          content,
+          sourceType: batchImportSourceType,
+          success,
+          failed,
+          errors: results.filter((result) => result?.success === false),
+        })
+      } else {
+        setBatchImportVisible(false)
+        setBatchImportLinks('')
+        setBatchImportSourceType('auto')
       }
 
-      setBatchImportVisible(false)
-      setBatchImportLinks('')
-      setBatchImportSourceType('auto')
       await loadNodes({ silent: true })
 
       if (enableAfterImport && importedIds.length > 0) {
@@ -1623,6 +1639,11 @@ function Dashboard({ onLogout }) {
         })
       }
     } catch (error) {
+      const data = error.response?.data
+      const errors = Array.isArray(data?.results)
+        ? data.results.filter((result) => result?.success === false)
+        : [{ error: data?.error || t('server_error') }]
+      setBatchImportResult({ content, sourceType: batchImportSourceType, success: 0, failed: errors.length, errors })
       message.error({
         content: error.response?.data?.error || t('server_error'),
         key: 'batchimport',
@@ -3025,13 +3046,31 @@ function Dashboard({ onLogout }) {
         okText={t('confirm')}
         cancelText={t('cancel')}
         confirmLoading={batchImportLoading}
-        okButtonProps={{ disabled: batchImportLoading }}
+        okButtonProps={{ disabled: batchImportLoading || batchImportRetryBlocked }}
         cancelButtonProps={{ disabled: batchImportLoading }}
         closable={!batchImportLoading}
         maskClosable={!batchImportLoading}
         width={700}
       >
         <Space direction="vertical" style={{ width: '100%' }} size="middle">
+          {batchImportResult && (
+            <Alert
+              type="warning"
+              showIcon
+              data-testid="batch-import-errors"
+              message={`${t('import_success', { count: batchImportResult.success })}; ${t('import_failed', { count: batchImportResult.failed })}`}
+              description={
+                <ul style={{ margin: 0, paddingLeft: 20, maxHeight: 240, overflowY: 'auto', overflowWrap: 'anywhere' }}>
+                  {batchImportResult.errors.map((result, index) => (
+                    <li key={index}>
+                      <strong>{result.source || result.link || `#${index + 1}`}</strong>
+                      {': '}{result.error || t('server_error')}
+                    </li>
+                  ))}
+                </ul>
+              }
+            />
+          )}
           <div>{t('batch_import_desc')}</div>
           <Select
             id="batch-import-source-type"

@@ -197,19 +197,13 @@ func CheckProxyIPContext(
 		return nil, fmt.Errorf("%w: %v", ErrProxyNotReady, err)
 	}
 
-	// Build proxy URL with authentication if provided
-	proxyURLStr := "http://"
-	if username != "" && password != "" {
-		proxyURLStr += url.QueryEscape(username) + ":" + url.QueryEscape(password) + "@"
-		log.Printf("[IPCheck] Using HTTP proxy with authentication (user: %s)", username)
-	}
-	proxyURLStr += proxyAddr
-
-	// Create HTTP client with HTTP proxy
-	proxyURL, err := url.Parse(proxyURLStr)
+	proxyURL, err := url.Parse("http://" + proxyAddr)
 	if err != nil {
 		log.Printf("[IPCheck] Failed to parse proxy URL: %v", err)
 		return nil, fmt.Errorf("invalid proxy address: %v", err)
+	}
+	if username != "" && password != "" {
+		proxyURL.User = url.UserPassword(username, password)
 	}
 
 	transport := &http.Transport{

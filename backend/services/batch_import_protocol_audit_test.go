@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -14,6 +15,68 @@ import (
 
 	"sb-proxy/backend/models"
 )
+
+func TestClashImportRejectsCertificateFingerprintWithoutDowngrade(t *testing.T) {
+	for _, proxyType := range []string{"trojan", "vless", "vmess", "hysteria2", "tuic", "anytls", "https"} {
+		for _, clientFingerprint := range []string{"", "chrome"} {
+			t.Run(proxyType+"/"+clientFingerprint, func(t *testing.T) {
+				content := fmt.Sprintf(`proxies:
+  - name: pinned
+    type: %s
+    server: proxy.example
+    port: 443
+    uuid: 00000000-0000-0000-0000-000000000001
+    password: test-password
+    cipher: auto
+    tls: true
+    fingerprint: %q
+    client-fingerprint: %q
+    skip-cert-verify: true
+`, proxyType, strings.Repeat("ab", 32), clientFingerprint)
+				items, failures, err := ExpandBatchImportSources(context.Background(), []string{content})
+				if err != nil || len(items) != 0 || len(failures) != 1 || !strings.Contains(failures[0].Error, "fingerprint") {
+					t.Fatalf("certificate pin was not rejected: items=%d failures=%+v err=%v", len(items), failures, err)
+				}
+			})
+		}
+	}
+}
+
+func TestClashClientFingerprintRemainsSeparateFromCertificatePinning(t *testing.T) {
+	content := `proxies:
+  - {name: client-fingerprint, type: trojan, server: proxy.example, port: 443, password: test, client-fingerprint: chrome, skip-cert-verify: true}
+`
+	items, failures, err := ExpandBatchImportSources(context.Background(), []string{content})
+	if err != nil || len(items) != 1 || len(failures) != 0 {
+		t.Fatalf("client fingerprint rejected: items=%d failures=%+v err=%v", len(items), failures, err)
+	}
+	cfg := items[0].Config.(models.TrojanConfig)
+	utls, _ := cfg.TLSOptions["utls"].(map[string]any)
+	if utls["fingerprint"] != "chrome" || cfg.TLSOptions["insecure"] != true {
+		t.Fatalf("client TLS settings were changed: %+v", cfg.TLSOptions)
+	}
+}
+
+func TestClashSOCKSTLSIsRejectedWhilePlainSOCKSRemainsSupported(t *testing.T) {
+	for _, proxyType := range []string{"socks", "socks5", "socks5h"} {
+		for _, tls := range []bool{false, true} {
+			t.Run(fmt.Sprintf("%s/tls=%t", proxyType, tls), func(t *testing.T) {
+				content := fmt.Sprintf("proxies:\n  - {name: socks, type: %s, server: proxy.example, port: 1080, tls: %t}\n", proxyType, tls)
+				items, failures, err := ExpandBatchImportSources(context.Background(), []string{content})
+				if err != nil {
+					t.Fatal(err)
+				}
+				if tls {
+					if len(items) != 0 || len(failures) != 1 || !strings.Contains(failures[0].Error, "TLS") {
+						t.Fatalf("SOCKS TLS was silently downgraded: items=%d failures=%+v", len(items), failures)
+					}
+				} else if len(items) != 1 || len(failures) != 0 {
+					t.Fatalf("plain SOCKS rejected: items=%d failures=%+v", len(items), failures)
+				}
+			})
+		}
+	}
+}
 
 func TestBatchImportAuditClashV2RayTransportsAndDialerAliases(t *testing.T) {
 	yaml := `

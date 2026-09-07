@@ -252,6 +252,26 @@ func nextAvailableInboundPort(startPort int, usedPorts map[int]struct{}) (int, e
 	return 0, fmt.Errorf("no available inbound port")
 }
 
+func nextBindableInboundPort(startPort int, usedPorts map[int]struct{}) (int, error) {
+	if err := validateInboundPort(startPort); err != nil {
+		return 0, err
+	}
+	for startPort <= 65535 {
+		port, err := nextAvailableInboundPort(startPort, usedPorts)
+		if err != nil {
+			return 0, err
+		}
+		if validateInboundPortAvailable(port) == nil {
+			return port, nil
+		}
+		if usedPorts != nil {
+			usedPorts[port] = struct{}{}
+		}
+		startPort = port + 1
+	}
+	return 0, fmt.Errorf("no available inbound port")
+}
+
 func nodeFromUpsertRequest(req nodeUpsertRequest) models.ProxyNode {
 	node := models.ProxyNode{
 		Name:         req.Name,
@@ -488,7 +508,10 @@ func (h *Handler) CreateNode(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
-	if err := h.validateNodeUpstream(&req, false); err != nil {
+	if payload.UpstreamMode == nil {
+		req.UpstreamMode = importedUpstreamMode([]byte(req.Config))
+	}
+	if err := h.validateNodeUpstream(&req, payload.UpstreamMode == nil); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
@@ -515,7 +538,7 @@ func (h *Handler) CreateNode(c *gin.Context) {
 				return err
 			}
 			if !preserveInboundPorts || req.InboundPort == 0 {
-				req.InboundPort, err = nextAvailableInboundPort(startPort, usedInboundPorts)
+				req.InboundPort, err = nextBindableInboundPort(startPort, usedInboundPorts)
 				if err != nil {
 					return err
 				}
@@ -622,7 +645,10 @@ func (h *Handler) BatchImportNodes(c *gin.Context) {
 	}
 	if len(items) == 0 {
 		if len(expandFailures) > 0 {
-			c.JSON(http.StatusBadRequest, gin.H{"error": expandFailures[0].Error})
+			c.JSON(http.StatusBadRequest, gin.H{
+				"error": expandFailures[0].Error, "total": len(results),
+				"success": 0, "failed": len(results), "results": results,
+			})
 			return
 		}
 		c.JSON(http.StatusBadRequest, gin.H{"error": "input contains no proxy nodes"})
@@ -701,15 +727,7 @@ func (h *Handler) BatchImportNodes(c *gin.Context) {
 			continue
 		}
 
-		inboundPort, err := nextAvailableInboundPort(startPort, usedInboundPorts)
-		if err == nil {
-			err = validateInboundPort(inboundPort)
-		}
-		if err == nil {
-			if _, exists := usedInboundPorts[inboundPort]; exists {
-				err = fmt.Errorf("inbound port already in use")
-			}
-		}
+		inboundPort, err := nextBindableInboundPort(startPort, usedInboundPorts)
 		if err != nil {
 			result["success"] = false
 			result["error"] = err.Error()
@@ -758,18 +776,7 @@ func (h *Handler) BatchImportNodes(c *gin.Context) {
 	portValidCandidates := make([]*batchImportCandidate, 0, len(validCandidates))
 	assignmentsChanged := false
 	for _, candidate := range validCandidates {
-		inboundPort, err := nextAvailableInboundPort(startPort, usedInboundPorts)
-		if err == nil {
-			err = validateInboundPort(inboundPort)
-		}
-		if err == nil {
-			if _, exists := usedInboundPorts[inboundPort]; exists {
-				err = fmt.Errorf("inbound port already in use")
-			}
-		}
-		if err == nil {
-			err = validateInboundPortAvailable(inboundPort)
-		}
+		inboundPort, err := nextBindableInboundPort(startPort, usedInboundPorts)
 		if err != nil {
 			candidate.result["success"] = false
 			candidate.result["error"] = err.Error()
@@ -824,18 +831,7 @@ func (h *Handler) BatchImportNodes(c *gin.Context) {
 		nextOrder = maxOrder + 1
 		currentPortValid := make([]*batchImportCandidate, 0, len(validCandidates))
 		for _, candidate := range validCandidates {
-			inboundPort, portErr := nextAvailableInboundPort(currentStartPort, usedInboundPorts)
-			if portErr == nil {
-				portErr = validateInboundPort(inboundPort)
-			}
-			if portErr == nil {
-				if _, exists := usedInboundPorts[inboundPort]; exists {
-					portErr = fmt.Errorf("inbound port already in use")
-				}
-			}
-			if portErr == nil {
-				portErr = validateInboundPortAvailable(inboundPort)
-			}
+			inboundPort, portErr := nextBindableInboundPort(currentStartPort, usedInboundPorts)
 			if portErr != nil {
 				candidate.result["success"] = false
 				candidate.result["error"] = portErr.Error()

@@ -48,6 +48,36 @@ func TestVerifyConditionalCheckUpdateHandlesMatchedRowsSemantics(t *testing.T) {
 	}
 }
 
+func TestCreateNodeInfersImportedDetourModeAndHonorsExplicitMode(t *testing.T) {
+	for _, explicitMode := range []string{"omitted", "none", "global"} {
+		t.Run(explicitMode, func(t *testing.T) {
+			handler := newTestHandler(t, nil)
+			payload := map[string]interface{}{
+				"name": "imported-detour", "type": "socks5",
+				"config":  `{"server":"proxy.example","server_port":1080,"detour":"direct"}`,
+				"enabled": true, "auth_enabled": false,
+			}
+			want := models.UpstreamModeLegacy
+			if explicitMode != "omitted" {
+				payload["upstream_mode"] = explicitMode
+				want = explicitMode
+			}
+			recorder := postJSON(t, handler.CreateNode, http.MethodPost, "/api/nodes", payload, nil)
+			if recorder.Code != http.StatusCreated {
+				t.Fatalf("create: status=%d body=%s", recorder.Code, recorder.Body.String())
+			}
+			var created models.ProxyNode
+			if err := json.Unmarshal(recorder.Body.Bytes(), &created); err != nil {
+				t.Fatal(err)
+			}
+			stored, err := loadNodeByIDFrom(context.Background(), handler.db, created.ID)
+			if err != nil || stored.UpstreamMode != want {
+				t.Fatalf("imported detour mode=%q want=%q err=%v", stored.UpstreamMode, want, err)
+			}
+		})
+	}
+}
+
 func TestCreateNodePersistsManagedUpstreamModes(t *testing.T) {
 	handler := newTestHandler(t, nil)
 	basePayload := map[string]interface{}{

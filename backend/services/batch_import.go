@@ -1074,6 +1074,9 @@ func convertClashProxyToImportItem(proxy map[string]any) (ImportItem, error) {
 		return ImportItem{Source: "clash:" + name, Type: "wireguard", Name: name, Config: cfg}, nil
 
 	case "socks5", "socks5h", "socks":
+		if getBool(proxy, "tls") {
+			return ImportItem{}, fmt.Errorf("SOCKS TLS is not supported by sing-box 1.12.12")
+		}
 		cfg := models.SOCKS5Config{
 			Server:     server,
 			ServerPort: port,
@@ -2046,6 +2049,9 @@ func buildClashMultiplex(proxy map[string]any) (map[string]interface{}, error) {
 }
 
 func buildClashTLSOptions(proxy map[string]any, enabled bool, disableSNI bool) (models.NativeOptions, error) {
+	if hasMeaningfulClashValue(proxy, "fingerprint") {
+		return nil, fmt.Errorf("TLS certificate fingerprint pinning is not supported by sing-box 1.12.12; client-fingerprint only controls the TLS client fingerprint")
+	}
 	if hasMeaningfulClashValue(proxy, "pcs", "pinned-peer-cert-sha256", "pinned_peer_cert_sha256", "pinnedPeerCertSha256") {
 		return nil, fmt.Errorf("TLS pinnedPeerCertSha256 is not supported by sing-box 1.12.12")
 	}
@@ -2085,7 +2091,7 @@ func buildClashTLSOptions(proxy map[string]any, enabled bool, disableSNI bool) (
 	if alpn := getStringSlice(proxy, "alpn"); len(alpn) > 0 {
 		result["alpn"] = alpn
 	}
-	fingerprint := normalizeFingerprint(firstNonEmpty(getString(proxy, "client-fingerprint"), getString(proxy, "client_fingerprint"), getString(proxy, "fingerprint")))
+	fingerprint := normalizeFingerprint(firstNonEmpty(getString(proxy, "client-fingerprint"), getString(proxy, "client_fingerprint")))
 	if fingerprint != "" {
 		result["utls"] = map[string]any{"enabled": true, "fingerprint": fingerprint}
 	}
