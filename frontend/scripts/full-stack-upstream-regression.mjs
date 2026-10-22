@@ -20,6 +20,7 @@ const BACKEND_READY_TIMEOUT = Number(process.env.E2E_BACKEND_READY_TIMEOUT_MS ||
 const STRESS_LEASE_DURATION = process.env.E2E_STRESS_LEASE_DURATION || '5s'
 const STRESS_LEASE_HEARTBEAT = process.env.E2E_STRESS_LEASE_HEARTBEAT || '1s'
 const STRESS_LEASE_MS = Number(STRESS_LEASE_DURATION.match(/^(\d+(?:\.\d+)?)s$/)?.[1]) * 1000
+const SLOW_CHECK_SECONDS = Math.max(6, Math.ceil(STRESS_LEASE_MS / 1000) + 1)
 
 const assert = (condition, message) => {
   if (!condition) throw new Error(message)
@@ -323,6 +324,7 @@ if (!BACKEND_BINARY || !SINGBOX_BINARY) {
   throw new Error('SBPM_E2E_BACKEND_BINARY and SINGBOX_TEST_BINARY are required')
 }
 assert(Number.isFinite(STRESS_LEASE_MS) && STRESS_LEASE_MS > 0, 'Stress lease duration must use seconds')
+assert(SLOW_CHECK_SECONDS <= 100, 'Stress lease duration exceeds the validation timeout limit')
 assert(Number.isFinite(BACKEND_READY_TIMEOUT) && BACKEND_READY_TIMEOUT > 0, 'Backend readiness timeout must be positive')
 
 const configDir = fs.mkdtempSync(path.join(os.tmpdir(), 'sbpm-upstream-full-stack-'))
@@ -642,10 +644,11 @@ try {
   await stopProcess(backend)
   const slowBinary = path.join(configDir, 'slow-sing-box')
   const slowMarker = path.join(configDir, 'slow-validation')
-  fs.writeFileSync(slowBinary, '#!/bin/sh\nif [ "$1" = check ]; then touch "$SBPM_SLOW_MARKER"; sleep 6; fi\nexec "$SBPM_REAL_KERNEL" "$@"\n', { mode: 0o700 })
+  fs.writeFileSync(slowBinary, `#!/bin/sh\nif [ "$1" = check ]; then touch "$SBPM_SLOW_MARKER"; sleep ${SLOW_CHECK_SECONDS}; fi\nexec "$SBPM_REAL_KERNEL" "$@"\n`, { mode: 0o700 })
   backend = startBackend({
     SINGBOX_BINARY: slowBinary, SBPM_REAL_KERNEL: SINGBOX_BINARY, SBPM_SLOW_MARKER: slowMarker,
     SINGBOX_ENV_ALLOWLIST: 'SBPM_REAL_KERNEL,SBPM_SLOW_MARKER',
+    SBPM_SINGBOX_CHECK_TIMEOUT: `${SLOW_CHECK_SECONDS + 10}s`,
     SBPM_SINGBOX_STARTUP_GRACE: '6s', SBPM_INSTANCE_LEASE_DURATION: STRESS_LEASE_DURATION,
     SBPM_INSTANCE_LEASE_HEARTBEAT: STRESS_LEASE_HEARTBEAT,
   })

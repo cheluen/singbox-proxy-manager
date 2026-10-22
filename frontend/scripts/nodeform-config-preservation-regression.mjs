@@ -1184,11 +1184,18 @@ const run = async () => {
         await setPasswordInput(page, `#${id}`, value)
       }
       for (const id of fixture.clearSelections || []) {
-        const clear = await page.$(`#${id}`)
-        const button = await clear.evaluateHandle((input) => input.closest('.ant-select')?.querySelector('.ant-select-clear'))
-        await button.asElement().click()
-        await button.dispose()
-        await clear.dispose()
+        const select = `.ant-select:has(#${id})`
+        await page.locator(select).hover()
+        await page.locator(`${select} .ant-select-clear`).click()
+        await page.waitForFunction(
+          (fieldID) => {
+            const text = document.getElementById(fieldID)?.closest('.ant-select')
+              ?.querySelector('.ant-select-selection-item')?.textContent?.trim() || ''
+            return text === '' || text === 'None'
+          },
+          { timeout: 5000 },
+          id
+        )
       }
 
       if (fixture.peerArray) {

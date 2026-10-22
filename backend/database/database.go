@@ -79,6 +79,9 @@ func Open(configDir string) (*sql.DB, error) {
 		}
 
 		db := sql.OpenDB(connector)
+		// Turso 同样采用 SQLite 写锁，串行化事务与租约、会话写入。
+		db.SetMaxOpenConns(1)
+		db.SetMaxIdleConns(1)
 		if err := db.Ping(); err != nil {
 			db.Close()
 			return nil, err

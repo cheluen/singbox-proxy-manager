@@ -83,6 +83,9 @@ func TestTursoDatabaseIntegration(t *testing.T) {
 		t.Fatalf("open Turso database: %v", err)
 	}
 	defer db.Close()
+	if got := db.Stats().MaxOpenConnections; got != 1 {
+		t.Fatalf("Turso must serialize database operations: max open connections = %d", got)
+	}
 	runDatabaseIntegrationContract(t, db)
 }
 
@@ -159,6 +162,57 @@ func runDatabaseIntegrationContract(t *testing.T, db *sql.DB) {
 	}
 
 	verifyUpstreamMigrationContract(t, db, largeUpstreamConfig)
+	if dialect == appdb.DialectSQLite || dialect == appdb.DialectTurso {
+		verifySQLiteWriterSerialization(t, db)
+	}
+}
+
+func verifySQLiteWriterSerialization(t *testing.T, db *sql.DB) {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	tx, err := db.BeginTx(ctx, nil)
+	if err != nil {
+		t.Fatalf("begin serialized transaction: %v", err)
+	}
+	defer tx.Rollback()
+	if _, err := tx.ExecContext(ctx, "UPDATE settings SET start_port = ? WHERE singleton_key = 1", 32001); err != nil {
+		t.Fatalf("write in transaction: %v", err)
+	}
+	waitCount := db.Stats().WaitCount
+	done := make(chan error, 1)
+	go func() {
+		_, err := db.ExecContext(ctx, "UPDATE settings SET start_port = ? WHERE singleton_key = 1", 32002)
+		done <- err
+	}()
+	deadline := time.NewTimer(5 * time.Second)
+	defer deadline.Stop()
+	ticker := time.NewTicker(10 * time.Millisecond)
+	defer ticker.Stop()
+	for db.Stats().WaitCount == waitCount {
+		select {
+		case err := <-done:
+			t.Fatalf("concurrent writer did not wait for the transaction: %v", err)
+		case <-deadline.C:
+			t.Fatal("concurrent writer never entered the connection queue")
+		case <-ticker.C:
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		t.Fatalf("commit serialized transaction: %v", err)
+	}
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("queued writer failed after commit: %v", err)
+		}
+	case <-ctx.Done():
+		t.Fatalf("queued writer did not finish: %v", ctx.Err())
+	}
+	var port int
+	if err := db.QueryRowContext(ctx, "SELECT start_port FROM settings WHERE singleton_key = 1").Scan(&port); err != nil || port != 32002 {
+		t.Fatalf("queued write not persisted: port=%d err=%v", port, err)
+	}
 }
 
 func verifyLegacyPasswordSetupStateAbsent(t *testing.T, db *sql.DB) {
