@@ -326,11 +326,12 @@ try {
     return outbound
   }
   const saveForm = async (method, endpoint) => {
-    const responsePromise = page.waitForResponse((response) =>
-      response.request().method() === method && response.url() === `${BASE_URL}/api${endpoint}`
-    )
-    await clickVisibleButton(page, 'Save')
-    const response = await responsePromise
+    const [response] = await Promise.all([
+      page.waitForResponse((response) =>
+        response.request().method() === method && response.url() === `${BASE_URL}/api${endpoint}`
+      ),
+      clickVisibleButton(page, 'Save'),
+    ])
     const body = await response.json()
     assert(response.status() < 400, `form save failed: ${JSON.stringify(body)}`)
     await page.waitForFunction(() => !Array.from(document.querySelectorAll('.ant-modal form')).some((form) => form.getBoundingClientRect().height > 0))

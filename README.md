@@ -4,7 +4,7 @@
 
 <img src="./logo.svg" alt="SingBox Proxy Manager Logo" width="96" />
 
-![Version](https://img.shields.io/badge/version-1.7.10-blue.svg)
+![Version](https://img.shields.io/badge/version-1.7.11-blue.svg)
 ![License](https://img.shields.io/badge/license-MIT-green.svg)
 ![SingBox](https://img.shields.io/badge/sing--box-1.12.12-orange.svg)
 
@@ -84,7 +84,7 @@ docker compose logs -f
 
 ```bash
 # 1) 同时下载本项目 Release 中的后台和安全重编译内核（Linux amd64）
-APP_VERSION=1.7.10
+APP_VERSION=1.7.11
 curl -fL -o singbox-proxy-manager "https://github.com/cheluen/singbox-proxy-manager/releases/download/v${APP_VERSION}/singbox-proxy-manager-linux-amd64"
 curl -fL -o sing-box "https://github.com/cheluen/singbox-proxy-manager/releases/download/v${APP_VERSION}/sing-box-linux-amd64"
 chmod +x singbox-proxy-manager sing-box

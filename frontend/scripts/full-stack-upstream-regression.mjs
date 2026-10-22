@@ -21,6 +21,8 @@ const STRESS_LEASE_DURATION = process.env.E2E_STRESS_LEASE_DURATION || '5s'
 const STRESS_LEASE_HEARTBEAT = process.env.E2E_STRESS_LEASE_HEARTBEAT || '1s'
 const STRESS_LEASE_MS = Number(STRESS_LEASE_DURATION.match(/^(\d+(?:\.\d+)?)s$/)?.[1]) * 1000
 const SLOW_CHECK_SECONDS = Math.max(6, Math.ceil(STRESS_LEASE_MS / 1000) + 1)
+const STRESS_START_TIMEOUT = Number(process.env.E2E_STRESS_START_TIMEOUT_MS || 5000)
+const STRESS_READ_TIMEOUT = Number(process.env.E2E_STRESS_READ_TIMEOUT_MS || 1500)
 
 const assert = (condition, message) => {
   if (!condition) throw new Error(message)
@@ -326,6 +328,8 @@ if (!BACKEND_BINARY || !SINGBOX_BINARY) {
 assert(Number.isFinite(STRESS_LEASE_MS) && STRESS_LEASE_MS > 0, 'Stress lease duration must use seconds')
 assert(SLOW_CHECK_SECONDS <= 100, 'Stress lease duration exceeds the validation timeout limit')
 assert(Number.isFinite(BACKEND_READY_TIMEOUT) && BACKEND_READY_TIMEOUT > 0, 'Backend readiness timeout must be positive')
+assert(Number.isSafeInteger(STRESS_START_TIMEOUT) && STRESS_START_TIMEOUT > 0 && STRESS_START_TIMEOUT <= BACKEND_READY_TIMEOUT, 'Stress start timeout must be positive and within the backend readiness timeout')
+assert(Number.isSafeInteger(STRESS_READ_TIMEOUT) && STRESS_READ_TIMEOUT > 0 && STRESS_READ_TIMEOUT < SLOW_CHECK_SECONDS * 1000, 'Stress read timeout must be shorter than the slow validation')
 
 const configDir = fs.mkdtempSync(path.join(os.tmpdir(), 'sbpm-upstream-full-stack-'))
 const backendLogs = []
@@ -429,12 +433,13 @@ try {
   await setSwitch(page, '#auth_enabled', false)
   const upstreamControlsInMainForm = await page.$('[data-testid="node-upstream-mode"]')
   assert(!upstreamControlsInMainForm, 'Main node editor still contains upstream policy controls')
-  const createResponsePromise = page.waitForResponse(
-    (response) => response.url() === `${BASE_URL}/api/nodes` && response.request().method() === 'POST',
-    { timeout: 15000 }
-  )
-  await page.$eval('[data-testid="node-form"] button[type="submit"]', (button) => button.click())
-  const createResponse = await createResponsePromise
+  const [createResponse] = await Promise.all([
+    page.waitForResponse(
+      (response) => response.url() === `${BASE_URL}/api/nodes` && response.request().method() === 'POST',
+      { timeout: 15000 }
+    ),
+    page.$eval('[data-testid="node-form"] button[type="submit"]', (button) => button.click()),
+  ])
   const createBody = await createResponse.json()
   assert(createResponse.status() === 201, `Create node failed (${createResponse.status()}): ${JSON.stringify(createBody)}`)
   const directNode = await waitForNodeMode(page, 'none')
@@ -530,11 +535,13 @@ try {
   await setInput(page, '#proxy_username', 'updated-upstream-user')
   await setInput(page, '#username', 'rotated-user')
   await setInput(page, '#password', 'rotated-password')
-  const savedPromise = page.waitForResponse((response) =>
-    response.url() === `${BASE_URL}/api/nodes/${concurrentID}` && response.request().method() === 'PUT'
-  )
-  await page.$eval('[data-testid="node-form"] button[type="submit"]', (button) => button.click())
-  assert((await savedPromise).status() === 200, 'Editing node and rotating credentials failed')
+  const [savedResponse] = await Promise.all([
+    page.waitForResponse((response) =>
+      response.url() === `${BASE_URL}/api/nodes/${concurrentID}` && response.request().method() === 'PUT'
+    ),
+    page.$eval('[data-testid="node-form"] button[type="submit"]', (button) => button.click()),
+  ])
+  assert(savedResponse.status() === 200, 'Editing node and rotating credentials failed')
   await page.waitForSelector('[data-testid="node-form"]', { hidden: true })
   const latestNode = (await browserAPI(page, `/api/nodes/${concurrentID}`)).body
   assert(latestNode.username === 'rotated-user' && latestNode.password === 'rotated-password', 'Credential rotation was not persisted')
@@ -544,17 +551,18 @@ try {
     [staleEnabledPage, 0, 'enabled'], [staleReusePage, 1, 'tcp_reuse_enabled'],
   ]) {
     await stalePage.bringToFront()
-    const responsePromise = stalePage.waitForResponse((response) =>
-      response.url() === `${BASE_URL}/api/nodes/${concurrentID}` && response.request().method() === 'PATCH'
-    )
     const toggleState = await stalePage.$$eval(`tbody.ant-table-tbody tr[data-row-key="${concurrentID}"] .ant-switch`, (switches, index) => {
       const toggle = switches[index]
       return { count: switches.length, disabled: toggle?.disabled, checked: toggle?.getAttribute('aria-checked') }
     }, switchIndex)
     assert(toggleState.count === 2 && !toggleState.disabled, `Stale-tab toggle unavailable: ${JSON.stringify(toggleState)}`)
     const toggleHandles = await stalePage.$$(`tbody.ant-table-tbody tr[data-row-key="${concurrentID}"] .ant-switch`)
-    await toggleHandles[switchIndex].click()
-    const response = await responsePromise.catch((error) => {
+    const [response] = await Promise.all([
+      stalePage.waitForResponse((response) =>
+        response.url() === `${BASE_URL}/api/nodes/${concurrentID}` && response.request().method() === 'PATCH'
+      ),
+      toggleHandles[switchIndex].click(),
+    ]).catch((error) => {
       throw new Error(`${field} toggle response failed (${JSON.stringify(toggleState)}): ${error.message}`)
     })
     const submitted = JSON.parse(response.request().postData())
@@ -664,22 +672,28 @@ try {
   }).then(async (response) => {
     mutationComplete = true
     return { status: response.status, body: await response.json() }
+  }).catch((error) => {
+    mutationComplete = true
+    return { status: 0, body: { error: error.message } }
   })
-  const slowDeadline = Date.now() + 5000
+  const slowDeadline = Date.now() + STRESS_START_TIMEOUT
   while (!fs.existsSync(slowMarker)) {
+    if (mutationComplete) {
+      throw new Error(`Mutation ended before slow validation: ${JSON.stringify(await pendingMutation)}`)
+    }
     assert(Date.now() < slowDeadline, 'Slow validation did not begin')
     await sleep(50)
   }
   let responsiveReads = 0
   while (!mutationComplete) {
-    const response = await fetch(`${BASE_URL}/api/nodes`, { headers, signal: AbortSignal.timeout(1500) })
+    const response = await fetch(`${BASE_URL}/api/nodes`, { headers, signal: AbortSignal.timeout(STRESS_READ_TIMEOUT) })
     assert(response.status === 200, 'Manager API failed during slow runtime work')
     await response.json()
     responsiveReads += 1
     await sleep(500)
   }
   const slowResult = await pendingMutation
-  assert(slowResult.status === 200, `Slow mutation failed with status ${slowResult.status}`)
+  assert(slowResult.status === 200, `Slow mutation failed: ${JSON.stringify(slowResult)}`)
   // 远程数据库每次读取有网络延迟，用实际耗时而非读取次数验证跨租约压力。
   assert(Date.now() - slowMutationStartedAt > Math.max(STRESS_LEASE_MS, 7500), 'Slow mutation did not span the lease window')
   assert(responsiveReads >= 2, 'Manager did not remain responsive during slow runtime work')
