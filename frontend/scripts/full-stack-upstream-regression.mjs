@@ -16,6 +16,10 @@ const HTTP_PORT = Number(process.env.E2E_FULL_STACK_UPSTREAM_PORT || 30129)
 const BASE_URL = `http://127.0.0.1:${HTTP_PORT}`
 const ADMIN_PASSWORD = 'full-stack-upstream-password'
 const ARTIFACT_DIR = process.env.E2E_ARTIFACT_DIR || ''
+const BACKEND_READY_TIMEOUT = Number(process.env.E2E_BACKEND_READY_TIMEOUT_MS || 30000)
+const STRESS_LEASE_DURATION = process.env.E2E_STRESS_LEASE_DURATION || '5s'
+const STRESS_LEASE_HEARTBEAT = process.env.E2E_STRESS_LEASE_HEARTBEAT || '1s'
+const STRESS_LEASE_MS = Number(STRESS_LEASE_DURATION.match(/^(\d+(?:\.\d+)?)s$/)?.[1]) * 1000
 
 const assert = (condition, message) => {
   if (!condition) throw new Error(message)
@@ -318,6 +322,8 @@ const entryByTag = (entries, tag) =>
 if (!BACKEND_BINARY || !SINGBOX_BINARY) {
   throw new Error('SBPM_E2E_BACKEND_BINARY and SINGBOX_TEST_BINARY are required')
 }
+assert(Number.isFinite(STRESS_LEASE_MS) && STRESS_LEASE_MS > 0, 'Stress lease duration must use seconds')
+assert(Number.isFinite(BACKEND_READY_TIMEOUT) && BACKEND_READY_TIMEOUT > 0, 'Backend readiness timeout must be positive')
 
 const configDir = fs.mkdtempSync(path.join(os.tmpdir(), 'sbpm-upstream-full-stack-'))
 const backendLogs = []
@@ -376,7 +382,7 @@ try {
   await waitForTCP(upstreamPort, 10000)
 
   backend = startBackend()
-  await waitForHTTP(`${BASE_URL}/api/version`, 30000)
+  await waitForHTTP(`${BASE_URL}/api/version`, BACKEND_READY_TIMEOUT)
   browser = await puppeteer.launch({
     headless: true,
     executablePath: browserExecutable(),
@@ -602,7 +608,7 @@ try {
   browser = undefined
   await stopProcess(backend)
   backend = startBackend()
-  await waitForHTTP(`${BASE_URL}/api/version`, 30000)
+  await waitForHTTP(`${BASE_URL}/api/version`, BACKEND_READY_TIMEOUT)
   const relogin = await fetch(`${BASE_URL}/api/login`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
@@ -640,11 +646,13 @@ try {
   backend = startBackend({
     SINGBOX_BINARY: slowBinary, SBPM_REAL_KERNEL: SINGBOX_BINARY, SBPM_SLOW_MARKER: slowMarker,
     SINGBOX_ENV_ALLOWLIST: 'SBPM_REAL_KERNEL,SBPM_SLOW_MARKER',
-    SBPM_SINGBOX_STARTUP_GRACE: '6s', SBPM_INSTANCE_LEASE_DURATION: '5s', SBPM_INSTANCE_LEASE_HEARTBEAT: '1s',
+    SBPM_SINGBOX_STARTUP_GRACE: '6s', SBPM_INSTANCE_LEASE_DURATION: STRESS_LEASE_DURATION,
+    SBPM_INSTANCE_LEASE_HEARTBEAT: STRESS_LEASE_HEARTBEAT,
   })
-  await waitForHTTP(`${BASE_URL}/api/version`, 30000)
+  await waitForHTTP(`${BASE_URL}/api/version`, BACKEND_READY_TIMEOUT)
   fs.rmSync(slowMarker, { force: true })
   const headers = { Authorization: `Bearer ${reloginBody.token}`, 'Content-Type': 'application/json' }
+  const slowMutationStartedAt = Date.now()
   let mutationComplete = false
   const pendingMutation = fetch(`${BASE_URL}/api/nodes/${concurrentID}`, {
     method: 'PATCH', headers, body: JSON.stringify({ enabled: false }),
@@ -667,7 +675,9 @@ try {
   }
   const slowResult = await pendingMutation
   assert(slowResult.status === 200, `Slow mutation failed with status ${slowResult.status}`)
-  assert(responsiveReads >= 15, 'Slow validation and startup were not exercised across the lease window')
+  // 远程数据库每次读取有网络延迟，用实际耗时而非读取次数验证跨租约压力。
+  assert(Date.now() - slowMutationStartedAt > Math.max(STRESS_LEASE_MS, 7500), 'Slow mutation did not span the lease window')
+  assert(responsiveReads >= 2, 'Manager did not remain responsive during slow runtime work')
   const runtimeResponse = await fetch(`${BASE_URL}/api/runtime/status`, { headers })
   assert(runtimeResponse.status === 200 && backend.exitCode === null, 'Manager exited after losing its lease')
 

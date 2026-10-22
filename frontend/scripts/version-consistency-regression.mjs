@@ -19,6 +19,7 @@ const frontendLock = readJSON('frontend/package-lock.json')
 const readme = readText('README.md')
 const badgeMatch = readme.match(/shields\.io\/badge\/version-(.+?)-blue\.svg/)
 const readmeVersion = badgeMatch ? decodeURIComponent(badgeMatch[1]) : ''
+const installVersionMatch = readme.match(/^APP_VERSION=(\d+\.\d+\.\d+)$/m)
 
 const versions = {
   backend: backendVersion,
@@ -26,6 +27,7 @@ const versions = {
   lockfile: String(frontendLock.version || '').trim(),
   lockfileRoot: String(frontendLock.packages?.['']?.version || '').trim(),
   readme: readmeVersion,
+  readmeInstall: installVersionMatch?.[1] || '',
 }
 
 const mismatches = Object.entries(versions)

@@ -49,3 +49,9 @@ AGENTS.md
 *.patch
 .checkpoints/
 .ace-tool/
+
+# 本地安全重编译产物和私有测试环境
+release-binaries/
+dev.env
+.env.*
+!.env.example

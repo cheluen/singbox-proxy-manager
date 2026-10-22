@@ -7,13 +7,34 @@ on:
     branches: [main]
 
 env:
-  GO_VERSION: "1.26.6"
+  GO_VERSION: "1.26.10"
   GOVULNCHECK_VERSION: "v1.7.0"
   NODE_VERSION: "18"
   SINGBOX_VERSION: "1.12.12"
-  SINGBOX_LINUX_AMD64_SHA256: "7c103cb2f9a7dc54cb82962043596718ed27989a478d6405f0939a9b775f889f"
+  GOTOOLCHAIN: "local"
 
 jobs:
+  build-test-kernel:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+
+      - name: 使用修复后的 Go 重编译固定版本内核
+        run: |
+          ./scripts/build-sing-box.sh "${RUNNER_TEMP}/sing-box"
+          "${RUNNER_TEMP}/sing-box" version
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: sing-box-test-kernel
+          path: ${{ runner.temp }}/sing-box
+          retention-days: 1
+
   lint-backend:
     runs-on: ubuntu-latest
     steps:
@@ -29,9 +50,10 @@ jobs:
         with:
           version: v2.12.0
           working-directory: ./
-          args: ./backend/...
+          args: ./backend/... ./internal/...
 
   vulnerability-backend:
+    needs: [build-test-kernel]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -49,6 +71,28 @@ jobs:
 
       - name: Scan reachable backend vulnerabilities
         run: ${RUNNER_TEMP}/bin/govulncheck -mode=binary "${RUNNER_TEMP}/sbpm-govulncheck-target"
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: sing-box-test-kernel
+          path: ${{ runner.temp }}/sing-box-kernel
+
+      - name: 扫描内核并阻断 CVE-2026-111943 回归
+        run: |
+          binary="${RUNNER_TEMP}/sing-box-kernel/sing-box"
+          ./scripts/verify-go-build.sh "${binary}"
+          "${RUNNER_TEMP}/bin/govulncheck" -mode=binary -json "${binary}" > "${RUNNER_TEMP}/sing-box-vulnerabilities.json"
+          if grep -F '"osv": "GO-2026-6809"' "${RUNNER_TEMP}/sing-box-vulnerabilities.json"; then
+            echo 'CVE-2026-111943 仍然存在' >&2
+            exit 1
+          fi
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: sing-box-vulnerability-report
+          path: ${{ runner.temp }}/sing-box-vulnerabilities.json
+          retention-days: 30
 
   lint-frontend:
     runs-on: ubuntu-latest
@@ -87,6 +131,7 @@ jobs:
         working-directory: frontend
 
   test-backend:
+    needs: [build-test-kernel]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -99,24 +144,23 @@ jobs:
       - name: Download dependencies
         run: go mod download
 
-      - name: Install pinned sing-box test kernel
+      - uses: actions/download-artifact@v4
+        with:
+          name: sing-box-test-kernel
+          path: ${{ runner.temp }}/sing-box-kernel
+
+      - name: 校验并启用重编译内核
         run: |
-          archive="sing-box-${SINGBOX_VERSION}-linux-amd64.tar.gz"
-          curl --fail --location --silent --show-error \
-            --output "${RUNNER_TEMP}/${archive}" \
-            "https://github.com/SagerNet/sing-box/releases/download/v${SINGBOX_VERSION}/${archive}"
-          echo "${SINGBOX_LINUX_AMD64_SHA256}  ${RUNNER_TEMP}/${archive}" | sha256sum --check --strict
-          tar --extract --gzip --file "${RUNNER_TEMP}/${archive}" --directory "${RUNNER_TEMP}"
-          binary="${RUNNER_TEMP}/sing-box-${SINGBOX_VERSION}-linux-amd64/sing-box"
+          binary="${RUNNER_TEMP}/sing-box-kernel/sing-box"
           chmod +x "${binary}"
-          "${binary}" version
+          ./scripts/verify-go-build.sh "${binary}"
           echo "SINGBOX_TEST_BINARY=${binary}" >> "${GITHUB_ENV}"
 
       - name: Build backend
         run: CGO_ENABLED=0 go build -o singbox-proxy-manager ./backend
 
       - name: Run backend tests
-        run: go test -race -count=1 ./backend/... -v
+        run: go test -race -count=1 ./backend/... ./internal/... -v
 
   test-frontend-build:
     runs-on: ubuntu-latest
@@ -200,6 +244,7 @@ jobs:
         working-directory: frontend
 
   test-upstream-full-stack:
+    needs: [build-test-kernel]
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
@@ -223,16 +268,16 @@ jobs:
         with:
           go-version: ${{ env.GO_VERSION }}
 
-      - name: Install pinned sing-box test kernel
+      - uses: actions/download-artifact@v4
+        with:
+          name: sing-box-test-kernel
+          path: ${{ runner.temp }}/sing-box-kernel
+
+      - name: 校验并启用重编译内核
         run: |
-          archive="sing-box-${SINGBOX_VERSION}-linux-amd64.tar.gz"
-          curl --fail --location --silent --show-error \
-            --output "${RUNNER_TEMP}/${archive}" \
-            "https://github.com/SagerNet/sing-box/releases/download/v${SINGBOX_VERSION}/${archive}"
-          echo "${SINGBOX_LINUX_AMD64_SHA256}  ${RUNNER_TEMP}/${archive}" | sha256sum --check --strict
-          tar --extract --gzip --file "${RUNNER_TEMP}/${archive}" --directory "${RUNNER_TEMP}"
-          binary="${RUNNER_TEMP}/sing-box-${SINGBOX_VERSION}-linux-amd64/sing-box"
+          binary="${RUNNER_TEMP}/sing-box-kernel/sing-box"
           chmod +x "${binary}"
+          ./scripts/verify-go-build.sh "${binary}"
           echo "SINGBOX_TEST_BINARY=${binary}" >> "${GITHUB_ENV}"
 
       - name: Build backend for full-stack test
@@ -446,6 +491,8 @@ jobs:
             GOOS=linux GOARCH="${arch}" CGO_ENABLED=0 \
               go build -tags frontend_dist -trimpath -ldflags="-s -w" \
               -o "release-binaries/singbox-proxy-manager-linux-${arch}" ./backend
+            GOOS=linux GOARCH="${arch}" ./scripts/build-sing-box.sh "${PWD}/release-binaries/sing-box-linux-${arch}"
+            ./scripts/verify-go-build.sh "${PWD}/release-binaries/singbox-proxy-manager-linux-${arch}"
           done
 
       - name: Set up QEMU
@@ -461,8 +508,6 @@ jobs:
           file: Dockerfile.release
           push: false
           platforms: linux/amd64,linux/arm64
-          build-args: |
-            SINGBOX_VERSION=${{ env.SINGBOX_VERSION }}
 
   build-frontend-dist:
     runs-on: ubuntu-latest
@@ -536,12 +581,17 @@ jobs:
           GOOS=${{ matrix.goos }} GOARCH=${{ matrix.goarch }} CGO_ENABLED=0 \
             go build -tags frontend_dist -trimpath -ldflags="-s -w" \
             -o "release-binaries/singbox-proxy-manager-${{ matrix.goos }}-${{ matrix.goarch }}" ./backend
+          GOOS=${{ matrix.goos }} GOARCH=${{ matrix.goarch }} \
+            ./scripts/build-sing-box.sh "${PWD}/release-binaries/sing-box-${{ matrix.goos }}-${{ matrix.goarch }}"
+          ./scripts/verify-go-build.sh "${PWD}/release-binaries/singbox-proxy-manager-${{ matrix.goos }}-${{ matrix.goarch }}"
 
       - name: Upload binary artifact
         uses: actions/upload-artifact@v4
         with:
           name: singbox-proxy-manager-${{ matrix.goos }}-${{ matrix.goarch }}
-          path: release-binaries/singbox-proxy-manager-${{ matrix.goos }}-${{ matrix.goarch }}
+          path: |
+            release-binaries/singbox-proxy-manager-${{ matrix.goos }}-${{ matrix.goarch }}
+            release-binaries/sing-box-${{ matrix.goos }}-${{ matrix.goarch }}
           retention-days: 30
 
   create-release:
@@ -568,8 +618,8 @@ jobs:
 
       - name: Prepare checksums
         run: |
-          chmod +x release-binaries/singbox-proxy-manager-* || true
-          (cd release-binaries && sha256sum singbox-proxy-manager-* > checksums.txt)
+          chmod +x release-binaries/singbox-proxy-manager-* release-binaries/sing-box-*
+          (cd release-binaries && sha256sum singbox-proxy-manager-* sing-box-* > checksums.txt)
 
       - name: Create or update release
         uses: softprops/action-gh-release@v2
@@ -583,11 +633,14 @@ jobs:
             - Linux: amd64 / arm64
             - FreeBSD: amd64 / arm64
             - macOS: amd64 / arm64
+            - 管理后台和 sing-box 1.12.12 均使用 Go 1.26.10 重新编译，修复 CVE-2026-111943。
+            - sing-box 内核需与后台产物一起替换，不能继续使用旧的预编译内核。
 
             ### 镜像
             GHCR 多架构镜像在后续作业自动发布（linux/amd64 + linux/arm64），并复用本次 Release 的 Linux 二进制。
           files: |
             release-binaries/singbox-proxy-manager-*
+            release-binaries/sing-box-*
             release-binaries/checksums.txt
           fail_on_unmatched_files: true
           draft: false
@@ -612,8 +665,9 @@ jobs:
           gh release download "v${APP_VERSION}" \
             --repo "${GITHUB_REPOSITORY}" \
             --pattern "singbox-proxy-manager-linux-*" \
+            --pattern "sing-box-linux-*" \
             --dir release-binaries
-          chmod +x release-binaries/singbox-proxy-manager-linux-*
+          chmod +x release-binaries/singbox-proxy-manager-linux-* release-binaries/sing-box-linux-*
 
       - name: Set up QEMU
         uses: docker/setup-qemu-action@v3
@@ -635,8 +689,6 @@ jobs:
           file: Dockerfile.release
           push: true
           platforms: linux/amd64,linux/arm64
-          build-args: |
-            SINGBOX_VERSION=${{ env.SINGBOX_VERSION }}
           tags: |
             ghcr.io/${{ github.repository }}:${{ github.sha }}
             ghcr.io/${{ github.repository }}:v${{ needs.create-release.outputs.app_version }}

@@ -4,7 +4,7 @@
 
 <img src="./logo.svg" alt="SingBox Proxy Manager Logo" width="96" />
 
-![Version](https://img.shields.io/badge/version-1.7.9-blue.svg)
+![Version](https://img.shields.io/badge/version-1.7.10-blue.svg)
 ![License](https://img.shields.io/badge/license-MIT-green.svg)
 ![SingBox](https://img.shields.io/badge/sing--box-1.12.12-orange.svg)
 
@@ -83,14 +83,11 @@ docker compose logs -f
 二进制会自动读取**同目录** `.env`（若未设置 `TZ`，默认按 `UTC+8` -> `Asia/Shanghai` 处理）。
 
 ```bash
-# 0) 准备 sing-box（示例：放到当前目录）
-#    可从 https://github.com/SagerNet/sing-box/releases 下载对应系统/架构版本
-#    并确保可执行（Linux/macOS/FreeBSD 需要 chmod +x）
-
-# 1) 下载对应系统架构的主程序二进制
-# 例如 Linux amd64:
-curl -fL -o singbox-proxy-manager https://github.com/cheluen/singbox-proxy-manager/releases/download/v<版本号>/singbox-proxy-manager-linux-amd64
-chmod +x singbox-proxy-manager
+# 1) 同时下载本项目 Release 中的后台和安全重编译内核（Linux amd64）
+APP_VERSION=1.7.10
+curl -fL -o singbox-proxy-manager "https://github.com/cheluen/singbox-proxy-manager/releases/download/v${APP_VERSION}/singbox-proxy-manager-linux-amd64"
+curl -fL -o sing-box "https://github.com/cheluen/singbox-proxy-manager/releases/download/v${APP_VERSION}/sing-box-linux-amd64"
+chmod +x singbox-proxy-manager sing-box
 
 # 2) 放置 .env（可直接复制仓库 .env.example）
 cp .env.example .env
@@ -103,6 +100,18 @@ cp .env.example .env
 ```
 
 > 提示：二进制模式下可通过 `SINGBOX_BINARY=/path/to/sing-box` 指定 sing-box 可执行文件路径；未设置时会按 `PATH`、`CONFIG_DIR`、可执行文件同目录顺序自动查找。
+
+---
+
+## 安全重编译说明
+
+- 后台和 sing-box 内核均固定使用 Go 1.26.10 编译，修复 CVE-2026-111943；升级时必须同时替换两个程序。
+- 后台另将 `golang.org/x/text` 最小升级至 0.41.0，修复扫描中发现的可达漏洞 GO-2026-6629；相关工具依赖按其最低要求同步。
+- 前端锁文件同步修复原有生产依赖审计发现的漏洞：Axios 1.20.0、follow-redirects 1.16.1，不更改页面业务代码。
+- sing-box 保留 1.12.12 版本，源码提交为 `54ed58499d7063136ed52dabf87d179d252425d0`，模块归档校验和固定在 `scripts/build-sing-box.sh`。
+- 源码构建使用该脚本并保留原官方内核的八项功能标签，支持通过 `GOOS`、`GOARCH` 交叉编译；脚本参数必须为输出文件的绝对路径。
+- 普通 Docker 构建从源码重编译内核；Release 镜像复用本次发布的后台与内核，不再下载上游旧的预编译包。
+- CI 保留后台完整可达漏洞扫描，并对内核执行二进制扫描、保存完整报告和阻断本次 CVE 回归。保留旧版内核的历史第三方依赖告警不等于已修复，本次没有升级其功能版本或依赖。
 
 ---
 
@@ -341,7 +350,7 @@ docker compose up -d
 ## 🛠️ 技术栈
 
 ### 后端
-- **语言**：Go 1.26.6
+- **语言**：Go 1.26.10
 - **框架**：Gin
 - **数据库**：SQLite（默认，本地存储）/ Turso（远程 libsql）/ PostgreSQL / MySQL（含 TiDB Cloud）
 - **代理核心**：sing-box 1.12.12
@@ -426,7 +435,7 @@ docker compose up -d --build
 
 当日志里出现 `sing-box binary not found` 或 `sing-box binary is not executable`：
 
-1. 下载与你系统/CPU 架构一致的 sing-box 可执行文件。
+1. 从本项目 Release 下载与你系统/CPU 架构一致的安全重编译 sing-box 可执行文件。
 2. 给执行权限（Linux/macOS/FreeBSD）：`chmod +x /path/to/sing-box`
 3. 在 `.env` 显式指定：
 

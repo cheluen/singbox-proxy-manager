@@ -7,3 +7,6 @@ config
 .gitignore
 README.md
 .env
+dev.env
+.env.*
+!.env.example

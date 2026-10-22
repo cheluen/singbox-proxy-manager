@@ -8,16 +8,19 @@ variables:
   DOCKER_IMAGE: $CI_REGISTRY_IMAGE
   DOCKER_TAG: $CI_COMMIT_SHORT_SHA
   GOVULNCHECK_VERSION: v1.7.0
+  GOTOOLCHAIN: local
 
 # Go代码lint检查
 lint-backend:
   stage: lint
   image: golangci/golangci-lint:v2.12.0
   script:
-    - golangci-lint run ./backend/...
+    - golangci-lint run ./backend/... ./internal/...
   only:
     changes:
       - backend/**/*
+      - internal/**/*
+      - scripts/**/*
       - go.mod
       - go.sum
       - .golangci.yml
@@ -49,14 +52,23 @@ lint-frontend:
 # 后端可达漏洞扫描
 vulnerability-backend:
   stage: test
-  image: golang:1.26.6
+  image: golang:1.26.10
   script:
     - GOBIN="$CI_PROJECT_DIR/.ci-bin" go install "golang.org/x/vuln/cmd/govulncheck@$GOVULNCHECK_VERSION"
     - CGO_ENABLED=0 go build -o "$CI_PROJECT_DIR/.ci-bin/sbpm-govulncheck-target" ./backend
     - $CI_PROJECT_DIR/.ci-bin/govulncheck -mode=binary "$CI_PROJECT_DIR/.ci-bin/sbpm-govulncheck-target"
+    - ./scripts/build-sing-box.sh "$CI_PROJECT_DIR/.ci-bin/sing-box"
+    - $CI_PROJECT_DIR/.ci-bin/govulncheck -mode=binary -json "$CI_PROJECT_DIR/.ci-bin/sing-box" > "$CI_PROJECT_DIR/.ci-bin/sing-box-vulnerabilities.json"
+    - |
+      if grep -F '"osv": "GO-2026-6809"' "$CI_PROJECT_DIR/.ci-bin/sing-box-vulnerabilities.json"; then
+        echo 'CVE-2026-111943 仍然存在' >&2
+        exit 1
+      fi
   only:
     changes:
       - backend/**/*
+      - internal/**/*
+      - scripts/**/*
       - go.mod
       - go.sum
       - .gitlab-ci.yml
@@ -68,11 +80,13 @@ vulnerability-backend:
 # 后端Go编译测试
 test-backend:
   stage: test
-  image: golang:1.26.6
+  image: golang:1.26.10
   script:
     - go mod download
     - CGO_ENABLED=0 go build -o main ./backend
-    - go test ./backend/... -v
+    - ./scripts/build-sing-box.sh "$CI_PROJECT_DIR/.ci-bin/sing-box"
+    - export SINGBOX_TEST_BINARY="$CI_PROJECT_DIR/.ci-bin/sing-box"
+    - go test -race -count=1 ./backend/... ./internal/... -v
   cache:
     key: go-modules
     paths:
@@ -80,6 +94,8 @@ test-backend:
   only:
     changes:
       - backend/**/*
+      - internal/**/*
+      - scripts/**/*
       - go.mod
       - go.sum
     refs:
@@ -163,7 +179,7 @@ build-frontend-dist:
 # 构建FreeBSD完整发布包
 build-freebsd:
   stage: build
-  image: golang:1.26.6
+  image: golang:1.26.10
   needs:
     - job: build-frontend-dist
       artifacts: true
@@ -173,8 +189,8 @@ build-freebsd:
     - go mod download
     - GOOS=freebsd GOARCH=amd64 CGO_ENABLED=0 go build -o main ./backend
     # 从源码编译FreeBSD版sing-box（官方无预编译版）
-    - git clone --depth 1 --branch v${SINGBOX_VERSION} https://github.com/SagerNet/sing-box.git
-    - cd sing-box && GOOS=freebsd GOARCH=amd64 CGO_ENABLED=0 go build -o ../sing-box ./cmd/sing-box && cd ..
+    - GOOS=freebsd GOARCH=amd64 ./scripts/build-sing-box.sh "$CI_PROJECT_DIR/sing-box"
+    - ./scripts/verify-go-build.sh "$CI_PROJECT_DIR/main"
     # 创建发布包
     - mkdir -p singbox-proxy-manager-freebsd-amd64/frontend
     - mv main singbox-proxy-manager-freebsd-amd64/
@@ -205,7 +221,7 @@ build-freebsd:
 # 构建Linux完整发布包
 build-linux:
   stage: build
-  image: golang:1.26.6
+  image: golang:1.26.10
   needs:
     - job: build-frontend-dist
       artifacts: true
@@ -214,35 +230,8 @@ build-linux:
   script:
     - go mod download
     - GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build -o main ./backend
-    # 下载Linux版sing-box
-    - apt-get update && apt-get install -y --no-install-recommends ca-certificates curl jq
-    - |
-      ASSET="sing-box-${SINGBOX_VERSION}-linux-amd64.tar.gz"
-      curl -fLo "$ASSET" "https://github.com/SagerNet/sing-box/releases/download/v${SINGBOX_VERSION}/$ASSET"
-      GH_API_URL="https://api.github.com/repos/SagerNet/sing-box/releases/tags/v${SINGBOX_VERSION}"
-      GH_BODY="$(mktemp)"
-      GH_HEADERS="$(mktemp)"
-      GH_STATUS="$(curl -sS -D "$GH_HEADERS" -o "$GH_BODY" -w "%{http_code}" "$GH_API_URL" || true)"
-      if [ "$GH_STATUS" != "200" ]; then
-        echo "ERROR: failed to fetch sing-box release metadata from GitHub API (api.github.com)." >&2
-        echo "URL: $GH_API_URL" >&2
-        echo "HTTP status: $GH_STATUS" >&2
-        echo "Hint: build environment may block api.github.com or GitHub API rate limit was hit." >&2
-        echo "GitHub rate limit headers:" >&2
-        grep -i '^x-ratelimit' "$GH_HEADERS" >&2 || true
-        echo "Response body (first 2000 bytes):" >&2
-        head -c 2000 "$GH_BODY" >&2 || true
-        exit 1
-      fi
-      DIGEST="$(jq -r --arg asset "$ASSET" '.assets[] | select(.name==$asset) | .digest' "$GH_BODY")"
-      rm -f "$GH_BODY" "$GH_HEADERS"
-      if [ -z "$DIGEST" ] || [ "$DIGEST" = "null" ]; then
-        echo "ERROR: failed to find digest for asset '$ASSET' in GitHub release metadata." >&2
-        exit 1
-      fi
-      echo "${DIGEST#sha256:}  $ASSET" | sha256sum -c -
-      tar xzf "$ASSET"
-    - mv sing-box-*/sing-box .
+    - GOOS=linux GOARCH=amd64 ./scripts/build-sing-box.sh "$CI_PROJECT_DIR/sing-box"
+    - ./scripts/verify-go-build.sh "$CI_PROJECT_DIR/main"
     # 创建发布包
     - mkdir -p singbox-proxy-manager-linux-amd64/frontend
     - mv main singbox-proxy-manager-linux-amd64/
