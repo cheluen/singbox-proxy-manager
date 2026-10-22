@@ -626,6 +626,8 @@ try {
     settings: await settingsAfterRestart.json(),
     nodes: await nodesAfterRestart.json(),
   }
+  assert(settingsAfterRestart.status === 200, `Settings after restart failed: ${JSON.stringify(persistedAfterRestart.settings)}`)
+  assert(nodesAfterRestart.status === 200, `Nodes after restart failed: ${JSON.stringify(persistedAfterRestart.nodes)}`)
   assert(persistedAfterRestart.settings.global_upstream_enabled === true, 'Global upstream did not survive restart')
   assert(persistedAfterRestart.nodes?.[0]?.upstream_mode === 'none', 'Node bypass mode did not survive restart')
   assert(persistedAfterRestart.nodes?.[0]?.upstream_type === 'http', 'Inactive custom definition did not survive restart')

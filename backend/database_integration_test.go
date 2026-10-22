@@ -6,6 +6,7 @@ import (
 	"errors"
 	"os"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -87,6 +88,7 @@ func TestTursoDatabaseIntegration(t *testing.T) {
 		t.Fatalf("Turso must serialize database operations: max open connections = %d", got)
 	}
 	runDatabaseIntegrationContract(t, db)
+	verifyTursoConnectionReuse(t, db)
 }
 
 func runDatabaseIntegrationContract(t *testing.T, db *sql.DB) {
@@ -164,6 +166,32 @@ func runDatabaseIntegrationContract(t *testing.T, db *sql.DB) {
 	verifyUpstreamMigrationContract(t, db, largeUpstreamConfig)
 	if dialect == appdb.DialectSQLite || dialect == appdb.DialectTurso {
 		verifySQLiteWriterSerialization(t, db)
+	}
+}
+
+func verifyTursoConnectionReuse(t *testing.T, db *sql.DB) {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	var workers sync.WaitGroup
+	errorCh := make(chan error, 60)
+	for range 3 {
+		workers.Go(func() {
+			for range 20 {
+				var value int
+				if err := db.QueryRowContext(ctx, "SELECT 1").Scan(&value); err != nil {
+					errorCh <- err
+				}
+			}
+		})
+	}
+	workers.Wait()
+	close(errorCh)
+	for err := range errorCh {
+		t.Errorf("queued Turso read failed: %v", err)
+	}
+	if stats := db.Stats(); stats.Idle != 0 || stats.MaxLifetimeClosed == 0 {
+		t.Fatalf("Turso reused remote streams: %+v", stats)
 	}
 }
 

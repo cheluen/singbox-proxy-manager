@@ -145,6 +145,7 @@ try {
       PORT: String(HTTP_PORT),
       SINGBOX_BINARY,
       SBPM_IPCHECK_URLS: `http://127.0.0.1:${targetPort}/ip`,
+      SBPM_SINGBOX_LOG_OUTPUT: 'both',
       SBPM_UPDATE_CHECK_DISABLED: '1',
       TZ: 'UTC',
     },
@@ -451,13 +452,14 @@ try {
       config: JSON.stringify({ server: '127.0.0.1', server_port: 443, ...config }),
     })
     await editNode(node)
-    const clearButton = await page.$eval(`#${field}`, (input) => {
-      const element = input.closest('.ant-select').querySelector('.ant-select-clear')
-      element?.dispatchEvent(new MouseEvent('mousedown', { bubbles: true }))
-      element?.click()
-      return Boolean(element)
-    })
-    assert(clearButton, `missing clear control for ${field}`)
+    const select = `.ant-select:has(#${field})`
+    await page.locator(select).hover()
+    await page.locator(`${select} .ant-select-clear`).click()
+    await page.waitForFunction((fieldID) => {
+      const text = document.getElementById(fieldID)?.closest('.ant-select')
+        ?.querySelector('.ant-select-selection-item')?.textContent?.trim() || ''
+      return text === '' || text === 'None'
+    }, { timeout: 5000 }, field)
     await saveForm('PUT', `/nodes/${node.id}`)
     const saved = JSON.parse((await apiRequest('GET', `/nodes/${node.id}`)).config)
     assert(saved[field] === '', `${field} did not clear in database`)

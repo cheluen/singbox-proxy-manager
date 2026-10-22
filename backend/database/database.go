@@ -81,7 +81,10 @@ func Open(configDir string) (*sql.DB, error) {
 		db := sql.OpenDB(connector)
 		// Turso 同样采用 SQLite 写锁，串行化事务与租约、会话写入。
 		db.SetMaxOpenConns(1)
-		db.SetMaxIdleConns(1)
+		db.SetMaxIdleConns(0)
+		// 当前 libsql 驱动重置会话会关闭远程流，禁止在排队请求间复用连接。
+		// 生命周期只在连接归还或取出时检查，不会中断进行中的事务。
+		db.SetConnMaxLifetime(time.Nanosecond)
 		if err := db.Ping(); err != nil {
 			db.Close()
 			return nil, err
