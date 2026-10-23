@@ -4,7 +4,7 @@
 
 <img src="./logo.svg" alt="SingBox Proxy Manager Logo" width="96" />
 
-![Version](https://img.shields.io/badge/version-1.7.11-blue.svg)
+![Version](https://img.shields.io/badge/version-1.7.12-blue.svg)
 ![License](https://img.shields.io/badge/license-MIT-green.svg)
 ![SingBox](https://img.shields.io/badge/sing--box-1.12.12-orange.svg)
 
@@ -77,41 +77,42 @@ docker compose logs -f
 - FreeBSD：`amd64` / `arm64`
 - macOS：`amd64` / `arm64`
 
-> 前置依赖：需要可用的 `sing-box` 内核可执行文件（不需要 Go/Node/Docker）。
-> 建议和主程序同级放置，或在 `.env` 里设置 `SINGBOX_BINARY=/absolute/path/to/sing-box`。
+> 每个平台只需一个可执行文件，已内置前端和 sing-box，不需要额外安装 Go、Node、Docker 或内核。
 
-二进制会自动读取**同目录** `.env`（若未设置 `TZ`，默认按 `UTC+8` -> `Asia/Shanghai` 处理）。
+程序自动读取**可执行文件同目录**和**当前工作目录**的 `.env`。首次使用新数据库需要设置管理员密码；未设置 `TZ` 时默认使用 `Asia/Shanghai`。
 
 ```bash
-# 1) 同时下载本项目 Release 中的后台和安全重编译内核（Linux amd64）
-APP_VERSION=1.7.11
+# 下载适合平台的单文件（示例：Linux amd64）
+APP_VERSION=1.7.12
 curl -fL -o singbox-proxy-manager "https://github.com/cheluen/singbox-proxy-manager/releases/download/v${APP_VERSION}/singbox-proxy-manager-linux-amd64"
-curl -fL -o sing-box "https://github.com/cheluen/singbox-proxy-manager/releases/download/v${APP_VERSION}/sing-box-linux-amd64"
-chmod +x singbox-proxy-manager sing-box
-
-# 2) 放置 .env（可直接复制仓库 .env.example）
-cp .env.example .env
-#    强烈建议显式指定 sing-box 路径，避免 PATH 差异
-#    SINGBOX_BINARY=/absolute/path/to/sing-box
-#    新数据库首次启动必须设置 ADMIN_PASSWORD，监听地址不会放宽该要求
-
-# 3) 启动
+chmod +x singbox-proxy-manager
+# 首次启动设置自己的管理员密码；之后可在管理面板修改
+read -rs -p '管理员密码: ' ADMIN_PASSWORD; echo
+export ADMIN_PASSWORD
 ./singbox-proxy-manager
 ```
 
-> 提示：二进制模式下可通过 `SINGBOX_BINARY=/path/to/sing-box` 指定 sing-box 可执行文件路径；未设置时会按 `PATH`、`CONFIG_DIR`、可执行文件同目录顺序自动查找。
+### 单文件升级与数据目录
+
+- 停止旧管理程序，替换该可执行文件，再用原来的工作目录、环境变量和启动方式启动即可。
+- **数据库位置不变**：默认仍为当前工作目录下的 `config/proxy.db`；指定 `CONFIG_DIR` 时仍使用该目录。不迁移、复制或重建数据库，不更改远程数据库选择规则。
+- 保留原 `.env`、`CONFIG_DIR` 和数据库连接配置；改变工作目录且使用默认相对路径会指向另一份数据库，这与旧版行为相同。
+- 内核自动释放到 `CONFIG_DIR/kernels/sing-box-<SHA256>`，每次管理程序启动都校验内容和权限，损坏时原子替换；目录和内核权限为 `0700`。目录必须可写，所在文件系统必须允许执行。
+- 新发行文件按内置内核内容选择路径，不使用 `SINGBOX_BINARY`、`PATH`、同目录或配置目录里的旧内核；旧内核文件不会被运行或覆盖。内置前端也不会被遗留的 `frontend/dist` 覆盖。
+- 管理程序和 sing-box 仍为独立进程。下载的单文件是分发形式，不是把两个项目代码合并。
+- 普通开发构建（不使用 `bundled_kernel` 标签）仍支持 `SINGBOX_BINARY` 及原有外部内核查找顺序，便于开发测试。
 
 ---
 
 ## 安全重编译说明
 
-- 后台和 sing-box 内核均固定使用 Go 1.26.10 编译，修复 CVE-2026-111943；升级时必须同时替换两个程序。
+- 后台和 sing-box 内核均固定使用 Go 1.26.10 编译，修复 CVE-2026-111943；两者编译后打包进一个发行文件，升级只替换管理程序。
 - 后台另将 `golang.org/x/text` 最小升级至 0.41.0，修复扫描中发现的可达漏洞 GO-2026-6629；相关工具依赖按其最低要求同步。
 - 前端锁文件同步修复原有生产依赖审计发现的漏洞：Axios 1.20.0、follow-redirects 1.16.1，不更改页面业务代码。
 - 远程回归发现 Turso 并发写锁及驱动关闭远程流后的复用错误；限制为单连接，事务结束后不复用远程连接，并增加排队读写回归测试。
 - sing-box 保留 1.12.12 版本，源码提交为 `54ed58499d7063136ed52dabf87d179d252425d0`，模块归档校验和固定在 `scripts/build-sing-box.sh`。
 - 源码构建使用该脚本并保留原官方内核的八项功能标签，支持通过 `GOOS`、`GOARCH` 交叉编译；脚本参数必须为输出文件的绝对路径。
-- 普通 Docker 构建从源码重编译内核；Release 镜像复用本次发布的后台与内核，不再下载上游旧的预编译包。
+- 普通 Docker 构建通过 `scripts/build-release.sh` 生成统一发行文件；Release 镜像直接复用本次发布的单文件，不再下载上游旧的预编译包。
 - CI 保留后台完整可达漏洞扫描，并对内核执行二进制扫描、保存完整报告和阻断本次 CVE 回归。保留旧版内核的历史第三方依赖告警不等于已修复，本次没有升级其功能版本或依赖。
 
 ---
@@ -232,7 +233,7 @@ SBPM_UPDATE_CHECK_TIMEOUT=5s
 
 > `TZ` 会作为全局服务时区参与日志与排障时间显示；默认建议使用 `UTC+8`（自动映射到上海/香港时区）。
 
-> `SINGBOX_BINARY` 可选：用于显式指定 sing-box 可执行文件路径（适合二进制部署）。
+> `SINGBOX_BINARY` 仅用于不内置内核的开发构建；统一发行文件始终使用内置内核。
 
 > sing-box 子进程默认只继承运行所需的最小环境。确需额外变量时可通过 `SINGBOX_ENV_ALLOWLIST` 指定名称；密码、Token、数据库地址及私钥类名称即使列入也会被拒绝。Compose 部署还需将对应变量显式加入容器环境。
 
@@ -432,19 +433,22 @@ docker compose down
 docker compose up -d --build
 ```
 
-### 二进制启动提示找不到 sing-box
+### 内置内核释放或启动失败
 
-当日志里出现 `sing-box binary not found` 或 `sing-box binary is not executable`：
+1. 确认下载了匹配系统和 CPU 架构的管理程序。
+2. 确认 `CONFIG_DIR` 可写，且该目录所在文件系统未使用 `noexec` 挂载。
+3. `CONFIG_DIR/kernels` 必须是普通目录，不能是符号链接。损坏或缺失的内核会在重启管理程序时自动恢复。
+4. 开发构建若提示 `sing-box binary not found`，使用 Go 1.26.10 运行 `scripts/build-sing-box.sh /绝对路径/sing-box`，并设置 `SINGBOX_BINARY`。正式发行不需要这一步。
 
-1. 从本项目 Release 下载与你系统/CPU 架构一致的安全重编译 sing-box 可执行文件。
-2. 给执行权限（Linux/macOS/FreeBSD）：`chmod +x /path/to/sing-box`
-3. 在 `.env` 显式指定：
+### 从源码构建单文件
+
+先在前端目录运行 `npm ci && npm run build`，然后用 Go 1.26.10 执行：
 
 ```bash
-SINGBOX_BINARY=/path/to/sing-box
+./scripts/build-release.sh "$PWD/release-binaries/singbox-proxy-manager"
 ```
 
-4. 重新启动主程序并确认日志不再提示依赖错误。
+可通过 `GOOS`、`GOARCH` 交叉编译。脚本先独立构建并验证内核，再内置内核及前端构建管理程序，最后校验管理程序编译器版本。相同工作区不允许并发构建不同平台。
 
 ### 代理无法连接
 ```bash

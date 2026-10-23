@@ -8,6 +8,17 @@ import (
 	"testing"
 )
 
+func TestPinnedBinaryIgnoresLegacyEnvironment(t *testing.T) {
+	t.Setenv("SINGBOX_BINARY", "/old/sing-box")
+	t.Setenv("PATH", t.TempDir())
+	pinned := filepath.Join(t.TempDir(), "sing-box-new")
+	svc := NewSingBoxService(t.TempDir(), WithBinaryPath(pinned))
+	got, err := svc.resolveSingBoxBinary()
+	if err != nil || got != pinned {
+		t.Fatalf("内置内核被历史配置覆盖: %q %v", got, err)
+	}
+}
+
 func TestResolveSingBoxBinaryFromEnvCommandName(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("this test uses unix executable permissions")

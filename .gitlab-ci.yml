@@ -167,8 +167,12 @@ build-frontend-dist:
   script:
     - cd frontend
     - npm ci
+    - npm run test:version-sync
     - npm run build
+    - echo "AUTO_TAG=v$(cat "$CI_PROJECT_DIR/internal/version/version.txt")" > "$CI_PROJECT_DIR/release-version.env"
   artifacts:
+    reports:
+      dotenv: release-version.env
     paths:
       - frontend/dist/
     expire_in: 1 day
@@ -187,32 +191,11 @@ build-freebsd:
     SINGBOX_VERSION: "1.12.12"
   script:
     - go mod download
-    - GOOS=freebsd GOARCH=amd64 CGO_ENABLED=0 go build -o main ./backend
-    # 从源码编译FreeBSD版sing-box（官方无预编译版）
-    - GOOS=freebsd GOARCH=amd64 ./scripts/build-sing-box.sh "$CI_PROJECT_DIR/sing-box"
-    - ./scripts/verify-go-build.sh "$CI_PROJECT_DIR/main"
-    # 创建发布包
-    - mkdir -p singbox-proxy-manager-freebsd-amd64/frontend
-    - mv main singbox-proxy-manager-freebsd-amd64/
-    - mv sing-box singbox-proxy-manager-freebsd-amd64/
-    - cp -r frontend/dist singbox-proxy-manager-freebsd-amd64/frontend/
-    - mkdir -p singbox-proxy-manager-freebsd-amd64/config
-    # 创建启动脚本
-    - |
-      cat > singbox-proxy-manager-freebsd-amd64/start.sh << 'EOF'
-      #!/bin/sh
-      cd "$(dirname "$0")"
-      export PATH="$PWD:$PATH"
-      export CONFIG_DIR="$PWD/config"
-      export PORT="${PORT:-30000}"
-      ./main
-      EOF
-    - chmod +x singbox-proxy-manager-freebsd-amd64/start.sh
-    - tar czf singbox-proxy-manager-freebsd-amd64.tar.gz singbox-proxy-manager-freebsd-amd64/
+    - GOOS=freebsd GOARCH=amd64 ./scripts/build-release.sh "$CI_PROJECT_DIR/singbox-proxy-manager-freebsd-amd64"
   artifacts:
     name: "singbox-proxy-manager-freebsd-$CI_COMMIT_SHORT_SHA"
     paths:
-      - singbox-proxy-manager-freebsd-amd64.tar.gz
+      - singbox-proxy-manager-freebsd-amd64
     expire_in: 30 days
   only:
     - main
@@ -229,31 +212,11 @@ build-linux:
     SINGBOX_VERSION: "1.12.12"
   script:
     - go mod download
-    - GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build -o main ./backend
-    - GOOS=linux GOARCH=amd64 ./scripts/build-sing-box.sh "$CI_PROJECT_DIR/sing-box"
-    - ./scripts/verify-go-build.sh "$CI_PROJECT_DIR/main"
-    # 创建发布包
-    - mkdir -p singbox-proxy-manager-linux-amd64/frontend
-    - mv main singbox-proxy-manager-linux-amd64/
-    - mv sing-box singbox-proxy-manager-linux-amd64/
-    - cp -r frontend/dist singbox-proxy-manager-linux-amd64/frontend/
-    - mkdir -p singbox-proxy-manager-linux-amd64/config
-    # 创建启动脚本
-    - |
-      cat > singbox-proxy-manager-linux-amd64/start.sh << 'EOF'
-      #!/bin/sh
-      cd "$(dirname "$0")"
-      export PATH="$PWD:$PATH"
-      export CONFIG_DIR="$PWD/config"
-      export PORT="${PORT:-30000}"
-      ./main
-      EOF
-    - chmod +x singbox-proxy-manager-linux-amd64/start.sh
-    - tar czf singbox-proxy-manager-linux-amd64.tar.gz singbox-proxy-manager-linux-amd64/
+    - GOOS=linux GOARCH=amd64 ./scripts/build-release.sh "$CI_PROJECT_DIR/singbox-proxy-manager-linux-amd64"
   artifacts:
     name: "singbox-proxy-manager-linux-$CI_COMMIT_SHORT_SHA"
     paths:
-      - singbox-proxy-manager-linux-amd64.tar.gz
+      - singbox-proxy-manager-linux-amd64
     expire_in: 30 days
   only:
     - main
@@ -262,14 +225,14 @@ build-linux:
 # 自动发布到Releases（main分支push时自动创建tag并发布）
 auto-release:
   stage: release
-  image: registry.gitlab.com/gitlab-org/release-cli:latest
+  image: registry.gitlab.com/gitlab-org/cli:latest
   needs:
+    - job: build-frontend-dist
+      artifacts: true
     - job: build-freebsd
       artifacts: false
     - job: build-linux
       artifacts: false
-  variables:
-    AUTO_TAG: "v0.0.${CI_PIPELINE_IID}"
   script:
     - echo "Auto-creating release ${AUTO_TAG} for commit ${CI_COMMIT_SHORT_SHA}"
   release:
@@ -282,28 +245,27 @@ auto-release:
       
       ### 完整发布包（开箱即用）
       
-      包含：后端程序 + 前端文件 + sing-box + 启动脚本
+      包含：单文件管理程序（内置前端与 sing-box，启动时自动释放内核）
       
       | 平台 | 下载 |
       |------|------|
-      | Linux (amd64) | singbox-proxy-manager-linux-amd64.tar.gz |
-      | FreeBSD (amd64) | singbox-proxy-manager-freebsd-amd64.tar.gz |
+      | Linux (amd64) | singbox-proxy-manager-linux-amd64 |
+      | FreeBSD (amd64) | singbox-proxy-manager-freebsd-amd64 |
       | Docker | `docker pull ${CI_REGISTRY_IMAGE}:latest` |
       
       ### 使用方法
       ```bash
-      tar xzf singbox-proxy-manager-linux-amd64.tar.gz
-      cd singbox-proxy-manager-linux-amd64
-      ADMIN_PASSWORD=your_password ./start.sh
+      chmod +x singbox-proxy-manager-linux-amd64
+      ADMIN_PASSWORD=your_password ./singbox-proxy-manager-linux-amd64
       # 访问 http://localhost:30000
       ```
     assets:
       links:
-        - name: "singbox-proxy-manager-linux-amd64.tar.gz"
-          url: "${CI_PROJECT_URL}/-/jobs/artifacts/${CI_COMMIT_SHA}/raw/singbox-proxy-manager-linux-amd64.tar.gz?job=build-linux"
+        - name: "singbox-proxy-manager-linux-amd64"
+          url: "${CI_PROJECT_URL}/-/jobs/artifacts/${CI_COMMIT_SHA}/raw/singbox-proxy-manager-linux-amd64?job=build-linux"
           link_type: package
-        - name: "singbox-proxy-manager-freebsd-amd64.tar.gz"
-          url: "${CI_PROJECT_URL}/-/jobs/artifacts/${CI_COMMIT_SHA}/raw/singbox-proxy-manager-freebsd-amd64.tar.gz?job=build-freebsd"
+        - name: "singbox-proxy-manager-freebsd-amd64"
+          url: "${CI_PROJECT_URL}/-/jobs/artifacts/${CI_COMMIT_SHA}/raw/singbox-proxy-manager-freebsd-amd64?job=build-freebsd"
           link_type: package
   rules:
     - if: '$CI_COMMIT_BRANCH == "main" && $CI_PIPELINE_SOURCE == "push"'

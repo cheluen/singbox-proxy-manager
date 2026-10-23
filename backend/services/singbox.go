@@ -21,6 +21,7 @@ import (
 
 type SingBoxService struct {
 	configDir            string
+	binaryPath           string
 	validationSlots      chan struct{}
 	validationTimeout    time.Duration
 	upstreamCheckSlots   chan struct{}
@@ -86,6 +87,9 @@ func upstreamValidationErrorf(format string, args ...interface{}) error {
 }
 
 func (s *SingBoxService) resolveSingBoxBinary() (string, error) {
+	if s.binaryPath != "" {
+		return s.binaryPath, nil
+	}
 	if explicit := strings.TrimSpace(os.Getenv("SINGBOX_BINARY")); explicit != "" {
 		if resolved, err := exec.LookPath(explicit); err == nil {
 			return resolved, nil
@@ -152,6 +156,12 @@ func isExecutableBinary(info os.FileInfo) bool {
 }
 
 type SingBoxServiceOption func(*SingBoxService)
+
+func WithBinaryPath(path string) SingBoxServiceOption {
+	return func(service *SingBoxService) {
+		service.binaryPath = path
+	}
+}
 
 func WithLastGoodSnapshotWriter(writer func(string, []byte) error) SingBoxServiceOption {
 	return func(service *SingBoxService) {

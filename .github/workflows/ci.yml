@@ -324,6 +324,11 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - uses: actions/download-artifact@v4
+        with:
+          name: sing-box-test-kernel
+          path: ${{ runner.temp }}/sing-box-kernel
+
       - name: Prepare .env for system test
         run: |
           cp .env.example .env
@@ -376,13 +381,11 @@ jobs:
             "route": {"final": "direct"}
           }
           JSON
-          docker run --detach --name sbpm-ci-ss-upstream --network host \
-            --volume /tmp/sbpm-ci-ss-upstream.json:/tmp/config.json:ro \
-            --entrypoint sing-box singbox-proxy-manager:local \
-            run -c /tmp/config.json
+          chmod +x "${RUNNER_TEMP}/sing-box-kernel/sing-box"
+          "${RUNNER_TEMP}/sing-box-kernel/sing-box" run -c /tmp/sbpm-ci-ss-upstream.json >/tmp/sbpm-ci-ss-upstream.log 2>&1 &
+          echo "$!" >/tmp/sbpm-ci-ss-upstream.pid
           sleep 1
-          docker ps --filter name=sbpm-ci-ss-upstream --filter status=running --format '{{.Names}}' \
-            | grep -Fx sbpm-ci-ss-upstream
+          kill -0 "$(cat /tmp/sbpm-ci-ss-upstream.pid)"
 
           curl -fsS http://127.0.0.1:38080/api/version --output /tmp/version.json
           cat /tmp/version.json
@@ -446,8 +449,8 @@ jobs:
           test "$SOCKS_RESULT" = "sbpm-live-proxy-ok"
 
           docker compose --profile local exec -T sb-proxy-local \
-            sing-box check -c /app/config/config.json
-          docker compose --profile local top sb-proxy-local | grep -E '[s]ing-box( |$)'
+            sh -c '/app/config/kernels/sing-box-* check -c /app/config/config.json'
+          docker compose --profile local top sb-proxy-local | grep -E '[s]ing-box-[a-f0-9]+'
 
       - name: Stop stack
         if: always()
@@ -455,7 +458,9 @@ jobs:
           if test -f /tmp/sbpm-live-target.pid; then
             kill "$(cat /tmp/sbpm-live-target.pid)" 2>/dev/null || true
           fi
-          docker rm --force sbpm-ci-ss-upstream 2>/dev/null || true
+          if test -f /tmp/sbpm-ci-ss-upstream.pid; then
+            kill "$(cat /tmp/sbpm-ci-ss-upstream.pid)" 2>/dev/null || true
+          fi
           docker compose --profile local down -v
 
   test-release-image-build:
@@ -488,12 +493,29 @@ jobs:
         run: |
           mkdir -p release-binaries
           for arch in amd64 arm64; do
-            GOOS=linux GOARCH="${arch}" CGO_ENABLED=0 \
-              go build -tags frontend_dist -trimpath -ldflags="-s -w" \
-              -o "release-binaries/singbox-proxy-manager-linux-${arch}" ./backend
-            GOOS=linux GOARCH="${arch}" ./scripts/build-sing-box.sh "${PWD}/release-binaries/sing-box-linux-${arch}"
-            ./scripts/verify-go-build.sh "${PWD}/release-binaries/singbox-proxy-manager-linux-${arch}"
+            GOOS=linux GOARCH="${arch}" ./scripts/build-release.sh "${PWD}/release-binaries/singbox-proxy-manager-linux-${arch}"
           done
+
+      - name: 验证单文件启动、代理转发、数据保留和内核自愈
+        run: |
+          for custom_config in 0 1; do
+            SBPM_RELEASE_TEST_CUSTOM_CONFIG="$custom_config" python3 "${PWD}/scripts/test-release.py" "${PWD}/release-binaries/singbox-proxy-manager-linux-amd64"
+          done
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: sing-box-test-kernel
+          path: ${{ runner.temp }}/sing-box-kernel
+
+      - name: 验证统一发行文件的浏览器协议导入全链路
+        working-directory: frontend
+        env:
+          SBPM_E2E_BACKEND_BINARY: ${{ github.workspace }}/release-binaries/singbox-proxy-manager-linux-amd64
+          SINGBOX_TEST_BINARY: ${{ runner.temp }}/sing-box-kernel/sing-box
+        run: |
+          chmod +x "$SINGBOX_TEST_BINARY"
+          export PUPPETEER_EXECUTABLE_PATH="$(command -v google-chrome || command -v chromium)"
+          npm run test:e2e:full-stack-protocol-import
 
       - name: Set up QEMU
         uses: docker/setup-qemu-action@v3
@@ -578,12 +600,8 @@ jobs:
       - name: Build binary
         run: |
           mkdir -p release-binaries
-          GOOS=${{ matrix.goos }} GOARCH=${{ matrix.goarch }} CGO_ENABLED=0 \
-            go build -tags frontend_dist -trimpath -ldflags="-s -w" \
-            -o "release-binaries/singbox-proxy-manager-${{ matrix.goos }}-${{ matrix.goarch }}" ./backend
           GOOS=${{ matrix.goos }} GOARCH=${{ matrix.goarch }} \
-            ./scripts/build-sing-box.sh "${PWD}/release-binaries/sing-box-${{ matrix.goos }}-${{ matrix.goarch }}"
-          ./scripts/verify-go-build.sh "${PWD}/release-binaries/singbox-proxy-manager-${{ matrix.goos }}-${{ matrix.goarch }}"
+            ./scripts/build-release.sh "${PWD}/release-binaries/singbox-proxy-manager-${{ matrix.goos }}-${{ matrix.goarch }}"
 
       - name: Upload binary artifact
         uses: actions/upload-artifact@v4
@@ -591,7 +609,6 @@ jobs:
           name: singbox-proxy-manager-${{ matrix.goos }}-${{ matrix.goarch }}
           path: |
             release-binaries/singbox-proxy-manager-${{ matrix.goos }}-${{ matrix.goarch }}
-            release-binaries/sing-box-${{ matrix.goos }}-${{ matrix.goarch }}
           retention-days: 30
 
   create-release:
@@ -618,8 +635,8 @@ jobs:
 
       - name: Prepare checksums
         run: |
-          chmod +x release-binaries/singbox-proxy-manager-* release-binaries/sing-box-*
-          (cd release-binaries && sha256sum singbox-proxy-manager-* sing-box-* > checksums.txt)
+          chmod +x release-binaries/singbox-proxy-manager-*
+          (cd release-binaries && sha256sum singbox-proxy-manager-* > checksums.txt)
 
       - name: Create or update release
         uses: softprops/action-gh-release@v2
@@ -634,13 +651,13 @@ jobs:
             - FreeBSD: amd64 / arm64
             - macOS: amd64 / arm64
             - 管理后台和 sing-box 1.12.12 均使用 Go 1.26.10 重新编译，修复 CVE-2026-111943。
-            - sing-box 内核需与后台产物一起替换，不能继续使用旧的预编译内核。
+            - 每个平台只需下载一个管理程序，已内置前端与 sing-box；启动时自动校验、释放并运行匹配内核。
+            - 升级只替换管理程序并重启，保留原工作目录、CONFIG_DIR 和数据库配置。
 
             ### 镜像
             GHCR 多架构镜像在后续作业自动发布（linux/amd64 + linux/arm64），并复用本次 Release 的 Linux 二进制。
           files: |
             release-binaries/singbox-proxy-manager-*
-            release-binaries/sing-box-*
             release-binaries/checksums.txt
           fail_on_unmatched_files: true
           draft: false
@@ -665,9 +682,8 @@ jobs:
           gh release download "v${APP_VERSION}" \
             --repo "${GITHUB_REPOSITORY}" \
             --pattern "singbox-proxy-manager-linux-*" \
-            --pattern "sing-box-linux-*" \
             --dir release-binaries
-          chmod +x release-binaries/singbox-proxy-manager-linux-* release-binaries/sing-box-linux-*
+          chmod +x release-binaries/singbox-proxy-manager-linux-*
 
       - name: Set up QEMU
         uses: docker/setup-qemu-action@v3

@@ -16,15 +16,11 @@ WORKDIR /app
 COPY go.mod go.sum ./
 RUN go mod download
 COPY scripts/ ./scripts/
-RUN ./scripts/build-sing-box.sh /usr/local/bin/sing-box
-# Force rebuild by adding timestamp
-RUN echo "Build at $(date)" > /tmp/buildtime
 COPY backend/ ./backend/
 COPY frontend/ ./frontend/
 COPY --from=frontend-builder /app/frontend/dist ./frontend/dist
 COPY internal/ ./internal/
-RUN CGO_ENABLED=0 go build -tags frontend_dist -trimpath -o singbox-proxy-manager ./backend \
-    && ./scripts/verify-go-build.sh /app/singbox-proxy-manager
+RUN ./scripts/build-release.sh /app/singbox-proxy-manager
 
 FROM debian:bookworm-slim
 RUN apt-get update && apt-get install -y --no-install-recommends \
@@ -34,7 +30,6 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 WORKDIR /app
 COPY --from=backend-builder /app/singbox-proxy-manager ./singbox-proxy-manager
-COPY --from=backend-builder /usr/local/bin/sing-box /usr/local/bin/sing-box
 RUN mkdir -p /app/config
 
 ENV PORT=30000

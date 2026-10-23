@@ -27,6 +27,7 @@ import (
 	"sb-proxy/backend/models"
 	"sb-proxy/backend/services"
 	frontendassets "sb-proxy/frontend"
+	"sb-proxy/internal/kernel"
 	"sb-proxy/internal/version"
 
 	"github.com/gin-gonic/gin"
@@ -245,7 +246,11 @@ func main() {
 	}
 
 	// Initialize sing-box service
-	singBoxService := services.NewSingBoxService(configDir)
+	kernelPath, err := kernel.Prepare(configDir)
+	if err != nil {
+		fatalWithInstanceLease(instanceLease, cancelLeaseMonitor, db, "Failed to prepare bundled sing-box: %v", err)
+	}
+	singBoxService := services.NewSingBoxService(configDir, services.WithBinaryPath(kernelPath))
 
 	// Initialize Gin. The whole HTTP stack (routes, middleware, frontend
 	// assets) is built before the sing-box child process is launched, so any
@@ -670,7 +675,7 @@ func registerFrontendRoutes(r *gin.Engine, frontendDistDir string, appVersion st
 }
 
 func frontendAssetFS(frontendDistDir string) (fs.FS, string, error) {
-	if info, err := os.Stat(frontendDistDir); err == nil && info.IsDir() {
+	if info, err := os.Stat(frontendDistDir); !kernel.Bundled && err == nil && info.IsDir() {
 		return os.DirFS(frontendDistDir), frontendDistDir, nil
 	}
 

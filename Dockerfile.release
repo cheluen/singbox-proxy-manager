@@ -16,10 +16,6 @@ RUN ARCH="${TARGETARCH}" \
       amd64|arm64) BIN="/app/release-binaries/singbox-proxy-manager-linux-${ARCH}" ;; \
       *) echo "Unsupported TARGETARCH: ${ARCH}" >&2; exit 1 ;; \
     esac \
-    && KERNEL="/app/release-binaries/sing-box-linux-${ARCH}" \
-    && test -f "$KERNEL" \
-    && cp "$KERNEL" /usr/local/bin/sing-box \
-    && chmod +x /usr/local/bin/sing-box \
     && test -f "$BIN" \
     && cp "$BIN" /app/singbox-proxy-manager \
     && chmod +x /app/singbox-proxy-manager \

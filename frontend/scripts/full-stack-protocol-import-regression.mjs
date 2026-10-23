@@ -48,6 +48,25 @@ const reservePort = async () => {
   return port
 }
 
+const waitForUpstream = async (child, ports) => {
+  const deadline = Date.now() + 15000
+  for (const port of ports) {
+    while (true) {
+      assert(child.exitCode === null, `Upstream exited before listening on ${port}`)
+      const connected = await new Promise((resolve) => {
+        const socket = net.createConnection({ host: '127.0.0.1', port })
+        const finish = (ready) => { socket.destroy(); resolve(ready) }
+        socket.once('connect', () => finish(true))
+        socket.once('error', () => finish(false))
+        socket.setTimeout(500, () => finish(false))
+      })
+      if (connected) break
+      assert(Date.now() < deadline, `Upstream did not listen on ${port}`)
+      await sleep(100)
+    }
+  }
+}
+
 const setInput = async (page, selector, value) => {
   await page.$eval(selector, (input, nextValue) => {
     const prototype = input instanceof HTMLTextAreaElement ? HTMLTextAreaElement.prototype : HTMLInputElement.prototype
@@ -371,6 +390,8 @@ try {
   const occupiedNodes = (await apiRequest('GET', '/nodes')).filter((node) => node.name.startsWith('occupied-'))
   assert(occupiedNodes.every((node) => node.inbound_port > occupiedPort), 'occupied port was assigned')
   await closeServer(occupiedPortServer)
+  // 占用端口测试使用系统临时端口范围，后续协议测试恢复原范围以避免客户端源端口竞争。
+  await apiRequest('PUT', '/settings', settings)
 
   const socksPort = await reservePort()
   const vmessPort = await reservePort()
@@ -387,6 +408,8 @@ try {
   upstream = spawn(SINGBOX_BINARY, ['run', '-c', upstreamConfigPath], { stdio: ['ignore', 'pipe', 'pipe'] })
   upstream.stdout.on('data', (chunk) => backendLogs.push(chunk.toString()))
   upstream.stderr.on('data', (chunk) => backendLogs.push(chunk.toString()))
+  // 等上游占用端口后再创建节点，避免管理程序将端口分配为入站并形成回环。
+  await waitForUpstream(upstream, [socksPort, vmessPort])
   const chainTarget = await apiRequest('POST', '/nodes', {
     name: 'chain-target', type: 'socks5', enabled: true, auth_enabled: false,
     config: JSON.stringify({ server: '127.0.0.1', server_port: socksPort }),
