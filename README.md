@@ -4,7 +4,7 @@
 
 <img src="./logo.svg" alt="SingBox Proxy Manager Logo" width="96" />
 
-![Version](https://img.shields.io/badge/version-1.7.18-blue.svg)
+![Version](https://img.shields.io/badge/version-1.7.19-blue.svg)
 ![License](https://img.shields.io/badge/license-MIT-green.svg)
 ![SingBox](https://img.shields.io/badge/sing--box-1.12.12-orange.svg)
 
@@ -93,7 +93,7 @@ docker compose logs -f
 
 ```bash
 # 下载适合平台的单文件（示例：Linux amd64）
-APP_VERSION=1.7.18
+APP_VERSION=1.7.19
 curl -fL -o singbox-proxy-manager "https://github.com/cheluen/singbox-proxy-manager/releases/download/v${APP_VERSION}/singbox-proxy-manager-linux-amd64"
 chmod +x singbox-proxy-manager
 # 首次启动设置自己的管理员密码；之后可在管理面板修改

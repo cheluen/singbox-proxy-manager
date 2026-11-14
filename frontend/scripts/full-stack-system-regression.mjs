@@ -10,6 +10,7 @@ import { spawn } from 'node:child_process'
 import { fileURLToPath } from 'node:url'
 import puppeteer from 'puppeteer-core'
 import { findTestPortRange } from './test-ports.mjs'
+import { isExpectedSystemBrowserError } from './system-browser-errors.mjs'
 import { PROJECT_MARK_FILE, PROJECT_NAME } from '../src/core/project.js'
 import { assertProjectBrand, clickControl, clickText, confirmDialog, editNode, openBatchImport, openNodeMenu, saveNodeForm, selectOption, setInput, sleep, toggle, waitOverlaysClosed } from './ui-driver.mjs'
 
@@ -154,10 +155,10 @@ try {
     if (message.type() !== 'error') return
     let endpoint = ''
     try { endpoint = new URL(message.location().url).pathname } catch { /* 保留非网络错误 */ }
-    if (endpoint === '/api/nodes/batch-import' && message.text().includes('400')) return
-    if (expectRestart && endpoint === '/api/runtime/status' && message.text().includes('net::ERR_CONNECTION_REFUSED')) return
-    if (expectAuthRevocation && ['/api/runtime/status', '/api/nodes', '/api/settings'].includes(endpoint) && message.text().includes('401')) return
-    browserErrors.push(message.text())
+    if (isExpectedSystemBrowserError({ text: message.text(), url: message.location().url }, {
+      origin: base, restarting: expectRestart, revoking: expectAuthRevocation,
+    })) return
+    browserErrors.push({ text: message.text(), endpoint, restarting: expectRestart, revoking: expectAuthRevocation })
   })
   await page.goto(base, { waitUntil: 'networkidle2' })
   assert.equal(await page.$('.demo-bar, [data-testid="login-fill-demo"]'), null)
@@ -262,10 +263,11 @@ try {
   for (const node of await api('GET', '/nodes')) assert.equal(node.inbound_port, ports.get(node.id))
   steps.push('settings-sort-preserve-ports')
 
+  await page.waitForNetworkIdle({ idleTime: 500 })
   expectRestart = true
   await stop(backend)
   await start()
-  await page.reload({ waitUntil: 'networkidle2' })
+  await page.reload({ waitUntil: 'networkidle0' })
   await page.waitForSelector('[data-testid="nodes-list"]', { visible: true })
   expectRestart = false
   assert.equal(await page.evaluate(() => localStorage.getItem('token')), token)

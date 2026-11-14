@@ -13,6 +13,26 @@ import { createLatestRequestCoordinator } from '../src/core/latestRequest.js'
 import { PROJECT_BRAND, PROJECT_DESCRIPTOR, PROJECT_MARK_FILE, PROJECT_NAME } from '../src/core/project.js'
 import baseZh from '../src/core/i18n/base-zh.js'
 import baseEn from '../src/core/i18n/base-en.js'
+import { isExpectedSystemBrowserError } from './system-browser-errors.mjs'
+
+test('系统测试只允许同源预期停机与撤销认证错误，不屏蔽正常运行故障', () => {
+  const origin = 'http://127.0.0.1:38080'
+  const refused = 'Failed to load resource: net::ERR_CONNECTION_REFUSED'
+  const error = (endpoint, text = refused) => ({ text, url: origin + endpoint })
+  for (const endpoint of ['/api/nodes', '/api/settings', '/api/runtime/status', '/api/version']) {
+    assert.equal(isExpectedSystemBrowserError(error(endpoint), { origin, restarting: true }), true)
+    assert.equal(isExpectedSystemBrowserError(error(endpoint), { origin }), false)
+    assert.equal(isExpectedSystemBrowserError(error(endpoint, 'net::ERR_FAILED'), { origin, restarting: true }), false)
+    assert.equal(isExpectedSystemBrowserError({ text: refused, url: 'https://example.com' + endpoint }, { origin, restarting: true }), false)
+  }
+  assert.equal(isExpectedSystemBrowserError(error('/assets/app.js'), { origin, restarting: true }), false)
+  assert.equal(isExpectedSystemBrowserError(error('/api/nodes/1'), { origin, restarting: true }), false)
+  assert.equal(isExpectedSystemBrowserError({ text: refused, url: '' }, { origin, restarting: true }), false)
+  assert.equal(isExpectedSystemBrowserError(error('/api/nodes', 'status of 401 (Unauthorized)'), { origin, revoking: true }), true)
+  assert.equal(isExpectedSystemBrowserError(error('/api/nodes', 'status of 401 (Unauthorized)'), { origin }), false)
+  assert.equal(isExpectedSystemBrowserError(error('/api/nodes/batch-import', 'status of 400 (Bad Request)'), { origin }), true)
+  assert.equal(isExpectedSystemBrowserError(error('/api/nodes/batch-import', 'status of 500 (Server Error)'), { origin }), false)
+})
 
 test('中英文统一使用项目品牌，不再把功能描述当作项目名', () => {
   assert.equal(PROJECT_NAME, 'SingBox Proxy Manager')
