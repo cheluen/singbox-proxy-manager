@@ -4,7 +4,7 @@
 
 <img src="./logo.svg" alt="SingBox Proxy Manager Logo" width="96" />
 
-![Version](https://img.shields.io/badge/version-1.7.17-blue.svg)
+![Version](https://img.shields.io/badge/version-1.7.18-blue.svg)
 ![License](https://img.shields.io/badge/license-MIT-green.svg)
 ![SingBox](https://img.shields.io/badge/sing--box-1.12.12-orange.svg)
 
@@ -93,7 +93,7 @@ docker compose logs -f
 
 ```bash
 # 下载适合平台的单文件（示例：Linux amd64）
-APP_VERSION=1.7.17
+APP_VERSION=1.7.18
 curl -fL -o singbox-proxy-manager "https://github.com/cheluen/singbox-proxy-manager/releases/download/v${APP_VERSION}/singbox-proxy-manager-linux-amd64"
 chmod +x singbox-proxy-manager
 # 首次启动设置自己的管理员密码；之后可在管理面板修改
@@ -116,7 +116,7 @@ export ADMIN_PASSWORD
 
 ## 安全重编译说明
 
-- 后台和 sing-box 内核均固定使用 Go 1.26.10 编译，修复 CVE-2026-111943；两者编译后打包进一个发行文件，升级只替换管理程序。
+- 后台和 sing-box 内核均固定使用 Go 1.26.11 编译，修复 CVE-2026-111943 和 CVE-2026-97054；两者编译后打包进一个发行文件，升级只替换管理程序。
 - 后台另将 `golang.org/x/text` 最小升级至 0.41.0，修复扫描中发现的可达漏洞 GO-2026-6629；相关工具依赖按其最低要求同步。
 - 前端锁文件同步修复原有生产依赖审计发现的漏洞：Axios 1.20.0、follow-redirects 1.16.1，不更改页面业务代码。
 - 远程回归发现 Turso 并发写锁及驱动关闭远程流后的复用错误；限制为单连接，事务结束后不复用远程连接，并增加排队读写回归测试。
@@ -362,7 +362,7 @@ docker compose up -d
 ## 🛠️ 技术栈
 
 ### 后端
-- **语言**：Go 1.26.10
+- **语言**：Go 1.26.11
 - **框架**：Gin
 - **数据库**：SQLite（默认，本地存储）/ Turso（远程 libsql）/ PostgreSQL / MySQL（含 TiDB Cloud）
 - **代理核心**：sing-box 1.12.12
@@ -448,11 +448,11 @@ docker compose up -d --build
 1. 确认下载了匹配系统和 CPU 架构的管理程序。
 2. 确认 `CONFIG_DIR` 可写，且该目录所在文件系统未使用 `noexec` 挂载。
 3. `CONFIG_DIR/kernels` 必须是普通目录，不能是符号链接。损坏或缺失的内核会在重启管理程序时自动恢复。
-4. 开发构建若提示 `sing-box binary not found`，使用 Go 1.26.10 运行 `scripts/build-sing-box.sh /绝对路径/sing-box`，并设置 `SINGBOX_BINARY`。正式发行不需要这一步。
+4. 开发构建若提示 `sing-box binary not found`，使用 Go 1.26.11 运行 `scripts/build-sing-box.sh /绝对路径/sing-box`，并设置 `SINGBOX_BINARY`。正式发行不需要这一步。
 
 ### 从源码构建单文件
 
-先在前端目录运行 `npm ci && npm run build`，然后用 Go 1.26.10 执行：
+先在前端目录运行 `npm ci && npm run build`，然后用 Go 1.26.11 执行：
 
 ```bash
 ./scripts/build-release.sh "$PWD/release-binaries/singbox-proxy-manager"

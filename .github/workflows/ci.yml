@@ -7,7 +7,7 @@ on:
     branches: [main]
 
 env:
-  GO_VERSION: "1.26.10"
+  GO_VERSION: "1.26.11"
   GOVULNCHECK_VERSION: "v1.7.0"
   NODE_VERSION: "22"
   SINGBOX_VERSION: "1.12.12"
@@ -77,13 +77,13 @@ jobs:
           name: sing-box-test-kernel
           path: ${{ runner.temp }}/sing-box-kernel
 
-      - name: 扫描内核并阻断 CVE-2026-111943 回归
+      - name: 扫描内核并阻断标准库漏洞回归
         run: |
           binary="${RUNNER_TEMP}/sing-box-kernel/sing-box"
           ./scripts/verify-go-build.sh "${binary}"
           "${RUNNER_TEMP}/bin/govulncheck" -mode=binary -json "${binary}" > "${RUNNER_TEMP}/sing-box-vulnerabilities.json"
-          if grep -F '"osv": "GO-2026-6809"' "${RUNNER_TEMP}/sing-box-vulnerabilities.json"; then
-            echo 'CVE-2026-111943 仍然存在' >&2
+          if grep -E '"osv": "GO-2026-(6809|6859)"' "${RUNNER_TEMP}/sing-box-vulnerabilities.json"; then
+            echo 'CVE-2026-111943 或 CVE-2026-97054 仍然存在' >&2
             exit 1
           fi
 
@@ -665,7 +665,7 @@ jobs:
             - Linux: amd64 / arm64
             - FreeBSD: amd64 / arm64
             - macOS: amd64 / arm64
-            - 管理后台和 sing-box 1.12.12 均使用 Go 1.26.10 重新编译，修复 CVE-2026-111943。
+            - 管理后台和 sing-box 1.12.12 均使用 Go 1.26.11 重新编译，修复 CVE-2026-111943 和 CVE-2026-97054。
             - 每个平台只需下载一个管理程序，已内置前端与 sing-box；启动时自动校验、释放并运行匹配内核。
             - 升级只替换管理程序并重启，保留原工作目录、CONFIG_DIR 和数据库配置。
 

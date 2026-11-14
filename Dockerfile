@@ -5,7 +5,7 @@ RUN npm ci
 COPY frontend/ ./
 RUN npm run build
 
-FROM golang:1.26.10 AS backend-builder
+FROM golang:1.26.11 AS backend-builder
 ARG SINGBOX_VERSION=1.12.12
 ENV GOTOOLCHAIN=local
 ARG GOPROXY=https://proxy.golang.org,direct

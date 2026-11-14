@@ -12,8 +12,8 @@ for binary in "$@"; do
     esac
     metadata=$(GOTOOLCHAIN=local go version -m "$binary")
     version=$(printf '%s\n' "$metadata" | awk 'NR == 1 { print $NF }')
-    if [ "$version" != go1.26.10 ]; then
-        echo "$binary 的编译器版本不是 go1.26.10: $version" >&2
+    if [ "$version" != go1.26.11 ]; then
+        echo "$binary 的编译器版本不是 go1.26.11: $version" >&2
         exit 1
     fi
     printf '%s\n' "$binary: $version"
