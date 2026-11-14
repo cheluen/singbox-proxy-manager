@@ -10,3 +10,8 @@ README.md
 dev.env
 .env.*
 !.env.example
+
+.checkpoints
+ui-preview
+CLAUDE.md
+AGENTS.md

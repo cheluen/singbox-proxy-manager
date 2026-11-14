@@ -37,6 +37,10 @@ func writeTestFrontendDist(t *testing.T) string {
 	if err := os.WriteFile(filepath.Join(distDir, "logo.svg"), []byte("<svg xmlns=\"http://www.w3.org/2000/svg\"></svg>"), 0o644); err != nil {
 		t.Fatalf("write logo.svg: %v", err)
 	}
+	mark := `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64"><title>SingBox Proxy Manager</title></svg>`
+	if err := os.WriteFile(filepath.Join(distDir, "brand-mark.svg"), []byte(mark), 0o644); err != nil {
+		t.Fatalf("write brand-mark.svg: %v", err)
+	}
 
 	return distDir
 }
@@ -233,6 +237,57 @@ func TestRegisterFrontendRoutesServesLogoFile(t *testing.T) {
 	}
 	if got := rec.Header().Get("Cache-Control"); got != assetsCacheControlHeader {
 		t.Fatalf("unexpected cache-control: %s", got)
+	}
+}
+
+func TestRegisterFrontendRoutesServesBrandMark(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	r := gin.New()
+	distDir := writeTestFrontendDist(t)
+	if err := registerFrontendRoutes(r, distDir, "1.2.4"); err != nil {
+		t.Fatalf("register frontend routes: %v", err)
+	}
+
+	for _, method := range []string{http.MethodGet, http.MethodHead} {
+		t.Run(method, func(t *testing.T) {
+			rec := httptest.NewRecorder()
+			r.ServeHTTP(rec, httptest.NewRequest(method, "/brand-mark.svg", nil))
+			if rec.Code != http.StatusOK {
+				t.Fatalf("unexpected status: %d", rec.Code)
+			}
+			if got := rec.Header().Get("Content-Type"); !strings.HasPrefix(got, "image/svg+xml") {
+				t.Fatalf("brand mark must be SVG, not the SPA fallback: %q", got)
+			}
+			if got := rec.Header().Get("Cache-Control"); got != assetsCacheControlHeader {
+				t.Fatalf("unexpected cache-control: %q", got)
+			}
+			if got := rec.Header().Get("X-App-Version"); got != "1.2.4" {
+				t.Fatalf("unexpected app version: %q", got)
+			}
+			if rec.Header().Get("X-Frontend-Fingerprint") == "" {
+				t.Fatal("frontend fingerprint must not be empty")
+			}
+			if method == http.MethodGet && !strings.Contains(rec.Body.String(), "<title>SingBox Proxy Manager</title>") {
+				t.Fatalf("brand mark body is incorrect: %q", rec.Body.String())
+			}
+		})
+	}
+}
+
+func TestRegisterFrontendRoutesMissingBrandMarkReturnsNotFound(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	r := gin.New()
+	distDir := writeTestFrontendDist(t)
+	if err := os.Remove(filepath.Join(distDir, "brand-mark.svg")); err != nil {
+		t.Fatalf("remove temporary brand mark: %v", err)
+	}
+	if err := registerFrontendRoutes(r, distDir, "1.2.4"); err != nil {
+		t.Fatalf("register frontend routes: %v", err)
+	}
+	rec := httptest.NewRecorder()
+	r.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/brand-mark.svg", nil))
+	if rec.Code != http.StatusNotFound || !strings.HasPrefix(rec.Header().Get("Content-Type"), "application/json") {
+		t.Fatalf("missing brand mark must not fall back to index.html: status=%d body=%q", rec.Code, rec.Body.String())
 	}
 }
 

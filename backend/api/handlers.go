@@ -349,8 +349,18 @@ func singboxUpdateError(err error) gin.H {
 // Auth middleware
 func (h *Handler) AuthMiddleware() gin.HandlerFunc {
 	return func(c *gin.Context) {
+		requestContext := c.Request.Context()
+		if requestContext.Err() != nil {
+			c.Abort()
+			return
+		}
 		token := normalizeAuthToken(c.GetHeader("Authorization"))
-		ok, err := h.isValidAdminSessionContext(c.Request.Context(), token)
+		ok, err := h.isValidAdminSessionContext(requestContext, token)
+		// 页面切换取消的查询不是数据库故障，也不能继续执行受保护操作。
+		if requestContext.Err() != nil {
+			c.Abort()
+			return
+		}
 		if err != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "database error"})
 			c.Abort()

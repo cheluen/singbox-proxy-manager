@@ -1,3 +1,5 @@
+import { legacyClick as clickVisibleButton, editNode as openNodeEditor, waitOverlaysClosed, toggle, clickControl, setInput as setControlInput } from './ui-driver.mjs'
+import { findTestPortRange } from './test-ports.mjs'
 import fs from 'node:fs'
 import http from 'node:http'
 import net from 'node:net'
@@ -121,23 +123,6 @@ const stopProcess = async (child) => {
   ])
 }
 
-const clickVisibleButton = async (page, text, timeoutMs = 15000) => {
-  const deadline = Date.now() + timeoutMs
-  while (Date.now() < deadline) {
-    const clicked = await page.evaluate((needle) => {
-      const button = Array.from(document.querySelectorAll('button')).find((candidate) => {
-        const rect = candidate.getBoundingClientRect()
-        return rect.width > 0 && rect.height > 0 && (candidate.textContent || '').trim() === needle
-      })
-      if (!button || button.disabled) return false
-      button.click()
-      return true
-    }, text)
-    if (clicked) return
-    await sleep(100)
-  }
-  throw new Error(`Visible button not found: ${text}`)
-}
 
 if (!BACKEND_BINARY || !SINGBOX_BINARY) {
   throw new Error('SBPM_E2E_BACKEND_BINARY and SINGBOX_TEST_BINARY are required')
@@ -252,13 +237,13 @@ try {
   await page.setViewport({ width: 1440, height: 1000 })
   await page.type('input[type="password"]', ADMIN_PASSWORD)
   await clickVisibleButton(page, 'Login')
-  await page.waitForFunction(
-    () => Array.from(document.querySelectorAll('button')).some((button) =>
-      (button.textContent || '').includes('Batch Import')
-    ),
-    { timeout: 15000 }
-  )
+  await page.waitForSelector('[data-testid="nodes-add-menu"]', { visible: true, timeout: 15000 })
   assert(legacyAuthRequests.length === 0, `legacy auth requests: ${legacyAuthRequests.join(', ')}`)
+
+  await clickControl(page, '[data-testid="open-settings"]')
+  await setControlInput(page, '#start_port', await findTestPortRange())
+  await clickVisibleButton(page, 'Save Settings')
+  await waitOverlaysClosed(page)
 
   await clickVisibleButton(page, 'Batch Import')
   await page.waitForSelector('.ant-modal textarea', { visible: true, timeout: 10000 })
@@ -353,14 +338,12 @@ try {
     ])
     const body = await response.json()
     assert(response.status() < 400, `form save failed: ${JSON.stringify(body)}`)
-    await page.waitForFunction(() => !Array.from(document.querySelectorAll('.ant-modal form')).some((form) => form.getBoundingClientRect().height > 0))
+    await waitOverlaysClosed(page)
     return body
   }
   const editNode = async (node) => {
     await page.reload({ waitUntil: 'networkidle2' })
-    const selector = `tr[data-row-key="${node.id}"] .anticon-edit`
-    await page.waitForSelector(selector, { visible: true })
-    await page.click(selector)
+    await openNodeEditor(page, node.id)
     await page.waitForSelector('#name', { visible: true })
   }
 
@@ -416,11 +399,12 @@ try {
   })
   await page.reload({ waitUntil: 'networkidle2' })
   await clickVisibleButton(page, 'Import Node')
-  await page.waitForSelector('#import-link-input', { visible: true })
-  await setInput(page, '#import-link-input', `socks5://127.0.0.1:${socksPort}?detour=chain-target#single-detour`)
+  await page.waitForSelector('#sb-link-input', { visible: true })
+  await setInput(page, '#sb-link-input', `socks5://127.0.0.1:${socksPort}?detour=chain-target#single-detour`)
   await clickVisibleButton(page, 'Parse Link')
+  await page.waitForFunction(() => document.querySelector('#name')?.value === 'single-detour')
   await page.waitForSelector('#auth_enabled', { visible: true })
-  await page.$eval('#auth_enabled', (element) => { if (element.getAttribute('aria-checked') === 'true') element.click() })
+  await toggle(page, '#auth_enabled', false)
   const singleNode = await saveForm('POST', '/nodes')
   const batchChain = await apiRequest('POST', '/nodes/batch-import', {
     content: `socks5://127.0.0.1:${socksPort}?detour=chain-target#batch-detour`, enabled: true,
@@ -502,7 +486,7 @@ try {
     `${JSON.stringify({ success: true, version: state.version, importedTypes: state.nodes.map((node) => node.type).sort(), checked: ['failure-details', 'security-rejections', 'occupied-port', 'single-batch-detour', 'vmess-path', 'http-space-credentials', 'hy2-bandwidth', 'clear-select', 'vmess-security'] })}\n`
   )
 } catch (error) {
-  throw new Error(`${error.message}\nBackend logs:\n${backendLogs.join('')}`)
+  throw new Error(`${error.stack}\nBackend logs:\n${backendLogs.join('')}`)
 } finally {
   try {
     await browser?.close()

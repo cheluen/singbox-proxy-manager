@@ -1,0 +1,164 @@
+// English strings added by the redesigned panels. Existing strings stay untouched in base-en.js.
+export default {
+  // Common
+  all: 'All',
+  any: 'Any',
+  clear: 'Clear',
+  close: 'Close',
+  show: 'Show',
+  hide: 'Hide',
+  retry: 'Retry',
+  language: 'Language',
+  configure: 'Configure',
+  configured: 'Configured',
+  configured_unsaved: 'Changed. Takes effect after you save settings',
+  not_configured: 'Not configured',
+  more_actions: 'More actions',
+  unsaved_changes: 'Unsaved changes',
+  updated_at: 'Updated',
+
+  // Login
+  login_wrong_secret: 'Incorrect password. Try again.',
+
+  // Runtime
+  runtime_running: 'Kernel running',
+  runtime_unknown: 'Status unknown',
+
+  // List and overview
+  status_unverified_tip: 'Not checked yet, or the last check failed',
+  region: 'Region',
+  status_unverified_short: 'Unverified',
+  count_nodes: '{{count}} nodes',
+  region_unknown: 'Unknown',
+  direct_local: 'Direct (local)',
+  server_address: 'Server address',
+  server_port: 'Server port',
+  node_enabled_label: 'Enable node',
+  select_node: 'Select {{name}}',
+  selected_suffix: 'selected',
+  clear_selection: 'Clear selection',
+  bulk_actions: 'Bulk actions',
+  loading_more: 'Showing {{shown}} of {{total}}. Scroll to load more',
+  empty_title: 'No nodes yet',
+  empty_hint: 'Add a node manually, or paste share links or a subscription to import in bulk.',
+  empty_filtered_title: 'No matching nodes',
+  empty_filtered_hint: 'No node matches the current search or filters.',
+
+  // Search and filters
+  search_placeholder: 'Search name, remark, IP, region, port…',
+  filters: 'Filters',
+  remove_filter: 'Remove filter',
+  filter_result_count: 'Showing {{shown}} of {{total}}',
+  filter_ports_invalid: 'Invalid format. Example: 30001-30005, 30008',
+
+  // Ordering
+  drag_sort_hint_short: 'Drag to reorder (keyboard: Space to grab, arrows to move)',
+  move_top: 'Move to top',
+  move_up: 'Move up',
+  move_down: 'Move down',
+  move_bottom: 'Move to bottom',
+
+  // IP check
+  check_all_visible: 'Check all',
+  checking: 'Checking',
+  check_done: 'IP check completed',
+  check_failed: 'IP check failed',
+  check_failed_count: '{{count}} failed',
+  check_summary_mixed: 'Check finished: {{ok}} healthy, {{failed}} failed',
+  check_none_enabled: 'Nothing to check (disabled nodes cannot be checked)',
+  check_skipped_disabled: 'Skipped {{count}} disabled nodes',
+  check_disabled_hint: 'This node is disabled. Enable it to check its exit IP.',
+
+  // Node detail
+  section_connect: 'How to connect',
+  section_exit: 'Exit',
+  section_inbound: 'Local inbound',
+  section_outbound: 'Outbound',
+  auth_secret: 'Password',
+  auth_none: 'No auth',
+  auth_open_warning: 'Inbound authentication is off. Anyone who can reach this port can use the proxy.',
+  connect_host_hint: 'The host comes from the address you are using to open this panel ({{host}})',
+  connect_no_port: 'No inbound port assigned yet',
+  connect_disabled_hint: 'This node is disabled, so the addresses below will not accept connections.',
+  copy_proxy_http: 'Copy HTTP proxy URL',
+  copy_proxy_socks: 'Copy SOCKS5 proxy URL',
+  tcp_reuse_explain: 'Sign in to any authenticated inbound port with this username and this node’s password, and the traffic is routed through this node.',
+  remark_empty_hint: 'Add a remark, such as the expiry date or what it is for',
+  remark_saved: 'Remark saved',
+
+  // Add and edit
+  add_manual: 'Fill in manually',
+  add_from_link: 'Paste a share link',
+  more_add_options: 'More ways to add',
+  create_node: 'Create node',
+  edit_node: 'Edit node',
+  link_import_title: 'Have a share link? Paste it to fill in the form below',
+  link_import_placeholder: 'Paste a share link and press Enter',
+  link_import_hint: 'Supports ss, vless, vmess, trojan, hysteria2, tuic, anytls, socks5, http and more.',
+  link_import_filled: 'Filled in the {{type}} config from the link. Review it and save. The exit IP is checked once after saving.',
+  form_group_basic: 'Basics',
+  form_group_protocol: 'Protocol',
+  form_group_transport: 'Transport',
+  form_group_tls: 'TLS',
+  form_group_advanced: 'Advanced',
+  form_group_inbound: 'Local inbound',
+  direct_hint: 'A direct node has no remote server. Traffic leaves from this machine (it can still use an upstream proxy).',
+  port_hint_preserve: 'Leave empty or enter 0 to assign a free port automatically.',
+  port_hint_pinned: 'This port is pinned. You can change it by hand and it is skipped by automatic reassignment.',
+  port_hint_managed: 'Assigned by node order. To choose it yourself, pin this node’s port or turn on Preserve Inbound Ports in Settings.',
+  auth_generate: 'Generate',
+  auth_on_hint: 'Clients must supply a username and password to use this inbound.',
+  auth_off_hint: 'Off. Anyone who can reach this port can use the proxy.',
+  raw_config_title: 'View the full stored config',
+  raw_config_hint: 'Read only. Fields the form does not cover are kept as they are when you save.',
+  delete_node_title: 'Delete node “{{name}}”?',
+  delete_node_desc: 'This cannot be undone. Its inbound port stops serving immediately.',
+  replace_with_link: 'Replace with a share link',
+
+  // Upstream proxy
+  upstream_mode_hint_none: 'Connect directly, with no upstream proxy',
+  upstream_mode_hint_global: 'Use the global upstream proxy from Settings',
+  upstream_mode_hint_custom: 'Give this node its own upstream proxy',
+  upstream_mode_hint_legacy: 'Keep the detour from the legacy config',
+  upstream_global_enable: 'Enable the global upstream proxy',
+  upstream_global_off_hint: 'The global upstream proxy is off. Until you enable it in Settings, this node connects directly.',
+
+  // Import and export
+  export_share_link: 'Export share link',
+  export_desc: '{{count}} share links, one per line.',
+  download_txt: 'Download .txt',
+  import_action: 'Import',
+  import_empty: 'Paste something to import first',
+  import_line_count: '{{count}} lines',
+  import_placeholder: 'One share link per line. You can also paste a Base64 subscription, Clash Meta YAML or a subscription URL\n\nvless://…\nss://…\nhttps://example.com/sub',
+  import_result: '{{success}} imported, {{failed}} failed',
+  import_retry_blocked: 'The successful part is already imported. Remove those lines or change the content before submitting again to avoid duplicates.',
+  import_source_auto: 'Auto detect',
+  import_source_subscription: 'Subscription URL',
+  import_source_http_proxy: 'HTTP proxy node',
+  import_source_auto_hint: 'Lines starting with http(s):// are fetched as subscription URLs.',
+  import_source_subscription_hint: 'The content is treated as subscription URLs. A failed subscription is never downgraded to a proxy node.',
+  import_source_http_proxy_hint: 'Lines starting with http(s):// are imported as HTTP/HTTPS proxy nodes, not subscriptions.',
+
+  // Batch auth
+  batch_auth_scope: 'Applies to the {{count}} selected nodes.',
+  batch_auth_on_hint: 'The selected nodes will all use the username and password below.',
+  batch_auth_disable_action: 'Turn off authentication',
+
+  // Settings
+  settings_ports: 'Port assignment',
+  confirm_new_secret: 'Repeat the new password',
+  relogin_notice: 'After changing the password you need to sign in again with the new one.',
+
+  // Command palette and shortcuts (dark command center)
+  cmd_open: 'Search nodes or run an action',
+  cmd_placeholder: 'Type a node name or an action…',
+  cmd_actions: 'Actions',
+  cmd_empty: 'No matching node or action',
+  cmd_selected: '{{action}} ({{count}} selected)',
+  key_move: 'move',
+  key_expand: 'expand',
+  key_select: 'select',
+
+  // Preview site
+}

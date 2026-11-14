@@ -1,3 +1,5 @@
+import { legacyClick as clickButton, editNode as openNodeEditor, waitOverlaysClosed, clickControl, openNodeMenu } from './ui-driver.mjs'
+import { findTestPortRange } from './test-ports.mjs'
 import fs from 'node:fs'
 import http from 'node:http'
 import net from 'node:net'
@@ -131,28 +133,6 @@ const stopProcess = async (child) => {
   ])
 }
 
-const clickButton = async (page, text, timeoutMilliseconds = 15000) => {
-  const deadline = Date.now() + timeoutMilliseconds
-  while (Date.now() < deadline) {
-    const clicked = await page.evaluate((label) => {
-      const button = Array.from(document.querySelectorAll('button')).find((candidate) => {
-        const rectangle = candidate.getBoundingClientRect()
-        return (
-          rectangle.width > 0 &&
-          rectangle.height > 0 &&
-          !candidate.disabled &&
-          (candidate.textContent || '').trim() === label
-        )
-      })
-      if (!button) return false
-      button.click()
-      return true
-    }, text)
-    if (clicked) return
-    await sleep(100)
-  }
-  throw new Error(`Visible button not found: ${text}`)
-}
 
 const setInput = async (page, selector, value) => {
   await page.waitForSelector(selector, { visible: true, timeout: 10000 })
@@ -226,20 +206,11 @@ const selectOption = async (page, fieldID, optionText) => {
   assert(selected, `Select option not found: ${optionText}`)
 }
 
+
 const clickSegment = async (page, label) => {
-  const clicked = await page.$eval(
-    '[data-testid="node-upstream-mode"]',
-    (root, targetLabel) => {
-      const item = Array.from(root.querySelectorAll('.ant-segmented-item')).find(
-        (candidate) => (candidate.textContent || '').trim() === targetLabel
-      )
-      if (!item) return false
-      item.click()
-      return true
-    },
-    label
-  )
-  assert(clicked, `Upstream mode not found: ${label}`)
+  const mode = { 'Follow Global': 'global', Custom: 'custom', Direct: 'none', Legacy: 'legacy' }[label]
+  assert(mode, `未知前置代理模式：${label}`)
+  await clickControl(page, `[data-testid="node-upstream-mode"] [data-mode="${mode}"]`)
 }
 
 const openUpstreamEditor = async (page, triggerSelector) => {
@@ -259,21 +230,15 @@ const openUpstreamEditor = async (page, triggerSelector) => {
   throw new Error(`Upstream editor did not open from ${triggerSelector}`)
 }
 
+
 const openSettings = async (page) => {
-  const clicked = await page.evaluate(() => {
-    const button = document.querySelector('.anticon-setting')?.closest('button')
-    if (!button) return false
-    button.click()
-    return true
-  })
-  assert(clicked, 'Settings button was not found')
-  await page.waitForSelector('[data-testid="settings-form"]', { visible: true, timeout: 10000 })
+  await page.click('[data-testid="open-settings"]')
+  await page.waitForSelector('[data-testid="settings-form"]', { visible: true })
 }
 
 const openNodeUpstream = async (page, nodeID) => {
-  const selector = `[data-testid="node-upstream-action-${nodeID}"]`
-  await page.waitForSelector(selector, { visible: true, timeout: 15000 })
-  await page.$eval(selector, (button) => button.click())
+  await waitOverlaysClosed(page)
+  await openNodeMenu(page, nodeID, 'Node Upstream Proxy')
   await page.waitForSelector('[data-testid="node-upstream-form"]', {
     visible: true,
     timeout: 10000,
@@ -281,11 +246,12 @@ const openNodeUpstream = async (page, nodeID) => {
 }
 
 const saveNodeUpstream = async (page) => {
-  await page.$eval('[data-testid="node-upstream-form"] button[type="submit"]', (button) => button.click())
+  await clickControl(page, '[data-testid="node-upstream-save"]')
   await page.waitForSelector('[data-testid="node-upstream-form"]', {
     hidden: true,
     timeout: 15000,
   })
+  await waitOverlaysClosed(page)
 }
 
 const browserAPI = async (page, pathName, options = {}) =>
@@ -411,6 +377,7 @@ try {
   await page.waitForSelector('[data-testid="nodes-add-node"]', { visible: true, timeout: 15000 })
 
   await openSettings(page)
+  await setInput(page, '#start_port', await findTestPortRange())
   await openUpstreamEditor(page, '[data-testid="global-upstream-configure"]')
   await selectOption(page, 'global_upstream_proxy_type', 'SOCKS5')
   await setInput(page, '#global_upstream_server', '127.0.0.1')
@@ -420,6 +387,7 @@ try {
   await setSwitch(page, '[data-testid="global-upstream-enabled"]', true)
   await clickButton(page, 'Save Settings')
   await page.waitForSelector('[data-testid="settings-form"]', { hidden: true, timeout: 15000 })
+  await waitOverlaysClosed(page)
 
   const persistedSettings = await browserAPI(page, '/api/settings')
   assert(persistedSettings.status === 200, `Settings API status=${persistedSettings.status}`)
@@ -438,7 +406,7 @@ try {
       (response) => response.url() === `${BASE_URL}/api/nodes` && response.request().method() === 'POST',
       { timeout: 15000 }
     ),
-    page.$eval('[data-testid="node-form"] button[type="submit"]', (button) => button.click()),
+    clickButton(page, 'Save'),
   ])
   const createBody = await createResponse.json()
   assert(createResponse.status() === 201, `Create node failed (${createResponse.status()}): ${JSON.stringify(createBody)}`)
@@ -451,7 +419,7 @@ try {
 
   await openNodeUpstream(page, directNode.id)
   const initialMode = await page.$eval(
-    '[data-testid="node-upstream-mode"] .ant-segmented-item-selected',
+    '[data-testid="node-upstream-mode"] [aria-checked="true"] strong',
     (element) => (element.textContent || '').trim()
   )
   assert(initialMode === 'Direct', `New node upstream default mode=${initialMode}`)
@@ -524,12 +492,14 @@ try {
   const staleEnabledPage = await browser.newPage()
   const staleReusePage = await browser.newPage()
   for (const stalePage of [staleEnabledPage, staleReusePage]) {
+    await stalePage.bringToFront()
     await stalePage.setViewport({ width: 1440, height: 1000 })
     await stalePage.goto(BASE_URL, { waitUntil: 'networkidle2' })
-    await stalePage.waitForSelector(`tr[data-row-key="${concurrentID}"] .ant-switch`)
+    await stalePage.waitForSelector(`[data-testid="node-enabled-${concurrentID}"]`)
+    await stalePage.click(`[data-testid="node-open-${concurrentID}"]`)
   }
   await page.bringToFront()
-  await page.click(`tr[data-row-key="${concurrentID}"] .anticon-edit`)
+  await openNodeEditor(page, concurrentID)
   await page.waitForSelector('[data-testid="node-form"]', { visible: true })
   await setInput(page, '#name', 'rotated-node')
   await setInput(page, '#proxy_username', 'updated-upstream-user')
@@ -539,7 +509,7 @@ try {
     page.waitForResponse((response) =>
       response.url() === `${BASE_URL}/api/nodes/${concurrentID}` && response.request().method() === 'PUT'
     ),
-    page.$eval('[data-testid="node-form"] button[type="submit"]', (button) => button.click()),
+    clickButton(page, 'Save'),
   ])
   assert(savedResponse.status() === 200, 'Editing node and rotating credentials failed')
   await page.waitForSelector('[data-testid="node-form"]', { hidden: true })
@@ -547,21 +517,18 @@ try {
   assert(latestNode.username === 'rotated-user' && latestNode.password === 'rotated-password', 'Credential rotation was not persisted')
   assert(JSON.parse(latestNode.config).username === 'updated-upstream-user', 'Outbound edit was not persisted')
 
-  for (const [stalePage, switchIndex, field] of [
-    [staleEnabledPage, 0, 'enabled'], [staleReusePage, 1, 'tcp_reuse_enabled'],
+  for (const [stalePage, field] of [
+    [staleEnabledPage, 'enabled'], [staleReusePage, 'tcp_reuse_enabled'],
   ]) {
     await stalePage.bringToFront()
-    const toggleState = await stalePage.$$eval(`tbody.ant-table-tbody tr[data-row-key="${concurrentID}"] .ant-switch`, (switches, index) => {
-      const toggle = switches[index]
-      return { count: switches.length, disabled: toggle?.disabled, checked: toggle?.getAttribute('aria-checked') }
-    }, switchIndex)
-    assert(toggleState.count === 2 && !toggleState.disabled, `Stale-tab toggle unavailable: ${JSON.stringify(toggleState)}`)
-    const toggleHandles = await stalePage.$$(`tbody.ant-table-tbody tr[data-row-key="${concurrentID}"] .ant-switch`)
+    const selector = `[data-testid="${field === 'enabled' ? 'node-enabled' : 'node-tcp-reuse'}-${concurrentID}"]`
+    const toggleState = await stalePage.$eval(selector, (element) => ({ disabled: element.disabled, checked: element.getAttribute('aria-checked') }))
+    assert(!toggleState.disabled, `旧标签页开关不可用：${JSON.stringify(toggleState)}`)
     const [response] = await Promise.all([
       stalePage.waitForResponse((response) =>
         response.url() === `${BASE_URL}/api/nodes/${concurrentID}` && response.request().method() === 'PATCH'
       ),
-      toggleHandles[switchIndex].click(),
+      stalePage.click(selector),
     ]).catch((error) => {
       throw new Error(`${field} toggle response failed (${JSON.stringify(toggleState)}): ${error.message}`)
     })

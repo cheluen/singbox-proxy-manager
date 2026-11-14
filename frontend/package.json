@@ -1,11 +1,12 @@
 {
   "name": "sb-proxy-frontend",
   "private": true,
-  "version": "1.7.12",
+  "version": "1.7.17",
   "type": "module",
+  "description": "SingBox Proxy Manager 暮色管理面板，连接真实后端接口",
   "scripts": {
     "dev": "vite",
-    "build": "vite build",
+    "build": "vite build && node ./tools/precompress.mjs",
     "preview": "vite preview",
     "lint": "eslint .",
     "lint:fix": "eslint . --fix",
@@ -28,30 +29,41 @@
     "test:e2e:upstream-proxy": "node ./scripts/upstream-proxy-ui-regression.mjs",
     "test:e2e:full-stack-upstream": "node ./scripts/full-stack-upstream-regression.mjs",
     "test:e2e:full-stack-protocol-import": "node ./scripts/full-stack-protocol-import-regression.mjs",
-    "test:e2e:all": "npm run test:e2e:dnd && npm run test:e2e:dnd-virtual && npm run test:e2e:preserve-ports && npm run test:e2e:batch-import && npm run test:e2e:batch-auth && npm run test:e2e:batch-check-ip-live && npm run test:e2e:outbound-dedup && npm run test:e2e:remark && npm run test:e2e:filter && npm run test:e2e:tcp-reuse-ui && npm run test:e2e:nodes-viewport && npm run test:e2e:version-refresh && npm run test:e2e:wireguard-ui && npm run test:e2e:version-update && npm run test:e2e:nodeform-config-preservation && npm run test:e2e:dashboard-concurrency-replace && npm run test:e2e:upstream-proxy",
-    "test:version-sync": "node ./scripts/version-consistency-regression.mjs"
+    "test:e2e:all": "node ./scripts/dusk-ui-regression.mjs && npm run test:e2e:nodeform-config-preservation",
+    "test:version-sync": "node ./scripts/version-consistency-regression.mjs",
+    "audit": "node ./tools/audit-contrast.mjs && node ./tools/audit-i18n.mjs",
+    "test:core": "node --test ./scripts/core-regression.test.mjs",
+    "test:e2e:session": "node ./scripts/dusk-ui-regression.mjs session",
+    "test:e2e:full-stack-system": "node ./scripts/full-stack-system-regression.mjs",
+    "test:e2e:brand": "node ./scripts/dusk-ui-regression.mjs brand",
+    "test:e2e:language-copy": "node ./scripts/dusk-ui-regression.mjs language-copy"
   },
   "dependencies": {
-    "@ant-design/icons": "^5.2.6",
-    "antd": "^5.11.5",
+    "@dnd-kit/core": "^6.3.1",
+    "@dnd-kit/sortable": "^10.0.0",
+    "@dnd-kit/utilities": "^3.2.2",
+    "@fontsource-variable/inter": "^5.2.0",
+    "@fontsource-variable/jetbrains-mono": "^5.2.0",
+    "antd": "^5.27.6",
     "axios": "^1.19.0",
     "i18next": "^23.7.6",
+    "lucide-react": "^1.71.0",
     "react": "^18.2.0",
-    "react-beautiful-dnd": "^13.1.1",
     "react-dom": "^18.2.0",
     "react-i18next": "^13.5.0"
   },
   "devDependencies": {
     "@eslint/js": "^9.15.0",
-    "@types/react": "^18.2.43",
-    "@types/react-dom": "^18.2.17",
     "@vitejs/plugin-react": "^4.7.0",
     "eslint": "^9.15.0",
     "eslint-plugin-react": "^7.37.5",
     "eslint-plugin-react-hooks": "^5.0.0",
     "eslint-plugin-react-refresh": "^0.4.14",
     "globals": "^15.12.0",
-    "puppeteer-core": "^24.15.0",
-    "vite": "^6.4.1"
+    "vite": "^6.4.1",
+    "puppeteer-core": "^24.15.0"
+  },
+  "engines": {
+    "node": ">=22.12.0"
   }
 }

@@ -4,7 +4,7 @@
 
 <img src="./logo.svg" alt="SingBox Proxy Manager Logo" width="96" />
 
-![Version](https://img.shields.io/badge/version-1.7.12-blue.svg)
+![Version](https://img.shields.io/badge/version-1.7.17-blue.svg)
 ![License](https://img.shields.io/badge/license-MIT-green.svg)
 ![SingBox](https://img.shields.io/badge/sing--box-1.12.12-orange.svg)
 
@@ -27,12 +27,22 @@
 - ⬆️ **版本更新提示** - 自动检查 GitHub Release，发现新版本时在面板版本号旁显示向上箭头
 
 ### 管理功能
-- ✨ **可视化管理** - 现代化的 React + Ant Design 界面
+- ✨ **暮色管理面板** - 单一暗色指挥台、高密度节点列表、行内详情和移动端抽屉
 - 📥 **批量操作** - 支持批量导入、删除、设置认证、检测 IP
 - 📝 **备注/导出/替换** - 给节点加备注；支持导出可表达的分享链接；支持用新分享链接直接替换节点
 - 🔧 **灵活配置** - 自定义入站端口，自动或手动分配
 - 🌍 **多语言** - 支持中文/英文界面切换
-- 📱 **拖拽排序** - 拖拽节点即可重新排序并自动分配端口
+- 📱 **排序与端口保留** - 支持鼠标和键盘排序，保留固定端口和全局保留端口策略
+- ⌨️ **键盘操作** - `Ctrl/⌘ K` 打开命令面板，`j/k` 移动、`Enter` 展开、`x` 选择、`e` 编辑、`t` 检测
+
+### 前端集成
+- 管理面板直接使用同源 `/api` 真实接口，不包含演示数据、模拟请求适配器或演示密码。
+- 升级保留原有登录会话；退出登录、会话失效和修改管理员密码会清除本地认证。
+- 筛选后批量操作仅作用于可见节点；单条和批量 IP 检测共享并发预算，支持中止。
+- 协议编辑保留原始扩展配置，支持原生 TLS、WireGuard 多 Peer 和历史保留字节格式。
+- 前端、后端、发行文件和构建指纹对齐；窗口尺寸变化不会清空正在编辑的表单。
+
+前端开发工具使用 Node.js 22。持续验证包含核心逻辑、对比度与词条审计、浏览器交互以及真实 sing-box 全链路回归。
 
 ---
 
@@ -83,7 +93,7 @@ docker compose logs -f
 
 ```bash
 # 下载适合平台的单文件（示例：Linux amd64）
-APP_VERSION=1.7.12
+APP_VERSION=1.7.17
 curl -fL -o singbox-proxy-manager "https://github.com/cheluen/singbox-proxy-manager/releases/download/v${APP_VERSION}/singbox-proxy-manager-linux-amd64"
 chmod +x singbox-proxy-manager
 # 首次启动设置自己的管理员密码；之后可在管理面板修改

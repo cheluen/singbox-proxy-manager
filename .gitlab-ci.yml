@@ -32,7 +32,7 @@ lint-backend:
 # 前端ESLint检查
 lint-frontend:
   stage: lint
-  image: node:18-alpine
+  image: node:22-alpine
   script:
     - cd frontend
     - npm ci
@@ -105,10 +105,13 @@ test-backend:
 # 前端构建测试
 test-frontend:
   stage: test
-  image: node:18-alpine
+  image: node:22-alpine
   script:
     - cd frontend
     - npm ci
+    - npm run test:core
+    - npm run audit
+    - npm run test:version-sync
     - npm run build
   cache:
     key: npm-modules
@@ -163,7 +166,7 @@ build-release:
 # 构建前端（供其他job使用）
 build-frontend-dist:
   stage: build
-  image: node:18-alpine
+  image: node:22-alpine
   script:
     - cd frontend
     - npm ci

@@ -654,6 +654,7 @@ func registerFrontendRoutes(r *gin.Engine, frontendDistDir string, appVersion st
 	}
 
 	serveStaticFile("/logo.svg", "logo.svg")
+	serveStaticFile("/brand-mark.svg", "brand-mark.svg")
 	r.GET("/favicon.ico", func(c *gin.Context) {
 		c.Redirect(http.StatusMovedPermanently, "/logo.svg")
 	})

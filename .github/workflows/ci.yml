@@ -9,7 +9,7 @@ on:
 env:
   GO_VERSION: "1.26.10"
   GOVULNCHECK_VERSION: "v1.7.0"
-  NODE_VERSION: "18"
+  NODE_VERSION: "22"
   SINGBOX_VERSION: "1.12.12"
   GOTOOLCHAIN: "local"
 
@@ -178,6 +178,10 @@ jobs:
         run: npm ci
         working-directory: frontend
 
+      - name: 校验前端核心逻辑与可访问性
+        run: npm run test:core && npm run audit
+        working-directory: frontend
+
       - name: Verify global version consistency
         run: npm run test:version-sync
         working-directory: frontend
@@ -193,6 +197,7 @@ jobs:
       fail-fast: false
       matrix:
         script:
+          - test:e2e:brand
           - test:e2e:dnd
           - test:e2e:dnd-virtual
           - test:e2e:preserve-ports
@@ -210,6 +215,8 @@ jobs:
           - test:e2e:nodeform-config-preservation
           - test:e2e:dashboard-concurrency-replace
           - test:e2e:upstream-proxy
+          - test:e2e:session
+          - test:e2e:language-copy
     steps:
       - uses: actions/checkout@v4
 
@@ -516,6 +523,14 @@ jobs:
           chmod +x "$SINGBOX_TEST_BINARY"
           export PUPPETEER_EXECUTABLE_PATH="$(command -v google-chrome || command -v chromium)"
           npm run test:e2e:full-stack-protocol-import
+
+      - name: 验证统一发行文件的完整系统交互
+        working-directory: frontend
+        env:
+          SBPM_E2E_BACKEND_BINARY: ${{ github.workspace }}/release-binaries/singbox-proxy-manager-linux-amd64
+        run: |
+          export PUPPETEER_EXECUTABLE_PATH="$(command -v google-chrome || command -v chromium)"
+          npm run test:e2e:full-stack-system
 
       - name: Set up QEMU
         uses: docker/setup-qemu-action@v3

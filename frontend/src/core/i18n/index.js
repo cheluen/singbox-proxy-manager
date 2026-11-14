@@ -1,0 +1,48 @@
+import i18n from 'i18next'
+import { initReactI18next } from 'react-i18next'
+import baseZh from './base-zh'
+import baseEn from './base-en'
+import extraZh from './extra-zh'
+import extraEn from './extra-en'
+
+export const LANGUAGE_STORAGE_KEY = 'language'
+export const LANGUAGES = [
+  { value: 'zh', label: '中文', short: '中' },
+  { value: 'en', label: 'English', short: 'EN' },
+]
+
+const readStoredLanguage = () => {
+  try {
+    return window.localStorage.getItem(LANGUAGE_STORAGE_KEY) || 'zh'
+  } catch {
+    return 'zh'
+  }
+}
+
+i18n.use(initReactI18next).init({
+  resources: {
+    // 线上面板的全部词条原样保留，新面板新增的词条放在 extra-* 中叠加。
+    zh: { translation: { ...baseZh, ...extraZh } },
+    en: { translation: { ...baseEn, ...extraEn } },
+  },
+  lng: readStoredLanguage(),
+  fallbackLng: 'zh',
+  interpolation: { escapeValue: false },
+})
+
+const syncDocumentLang = (lang) => {
+  document.documentElement.lang = String(lang).startsWith('zh') ? 'zh-CN' : 'en'
+}
+syncDocumentLang(i18n.language)
+
+export const changeLanguage = (lang) => {
+  i18n.changeLanguage(lang)
+  try {
+    window.localStorage.setItem(LANGUAGE_STORAGE_KEY, lang)
+  } catch {
+    // 存储不可用时仅本次会话生效
+  }
+  syncDocumentLang(lang)
+}
+
+export default i18n

@@ -1,0 +1,19 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="64" height="64" role="img" aria-labelledby="brand-title">
+  <title id="brand-title">SingBox Proxy Manager</title>
+  <defs>
+    <mask id="bottom-flow" maskUnits="userSpaceOnUse" x="0" y="0" width="64" height="64">
+      <rect width="64" height="64" fill="white" />
+      <path d="M12 47h8c12 0 12-30 24-30h8M10 32h44" fill="none" stroke="black" stroke-width="11" stroke-linecap="round" />
+    </mask>
+    <mask id="middle-flow" maskUnits="userSpaceOnUse" x="0" y="0" width="64" height="64">
+      <rect width="64" height="64" fill="white" />
+      <path d="M10 32h44" fill="none" stroke="black" stroke-width="11" stroke-linecap="round" />
+    </mask>
+  </defs>
+  <rect width="64" height="64" rx="14" fill="#fbfaf6" />
+  <g fill="none" stroke="#2e4637" stroke-width="5" stroke-linecap="round">
+    <path d="M12 17h8c12 0 12 30 24 30h8" mask="url(#bottom-flow)" />
+    <path d="M12 47h8c12 0 12-30 24-30h8" mask="url(#middle-flow)" />
+    <path d="M10 32h44" stroke="#cc6b52" />
+  </g>
+</svg>
