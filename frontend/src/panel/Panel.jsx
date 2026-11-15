@@ -21,7 +21,7 @@ const typingInField = () => {
   const element = document.activeElement
   return Boolean(element && (['INPUT', 'TEXTAREA', 'SELECT'].includes(element.tagName) || element.isContentEditable))
 }
-const overlayOpen = () => Boolean(document.querySelector('.ant-modal-wrap:not([style*="display: none"]), .ant-drawer-open, .ant-dropdown:not(.ant-dropdown-hidden), .ant-popover:not(.ant-popover-hidden)'))
+const overlayOpen = () => Boolean(document.querySelector('.ant-modal-wrap:not([style*="display: none"]), .ant-dropdown:not(.ant-dropdown-hidden), .ant-popover:not(.ant-popover-hidden)'))
 
 export default function DuskPanel({ session }) {
   const { ctl, act, t } = usePanel(session)
@@ -29,7 +29,7 @@ export default function DuskPanel({ session }) {
   const [focusedId, setFocusedId] = useState(null)
   const [paletteOpen, setPaletteOpen] = useState(false)
   const desktop = useMediaQuery('(min-width: 900px)')
-  const { shown, hasMore, sentinelRef, reveal } = useIncrementalList(ctl.visibleNodes, { initial: 120, step: 120 })
+  const { shown, hasMore, sentinelRef, reveal } = useIncrementalList(ctl.visibleNodes)
   const ids = useMemo(() => shown.map((node) => node.id), [shown])
   // 键盘监听只注册一次，通过 ref 读取最新状态。
   const stateRef = useRef({ ctl, shown, focusedId })

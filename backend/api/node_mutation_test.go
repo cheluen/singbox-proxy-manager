@@ -11,6 +11,7 @@ import (
 	"time"
 
 	appdb "sb-proxy/backend/database"
+	"sb-proxy/backend/models"
 )
 
 func TestNodeMutationLateFailureRestoresRuntimeWithoutOverwritingDatabase(t *testing.T) {
@@ -19,7 +20,7 @@ func TestNodeMutationLateFailureRestoresRuntimeWithoutOverwritingDatabase(t *tes
 			handler := newTestHandler(t, nil)
 			handler.db.SetMaxOpenConns(1)
 			nodeID := insertTestNode(t, handler.db)
-			nodes, err := handler.loadAllNodes()
+			nodes, err := models.LoadProxyNodes(context.Background(), handler.db)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -79,7 +80,7 @@ func TestNodeMutationLateFailureRestoresRuntimeWithoutOverwritingDatabase(t *tes
 			if err := <-done; err == nil {
 				t.Fatal("injected failure did not reject the mutation")
 			}
-			node, err := loadNodeByIDFrom(context.Background(), handler.db, nodeID)
+			node, err := models.LoadProxyNode(context.Background(), handler.db, nodeID)
 			if err != nil || bytes.Contains([]byte(node.Config), []byte("candidate.example.com")) {
 				t.Fatal("failed candidate remained in the database")
 			}

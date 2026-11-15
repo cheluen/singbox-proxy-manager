@@ -506,6 +506,23 @@ const scenarios = {
     await closeOverlay(page)
   },
 
+  async 'runtime-restart'({ page, state }) {
+    const before = structuredClone(state.nodes)
+    state.runtime = { running: true, degraded: true, message: 'runtime recovery required' }
+    await clickControl(page, '[data-testid="nodes-refresh"]')
+    await page.waitForSelector('[data-testid="runtime-restart"]', { visible: true })
+    const [response] = await Promise.all([
+      page.waitForResponse((item) => new URL(item.url()).pathname === '/api/runtime/restart'),
+      clickControl(page, '[data-testid="runtime-restart"]'),
+    ])
+    assert.equal(response.request().method(), 'POST')
+    assert.equal(response.status(), 200)
+    await page.waitForSelector('[data-testid="runtime-status-degraded"]', { hidden: true })
+    assert.deepEqual(state.nodes, before)
+    assert.equal(state.requests.filter((item) => item.route === '/api/runtime/restart').length, 1)
+    assert.equal(state.requests.filter((item) => item.route.startsWith('/api/nodes') && item.method !== 'GET').length, 0)
+  },
+
   async 'nodes-viewport'({ page, state, refresh }) {
     state.nodes[0].name = '长名称'.repeat(80)
     state.nodes = [state.nodes[0]]

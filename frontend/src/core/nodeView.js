@@ -22,15 +22,11 @@ export const latencyTone = (latency) => {
 }
 
 export const summarizeNodes = (nodes) => {
-  const summary = { total: nodes.length, healthy: 0, unverified: 0, disabled: 0, enabled: 0, avgLatency: 0 }
-  let latencySum = 0
+  const summary = { total: nodes.length, healthy: 0, unverified: 0, disabled: 0 }
   for (const node of nodes) {
     const health = nodeHealth(node)
     summary[health] += 1
-    if (health !== 'disabled') summary.enabled += 1
-    if (health === 'healthy') latencySum += Number(node.latency) || 0
   }
-  summary.avgLatency = summary.healthy > 0 ? Math.round(latencySum / summary.healthy) : 0
   return summary
 }
 
@@ -114,12 +110,6 @@ export const matchesSearch = (node, search) => {
   if (tokens.length === 0) return true
   const haystack = nodeHaystack(node)
   return tokens.every((token) => haystack.includes(token))
-}
-
-export const countByType = (nodes) => {
-  const counts = new Map()
-  for (const node of nodes) counts.set(node.type, (counts.get(node.type) || 0) + 1)
-  return Array.from(counts, ([type, count]) => ({ type, count })).sort((left, right) => right.count - left.count)
 }
 
 export const formatDateTime = (value, locale) => {

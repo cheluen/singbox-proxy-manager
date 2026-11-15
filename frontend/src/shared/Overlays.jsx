@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react'
-import { Drawer, Modal } from 'antd'
+import { Modal } from 'antd'
 import { useTranslation } from 'react-i18next'
 import { BatchAuthDialogBody, ImportDialogBody } from './BatchDialogs'
 import { ExportDialogBody, NodeDialogBody, ReplaceDialogBody, UpstreamDialogBody } from './NodeDialogs'
@@ -7,16 +7,13 @@ import { SettingsDialogBody } from './SettingsDialog'
 
 const WIDTH = { node: 720, upstream: 620, replace: 560, export: 640, import: 680, auth: 520, settings: 640 }
 
-export function Overlays({ ctl, presentation = 'modal' }) {
+export function Overlays({ ctl }) {
   const { t } = useTranslation()
-  const [locked, setLocked] = useState(false)
+  const [busyOverlay, setBusyOverlay] = useState(null)
   const overlay = ctl.overlay
-  const [activeView, setActiveView] = useState({ overlay, presentation })
-  // 打开期间不更换容器类型，旋转屏幕或调整窗口不会丢失表单与导入结果。
-  if (activeView.overlay !== overlay) {
-    setActiveView({ overlay, presentation })
-    if (locked) setLocked(false)
-  }
+  const locked = Boolean(overlay) && busyOverlay === overlay
+  // 忙碌状态绑定弹窗实例，旧导入结束不会解除新弹窗的关闭保护。
+  const onBusyChange = (busy) => setBusyOverlay((current) => busy ? overlay : current === overlay ? null : current)
   const kind = overlay?.kind
   const onDone = () => ctl.setOverlay((current) => current === overlay ? null : current)
   const close = () => {
@@ -46,7 +43,7 @@ export function Overlays({ ctl, presentation = 'modal' }) {
   else if (kind === 'upstream' && node) body = <UpstreamDialogBody key={node.id} node={node} ctl={ctl} onDone={onDone} />
   else if (kind === 'replace' && node) body = <ReplaceDialogBody node={node} ctl={ctl} onDone={onDone} />
   else if (kind === 'export') body = <ExportDialogBody text={overlay.text} count={overlay.count} onDone={onDone} />
-  else if (kind === 'import') body = <ImportDialogBody ctl={ctl} onDone={onDone} onBusyChange={setLocked} />
+  else if (kind === 'import') body = <ImportDialogBody ctl={ctl} onDone={onDone} onBusyChange={onBusyChange} />
   else if (kind === 'auth') body = <BatchAuthDialogBody ctl={ctl} count={ctl.selectedIds.size} onDone={onDone} />
   else if (kind === 'settings') body = <SettingsDialogBody ctl={ctl} onDone={onDone} />
 
@@ -59,13 +56,6 @@ export function Overlays({ ctl, presentation = 'modal' }) {
     </span>
   )
 
-  if ((activeView.overlay === overlay ? activeView.presentation : presentation) === 'drawer') {
-    return (
-      <Drawer title={title} open={open} onClose={close} width={Math.min(WIDTH[kind] || 640, 720)} destroyOnHidden maskClosable={!locked} keyboard={!locked} closable={!locked} rootClassName="sb-overlay">
-        {body}
-      </Drawer>
-    )
-  }
   return (
     <Modal title={title} open={open} onCancel={close} footer={null} width={WIDTH[kind] || 640} destroyOnHidden centered maskClosable={kind === 'export'} keyboard={!locked} closable={!locked} rootClassName="sb-overlay">
       {body}

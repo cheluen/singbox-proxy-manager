@@ -11,6 +11,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 
+	"sb-proxy/backend/models"
 	"sb-proxy/backend/services"
 )
 
@@ -40,7 +41,7 @@ func (h *Handler) UpdateNodeFlags(c *gin.Context) {
 	nodes, err := h.nodeMutations.Execute(c.Request.Context(), NodeMutationOperation{
 		ApplyRuntime: true,
 		Mutate: func(ctx context.Context, tx *sql.Tx) error {
-			node, err := loadNodeByIDFrom(ctx, tx, id)
+			node, err := models.LoadProxyNode(ctx, tx, id)
 			if err != nil {
 				return err
 			}

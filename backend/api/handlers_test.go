@@ -383,7 +383,7 @@ func TestRestartRuntimeReappliesDatabaseState(t *testing.T) {
 		t.Fatalf("restart failed: status=%d body=%s", recorder.Code, recorder.Body.String())
 	}
 
-	nodes, err := loadAllNodesFrom(context.Background(), handler.db)
+	nodes, err := models.LoadProxyNodes(context.Background(), handler.db)
 	if err != nil {
 		t.Fatalf("load expected database state: %v", err)
 	}
@@ -396,6 +396,120 @@ func TestRestartRuntimeReappliesDatabaseState(t *testing.T) {
 	status := handler.singBoxService.RuntimeStatus()
 	if !status.Running || status.Degraded || status.ActiveConfigHash != expectedHash {
 		t.Fatalf("reapplied runtime is not healthy: %+v", status)
+	}
+}
+
+func TestRestartRuntimeFailurePreservesPreviousRuntime(t *testing.T) {
+	for _, failure := range []string{"check", "start", "snapshot", "read", "cancel", "cancel-late"} {
+		t.Run(failure, func(t *testing.T) {
+			handler := newTestHandler(t, nil)
+			nodeID := insertTestNode(t, handler.db)
+			configDir := t.TempDir()
+			failSnapshot := false
+			service := services.NewSingBoxService(configDir, services.WithLastGoodSnapshotWriter(func(path string, content []byte) error {
+				if failSnapshot {
+					return fmt.Errorf("injected snapshot failure")
+				}
+				return os.WriteFile(path, content, 0o600)
+			}))
+			t.Cleanup(func() { _ = service.Stop() })
+			handler.singBoxService = service
+			handler.nodeMutations = NewNodeMutationCoordinator(handler.db, service)
+			response := postJSON(t, handler.RestartRuntime, http.MethodPost, "/api/runtime/restart", nil, nil)
+			if response.Code != http.StatusOK {
+				t.Fatalf("初次启动失败：%s", response.Body.String())
+			}
+			before := service.RuntimeStatus()
+			configPath := filepath.Join(configDir, "config.json")
+			previous, err := os.ReadFile(configPath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := handler.db.Exec("UPDATE proxy_nodes SET config = ? WHERE id = ?", `{"server":"candidate.example.com","server_port":443,"method":"aes-128-gcm","password":"p"}`, nodeID); err != nil {
+				t.Fatal(err)
+			}
+			binary := filepath.Join(t.TempDir(), "failing-sing-box")
+			marker := filepath.Join(t.TempDir(), "candidate-started")
+			script := "#!/bin/sh\nif [ \"$1\" = check ]; then\n"
+			if failure == "check" {
+				script += " exit 1\n"
+			} else {
+				script += " exit 0\n"
+			}
+			script += "fi\n"
+			if failure == "start" {
+				script += "if grep -q candidate.example.com \"$3\"; then exit 1; fi\n"
+			}
+			if failure == "cancel-late" {
+				script += fmt.Sprintf("if grep -q candidate.example.com \"$3\"; then touch '%s'; fi\n", marker)
+				t.Setenv("SBPM_SINGBOX_STARTUP_GRACE", "100ms")
+			}
+			script += "exec sleep 300\n"
+			if err := os.WriteFile(binary, []byte(script), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			t.Setenv("SINGBOX_BINARY", binary)
+			failSnapshot = failure == "snapshot"
+			if failure == "read" {
+				if err := handler.db.Close(); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if failure == "cancel" || failure == "cancel-late" {
+				ctx, cancel := context.WithCancel(context.Background())
+				defer cancel()
+				recorder := httptest.NewRecorder()
+				c, _ := gin.CreateTestContext(recorder)
+				c.Request = httptest.NewRequest(http.MethodPost, "/api/runtime/restart", nil).WithContext(ctx)
+				if failure == "cancel" {
+					cancel()
+					handler.RestartRuntime(c)
+				} else {
+					done := make(chan struct{})
+					go func() {
+						handler.RestartRuntime(c)
+						close(done)
+					}()
+					deadline := time.Now().Add(3 * time.Second)
+					for {
+						if _, err := os.Stat(marker); err == nil {
+							break
+						}
+						if time.Now().After(deadline) {
+							t.Fatal("候选内核没有开始启动")
+						}
+						time.Sleep(time.Millisecond)
+					}
+					cancel()
+					select {
+					case <-done:
+					case <-time.After(3 * time.Second):
+						t.Fatal("取消重启没有结束")
+					}
+				}
+				response = recorder
+			} else {
+				response = postJSON(t, handler.RestartRuntime, http.MethodPost, "/api/runtime/restart", nil, nil)
+			}
+			if response.Code != http.StatusInternalServerError {
+				t.Fatalf("失败重启未报错：status=%d body=%s", response.Code, response.Body.String())
+			}
+			after := service.RuntimeStatus()
+			if !after.Running || !after.Degraded || after.ActiveConfigHash != before.ActiveConfigHash {
+				t.Fatalf("失败重启未保留之前的运行时：before=%+v after=%+v", before, after)
+			}
+			if failure == "check" || failure == "read" || failure == "cancel" {
+				if after.PID != before.PID {
+					t.Fatal("准备失败不应替换正在运行的内核")
+				}
+			}
+			for _, path := range []string{configPath, configPath + ".last-good"} {
+				content, err := os.ReadFile(path)
+				if err != nil || !bytes.Equal(content, previous) {
+					t.Fatalf("失败重启未恢复配置 %s：%v", path, err)
+				}
+			}
+		})
 	}
 }
 
@@ -800,7 +914,7 @@ func TestBatchImportNodesAutoAssignSkipsSystemOccupiedPorts(t *testing.T) {
 	if recorder.Code != http.StatusOK || result.Success != 3 || result.Failed != 0 {
 		t.Fatalf("occupied port poisoned batch: status=%d body=%s", recorder.Code, recorder.Body.String())
 	}
-	nodes, err := handler.loadAllNodes()
+	nodes, err := models.LoadProxyNodes(context.Background(), handler.db)
 	if err != nil || len(nodes) != 3 {
 		t.Fatalf("load imported nodes: count=%d err=%v", len(nodes), err)
 	}

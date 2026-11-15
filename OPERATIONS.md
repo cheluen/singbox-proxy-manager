@@ -133,9 +133,23 @@ MySQL URL 未显式提供 `tls` 时，`localhost`、回环 IP、私有 IP 与未
 
 源码依据：[版本接口与服务端缓存](internal/version/update.go)、[前端加载和状态轮询](frontend/src/core/useNodeManager.js)、[构建元数据](frontend/vite.config.js)、[前后端版本比较](frontend/src/core/version.js)、[版本一致性检查](frontend/scripts/version-consistency-regression.mjs)。
 
+## 节点列表与运行时重启
+
+`SBPM_NODES_VIRTUAL_THRESHOLD` 决定列表首批显示和每次滚动追加的行数，默认 `120`。正整数可按节点数量和设备性能调整；`0` 表示全量展开；负数、空值或格式无效时使用默认值。节点不足一批时直接显示全部，不显示加载提示。
+
+管理进程把运行时环境值写入页面的 `sbpm-nodes-virtual-threshold` 元数据，覆盖前端构建时的值；Vite 开发服务也读取同名变量。修改后重启管理进程，Compose 部署需重建容器，再刷新浏览器页面。
+
+弹窗只使用居中 Modal，窗口或屏幕方向改变不更换容器、不丢失草稿。批量导入进行中仍禁止 Esc 和关闭按钮取消弹窗。排序只支持纵向列表，保留鼠标、触屏和键盘操作。
+
+`POST /api/runtime/restart` 与节点修改共用互斥锁，只读取一次节点列表和一次运行时设置，不开启数据库事务、不捕获数据修改快照，也不写回数据库。生成配置和内核校验通过后才替换运行时；启动或保存可用配置失败时，内核事务恢复之前的配置和进程。启动流程与 API 共用模型读取函数，只有启动流程保留数据库读取失败时启用已有配置的容错逻辑。
+
+批量导入的展开阶段保留分享链接的协议、名称和配置；API 直接使用该结果，原链接仅用于导入明细，不再次解析。
+
+源码依据：[共用数据库读取](backend/models/proxy_queries.go)、[只读重启](backend/api/node_mutation.go)、[内核事务](backend/services/runtime_applier.go)、[列表阈值](frontend/src/core/nodeList.js)、[分批渲染](frontend/src/shared/hooks.js)、[弹窗](frontend/src/shared/Overlays.jsx)。
+
 ## IP 检测与协议模型
 
-- `CheckProxyIP` 和 `CheckProxyIPContext` 的地址参数只能是无认证、无协议前缀的 `host:port`；IPv6 使用方括号包围地址。TCP 就绪检查直接使用该地址，因此不能传 `user:pass@host:port`。认证通过独立参数传递。
+- `CheckProxyIPContext` 的地址参数只能是无认证、无协议前缀的 `host:port`；IPv6 使用方括号包围地址。TCP 就绪检查直接使用该地址，因此不能传 `user:pass@host:port`。认证通过独立参数传递。`direct` 节点同样通过自身入站检测，节点功能与取消支持均保留。
 - VLESS／VMess 的应用层 `network` 兼容字段接受普通 TCP、WS、HTTP／H2、QUIC、gRPC、HTTPUpgrade。普通 TCP 通过省略 sing-box 的 `transport` 表示，不生成 `type=tcp` 的原生传输对象；KCP／mKCP 会被生成器拒绝。
 - `HeaderType`、`Seed` 等历史字段保留用于兼容读取，不表示内核支持相应扩展。QUIC 扩展头和非空 seed 不属于固定内核能力，详细协议边界见 README。
 - WireGuard 配置生成到顶层 `endpoints`，不是 `outbounds`；节点和前置代理都采用这一结构。应用层历史字段在生成时转换为 endpoint 原生字段。

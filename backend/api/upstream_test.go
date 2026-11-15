@@ -70,7 +70,7 @@ func TestCreateNodeInfersImportedDetourModeAndHonorsExplicitMode(t *testing.T) {
 			if err := json.Unmarshal(recorder.Body.Bytes(), &created); err != nil {
 				t.Fatal(err)
 			}
-			stored, err := loadNodeByIDFrom(context.Background(), handler.db, created.ID)
+			stored, err := models.LoadProxyNode(context.Background(), handler.db, created.ID)
 			if err != nil || stored.UpstreamMode != want {
 				t.Fatalf("imported detour mode=%q want=%q err=%v", stored.UpstreamMode, want, err)
 			}
@@ -109,7 +109,7 @@ func TestCreateNodePersistsManagedUpstreamModes(t *testing.T) {
 	if err := json.Unmarshal(recorder.Body.Bytes(), &created); err != nil {
 		t.Fatalf("decode custom response: %v", err)
 	}
-	stored, err := loadNodeByIDFrom(context.Background(), handler.db, created.ID)
+	stored, err := models.LoadProxyNode(context.Background(), handler.db, created.ID)
 	if err != nil {
 		t.Fatalf("load custom node: %v", err)
 	}
@@ -144,7 +144,7 @@ func TestReplaceNodeMovesLegacyNodeWithoutDetourToDirectMode(t *testing.T) {
 		t.Fatalf("replace legacy node: status=%d body=%s", recorder.Code, recorder.Body.String())
 	}
 
-	stored, err := loadNodeByIDFrom(context.Background(), handler.db, nodeID)
+	stored, err := models.LoadProxyNode(context.Background(), handler.db, nodeID)
 	if err != nil {
 		t.Fatalf("load replaced node: %v", err)
 	}
@@ -182,7 +182,7 @@ func TestUpdateNodeRejectsLocalInboundUpstreamAndRollsBack(t *testing.T) {
 	if recorder.Code != http.StatusBadRequest || !strings.Contains(recorder.Body.String(), "route-number") {
 		t.Fatalf("expected recursion rejection: status=%d body=%s", recorder.Code, recorder.Body.String())
 	}
-	stored, err := loadNodeByIDFrom(context.Background(), handler.db, sourceID)
+	stored, err := models.LoadProxyNode(context.Background(), handler.db, sourceID)
 	if err != nil {
 		t.Fatalf("load rolled back node: %v", err)
 	}
@@ -214,14 +214,14 @@ func TestUpdateSettingsAppliesGlobalUpstreamAndRejectsConflicts(t *testing.T) {
 	if recorder.Code != http.StatusOK {
 		t.Fatalf("enable global upstream: status=%d body=%s", recorder.Code, recorder.Body.String())
 	}
-	settings, err := loadRuntimeSettingsFrom(context.Background(), handler.db)
+	settings, err := models.LoadRuntimeSettings(context.Background(), handler.db)
 	if err != nil {
 		t.Fatalf("load settings: %v", err)
 	}
 	if !settings.GlobalUpstreamEnabled || settings.GlobalUpstreamType != "socks5" {
 		t.Fatalf("global upstream not persisted: %+v", settings)
 	}
-	nodes, err := loadAllNodesFrom(context.Background(), handler.db)
+	nodes, err := models.LoadProxyNodes(context.Background(), handler.db)
 	if err != nil {
 		t.Fatalf("load nodes: %v", err)
 	}
@@ -242,7 +242,7 @@ func TestUpdateSettingsAppliesGlobalUpstreamAndRejectsConflicts(t *testing.T) {
 	if recorder.Code != http.StatusBadRequest {
 		t.Fatalf("expected local inbound rejection: status=%d body=%s", recorder.Code, recorder.Body.String())
 	}
-	after, err := loadRuntimeSettingsFrom(context.Background(), handler.db)
+	after, err := models.LoadRuntimeSettings(context.Background(), handler.db)
 	if err != nil {
 		t.Fatalf("reload settings: %v", err)
 	}
@@ -254,7 +254,7 @@ func TestUpdateSettingsAppliesGlobalUpstreamAndRejectsConflicts(t *testing.T) {
 func TestUpdateNodeUpstreamChangesOnlyManagedUpstreamFields(t *testing.T) {
 	handler := newTestHandler(t, nil)
 	nodeID := insertTestNodeWithPortAndOrder(t, handler.db, "node", 36301, 0)
-	before, err := loadNodeByIDFrom(context.Background(), handler.db, nodeID)
+	before, err := models.LoadProxyNode(context.Background(), handler.db, nodeID)
 	if err != nil {
 		t.Fatalf("load original node: %v", err)
 	}
@@ -276,7 +276,7 @@ func TestUpdateNodeUpstreamChangesOnlyManagedUpstreamFields(t *testing.T) {
 		t.Fatalf("update node upstream: status=%d body=%s", recorder.Code, recorder.Body.String())
 	}
 
-	after, err := loadNodeByIDFrom(context.Background(), handler.db, nodeID)
+	after, err := models.LoadProxyNode(context.Background(), handler.db, nodeID)
 	if err != nil {
 		t.Fatalf("load updated node: %v", err)
 	}
@@ -302,7 +302,7 @@ func TestUpdateNodeUpstreamChangesOnlyManagedUpstreamFields(t *testing.T) {
 	if invalid.Code != http.StatusBadRequest {
 		t.Fatalf("invalid custom upstream was accepted: status=%d body=%s", invalid.Code, invalid.Body.String())
 	}
-	rolledBack, err := loadNodeByIDFrom(context.Background(), handler.db, nodeID)
+	rolledBack, err := models.LoadProxyNode(context.Background(), handler.db, nodeID)
 	if err != nil {
 		t.Fatalf("load rolled back node: %v", err)
 	}
@@ -334,7 +334,7 @@ func TestUpdateSettingsCanDisableMalformedStoredGlobalUpstream(t *testing.T) {
 	if recorder.Code != http.StatusOK {
 		t.Fatalf("disable malformed global upstream: status=%d body=%s", recorder.Code, recorder.Body.String())
 	}
-	settings, err := loadRuntimeSettingsFrom(context.Background(), handler.db)
+	settings, err := models.LoadRuntimeSettings(context.Background(), handler.db)
 	if err != nil {
 		t.Fatalf("reload settings: %v", err)
 	}
@@ -364,7 +364,7 @@ func TestCheckGlobalUpstreamIPPersistsSuccessAndFailure(t *testing.T) {
 	if success.Code != http.StatusOK {
 		t.Fatalf("check global upstream: status=%d body=%s", success.Code, success.Body.String())
 	}
-	settings, err := loadRuntimeSettingsFrom(context.Background(), handler.db)
+	settings, err := models.LoadRuntimeSettings(context.Background(), handler.db)
 	if err != nil {
 		t.Fatalf("load successful global check: %v", err)
 	}
@@ -379,7 +379,7 @@ func TestCheckGlobalUpstreamIPPersistsSuccessAndFailure(t *testing.T) {
 	if failure.Code != http.StatusBadGateway {
 		t.Fatalf("failed global check status=%d body=%s", failure.Code, failure.Body.String())
 	}
-	settings, err = loadRuntimeSettingsFrom(context.Background(), handler.db)
+	settings, err = models.LoadRuntimeSettings(context.Background(), handler.db)
 	if err != nil {
 		t.Fatalf("load failed global check: %v", err)
 	}
@@ -394,7 +394,7 @@ func TestCheckGlobalUpstreamIPPersistsSuccessAndFailure(t *testing.T) {
 	if empty.Code != http.StatusBadGateway || !strings.Contains(empty.Body.String(), "upstream IP check returned no result") {
 		t.Fatalf("empty global check status=%d body=%s", empty.Code, empty.Body.String())
 	}
-	settings, err = loadRuntimeSettingsFrom(context.Background(), handler.db)
+	settings, err = models.LoadRuntimeSettings(context.Background(), handler.db)
 	if err != nil {
 		t.Fatalf("load empty global check: %v", err)
 	}

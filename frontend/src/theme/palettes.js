@@ -6,12 +6,6 @@ export const THEMES = {
   dusk: {
     id: 'dusk',
     dark: true,
-    name: { zh: '暮色 · 暗色指挥台', en: 'Dusk · Command Center' },
-    tagline: {
-      zh: '暗色莫兰迪 + 高密度列表 + Ctrl/⌘ K 命令面板，适合键盘党与夜间使用',
-      en: 'Dark Morandi, dense rows and a Ctrl/⌘ K palette for keyboard-first use.',
-    },
-    swatches: ['#A6ACD0', '#6E7391', '#353A4D', '#22252A', '#D6B983'],
     fontUI: `"Inter Variable", ${FONT_CJK}`,
     fontDisplay: `"Inter Variable", ${FONT_CJK}`,
     radius: 8,
@@ -44,8 +38,6 @@ export const THEMES = {
     shadow2: '0 18px 44px rgba(0, 0, 0, 0.42), 0 2px 8px rgba(0, 0, 0, 0.28)',
   },
 }
-
-export const FONT_MONO_STACK = FONT_MONO
 
 const luminance = (hex) => {
   const value = Number.parseInt(hex.slice(1), 16)
@@ -142,7 +134,6 @@ export const themeToAntdTokens = (theme) => {
       },
       Switch: { colorPrimary: c.accent, colorPrimaryHover: c.accentStrong, handleBg: theme.dark ? c.bg : '#FFFFFF', colorTextQuaternary: c.muted, colorTextTertiary: c.ink3 },
       Modal: { contentBg: c.surface, headerBg: c.surface, footerBg: c.surface, titleFontSize: 17 },
-      Drawer: { colorBgElevated: c.surface },
       Input: { activeShadow: `0 0 0 3px ${c.accentSoft}`, colorBgContainer: theme.dark ? c.bg2 : '#FFFFFF' },
       InputNumber: { activeShadow: `0 0 0 3px ${c.accentSoft}`, colorBgContainer: theme.dark ? c.bg2 : '#FFFFFF' },
       Select: { colorBgContainer: theme.dark ? c.bg2 : '#FFFFFF', optionSelectedBg: c.accentSoft },

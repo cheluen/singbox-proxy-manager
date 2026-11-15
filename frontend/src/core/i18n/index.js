@@ -21,7 +21,7 @@ const readStoredLanguage = () => {
 
 i18n.use(initReactI18next).init({
   resources: {
-    // 线上面板的全部词条原样保留，新面板新增的词条放在 extra-* 中叠加。
+    // 基础文案与面板专用词条合并；两套字典都只保留当前界面使用的词条。
     zh: { translation: { ...baseZh, ...extraZh } },
     en: { translation: { ...baseEn, ...extraEn } },
   },

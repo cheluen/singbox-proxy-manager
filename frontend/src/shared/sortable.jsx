@@ -1,10 +1,10 @@
 // 拖拽排序封装（@dnd-kit）：支持鼠标、触屏与键盘（聚焦手柄后 空格 抓起，方向键移动，空格 放下）。
 import { DndContext, KeyboardSensor, PointerSensor, closestCenter, useSensor, useSensors } from '@dnd-kit/core'
-import { SortableContext, rectSortingStrategy, sortableKeyboardCoordinates, useSortable, verticalListSortingStrategy } from '@dnd-kit/sortable'
+import { SortableContext, sortableKeyboardCoordinates, useSortable, verticalListSortingStrategy } from '@dnd-kit/sortable'
 import { CSS } from '@dnd-kit/utilities'
 import { GripVertical } from 'lucide-react'
 
-export function SortableList({ ids, disabled, onReorder, layout = 'vertical', children }) {
+export function SortableList({ ids, disabled, onReorder, children }) {
   const sensors = useSensors(
     useSensor(PointerSensor, { activationConstraint: { distance: 6 } }),
     useSensor(KeyboardSensor, { coordinateGetter: sortableKeyboardCoordinates })
@@ -17,7 +17,7 @@ export function SortableList({ ids, disabled, onReorder, layout = 'vertical', ch
         if (over && active.id !== over.id) onReorder(active.id, over.id)
       }}
     >
-      <SortableContext items={ids} disabled={disabled} strategy={layout === 'grid' ? rectSortingStrategy : verticalListSortingStrategy}>
+      <SortableContext items={ids} disabled={disabled} strategy={verticalListSortingStrategy}>
         {children}
       </SortableContext>
     </DndContext>

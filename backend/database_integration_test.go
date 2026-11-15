@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"os"
+	"reflect"
 	"strings"
 	"sync"
 	"testing"
@@ -162,10 +163,63 @@ func runDatabaseIntegrationContract(t *testing.T, db *sql.DB) {
 	if preserve {
 		t.Fatalf("default preserve_inbound_ports should be false")
 	}
+	verifySharedReadContract(t, db, node)
 
 	verifyUpstreamMigrationContract(t, db, largeUpstreamConfig)
 	if dialect == appdb.DialectSQLite || dialect == appdb.DialectTurso {
 		verifySQLiteWriterSerialization(t, db)
+	}
+}
+
+func verifySharedReadContract(t *testing.T, db *sql.DB, expected models.ProxyNode) {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	stored, err := models.LoadProxyNode(ctx, db, expected.ID)
+	if err != nil || !reflect.DeepEqual(stored, expected) {
+		t.Fatalf("共用节点读取与完整列映射不符：node=%+v err=%v", stored, err)
+	}
+	nodes, err := models.LoadProxyNodes(ctx, db)
+	if err != nil || len(nodes) != 1 || !reflect.DeepEqual(nodes[0], expected) {
+		t.Fatalf("共用节点列表读取不符：nodes=%d err=%v", len(nodes), err)
+	}
+	settings, err := models.LoadRuntimeSettings(ctx, db)
+	if err != nil || settings.ID <= 0 || settings.SingletonKey != 1 || settings.PreserveInboundPorts {
+		t.Fatalf("共用设置读取不符：settings=%+v err=%v", settings, err)
+	}
+	tx, err := db.BeginTx(ctx, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer tx.Rollback()
+	if _, err := tx.ExecContext(ctx, "UPDATE proxy_nodes SET inbound_port_pinned = ? WHERE id = ?", true, expected.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := tx.ExecContext(ctx, "UPDATE settings SET start_port = ? WHERE singleton_key = 1", 32050); err != nil {
+		t.Fatal(err)
+	}
+	transactionNode, err := models.LoadProxyNode(ctx, tx, expected.ID)
+	if err != nil || !transactionNode.InboundPortPinned {
+		t.Fatalf("共用读取未使用事务内的节点状态：%v", err)
+	}
+	transactionNodes, err := models.LoadProxyNodes(ctx, tx)
+	if err != nil || len(transactionNodes) != 1 || !transactionNodes[0].InboundPortPinned {
+		t.Fatalf("共用读取未使用事务内的节点列表：%v", err)
+	}
+	transactionSettings, err := models.LoadRuntimeSettings(ctx, tx)
+	if err != nil || transactionSettings.StartPort != 32050 {
+		t.Fatalf("共用读取未使用事务内的设置状态：%v", err)
+	}
+	if err := tx.Rollback(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := models.LoadProxyNode(ctx, db, expected.ID+10000); !errors.Is(err, sql.ErrNoRows) {
+		t.Fatalf("共用读取未保留节点缺失语义：%v", err)
+	}
+	canceled, cancelRead := context.WithCancel(ctx)
+	cancelRead()
+	if _, err := models.LoadProxyNodes(canceled, db); !errors.Is(err, context.Canceled) {
+		t.Fatalf("共用列表读取未保留取消语义：%v", err)
 	}
 }
 

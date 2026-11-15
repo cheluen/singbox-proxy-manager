@@ -335,11 +335,6 @@ func (h *Handler) validateNodeUpstream(node *models.ProxyNode, allowLegacy bool)
 	return nil
 }
 
-// loadAllNodes reads every proxy node from the database ordered by sort_order.
-func (h *Handler) loadAllNodes() ([]models.ProxyNode, error) {
-	return loadAllNodesFrom(context.Background(), h.db)
-}
-
 // singboxUpdateError builds the error payload for a failed config update,
 // surfacing the underlying kernel/validator message to the frontend.
 func singboxUpdateError(err error) gin.H {
@@ -462,7 +457,7 @@ func (h *Handler) Login(c *gin.Context) {
 
 // GetNodes returns all proxy nodes
 func (h *Handler) GetNodes(c *gin.Context) {
-	nodes, err := loadAllNodesFrom(c.Request.Context(), h.db)
+	nodes, err := models.LoadProxyNodes(c.Request.Context(), h.db)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "database error"})
 		return
@@ -479,7 +474,7 @@ func (h *Handler) GetNode(c *gin.Context) {
 		return
 	}
 
-	node, err := loadNodeByIDFrom(c.Request.Context(), h.db, id)
+	node, err := models.LoadProxyNode(c.Request.Context(), h.db, id)
 	if err != nil {
 		if err == sql.ErrNoRows {
 			c.JSON(http.StatusNotFound, gin.H{"error": "node not found"})
@@ -675,11 +670,11 @@ func (h *Handler) BatchImportNodes(c *gin.Context) {
 	defer cancelValidation()
 
 	h.nodeWriteMu.Lock()
-	existingNodes, snapshotErr := loadAllNodesFrom(validationCtx, h.db)
+	existingNodes, snapshotErr := models.LoadProxyNodes(validationCtx, h.db)
 	var runtimeSettings models.Settings
 	var startPort int
 	if snapshotErr == nil {
-		runtimeSettings, snapshotErr = loadRuntimeSettingsFrom(validationCtx, h.db)
+		runtimeSettings, snapshotErr = models.LoadRuntimeSettings(validationCtx, h.db)
 	}
 	if snapshotErr == nil {
 		startPort, _, snapshotErr = getPortSettings(h.db)
@@ -699,21 +694,10 @@ func (h *Handler) BatchImportNodes(c *gin.Context) {
 	candidates := make([]*batchImportCandidate, 0, len(items))
 	for _, item := range items {
 		result := map[string]interface{}{"source": item.Source}
-		var parsedConfig any
-		var proxyType, name string
 		if item.Link != "" {
 			result["link"] = item.Link
-			var parseErr error
-			parsedConfig, proxyType, name, parseErr = services.ParseShareLink(item.Link)
-			if parseErr != nil {
-				result["success"] = false
-				result["error"] = parseErr.Error()
-				results = append(results, result)
-				continue
-			}
-		} else {
-			parsedConfig, proxyType, name = item.Config, item.Type, item.Name
 		}
+		parsedConfig, proxyType, name := item.Config, item.Type, item.Name
 
 		configJSON, marshalErr := json.Marshal(parsedConfig)
 		if marshalErr != nil {
@@ -828,7 +812,7 @@ func (h *Handler) BatchImportNodes(c *gin.Context) {
 		h.nodeWriteMu.Lock()
 		defer h.nodeWriteMu.Unlock()
 
-		currentNodes, currentErr := loadAllNodesFrom(validationCtx, h.db)
+		currentNodes, currentErr := models.LoadProxyNodes(validationCtx, h.db)
 		var currentStartPort int
 		if currentErr == nil {
 			currentStartPort, _, currentErr = getPortSettings(h.db)
@@ -1303,7 +1287,7 @@ func (h *Handler) UpdateNode(c *gin.Context) {
 		ApplyRuntime: true,
 		Mutate: func(ctx context.Context, tx *sql.Tx) error {
 			var err error
-			prev, err = loadNodeByIDFrom(ctx, tx, id)
+			prev, err = models.LoadProxyNode(ctx, tx, id)
 			if err != nil {
 				if err == sql.ErrNoRows {
 					notFound = true
@@ -1463,7 +1447,7 @@ func (h *Handler) UpdateNodeUpstream(c *gin.Context) {
 	candidateNodes, mutationErr := h.nodeMutations.Execute(c.Request.Context(), NodeMutationOperation{
 		ApplyRuntime: true,
 		Mutate: func(ctx context.Context, tx *sql.Tx) error {
-			node, err := loadNodeByIDFrom(ctx, tx, id)
+			node, err := models.LoadProxyNode(ctx, tx, id)
 			if err != nil {
 				if errors.Is(err, sql.ErrNoRows) {
 					notFound = true
@@ -1646,7 +1630,7 @@ func (h *Handler) DeleteNode(c *gin.Context) {
 	_, mutationErr := h.nodeMutations.Execute(c.Request.Context(), NodeMutationOperation{
 		ApplyRuntime: true,
 		Mutate: func(ctx context.Context, tx *sql.Tx) error {
-			_, err := loadNodeByIDFrom(ctx, tx, id)
+			_, err := models.LoadProxyNode(ctx, tx, id)
 			if err != nil {
 				if err == sql.ErrNoRows {
 					notFound = true
@@ -1718,7 +1702,7 @@ func (h *Handler) BatchDeleteNodes(c *gin.Context) {
 		ApplyRuntime: true,
 		Mutate: func(ctx context.Context, tx *sql.Tx) error {
 			for _, id := range req.IDs {
-				_, err := loadNodeByIDFrom(ctx, tx, id)
+				_, err := models.LoadProxyNode(ctx, tx, id)
 				if err != nil {
 					if err == sql.ErrNoRows {
 						missingID = id
@@ -2218,7 +2202,7 @@ func (h *Handler) BatchSetAuth(c *gin.Context) {
 
 // GetSettings returns current settings
 func (h *Handler) GetSettings(c *gin.Context) {
-	settings, err := loadRuntimeSettingsFrom(c.Request.Context(), h.db)
+	settings, err := models.LoadRuntimeSettings(c.Request.Context(), h.db)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "database error"})
 		return
@@ -2241,7 +2225,7 @@ func (h *Handler) GetSettings(c *gin.Context) {
 // CheckGlobalUpstreamIP checks the configured global upstream without changing
 // whether it is currently enabled for nodes.
 func (h *Handler) CheckGlobalUpstreamIP(c *gin.Context) {
-	settings, err := loadRuntimeSettingsFrom(c.Request.Context(), h.db)
+	settings, err := models.LoadRuntimeSettings(c.Request.Context(), h.db)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "database error"})
 		return
@@ -2360,12 +2344,7 @@ func (h *Handler) RestartRuntime(c *gin.Context) {
 
 	h.nodeWriteMu.Lock()
 	defer h.nodeWriteMu.Unlock()
-	_, err := h.nodeMutations.Execute(c.Request.Context(), NodeMutationOperation{
-		ApplyRuntime: true,
-		Mutate: func(context.Context, *sql.Tx) error {
-			return nil
-		},
-	})
+	err := h.nodeMutations.ReapplyRuntime(c.Request.Context())
 	if err != nil {
 		h.singBoxService.MarkDegraded(err)
 		c.JSON(http.StatusInternalServerError, gin.H{
@@ -2429,7 +2408,7 @@ func (h *Handler) UpdateSettings(c *gin.Context) {
 	h.nodeWriteMu.Lock()
 	defer h.nodeWriteMu.Unlock()
 
-	previous, err := loadRuntimeSettingsFrom(c.Request.Context(), h.db)
+	previous, err := models.LoadRuntimeSettings(c.Request.Context(), h.db)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to query settings"})
 		return
@@ -2742,7 +2721,7 @@ func (h *Handler) ReplaceNode(c *gin.Context) {
 		ApplyRuntime: true,
 		Mutate: func(ctx context.Context, tx *sql.Tx) error {
 			var err error
-			previous, err = loadNodeByIDFrom(ctx, tx, id)
+			previous, err = models.LoadProxyNode(ctx, tx, id)
 			if err != nil {
 				if err == sql.ErrNoRows {
 					notFound = true
@@ -2793,7 +2772,7 @@ func (h *Handler) ReplaceNode(c *gin.Context) {
 		return
 	}
 
-	node, err := loadNodeByIDFrom(c.Request.Context(), h.db, id)
+	node, err := models.LoadProxyNode(c.Request.Context(), h.db, id)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "database error"})
 		return

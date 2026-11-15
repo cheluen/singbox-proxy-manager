@@ -137,17 +137,6 @@ export function DetailActions({ node, act, checking, canReorder }) {
   )
 }
 
-export function EnabledSwitch({ node, act, flagBusy, size = 'md' }) {
-  const { t } = useTranslation()
-  const on = node.enabled !== false
-  return (
-    <span className="sb-inline sb-enabled-switch">
-      <Toggle size={size} checked={on} busy={flagBusy} label={t('node_enabled_label')} onChange={() => act.toggleEnabled(node)} testId={`node-enabled-detail-${node.id}`} />
-      <span>{on ? t('enabled') : t('disabled')}</span>
-    </span>
-  )
-}
-
 // 完整的详情分区集合。layout 由外层容器的样式决定（单列 / 多列）。
 export function DetailSections({ node, ctl, act }) {
   const checking = ctl.checks.checkingIds.has(node.id)

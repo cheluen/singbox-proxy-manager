@@ -66,7 +66,7 @@ func TestNodeMutationRemoteDatabaseLifecycle(t *testing.T) {
 		t.Fatalf("admin generation changed incorrectly: generation=%d err=%v", generation, err)
 	}
 	for index, id := range ids {
-		node, err := loadNodeByIDFrom(context.Background(), db, id)
+		node, err := models.LoadProxyNode(context.Background(), db, id)
 		if err != nil || node.InboundPort != 32000+index {
 			t.Fatal("settings mutation did not atomically reassign node ports")
 		}
@@ -82,7 +82,7 @@ func TestNodeMutationRemoteDatabaseLifecycle(t *testing.T) {
 	if response.Code != http.StatusOK {
 		t.Fatalf("reorder status=%d body=%s", response.Code, response.Body.String())
 	}
-	first, err := loadNodeByIDFrom(context.Background(), db, ids[0])
+	first, err := models.LoadProxyNode(context.Background(), db, ids[0])
 	if err != nil || first.SortOrder != 1 || first.InboundPort != 32001 || first.Password != "integration-password" {
 		t.Fatal("reorder changed credentials or lost the port assignment")
 	}

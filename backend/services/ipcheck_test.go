@@ -224,7 +224,7 @@ func TestCheckWithService_ParsesCountryCodeCC(t *testing.T) {
 	}
 }
 
-func TestCheckDirectIP_UsesEnvServicesWithFallback(t *testing.T) {
+func TestCheckProxyIPContextUsesEnvServicesWithFallback(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case "/fail":
@@ -239,9 +239,11 @@ func TestCheckDirectIP_UsesEnvServicesWithFallback(t *testing.T) {
 	t.Cleanup(srv.Close)
 
 	t.Setenv("SBPM_IPCHECK_URLS", srv.URL+"/fail,"+srv.URL+"/ok")
-	info, err := CheckDirectIP()
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	info, err := CheckProxyIPContext(ctx, strings.TrimPrefix(srv.URL, "http://"), "", "")
 	if err != nil {
-		t.Fatalf("CheckDirectIP: %v", err)
+		t.Fatalf("CheckProxyIPContext: %v", err)
 	}
 	if info.IP != "1.2.3.4" {
 		t.Fatalf("unexpected ip: %q", info.IP)

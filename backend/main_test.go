@@ -134,6 +134,40 @@ func TestRegisterFrontendRoutesServesIndexWithRevalidateHeaders(t *testing.T) {
 	}
 }
 
+func TestFrontendNodesVirtualThresholdMetadata(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	for _, test := range []struct{ value, expected string }{
+		{"", "120"}, {"0", "0"}, {"1", "1"}, {"9999", "9999"}, {"-1", "120"}, {"invalid", "120"},
+	} {
+		t.Run(test.value, func(t *testing.T) {
+			t.Setenv("SBPM_NODES_VIRTUAL_THRESHOLD", test.value)
+			dist := writeTestFrontendDist(t)
+			index := filepath.Join(dist, "index.html")
+			content, err := os.ReadFile(index)
+			if err != nil {
+				t.Fatal(err)
+			}
+			content = []byte(strings.Replace(string(content), "</head>", `<meta name="sbpm-nodes-virtual-threshold" content="50" /></head>`, 1))
+			if err := os.WriteFile(index, content, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			router := gin.New()
+			if err := registerFrontendRoutes(router, dist, "1.2.3"); err != nil {
+				t.Fatal(err)
+			}
+			response := httptest.NewRecorder()
+			router.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/", nil))
+			body := response.Body.String()
+			if response.Code != http.StatusOK || strings.Count(body, `name="sbpm-nodes-virtual-threshold"`) != 1 {
+				t.Fatalf("阈值元数据未正确替换：status=%d body=%s", response.Code, body)
+			}
+			if !strings.Contains(body, `name="sbpm-nodes-virtual-threshold" content="`+test.expected+`"`) {
+				t.Fatalf("阈值不符：value=%q expected=%s body=%s", test.value, test.expected, body)
+			}
+		})
+	}
+}
+
 func TestRegisterFrontendRoutes_InjectsBatchCheckIPConcurrencyMeta(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	r := gin.New()

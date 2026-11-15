@@ -172,14 +172,14 @@ export async function saveNodeForm(page, { confirmOpenAuth = false } = {}) {
 }
 
 export async function closeOverlay(page) {
-  const selector = '.sb-overlay .ant-modal-close, .sb-overlay .ant-drawer-close'
+  const selector = '.sb-overlay .ant-modal-close'
   const handle = await page.waitForSelector(selector, { visible: true })
   await handle.asLocator().click()
   await waitOverlaysClosed(page)
 }
 
 export async function waitOverlaysClosed(page) {
-  await page.waitForFunction(() => !Array.from(document.querySelectorAll('.sb-overlay .ant-modal-wrap, .sb-overlay .ant-drawer-content-wrapper')).some((element) => {
+  await page.waitForFunction(() => !Array.from(document.querySelectorAll('.sb-overlay .ant-modal-wrap')).some((element) => {
     const style = getComputedStyle(element)
     const rect = element.getBoundingClientRect()
     return style.display !== 'none' && style.visibility !== 'hidden' && rect.width > 0 && rect.height > 0

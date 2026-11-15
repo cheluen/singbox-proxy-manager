@@ -378,10 +378,11 @@ func validatedShareLinkItem(input string) ([]ImportItem, []ImportFailure, error)
 	if !isSupportedShareLink(input) {
 		return nil, nil, fmt.Errorf("unsupported link format")
 	}
-	if _, _, _, err := ParseShareLink(input); err != nil {
+	config, proxyType, name, err := ParseShareLink(input)
+	if err != nil {
 		return nil, nil, err
 	}
-	return []ImportItem{{Source: input, Link: input}}, nil, nil
+	return []ImportItem{{Source: input, Link: input, Config: config, Type: proxyType, Name: name}}, nil, nil
 }
 
 func isSupportedShareLink(input string) bool {

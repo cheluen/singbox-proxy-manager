@@ -209,6 +209,7 @@ jobs:
           - test:e2e:filter
           - test:e2e:tcp-reuse-ui
           - test:e2e:nodes-viewport
+          - test:e2e:runtime-restart
           - test:e2e:version-refresh
           - test:e2e:wireguard-ui
           - test:e2e:version-update
@@ -531,6 +532,7 @@ jobs:
         run: |
           export PUPPETEER_EXECUTABLE_PATH="$(command -v google-chrome || command -v chromium)"
           npm run test:e2e:full-stack-system
+          npm run test:e2e:full-stack-node-list
 
       - name: Set up QEMU
         uses: docker/setup-qemu-action@v3

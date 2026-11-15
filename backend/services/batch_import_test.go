@@ -3,6 +3,7 @@ package services
 import (
 	"context"
 	"encoding/base64"
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -160,6 +161,37 @@ func TestExpandBatchImportSources_Base64Subscription(t *testing.T) {
 	}
 	if items[0].Link == "" || items[1].Link == "" {
 		t.Fatalf("expected link items, got %+v", items)
+	}
+}
+
+func TestShareLinkImportItemsCarryParsedConfiguration(t *testing.T) {
+	for _, link := range []string{
+		"trojan://import-secret@example.com:443#Parsed%20Trojan",
+		"socks5://user:pass@example.com:1080#Parsed%20SOCKS",
+		"http://user:pass@example.com:8080?proxy=1#Parsed%20HTTP",
+		"vless://00000000-0000-0000-0000-000000000000@example.com:443?security=tls&type=ws&path=%2Fws#Parsed%20VLESS",
+	} {
+		t.Run(link, func(t *testing.T) {
+			config, proxyType, name, err := ParseShareLink(link)
+			if err != nil {
+				t.Fatal(err)
+			}
+			want, err := json.Marshal(config)
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, source := range []string{link, base64.StdEncoding.EncodeToString([]byte(link + "\n"))} {
+				items, failures, err := ExpandBatchImportSources(context.Background(), []string{source})
+				if err != nil || len(failures) != 0 || len(items) != 1 {
+					t.Fatalf("展开失败：items=%d failures=%+v err=%v", len(items), failures, err)
+				}
+				item := items[0]
+				got, err := json.Marshal(item.Config)
+				if err != nil || string(got) != string(want) || item.Type != proxyType || item.Name != name || item.Link != link {
+					t.Fatalf("解析结果没有完整传递：item=%+v err=%v", item, err)
+				}
+			}
+		})
 	}
 }
 

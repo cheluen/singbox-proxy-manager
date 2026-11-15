@@ -20,7 +20,7 @@ export function SearchBox({ ctl, shortcut = '/', className = '', autoFocus = fal
       if (event.key !== shortcut || event.metaKey || event.ctrlKey || event.altKey) return
       const tag = document.activeElement?.tagName
       if (tag === 'INPUT' || tag === 'TEXTAREA' || document.activeElement?.isContentEditable) return
-      if (document.querySelector('.ant-modal-wrap:not([style*="display: none"]), .ant-drawer-open')) return
+      if (document.querySelector('.ant-modal-wrap:not([style*="display: none"])')) return
       event.preventDefault()
       ref.current?.focus()
       ref.current?.select()

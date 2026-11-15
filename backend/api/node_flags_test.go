@@ -25,7 +25,7 @@ func TestNodeFlagsPreserveLatestConfigurationAndCredentials(t *testing.T) {
 	if response := postJSON(t, handler.UpdateNode, http.MethodPut, path, payload, params); response.Code != http.StatusOK {
 		t.Fatalf("update config before toggle: status=%d", response.Code)
 	}
-	previous, err := loadNodeByIDFrom(context.Background(), handler.db, nodeID)
+	previous, err := models.LoadProxyNode(context.Background(), handler.db, nodeID)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -36,7 +36,7 @@ func TestNodeFlagsPreserveLatestConfigurationAndCredentials(t *testing.T) {
 		if response.Code != http.StatusOK {
 			t.Fatalf("toggle failed: status=%d body=%s", response.Code, response.Body.String())
 		}
-		stored, err := loadNodeByIDFrom(context.Background(), handler.db, nodeID)
+		stored, err := models.LoadProxyNode(context.Background(), handler.db, nodeID)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -76,7 +76,7 @@ func TestNodeFlagsRejectInvalidFieldsAndMissingNodes(t *testing.T) {
 	if response.Code != http.StatusNotFound {
 		t.Fatalf("missing node status=%d", response.Code)
 	}
-	node, err := loadNodeByIDFrom(context.Background(), handler.db, nodeID)
+	node, err := models.LoadProxyNode(context.Background(), handler.db, nodeID)
 	if err != nil || !node.Enabled || node.Password != "pass" {
 		t.Fatal("invalid request changed stored node")
 	}

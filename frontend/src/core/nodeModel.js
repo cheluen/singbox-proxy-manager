@@ -1,102 +1,5 @@
-export const FILTER_KEY_LABEL_MAP = {
-  status: 'status',
-  enabled: 'state_controls',
-  type: 'node_type',
-  inbound_port: 'inbound_port',
-  name: 'node_name',
-  remark: 'remark',
-  node_ip: 'node_ip',
-  location: 'location',
-  country_code: 'country_code',
-  username: 'username',
-  tcp_reuse_enabled: 'tcp_reuse',
-}
+const PORT_FILTER_TOKEN_PATTERN = /^(\d+)(?:\s*-\s*(\d+))?$/
 
-export const FILTER_KEY_ORDER = [
-  'status',
-  'enabled',
-  'type',
-  'inbound_port',
-  'name',
-  'remark',
-  'node_ip',
-  'location',
-  'country_code',
-  'username',
-  'tcp_reuse_enabled',
-]
-
-export const FILTER_SUGGESTION_KEYS = new Set(['type', 'location', 'country_code', 'username'])
-export const PORT_FILTER_TOKEN_PATTERN = /^(\d+)(?:\s*-\s*(\d+))?$/
-
-export const getFilterKeyLabel = (key, t) => {
-  const labelKey = FILTER_KEY_LABEL_MAP[key]
-  return labelKey ? t(labelKey) : key
-}
-
-export const getFilterKeyOptions = (t) =>
-  FILTER_KEY_ORDER.map((key) => ({
-    value: key,
-    label: getFilterKeyLabel(key, t),
-  }))
-
-export const getFilterSelectOptions = (key, t) => {
-  if (key === 'status') {
-    return [
-      { value: 'healthy', label: t('status_healthy') },
-      { value: 'unverified', label: t('status_unverified') },
-    ]
-  }
-
-  if (key === 'enabled' || key === 'tcp_reuse_enabled') {
-    return [
-      { value: 'true', label: t('enabled') },
-      { value: 'false', label: t('disabled') },
-    ]
-  }
-
-  return []
-}
-
-export const getFilterValuePlaceholder = (key, t) =>
-  key === 'inbound_port' ? t('filter_inbound_port_placeholder') : t('filter_value_placeholder')
-
-export const getFilterValueLabel = (key, value, t) => {
-  if (key === 'status') {
-    return value === 'healthy'
-      ? t('status_healthy')
-      : value === 'unverified'
-        ? t('status_unverified')
-        : value
-  }
-
-  if (key === 'enabled' || key === 'tcp_reuse_enabled') {
-    return value === 'true' ? t('enabled') : value === 'false' ? t('disabled') : value
-  }
-
-  return value
-}
-
-export const buildFilterSuggestionOptions = (nodes, key) => {
-  if (!FILTER_SUGGESTION_KEYS.has(key) || !Array.isArray(nodes)) {
-    return []
-  }
-
-  const values = new Set()
-  for (const node of nodes) {
-    const raw = String(node?.[key] ?? '').trim()
-    if (raw) {
-      values.add(raw)
-    }
-  }
-
-  return Array.from(values)
-    .sort((left, right) => left.localeCompare(right, undefined, { numeric: true, sensitivity: 'base' }))
-    .map((value) => ({
-      value,
-      label: value,
-    }))
-}
 export const parseCountryName = (location) => {
   const raw = String(location || '').trim()
   if (!raw) {
@@ -114,22 +17,7 @@ export const normalizeCountryCode = (countryCode) => {
   return raw.toLowerCase()
 }
 
-export const formatCountryWithCode = (record) => {
-  const code = normalizeCountryCode(record?.country_code)
-  const countryName = parseCountryName(record?.location)
-  if (!code && !countryName) {
-    return '-'
-  }
-  if (!countryName) {
-    return code
-  }
-  if (!code) {
-    return countryName
-  }
-  return `${code} ${countryName}`
-}
-
-export const sortObjectKeysDeep = (value) => {
+const sortObjectKeysDeep = (value) => {
   if (Array.isArray(value)) {
     return value.map(sortObjectKeysDeep)
   }
@@ -182,7 +70,7 @@ export const stableConfigSignature = (rawConfig) => {
 
 export const isNodeExportable = (node) => String(node?.type || '').toLowerCase() !== 'direct'
 
-export const normalizeFilterText = (value) => String(value ?? '').trim().toLowerCase()
+const normalizeFilterText = (value) => String(value ?? '').trim().toLowerCase()
 
 export const parseInboundPortFilterExpression = (value) => {
   const tokens = String(value ?? '')
@@ -232,44 +120,4 @@ export const getNodeStatusCode = (node) => {
   const latencyRaw = Number(node?.latency)
   const latency = Number.isFinite(latencyRaw) ? latencyRaw : 0
   return hasIP && latency > 0 ? 'healthy' : 'unverified'
-}
-
-export const matchNodeFilter = (node, filter) => {
-  const key = String(filter?.key || '').trim()
-  const valueText = normalizeFilterText(filter?.value)
-  if (!key || !valueText) return true
-
-  if (key === 'status') {
-    return getNodeStatusCode(node) === valueText
-  }
-
-  if (key === 'enabled') {
-    const enabled = node?.enabled !== false
-    return (enabled ? 'true' : 'false') === valueText
-  }
-
-  if (key === 'tcp_reuse_enabled') {
-    const enabled = node?.tcp_reuse_enabled !== false
-    return (enabled ? 'true' : 'false') === valueText
-  }
-
-  if (key === 'inbound_port') {
-    return matchInboundPortFilter(node?.inbound_port, filter?.value)
-  }
-
-  const candidate = normalizeFilterText(node?.[key])
-  return candidate.includes(valueText)
-}
-
-export const applyNodeFilters = (nodes, filters) => {
-  if (!Array.isArray(nodes)) return []
-  if (!Array.isArray(filters) || filters.length === 0) return nodes
-  const normalized = filters
-    .map((filter) => ({
-      key: String(filter?.key || '').trim(),
-      value: String(filter?.value ?? '').trim(),
-    }))
-    .filter((filter) => filter.key && filter.value)
-  if (normalized.length === 0) return nodes
-  return nodes.filter((node) => normalized.every((filter) => matchNodeFilter(node, filter)))
 }

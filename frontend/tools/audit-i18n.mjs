@@ -9,8 +9,10 @@ const load = async (name) => {
   const file = path.join(SRC, 'core', 'i18n', name)
   return existsSync(file) ? (await import(pathToFileURL(file).href)).default : {}
 }
-const zh = { ...(await load('base-zh.js')), ...(await load('extra-zh.js')) }
-const en = { ...(await load('base-en.js')), ...(await load('extra-en.js')) }
+const baseZh = await load('base-zh.js')
+const baseEn = await load('base-en.js')
+const zh = { ...baseZh, ...(await load('extra-zh.js')) }
+const en = { ...baseEn, ...(await load('extra-en.js')) }
 const extraZh = await load('extra-zh.js')
 const extraEn = await load('extra-en.js')
 
@@ -32,6 +34,10 @@ const DYNAMIC_HINT = ['auto', 'subscription', 'http_proxy'].map((value) => `impo
 for (const file of walk(SRC)) {
   if (file.includes(`${path.sep}i18n${path.sep}`)) continue
   const text = readFileSync(file, 'utf8')
+  // 对象映射间接引用的基础词条也计入，避免把动态标签误判为死词条。
+  for (const match of text.matchAll(/['"]([a-z][a-z0-9_]*)['"]/g)) {
+    if (match[1] in baseZh || match[1] in baseEn) note(match[1], file)
+  }
   for (const match of text.matchAll(/\bt\(\s*'([a-z0-9_]+)'/g)) note(match[1], file)
   for (const match of text.matchAll(/\bt\(\s*[a-zA-Z]+\s*\?\s*'([a-z0-9_]+)'\s*:\s*'([a-z0-9_]+)'/g)) { note(match[1], file); note(match[2], file) }
   for (const match of text.matchAll(/key:\s*'((?:login_point|demo)_[a-z0-9_]+)'/g)) note(match[1], file)
@@ -53,6 +59,9 @@ const missingEn = [...used.keys()].filter((key) => !(key in en)).sort()
 const onlyZh = Object.keys(extraZh).filter((key) => !(key in extraEn))
 const onlyEn = Object.keys(extraEn).filter((key) => !(key in extraZh))
 const unusedExtra = Object.keys(extraZh).filter((key) => !used.has(key))
+const unusedBase = Object.keys(baseZh).filter((key) => !used.has(key))
+const onlyBaseZh = Object.keys(baseZh).filter((key) => !(key in baseEn))
+const onlyBaseEn = Object.keys(baseEn).filter((key) => !(key in baseZh))
 
 const print = (title, list) => { if (list.length) process.stdout.write(`${title} (${list.length}):\n  ${list.join('\n  ')}\n`) }
 print('中文缺失', process.argv.includes('--where') ? missingZh.map((key) => `${key}  <- ${[...new Set(used.get(key))].join(', ')}`) : missingZh)
@@ -60,6 +69,9 @@ print('英文缺失', missingEn.filter((key) => !missingZh.includes(key)))
 print('仅中文新增词条有', onlyZh)
 print('仅英文新增词条有', onlyEn)
 print('新增词条未被使用', unusedExtra)
-const failed = missingZh.length + missingEn.length + onlyZh.length + onlyEn.length + unusedExtra.length
+print('基础词条未被使用', unusedBase)
+print('仅中文基础词条有', onlyBaseZh)
+print('仅英文基础词条有', onlyBaseEn)
+const failed = missingZh.length + missingEn.length + onlyZh.length + onlyEn.length + unusedExtra.length + unusedBase.length + onlyBaseZh.length + onlyBaseEn.length
 process.stdout.write(`引用 ${used.size} 个 key；${failed === 0 ? '词条审计通过' : `词条审计失败：${failed} 项`}\n`)
 process.exit(failed === 0 ? 0 : 1)

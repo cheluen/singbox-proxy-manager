@@ -16,10 +16,8 @@
 .sb-form-collapse .ant-collapse-header { font-weight: 550; color: var(--ink-2) !important; }
 .sb-form-footer { position: sticky; bottom: -1px; z-index: 2; display: flex; justify-content: flex-end; flex-wrap: wrap; gap: 8px; margin-top: 18px; padding: 14px 0 2px; border-top: 1px solid var(--line); background: var(--surface); }
 :root[data-theme='dusk'] .ant-modal .sb-form-footer { background: var(--surface); }
-.sb-overlay .ant-drawer-body { padding-bottom: 0; }
-.sb-overlay .ant-drawer-body .sb-form-footer { padding-bottom: 16px; }
 /* 固定操作栏不应遮住通过键盘聚焦或自动滚入视野的表单字段。 */
-.sb-overlay .ant-modal-body, .sb-overlay .ant-drawer-body { scroll-padding: 16px 0 80px; }
+.sb-overlay .ant-modal-body { scroll-padding: 16px 0 80px; }
 .sb-code { max-height: 260px; margin: 0; padding: 12px; overflow: auto; border-radius: var(--radius-sm); border: 1px solid var(--line); background: var(--surface-2); font-family: var(--font-mono); font-size: 12px; line-height: 1.55; color: var(--ink); }
 
 .sb-auth-box { margin-top: 4px; border: 1px solid var(--line-strong); border-radius: var(--radius); background: var(--surface-2); }
@@ -45,9 +43,9 @@
 .sb-inline-card__text span { font-size: 12.5px; color: var(--ink-3); }
 
 /* ---------- 弹窗内容 ---------- */
-.sb-overlay .ant-modal-content, .sb-overlay .ant-drawer-content { background: var(--surface); }
+.sb-overlay .ant-modal-content { background: var(--surface); }
 .sb-overlay .ant-modal-body { max-height: calc(100dvh - var(--chrome-h) - 150px); overflow-y: auto; overscroll-behavior: contain; margin: 0 -24px; padding: 4px 24px 0; }
-.sb-overlay.ant-modal-root .ant-modal-wrap, .sb-overlay.ant-modal-root .ant-modal-mask, .sb-overlay.ant-drawer { top: var(--chrome-h); }
+.sb-overlay.ant-modal-root .ant-modal-wrap, .sb-overlay.ant-modal-root .ant-modal-mask { top: var(--chrome-h); }
 .sb-dialog-title { display: flex; align-items: baseline; gap: 10px; min-width: 0; padding-right: 28px; }
 .sb-dialog-title__sub { font-size: 13px; font-weight: 400; color: var(--ink-3); }
 .sb-dialog-lead { margin-bottom: 14px; color: var(--ink-2); }

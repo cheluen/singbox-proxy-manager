@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"reflect"
 	"strings"
+
+	"sb-proxy/backend/models"
 )
 
 type nodeMutationTable struct {
@@ -17,8 +19,8 @@ type nodeMutationTable struct {
 
 func captureNodeMutationTables(ctx context.Context, tx *sql.Tx) ([]nodeMutationTable, error) {
 	tables := []struct{ name, columns string }{
-		{"proxy_nodes", proxyNodeSelectColumns},
-		{"settings", runtimeSettingsSelectColumns + ", admin_password, admin_password_env_fingerprint, auth_generation"},
+		{"proxy_nodes", models.ProxyNodeSelectColumns},
+		{"settings", models.RuntimeSettingsSelectColumns + ", admin_password, admin_password_env_fingerprint, auth_generation"},
 	}
 	snapshots := make([]nodeMutationTable, 0, len(tables))
 	for _, table := range tables {

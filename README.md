@@ -6,7 +6,7 @@
 
 <img src="./logo.svg" alt="SingBox Proxy Manager Logo" width="96" />
 
-![Version](https://img.shields.io/badge/version-1.7.20-blue.svg)
+![Version](https://img.shields.io/badge/version-1.7.21-blue.svg)
 ![License](https://img.shields.io/badge/license-MIT-green.svg)
 ![SingBox](https://img.shields.io/badge/sing--box-1.12.12-orange.svg)
 
@@ -29,7 +29,7 @@
 - ⬆️ **版本更新提示** - GitHub Release 有新版本时，在面板版本号旁显示向上箭头
 
 ### 管理功能
-- ✨ **暮色管理面板** - 单一暗色指挥台、高密度节点列表、行内详情和移动端抽屉
+- ✨ **暮色管理面板** - 单一暗色指挥台、高密度节点列表、行内详情和响应式居中弹窗
 - 📥 **批量操作** - 支持批量导入、删除、设置认证、检测 IP
 - 📝 **备注/导出/替换** - 给节点加备注；支持导出可表达的分享链接；支持用新分享链接直接替换节点
 - 🔧 **灵活配置** - 自定义入站端口，自动或手动分配
@@ -100,7 +100,7 @@ docker compose logs -f
 # 下载适合平台的单文件（示例：Linux amd64）
 mkdir -p /opt/singbox-proxy-manager
 cd /opt/singbox-proxy-manager
-APP_VERSION=1.7.20
+APP_VERSION=1.7.21
 curl -fL -o /opt/singbox-proxy-manager/singbox-proxy-manager "https://github.com/cheluen/singbox-proxy-manager/releases/download/v${APP_VERSION}/singbox-proxy-manager-linux-amd64"
 chmod +x /opt/singbox-proxy-manager/singbox-proxy-manager
 # 首次启动设置自己的管理员密码；之后可在管理面板修改
@@ -366,7 +366,7 @@ docker compose up -d
 CI 会自动发布以下镜像标签到 GHCR，并提供 `linux/amd64` + `linux/arm64` 多架构清单：
 
 - `ghcr.io/cheluen/singbox-proxy-manager:latest`
-- 版本标签：`v` 加项目版本，例如 `ghcr.io/cheluen/singbox-proxy-manager:v1.7.20`
+- 版本标签：`v` 加项目版本，例如 `ghcr.io/cheluen/singbox-proxy-manager:v1.7.21`
 - 提交标签：完整 Git 提交 SHA；用于固定某次发布构建
 
 镜像构建会复用对应版本 Release 中的 Linux 二进制，确保二进制发布与容器发布支持的架构一致。

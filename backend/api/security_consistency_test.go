@@ -238,7 +238,7 @@ exec sleep 300
 	service := services.NewSingBoxService(configDir)
 	handler := NewHandler(db, service)
 	nodeID := insertTestNode(t, db)
-	nodes, err := handler.loadAllNodes()
+	nodes, err := models.LoadProxyNodes(context.Background(), handler.db)
 	if err != nil {
 		t.Fatalf("load initial nodes: %v", err)
 	}
@@ -420,7 +420,7 @@ exec sleep 300
 	)
 	handler := NewHandler(db, service)
 	nodeID := insertTestNode(t, db)
-	nodes, err := loadAllNodesFrom(context.Background(), db)
+	nodes, err := models.LoadProxyNodes(context.Background(), db)
 	if err != nil {
 		t.Fatalf("load initial nodes: %v", err)
 	}

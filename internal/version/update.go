@@ -31,18 +31,17 @@ type UpdateInfo struct {
 }
 
 type UpdateChecker struct {
-	owner      string
-	repo       string
-	client     *http.Client
-	ttl        time.Duration
-	timeout    time.Duration
-	disabled   bool
-	now        func() time.Time
-	mu         sync.Mutex
-	cached     UpdateInfo
-	cachedAt   time.Time
-	cachedFor  string
-	lastErrMsg string
+	owner     string
+	repo      string
+	client    *http.Client
+	ttl       time.Duration
+	timeout   time.Duration
+	disabled  bool
+	now       func() time.Time
+	mu        sync.Mutex
+	cached    UpdateInfo
+	cachedAt  time.Time
+	cachedFor string
 }
 
 func NewUpdateCheckerFromEnv() *UpdateChecker {
@@ -100,7 +99,7 @@ func (c *UpdateChecker) Check(ctx context.Context, currentVersion string) (Updat
 	if c.owner == "" || c.repo == "" {
 		info.CheckedAt = now.UTC().Format(time.RFC3339)
 		info.Error = "update repository is not configured"
-		c.cache(currentVersion, info, info.Error)
+		c.cache(currentVersion, info)
 		return info, errors.New(info.Error)
 	}
 
@@ -115,7 +114,7 @@ func (c *UpdateChecker) Check(ctx context.Context, currentVersion string) (Updat
 	info.CheckedAt = now.UTC().Format(time.RFC3339)
 	if err != nil {
 		info.Error = err.Error()
-		c.cache(currentVersion, info, info.Error)
+		c.cache(currentVersion, info)
 		return info, err
 	}
 
@@ -123,15 +122,14 @@ func (c *UpdateChecker) Check(ctx context.Context, currentVersion string) (Updat
 	info.ReleaseURL = latest.HTMLURL
 	info.PublishedAt = latest.PublishedAt
 	info.Available = CompareVersions(info.LatestVersion, currentVersion) > 0
-	c.cache(currentVersion, info, "")
+	c.cache(currentVersion, info)
 	return info, nil
 }
 
-func (c *UpdateChecker) cache(currentVersion string, info UpdateInfo, errMsg string) {
+func (c *UpdateChecker) cache(currentVersion string, info UpdateInfo) {
 	c.cachedFor = currentVersion
 	c.cached = info
 	c.cachedAt = c.now()
-	c.lastErrMsg = errMsg
 }
 
 type githubRelease struct {

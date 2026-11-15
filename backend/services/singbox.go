@@ -28,7 +28,6 @@ type SingBoxService struct {
 	upstreamCheckTimeout time.Duration
 	resolver             netIPResolver
 	process              *exec.Cmd
-	logCloser            io.Closer
 	processDone          chan struct{}
 	processErr           error
 	processGeneration    uint64
@@ -210,21 +209,12 @@ type EndpointConfig struct {
 }
 
 type DNSConfig struct {
-	Servers  []DNSServer `json:"servers"`
-	Rules    []DNSRule   `json:"rules,omitempty"`
-	Strategy string      `json:"strategy,omitempty"`
+	Servers []DNSServer `json:"servers"`
 }
 
 type DNSServer struct {
-	Type    string `json:"type,omitempty"`
-	Tag     string `json:"tag"`
-	Address string `json:"address,omitempty"`
-	Detour  string `json:"detour,omitempty"`
-}
-
-type DNSRule struct {
-	Server   string   `json:"server"`
-	Outbound []string `json:"outbound,omitempty"`
+	Type string `json:"type,omitempty"`
+	Tag  string `json:"tag"`
 }
 
 type LogConfig struct {
@@ -262,8 +252,6 @@ type RouteConfig struct {
 type RouteRule struct {
 	Inbound  []string               `json:"inbound,omitempty"`
 	Outbound string                 `json:"outbound,omitempty"`
-	Action   string                 `json:"action,omitempty"`
-	Strategy string                 `json:"strategy,omitempty"`
 	Extra    map[string]interface{} `json:"-"`
 }
 
@@ -286,7 +274,6 @@ type parsedUpstreamProxy struct {
 	Definition models.ProxyDefinition
 	Config     interface{}
 	Tag        string
-	OwnerID    int
 	Scope      string
 }
 
@@ -946,7 +933,6 @@ func (s *SingBoxService) prepareManagedUpstreams(
 	prepare := func(
 		definition models.ProxyDefinition,
 		tag string,
-		ownerID int,
 		scope string,
 	) (parsedUpstreamProxy, error) {
 		normalized, parsedConfig, err := s.parseManagedUpstreamDefinition(definition)
@@ -966,7 +952,6 @@ func (s *SingBoxService) prepareManagedUpstreams(
 			Definition: normalized,
 			Config:     parsedConfig,
 			Tag:        tag,
-			OwnerID:    ownerID,
 			Scope:      scope,
 		}, nil
 	}
@@ -976,7 +961,7 @@ func (s *SingBoxService) prepareManagedUpstreams(
 		prepared, err := prepare(models.ProxyDefinition{
 			Type:   settings.GlobalUpstreamType,
 			Config: settings.GlobalUpstreamConfig,
-		}, globalUpstreamTag, 0, "global upstream proxy")
+		}, globalUpstreamTag, "global upstream proxy")
 		if err != nil {
 			return nil, false, err
 		}
@@ -1020,7 +1005,7 @@ func (s *SingBoxService) prepareManagedUpstreams(
 			prepared, err := prepare(models.ProxyDefinition{
 				Type:   node.Node.UpstreamType,
 				Config: node.Node.UpstreamConfig,
-			}, tag, node.Node.ID, fmt.Sprintf("node %d custom upstream proxy", node.Node.ID))
+			}, tag, fmt.Sprintf("node %d custom upstream proxy", node.Node.ID))
 			if err != nil {
 				return nil, false, err
 			}
@@ -1669,14 +1654,6 @@ func mergeGeneratorOptionMaps(base map[string]interface{}, override map[string]i
 	return result
 }
 
-func normalizeGeneratorFingerprint(raw string) string {
-	value := strings.ToLower(strings.TrimSpace(raw))
-	if value == "none" {
-		return ""
-	}
-	return value
-}
-
 func legacyGeneratorTLS(enabled bool, disableSNI bool, serverName string, insecure bool, alpn []string, fingerprint string) map[string]interface{} {
 	if !enabled {
 		return map[string]interface{}{}
@@ -1694,7 +1671,7 @@ func legacyGeneratorTLS(enabled bool, disableSNI bool, serverName string, insecu
 	if len(alpn) > 0 {
 		tls["alpn"] = append([]string{}, alpn...)
 	}
-	if fingerprint = normalizeGeneratorFingerprint(fingerprint); fingerprint != "" {
+	if fingerprint = normalizeFingerprint(fingerprint); fingerprint != "" {
 		tls["utls"] = map[string]interface{}{
 			"enabled":     true,
 			"fingerprint": fingerprint,
@@ -2955,7 +2932,6 @@ func (s *SingBoxService) startProcessLocked(configHash string) error {
 	s.processGeneration++
 	generation := s.processGeneration
 	s.process = cmd
-	s.logCloser = logCloser
 	s.processDone = done
 	s.processErr = nil
 	s.processStartedAt = startedAt
@@ -3044,7 +3020,6 @@ func (s *SingBoxService) watchProcess(
 		desiredHash := s.runtimeStatus.DesiredConfigHash
 		applyStage := s.runtimeStatus.ApplyStage
 		s.process = nil
-		s.logCloser = nil
 		s.processDone = nil
 		s.processErr = err
 		s.processStartedAt = time.Time{}

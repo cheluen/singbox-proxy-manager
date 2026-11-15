@@ -5,6 +5,7 @@ import { protocolFixtures } from './fixtures/protocol-configs.mjs'
 import { createProtocolFormModel, parsePeersJSON, parseReservedInput } from '../src/core/protocolForm.js'
 import { EMPTY_CRITERIA, collectFacets, filterNodes } from '../src/core/nodeFilters.js'
 import { stableConfigSignature } from '../src/core/nodeModel.js'
+import { parseNodesVirtualThreshold, readNodesVirtualThreshold } from '../src/core/nodeList.js'
 import { buildProxyUrl, summarizeNodes } from '../src/core/nodeView.js'
 import { randomCredentials } from '../src/core/credentials.js'
 import { ensureLatestFrontendBuild, frontendBuildVersion } from '../src/core/version.js'
@@ -34,11 +35,14 @@ test('系统测试只允许同源预期停机与撤销认证错误，不屏蔽�
   assert.equal(isExpectedSystemBrowserError(error('/api/nodes/batch-import', 'status of 500 (Server Error)'), { origin }), false)
 })
 
-test('中英文统一使用项目品牌，不再把功能描述当作项目名', () => {
+test('项目品牌使用共享常量，不再依赖旧翻译词条', () => {
   assert.equal(PROJECT_NAME, 'SingBox Proxy Manager')
   assert.equal(PROJECT_NAME, `${PROJECT_BRAND} ${PROJECT_DESCRIPTOR}`)
-  assert.equal(baseZh.app_title, PROJECT_NAME)
-  assert.equal(baseEn.app_title, PROJECT_NAME)
+  assert.equal(Object.hasOwn(baseZh, 'app_title'), false)
+  assert.equal(Object.hasOwn(baseEn, 'app_title'), false)
+  const brand = readFileSync(new URL('../src/shared/Brand.jsx', import.meta.url), 'utf8')
+  assert.ok(brand.includes('{PROJECT_BRAND}') && brand.includes('{PROJECT_DESCRIPTOR}'))
+  assert.equal(brand.includes('useTranslation'), false)
 })
 
 test('静态浏览器标题、应用名称与紧凑品牌标识对齐', () => {
@@ -168,6 +172,22 @@ const nodes = [
   { id: 3, name: 'Tokyo off', type: 'vmess', inbound_port: 30003, enabled: false, node_ip: '203.0.113.3', country_code: 'JP', latency: 50 },
 ]
 
+test('节点渲染阈值默认 120，0 全量，正整数决定批次大小', () => {
+  for (const raw of [undefined, null, '', 'invalid', '-1', '1.5', '1e3', '9007199254740992']) {
+    assert.equal(parseNodesVirtualThreshold(raw), 120)
+  }
+  for (const [raw, expected] of [['0', 0], ['1', 1], ['120', 120], ['9999', 9999], [' +12 ', 12]]) {
+    assert.equal(parseNodesVirtualThreshold(raw), expected)
+    assert.equal(readNodesVirtualThreshold(), 120)
+    globalThis.document = { querySelector: (selector) => {
+      assert.equal(selector, 'meta[name="sbpm-nodes-virtual-threshold"]')
+      return { getAttribute: () => raw }
+    } }
+    assert.equal(readNodesVirtualThreshold(), expected)
+    delete globalThis.document
+  }
+})
+
 test('全部筛选项准确匹配，不把 SS 混为 VLESS 或 VMess', () => {
   const ids = (criteria) => filterNodes(nodes, { ...EMPTY_CRITERIA, ...criteria }).map((node) => node.id)
   assert.deepEqual(ids({ types: ['ss'] }), [1])
@@ -183,7 +203,7 @@ test('全部筛选项准确匹配，不把 SS 混为 VLESS 或 VMess', () => {
   const facets = collectFacets(nodes)
   assert.deepEqual(facets.usernames, ['alice'])
   assert.equal(facets.regions.find((region) => region.value === 'jp').count, 2)
-  assert.deepEqual(summarizeNodes(nodes), { total: 3, healthy: 1, unverified: 1, disabled: 1, enabled: 2, avgLatency: 30 })
+  assert.deepEqual(summarizeNodes(nodes), { total: 3, healthy: 1, unverified: 1, disabled: 1 })
 })
 
 test('去重基于配置语义，连接串安全编码认证字段', () => {

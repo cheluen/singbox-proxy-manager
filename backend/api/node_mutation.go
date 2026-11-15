@@ -10,124 +10,6 @@ import (
 	"sb-proxy/backend/services"
 )
 
-const proxyNodeSelectColumns = `
-	id, name, remark, type, config, inbound_port, inbound_port_pinned,
-	username, password, tcp_reuse_enabled, upstream_mode, upstream_type,
-	upstream_config, upstream_ip, upstream_location, upstream_country_code,
-	upstream_latency, upstream_error, sort_order, node_ip, location, country_code, latency,
-	enabled, created_at, updated_at
-`
-
-const runtimeSettingsSelectColumns = `
-	id, singleton_key, start_port, preserve_inbound_ports, global_upstream_enabled,
-	global_upstream_type, global_upstream_config, global_upstream_ip,
-	global_upstream_location, global_upstream_country_code, global_upstream_latency,
-	global_upstream_error, created_at, updated_at
-`
-
-type rowScanner interface {
-	Scan(dest ...interface{}) error
-}
-
-type nodeQueryer interface {
-	QueryContext(ctx context.Context, query string, args ...interface{}) (*sql.Rows, error)
-}
-
-type nodeQueryRower interface {
-	QueryRowContext(ctx context.Context, query string, args ...interface{}) *sql.Row
-}
-
-func scanProxyNode(scanner rowScanner) (models.ProxyNode, error) {
-	var node models.ProxyNode
-	err := scanner.Scan(
-		&node.ID,
-		&node.Name,
-		&node.Remark,
-		&node.Type,
-		&node.Config,
-		&node.InboundPort,
-		&node.InboundPortPinned,
-		&node.Username,
-		&node.Password,
-		&node.TCPReuseEnabled,
-		&node.UpstreamMode,
-		&node.UpstreamType,
-		&node.UpstreamConfig,
-		&node.UpstreamIP,
-		&node.UpstreamLocation,
-		&node.UpstreamCountryCode,
-		&node.UpstreamLatency,
-		&node.UpstreamError,
-		&node.SortOrder,
-		&node.NodeIP,
-		&node.Location,
-		&node.CountryCode,
-		&node.Latency,
-		&node.Enabled,
-		&node.CreatedAt,
-		&node.UpdatedAt,
-	)
-	return node, err
-}
-
-func loadAllNodesFrom(ctx context.Context, queryer nodeQueryer) ([]models.ProxyNode, error) {
-	rows, err := queryer.QueryContext(ctx, `
-		SELECT `+proxyNodeSelectColumns+`
-		FROM proxy_nodes
-		ORDER BY sort_order ASC
-	`)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-
-	nodes := make([]models.ProxyNode, 0)
-	for rows.Next() {
-		node, err := scanProxyNode(rows)
-		if err != nil {
-			return nil, err
-		}
-		nodes = append(nodes, node)
-	}
-	if err := rows.Err(); err != nil {
-		return nil, err
-	}
-	return nodes, nil
-}
-
-func loadNodeByIDFrom(ctx context.Context, queryer nodeQueryRower, id int) (models.ProxyNode, error) {
-	return scanProxyNode(queryer.QueryRowContext(ctx, `
-		SELECT `+proxyNodeSelectColumns+`
-		FROM proxy_nodes
-		WHERE id = ?
-	`, id))
-}
-
-func loadRuntimeSettingsFrom(ctx context.Context, queryer nodeQueryRower) (models.Settings, error) {
-	var settings models.Settings
-	err := queryer.QueryRowContext(ctx, `
-		SELECT `+runtimeSettingsSelectColumns+`
-		FROM settings
-		WHERE singleton_key = 1
-	`).Scan(
-		&settings.ID,
-		&settings.SingletonKey,
-		&settings.StartPort,
-		&settings.PreserveInboundPorts,
-		&settings.GlobalUpstreamEnabled,
-		&settings.GlobalUpstreamType,
-		&settings.GlobalUpstreamConfig,
-		&settings.GlobalUpstreamIP,
-		&settings.GlobalUpstreamLocation,
-		&settings.GlobalUpstreamCountryCode,
-		&settings.GlobalUpstreamLatency,
-		&settings.GlobalUpstreamError,
-		&settings.CreatedAt,
-		&settings.UpdatedAt,
-	)
-	return settings, err
-}
-
 type NodeMutationOperation struct {
 	ApplyRuntime bool
 	Mutate       func(context.Context, *sql.Tx) error
@@ -146,6 +28,41 @@ func NewNodeMutationCoordinator(db *sql.DB, singBoxService *services.SingBoxServ
 		singBoxService: singBoxService,
 		runtimeApplier: services.NewRuntimeApplier(singBoxService),
 	}
+}
+
+// ReapplyRuntime 只读取节点和设置，与数据修改共用互斥锁，但不创建数据库事务或快照。
+func (coordinator *NodeMutationCoordinator) ReapplyRuntime(ctx context.Context) error {
+	coordinator.mu.Lock()
+	defer coordinator.mu.Unlock()
+
+	nodes, err := models.LoadProxyNodes(ctx, coordinator.db)
+	if err != nil {
+		return err
+	}
+	settings, err := models.LoadRuntimeSettings(ctx, coordinator.db)
+	if err != nil {
+		return err
+	}
+	plan, err := coordinator.runtimeApplier.PrepareContext(ctx, nodes, settings)
+	if err != nil {
+		return err
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	// 内核事务仍负责配置校验后的启动，以及失败时恢复之前可用的配置和进程。
+	transaction, err := coordinator.runtimeApplier.Begin(plan)
+	if err != nil {
+		return err
+	}
+	if err := ctx.Err(); err != nil {
+		if rollbackErr := transaction.Rollback(); rollbackErr != nil {
+			return fmt.Errorf("runtime restart canceled: %w; rollback failed: %v", err, rollbackErr)
+		}
+		return err
+	}
+	transaction.Commit()
+	return nil
 }
 
 func (coordinator *NodeMutationCoordinator) Execute(
@@ -178,11 +95,11 @@ func (coordinator *NodeMutationCoordinator) Execute(
 	if !operation.ApplyRuntime {
 		return nil, tx.Commit()
 	}
-	candidateNodes, err := loadAllNodesFrom(ctx, tx)
+	candidateNodes, err := models.LoadProxyNodes(ctx, tx)
 	if err != nil {
 		return nil, err
 	}
-	settings, err := loadRuntimeSettingsFrom(ctx, tx)
+	settings, err := models.LoadRuntimeSettings(ctx, tx)
 	if err != nil {
 		return nil, err
 	}

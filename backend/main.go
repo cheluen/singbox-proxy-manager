@@ -442,54 +442,15 @@ func configuredBindAddress() string {
 // database contents and launches the sing-box child process. Failures are
 // logged but not fatal so the management UI stays reachable for recovery.
 func startSingBoxFromDatabase(db *sql.DB, singBoxService *services.SingBoxService, configDir string) {
-	rows, err := db.Query(`
-		SELECT id, name, remark, type, config, inbound_port, inbound_port_pinned, username, password, tcp_reuse_enabled,
-		       upstream_mode, upstream_type, upstream_config, sort_order, node_ip, location,
-		       country_code, latency, enabled, created_at, updated_at
-		FROM proxy_nodes
-		ORDER BY sort_order ASC
-	`)
+	ctx := context.Background()
+	nodes, err := models.LoadProxyNodes(ctx, db)
 	if err != nil {
-		startPreservedConfigAfterDatabaseFailure(singBoxService, fmt.Errorf("failed to query proxy nodes: %w", err), configDir)
+		startPreservedConfigAfterDatabaseFailure(singBoxService, fmt.Errorf("failed to load proxy nodes: %w", err), configDir)
 		return
 	}
-	defer rows.Close()
-
-	var nodes []models.ProxyNode
-	for rows.Next() {
-		var node models.ProxyNode
-		if err := rows.Scan(
-			&node.ID, &node.Name, &node.Remark, &node.Type, &node.Config, &node.InboundPort,
-			&node.InboundPortPinned, &node.Username, &node.Password, &node.TCPReuseEnabled,
-			&node.UpstreamMode, &node.UpstreamType, &node.UpstreamConfig, &node.SortOrder,
-			&node.NodeIP, &node.Location, &node.CountryCode, &node.Latency, &node.Enabled,
-			&node.CreatedAt, &node.UpdatedAt,
-		); err != nil {
-			startPreservedConfigAfterDatabaseFailure(singBoxService, fmt.Errorf("failed to scan proxy node: %w", err), configDir)
-			return
-		}
-		nodes = append(nodes, node)
-	}
-	if err := rows.Err(); err != nil {
-		startPreservedConfigAfterDatabaseFailure(singBoxService, fmt.Errorf("failed while reading proxy nodes: %w", err), configDir)
-		return
-	}
-	if err := rows.Close(); err != nil {
-		startPreservedConfigAfterDatabaseFailure(singBoxService, fmt.Errorf("failed to close proxy node query: %w", err), configDir)
-		return
-	}
-
-	var settings models.Settings
-	if err := db.QueryRow(`
-		SELECT global_upstream_enabled, global_upstream_type, global_upstream_config
-		FROM settings
-		WHERE singleton_key = 1
-	`).Scan(
-		&settings.GlobalUpstreamEnabled,
-		&settings.GlobalUpstreamType,
-		&settings.GlobalUpstreamConfig,
-	); err != nil {
-		startPreservedConfigAfterDatabaseFailure(singBoxService, fmt.Errorf("failed to query runtime settings: %w", err), configDir)
+	settings, err := models.LoadRuntimeSettings(ctx, db)
+	if err != nil {
+		startPreservedConfigAfterDatabaseFailure(singBoxService, fmt.Errorf("failed to load runtime settings: %w", err), configDir)
 		return
 	}
 
@@ -571,10 +532,10 @@ func registerFrontendRoutes(r *gin.Engine, frontendDistDir string, appVersion st
 		return fmt.Errorf("read index.html: %w", err)
 	}
 
-	nodesVirtualThreshold := readIntEnv("SBPM_NODES_VIRTUAL_THRESHOLD", 50)
+	nodesVirtualThreshold := readIntEnv("SBPM_NODES_VIRTUAL_THRESHOLD", 120)
 	if nodesVirtualThreshold < 0 {
-		log.Printf("Invalid SBPM_NODES_VIRTUAL_THRESHOLD=%d, using default 50", nodesVirtualThreshold)
-		nodesVirtualThreshold = 50
+		log.Printf("Invalid SBPM_NODES_VIRTUAL_THRESHOLD=%d, using default 120", nodesVirtualThreshold)
+		nodesVirtualThreshold = 120
 	}
 	nodesVirtualThresholdMeta := fmt.Sprintf(
 		`    <meta name="sbpm-nodes-virtual-threshold" content="%d" />`,

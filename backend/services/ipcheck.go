@@ -179,14 +179,8 @@ func waitForTCPReady(ctx context.Context, addr string, maxWait time.Duration) er
 	}
 }
 
-// CheckProxyIP checks the exit IP and location through the given proxy.
-// proxyAddr must be host:port (or [IPv6]:port), without a scheme or credentials.
-// Pass credentials through username and password; leave both empty for no authentication.
-func CheckProxyIP(proxyAddr string, username string, password string) (*IPInfo, error) {
-	return CheckProxyIPContext(context.Background(), proxyAddr, username, password)
-}
-
-// CheckProxyIPContext supports cancellation with the same address and credential contract as CheckProxyIP.
+// CheckProxyIPContext 通过节点入站检测出口 IP；proxyAddr 使用 host:port 或 [IPv6]:port。
+// 认证信息单独传入，无认证时两项都留空；ctx 支持取消，direct 节点也使用此通道。
 func CheckProxyIPContext(
 	ctx context.Context,
 	proxyAddr string,
@@ -587,32 +581,5 @@ func checkWithService(ctx context.Context, client *http.Client, serviceURL strin
 	log.Printf("[IPCheck] Parsed response - IP: %s, Country: %s (%s), City: %s, Region: %s",
 		info.IP, info.Country, info.CountryCode, info.City, info.Region)
 
-	return info, nil
-}
-
-// CheckDirectIP checks the IP without proxy
-func CheckDirectIP() (*IPInfo, error) {
-	log.Printf("[IPCheck] Checking direct IP (no proxy)")
-
-	ctx, cancel := context.WithTimeout(context.Background(), ipCheckTotalDeadline)
-	defer cancel()
-
-	transport := &http.Transport{
-		DisableKeepAlives: true,
-	}
-
-	client := &http.Client{
-		Transport: transport,
-	}
-
-	services := ipCheckServiceURLs()
-
-	info, err := checkWithServicesRacing(ctx, client, services)
-	transport.CloseIdleConnections()
-	if err != nil {
-		log.Printf("[IPCheck] Direct check failed completely: %v", err)
-		return nil, fmt.Errorf("all IP check services failed: %w", err)
-	}
-	log.Printf("[IPCheck] Direct check success! IP: %s", info.IP)
 	return info, nil
 }

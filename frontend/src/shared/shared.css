@@ -158,7 +158,6 @@
 }
 
 .sb-detail-actions { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; }
-.sb-enabled-switch { font-size: 13px; color: var(--ink-2); white-space: nowrap; }
 
 /* 健康分布：细分段条 + 可点击图例 */
 .sb-healthbar { margin: 0; min-width: 0; }
