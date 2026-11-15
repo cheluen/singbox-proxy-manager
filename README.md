@@ -1,10 +1,12 @@
+<a id="top"></a>
+
 # SingBox 代理转发管理系统-纯为了学习相关技术自用
 
 <div align="center">
 
 <img src="./logo.svg" alt="SingBox Proxy Manager Logo" width="96" />
 
-![Version](https://img.shields.io/badge/version-1.7.19-blue.svg)
+![Version](https://img.shields.io/badge/version-1.7.20-blue.svg)
 ![License](https://img.shields.io/badge/license-MIT-green.svg)
 ![SingBox](https://img.shields.io/badge/sing--box-1.12.12-orange.svg)
 
@@ -24,7 +26,7 @@
 - 🌐 **多协议支持** - 支持 Direct、VLESS、VMess、Trojan、Hysteria2、TUIC、Shadowsocks、AnyTLS、WireGuard，以及 SOCKS5/SOCKS5H/HTTP 上游代理
 - 🔄 **双模式代理** - 单端口同时支持 HTTP 和 SOCKS5 协议
 - 📊 **IP 检测** - 实时检测节点 IP、地理位置和延迟
-- ⬆️ **版本更新提示** - 自动检查 GitHub Release，发现新版本时在面板版本号旁显示向上箭头
+- ⬆️ **版本更新提示** - GitHub Release 有新版本时，在面板版本号旁显示向上箭头
 
 ### 管理功能
 - ✨ **暮色管理面板** - 单一暗色指挥台、高密度节点列表、行内详情和移动端抽屉
@@ -49,24 +51,25 @@
 ## 🚀 快速开始
 
 ### 环境要求
-- Docker & Docker Compose
-- 网络模式：host（用于多端口监听）
+- Linux、Docker 和 Docker Compose V2
+- 网络模式：host（用于多端口监听）；以下部署命令统一使用 `/opt/singbox-proxy-manager`
 
 ### 一键部署
 
 ```bash
 # 1. 克隆项目
-git clone https://github.com/cheluen/singbox-proxy-manager.git
-cd singbox-proxy-manager
+git clone https://github.com/cheluen/singbox-proxy-manager.git /opt/singbox-proxy-manager
+cd /opt/singbox-proxy-manager
 
 # 2. 生成部署环境变量文件（所有部署方式建议参考这个变量清单）
-cp .env.example .env
+cp /opt/singbox-proxy-manager/.env.example /opt/singbox-proxy-manager/.env
+chmod 600 /opt/singbox-proxy-manager/.env
 
-# 3. 修改 .env；Compose 默认监听 0.0.0.0，必须设置 ADMIN_PASSWORD 才能启动
+# 3. 修改 .env；新数据库必须设置 ADMIN_PASSWORD，监听回环地址也不能留空
 # 镜像来源切换：
 #   COMPOSE_PROFILES=ghcr  -> 使用 GHCR 预构建镜像（默认）
 #   COMPOSE_PROFILES=local -> 使用本地源码构建镜像
-nano .env
+nano /opt/singbox-proxy-manager/.env
 
 # 4. 启动服务
 docker compose up -d
@@ -74,6 +77,8 @@ docker compose up -d
 # 5. 查看日志
 docker compose logs -f
 ```
+
+两个 Compose 服务都会读取与 `docker-compose.yml` 同目录的 `.env`，包括配置校验、上游检测及批量导入的五个超时／并发参数。默认 `ghcr` 模式直接使用已发布镜像；只有 `local` 模式从本地源码构建。不要同时启用两种模式，它们共用容器名 `sb-proxy`。
 
 服务启动后访问：`http://您的服务器IP:30000`
 
@@ -89,17 +94,19 @@ docker compose logs -f
 
 > 每个平台只需一个可执行文件，已内置前端和 sing-box，不需要额外安装 Go、Node、Docker 或内核。
 
-程序自动读取**可执行文件同目录**和**当前工作目录**的 `.env`。首次使用新数据库需要设置管理员密码；未设置 `TZ` 时默认使用 `Asia/Shanghai`。
+程序自动读取**可执行文件同目录**和**当前工作目录**的 `.env`，已有进程环境变量优先。首次使用新数据库必须设置非空 `ADMIN_PASSWORD`，不受监听地址影响；未设置 `TZ` 时默认使用 `Asia/Shanghai`。如果复用 `.env.example`，请将容器内的 `CONFIG_DIR=/app/config` 改为二进制实际使用的数据目录。
 
 ```bash
 # 下载适合平台的单文件（示例：Linux amd64）
-APP_VERSION=1.7.19
-curl -fL -o singbox-proxy-manager "https://github.com/cheluen/singbox-proxy-manager/releases/download/v${APP_VERSION}/singbox-proxy-manager-linux-amd64"
-chmod +x singbox-proxy-manager
+mkdir -p /opt/singbox-proxy-manager
+cd /opt/singbox-proxy-manager
+APP_VERSION=1.7.20
+curl -fL -o /opt/singbox-proxy-manager/singbox-proxy-manager "https://github.com/cheluen/singbox-proxy-manager/releases/download/v${APP_VERSION}/singbox-proxy-manager-linux-amd64"
+chmod +x /opt/singbox-proxy-manager/singbox-proxy-manager
 # 首次启动设置自己的管理员密码；之后可在管理面板修改
 read -rs -p '管理员密码: ' ADMIN_PASSWORD; echo
 export ADMIN_PASSWORD
-./singbox-proxy-manager
+/opt/singbox-proxy-manager/singbox-proxy-manager
 ```
 
 ### 单文件升级与数据目录
@@ -118,7 +125,7 @@ export ADMIN_PASSWORD
 
 - 后台和 sing-box 内核均固定使用 Go 1.26.11 编译，修复 CVE-2026-111943 和 CVE-2026-97054；两者编译后打包进一个发行文件，升级只替换管理程序。
 - 后台另将 `golang.org/x/text` 最小升级至 0.41.0，修复扫描中发现的可达漏洞 GO-2026-6629；相关工具依赖按其最低要求同步。
-- 前端锁文件同步修复原有生产依赖审计发现的漏洞：Axios 1.20.0、follow-redirects 1.16.1，不更改页面业务代码。
+- 当前前端锁文件使用 Axios 1.21.1、follow-redirects 1.16.3；依赖的实际安装版本以 `frontend/package-lock.json` 为准。
 - 远程回归发现 Turso 并发写锁及驱动关闭远程流后的复用错误；限制为单连接，事务结束后不复用远程连接，并增加排队读写回归测试。
 - sing-box 保留 1.12.12 版本，源码提交为 `54ed58499d7063136ed52dabf87d179d252425d0`，模块归档校验和固定在 `scripts/build-sing-box.sh`。
 - 源码构建使用该脚本并保留原官方内核的八项功能标签，支持通过 `GOOS`、`GOARCH` 交叉编译；脚本参数必须为输出文件的绝对路径。
@@ -133,22 +140,23 @@ export ADMIN_PASSWORD
 
 - 默认端口：`30000`
 - **不再提供默认密码**
-  - 新数据库首次启动时，`ADMIN_PASSWORD` 必须为非空值；服务会先持久化安全哈希，再开放管理端口
+  - 新数据库首次启动时，`ADMIN_PASSWORD` 必须为非空值，最长 72 字节；无论监听公网还是回环地址，都先持久化安全哈希，再开放管理端口
   - 已有数据库包含有效管理员密码哈希时，可以不设置 `ADMIN_PASSWORD`，登录密码以数据库为准
-  - 修改 `ADMIN_PASSWORD` 后重启会更新数据库密码并撤销已有会话；环境值未变化时仍可在面板内修改密码
+  - 老数据库已有有效密码、但尚未记录环境密码指纹时，第一次配置 `ADMIN_PASSWORD` 只记录指纹，不覆盖旧密码，也不撤销会话
+  - 指纹已记录后，再更改非空 `ADMIN_PASSWORD` 并重启才会更新密码、撤销已有会话；环境值未变化时保留面板内修改的密码
 
 ### 2. 添加节点
 
 #### 方式一：单个添加
 1. 点击「添加节点」按钮
-2. 粘贴分享链接（支持 vless://、vmess://、hysteria2:// 等）
-3. 设置入站端口（留空自动分配）
-4. 系统会为每个新节点自动生成入站用户名/密码（可在面板内单独或批量修改）
+2. 粘贴分享链接并点击「解析」，或选择协议后手动填写服务器与协议配置
+3. 默认由后端从「全局设置」的起始端口分配入站端口；开启「保留入站端口」后才可在新增表单指定端口，留空仍自动分配
+4. 入站认证默认开启，但用户名和密码初始为空：自行填写或点击「生成」，也可关闭认证后保存
 
 #### 方式二：批量导入
 1. 点击「批量导入」
-2. 每行一个分享链接
-3. 系统自动解析并添加
+2. 选择输入类型，粘贴分享链接、订阅地址或 HTTP 代理列表
+3. 系统解析并校验候选节点，为每个成功导入的节点自动生成独立入站用户名和密码；失败项目会返回明细
 
 ### 3. 使用代理
 
@@ -158,15 +166,16 @@ export ADMIN_PASSWORD
 代理类型：HTTP 或 SOCKS5
 服务器：您的服务器IP
 端口：30001、30002、30003...（对应各节点）
-用户名：在管理界面查看/修改（新节点会自动生成）
-密码：在管理界面查看/修改（新节点会自动生成）
+用户名：使用节点详情中的入站用户名（关闭认证时不填）
+密码：使用节点详情中的入站密码（关闭认证时不填）
 ```
 
 ### 4. 管理节点
 
 - **启用/禁用**：点击开关即可切换节点状态
 - **检测 IP**：勾选节点后点击「批量测IP」
-- **拖拽排序**：拖动节点到目标位置，端口自动重新分配
+- **拖拽排序**：自动模式按顺序重分配未固定节点的端口；固定端口不变，开启全局「保留入站端口」时排序也不改端口
+- **固定端口**：自动模式可给现有节点固定端口，后续排序或端口重分配会跳过这些节点
 - **批量认证**：勾选多个节点，统一设置用户名密码
 - **批量删除**：勾选节点后点击「批量删除」
 
@@ -176,7 +185,9 @@ export ADMIN_PASSWORD
 
 ### 环境变量
 
-统一在项目根目录 `.env` 中配置（可由 `.env.example` 复制而来）：
+Compose 使用项目根目录 `.env`（必须先从 `.env.example` 复制），通过 `env_file` 将内容传入容器；`environment` 中显式声明的变量优先采用宿主机环境，再采用 `.env`，最后采用默认值。二进制部署按其工作目录与可执行文件目录加载 `.env`。
+
+下面列出常用配置；完整清单见 [`.env.example`](.env.example)，参数边界及版本检查实现见 [运维技术说明](OPERATIONS.md)。空白 `ADMIN_PASSWORD` 仅用于模板，新数据库启动前必须填写。
 
 ```bash
 # 镜像来源（关键开关）
@@ -196,6 +207,11 @@ TZ=UTC+8
 ADMIN_PASSWORD=
 SINGBOX_BINARY=
 SINGBOX_ENV_ALLOWLIST=                 # 额外传给 sing-box 的非敏感环境变量名，逗号分隔
+SBPM_SINGBOX_CHECK_CONCURRENCY=4
+SBPM_SINGBOX_CHECK_TIMEOUT=10s
+SBPM_UPSTREAM_CHECK_CONCURRENCY=3
+SBPM_UPSTREAM_CHECK_TIMEOUT=30s
+SBPM_BATCH_IMPORT_VALIDATION_TIMEOUT=45s
 SBPM_SINGBOX_LOG_OUTPUT=stdout       # stdout、file 或 both
 SBPM_SINGBOX_LOG_MAX_BYTES=10485760
 SBPM_SINGBOX_LOG_BACKUPS=3
@@ -219,12 +235,14 @@ HTTP_IDLE_TIMEOUT=60s
 HTTP_MAX_HEADER_BYTES=1048576
 API_MAX_BODY_BYTES=1048576
 
-# 数据库（优先级：DATABASE_URL/POSTGRES_DATABASE_URL/MYSQL_DATABASE_URL > Turso > 本地 SQLite）
-DATABASE_URL=                         # postgres://... 或 mysql://...
+# 数据库 URL 变量按以下顺序取第一个非空值，再考虑 Turso，最后使用本地 SQLite
+DATABASE_URL=
 POSTGRES_DATABASE_URL=
+POSTGRES_URL=
+PGSQL_DATABASE_URL=
+PGSQL=
 MYSQL_DATABASE_URL=
-PGSQL=                               # 可选短变量名：postgres://...
-MYSQL=                               # 可选短变量名：mysql://...
+MYSQL=
 MYSQL_DATABASE_NAME=                  # MySQL URL 指向 sys 等系统库时可覆盖实际业务库
 DB_MAX_OPEN_CONNS=10
 DB_MAX_IDLE_CONNS=5
@@ -233,52 +251,81 @@ SBPM_INSTANCE_LEASE_DURATION=30s
 SBPM_INSTANCE_LEASE_HEARTBEAT=10s
 TURSO_DATABASE_URL=
 TURSO_AUTH_TOKEN=
-
-# 版本更新检查
-SBPM_UPDATE_CHECK_DISABLED=false
-SBPM_UPDATE_CHECK_REPO=cheluen/singbox-proxy-manager
-SBPM_UPDATE_CHECK_TTL=6h
-SBPM_UPDATE_CHECK_TIMEOUT=5s
 ```
 
 > `TZ` 会作为全局服务时区参与日志与排障时间显示；默认建议使用 `UTC+8`（自动映射到上海/香港时区）。
 
 > `SINGBOX_BINARY` 仅用于不内置内核的开发构建；统一发行文件始终使用内置内核。
 
-> sing-box 子进程默认只继承运行所需的最小环境。确需额外变量时可通过 `SINGBOX_ENV_ALLOWLIST` 指定名称；密码、Token、数据库地址及私钥类名称即使列入也会被拒绝。Compose 部署还需将对应变量显式加入容器环境。
+> `CONFIG_DIR` 是容器内的数据目录，`CONFIG_VOLUME_HOST` 是宿主机挂载目录；默认将宿主机项目下的 `config` 挂到容器的 `/app/config`。更改容器内目录时需同步调整挂载目标，不能只修改 `CONFIG_DIR`。
+
+> sing-box 子进程默认只继承运行所需的最小环境。确需额外变量时可通过 `SINGBOX_ENV_ALLOWLIST` 指定名称，并将变量值写入 `.env`，Compose 的 `env_file` 会传入管理进程；密码、Token、数据库地址及私钥类名称即使列入也会被拒绝。
 
 > 如本地源码构建遇到 Go 模块下载受限，可改为：`GO_MODULE_PROXY=https://goproxy.cn,direct`，必要时再配合 `GO_SUM_DB=off`。
 
-> 不想用远程数据库可以全部留空，系统会自动使用本地 SQLite。远程数据库优先级为：`DATABASE_URL` / `POSTGRES_DATABASE_URL` / `MYSQL_DATABASE_URL` / `PGSQL` / `MYSQL` > Turso > 本地 SQLite。
+> 数据库 URL 的优先级严格为：`DATABASE_URL` > `POSTGRES_DATABASE_URL` > `POSTGRES_URL` > `PGSQL_DATABASE_URL` > `PGSQL` > `MYSQL_DATABASE_URL` > `MYSQL`。取第一个非空值，由 URL 协议决定数据库类型；配置错误会启动失败，不会继续尝试低优先级变量。上述变量全部为空时，只有 `TURSO_DATABASE_URL` 与 `TURSO_AUTH_TOKEN` 均非空才使用 Turso，否则使用本地 SQLite。
 
 > 管理进程通过数据库租约强制单实例运行。共享同一数据库启动第二个管理实例会直接失败；每个实例仍管理各自本地 sing-box 运行时，因此不支持横向扩容。
 
 ### 端口说明
 
 - `30000`：管理界面端口（可修改）
-- `30001+`：代理节点入站端口（自动分配或手动设置）
+- `30001`：新数据库默认的节点起始端口，在「全局设置」修改，允许范围为 `1024–65535`
+- 新增节点从起始端口寻找可用端口；自动模式忽略新增请求中的手动端口，保留模式允许指定端口
 
 ### 数据持久化
 
-默认使用本地 SQLite，数据存储在 `./config` 目录：
+默认使用本地 SQLite。按前述 Compose 部署路径，宿主机数据目录为 `/opt/singbox-proxy-manager/config`，容器内为 `/app/config`：
 - `config.json`：sing-box 配置文件
 - `proxy.db`：节点数据库
 - `config.json.last-good`：最近一次成功启动的 sing-box 配置快照
 
 如果启用了远程数据库（PostgreSQL/MySQL/Turso）：
 - 节点/设置/会话数据会存到远程数据库（不再写入本地 `proxy.db`）
-- `./config` 目录仍会保存 `config.json` 和 `config.json.last-good`
+- 配置目录仍会保存 `config.json` 和 `config.json.last-good`
 
 Compose 默认使用 `SBPM_SINGBOX_LOG_OUTPUT=stdout`，内核日志由容器 `json-file` 驱动按 `10m × 3` 轮转，不写入配置卷。独立二进制如设置为 `file` 或 `both`，则在配置目录生成 `singbox.log`，并按 `SBPM_SINGBOX_LOG_MAX_BYTES` 和 `SBPM_SINGBOX_LOG_BACKUPS` 保留轮转文件。
 
-```bash
-# 备份数据
-cp -r ./config ./config.backup
+以下是 **Linux 默认 Compose + SQLite 部署**的离线备份与恢复步骤。修改过 `CONFIG_VOLUME_HOST` 时使用实际宿主机路径；远程数据库必须另外通过数据库提供方备份与恢复，复制配置目录不能还原远程节点数据。
 
-# 恢复数据
-cp -r ./config.backup ./config
-docker compose restart
+备份时先停服务，避免复制正在写入的 SQLite 数据。备份保存在仓库外，不提交到 Git：
+
+```bash
+set -e
+cd /opt/singbox-proxy-manager
+install -d -m 700 /var/backups/singbox-proxy-manager
+BACKUP_DIR="/var/backups/singbox-proxy-manager/$(date -u +%Y%m%dT%H%M%S%N)"
+docker compose stop
+cp -a /opt/singbox-proxy-manager/config "$BACKUP_DIR"
+docker compose up -d
+printf '备份目录：%s\n' "$BACKUP_DIR"
 ```
+
+恢复时先把旧目录移到独立回滚位置，再复制备份到不存在的目标，既避免目录嵌套，也避免旧数据库的 WAL／SHM 文件残留：
+
+```bash
+set -e
+cd /opt/singbox-proxy-manager
+read -r -p '要恢复的备份目录（绝对路径）: ' BACKUP_DIR
+BACKUP_DIR=$(realpath -e "$BACKUP_DIR")
+case "$BACKUP_DIR" in
+  /opt/singbox-proxy-manager/config|/opt/singbox-proxy-manager/config/*)
+    printf '请选择配置目录外的独立备份\n' >&2
+    exit 1
+    ;;
+esac
+test -f "$BACKUP_DIR/proxy.db"
+install -d -m 700 /var/backups/singbox-proxy-manager
+ROLLBACK_DIR="/var/backups/singbox-proxy-manager/before-restore-$(date -u +%Y%m%dT%H%M%S%N)"
+docker compose stop
+if [ -e /opt/singbox-proxy-manager/config ]; then
+  mv /opt/singbox-proxy-manager/config "$ROLLBACK_DIR"
+fi
+cp -a "$BACKUP_DIR" /opt/singbox-proxy-manager/config
+docker compose up -d
+```
+
+保留原 `.env` 和数据库连接配置。确认恢复成功前不要删除回滚目录；备份与配置目录均包含节点凭据，应保持私有。
 
 ---
 
@@ -286,22 +333,21 @@ docker compose restart
 
 ### 修改默认端口
 
-```yaml
-# docker-compose.yml
-environment:
-  - PORT=8080  # 改为您想要的端口
+在 `/opt/singbox-proxy-manager/.env` 修改管理端口，然后执行 `docker compose up -d` 重建容器使环境生效，不需要修改 Compose 文件：
+
+```dotenv
+PORT=8080
 ```
 
 ### 使用环境变量管理密码
 
-```bash
-# 编辑 .env
-ADMIN_PASSWORD=您的超级安全密码
-```
+在 `.env` 填写非空 `ADMIN_PASSWORD` 后执行 `docker compose up -d`。`docker compose restart` 不会重新载入容器环境变量；老数据库首次接入环境密码的行为见「登录系统」，完整同步规则见 [运维技术说明](OPERATIONS.md#管理员密码同步)。
 
 ### 切换镜像来源（仅改 .env）
 
-```bash
+修改 `.env` 的 `COMPOSE_PROFILES` 后，先移除旧模式容器，再启动新模式；配置卷不会因此删除：
+
+```dotenv
 # 快速启动：使用 GHCR 预构建镜像
 COMPOSE_PROFILES=ghcr
 
@@ -309,53 +355,52 @@ COMPOSE_PROFILES=ghcr
 COMPOSE_PROFILES=local
 ```
 
+```bash
+cd /opt/singbox-proxy-manager
+docker compose --profile ghcr --profile local down
+docker compose up -d
+```
+
 ### GHCR 多架构镜像标签
 
 CI 会自动发布以下镜像标签到 GHCR，并提供 `linux/amd64` + `linux/arm64` 多架构清单：
 
 - `ghcr.io/cheluen/singbox-proxy-manager:latest`
-- `ghcr.io/cheluen/singbox-proxy-manager:v<版本号>`
-- `ghcr.io/cheluen/singbox-proxy-manager:<commit-sha>`
+- 版本标签：`v` 加项目版本，例如 `ghcr.io/cheluen/singbox-proxy-manager:v1.7.20`
+- 提交标签：完整 Git 提交 SHA；用于固定某次发布构建
 
 镜像构建会复用对应版本 Release 中的 Linux 二进制，确保二进制发布与容器发布支持的架构一致。
 
 ### 使用远程数据库（可选）
 
-默认走本地 SQLite，配合 `./config` 挂载即可持久化。需要跨机器共享数据时，可以选择以下任一远程数据库：
+默认走本地 SQLite，配合配置目录挂载即可持久化。需要由外部数据库保存数据时，可以选择以下任一类型；数据库租约仍限制同一数据库只能运行一个管理实例。
 
 #### PostgreSQL
 
-```bash
-DATABASE_URL=postgres://user:password@host:5432/dbname?sslmode=require
-```
+将数据库服务提供的 `postgres://` 或 `postgresql://` 连接串写入 `.env` 的 `DATABASE_URL`。可使用 `POSTGRES_DATABASE_URL`、`POSTGRES_URL`、`PGSQL_DATABASE_URL` 或 `PGSQL` 作为兼容变量；按前述优先级选择，URL 中的特殊用户名和密码需百分号编码。
 
 #### MySQL / TiDB Cloud
 
-```bash
-DATABASE_URL=mysql://user:password@host:4000/dbname?tls=true
-# 如云厂商给出的 URL 指向 sys/mysql/information_schema/performance_schema，程序会默认改用 test；也可显式覆盖：
-MYSQL_DATABASE_NAME=your_app_db
-```
+将 `mysql://` 连接串写入 `DATABASE_URL`、`MYSQL_DATABASE_URL` 或 `MYSQL`；后两者也接受 `go-sql-driver/mysql` 原生 DSN。未指定 `tls` 参数时，`localhost`、回环／私有 IP 及未指定地址（`0.0.0.0`、`::`）不自动启用 TLS，其他主机默认启用；可用连接串的 `tls` 参数覆盖。URL 指向 `sys`、`mysql`、`information_schema`、`performance_schema` 或未指定库名时使用 `test`，可通过 `MYSQL_DATABASE_NAME` 明确指定业务库。
 
 #### Turso / libSQL
 
-```bash
-TURSO_DATABASE_URL=libsql://your-db.turso.io
-TURSO_AUTH_TOKEN=your-token
-```
+将 Turso 提供的 libSQL 连接地址和认证令牌分别写入 `TURSO_DATABASE_URL`、`TURSO_AUTH_TOKEN`；两项必须同时设置，且全部 PostgreSQL／MySQL URL 变量必须为空。
 
-> 远程数据库优先级：`DATABASE_URL` / `POSTGRES_DATABASE_URL` / `MYSQL_DATABASE_URL` / `PGSQL` / `MYSQL` > Turso > 本地 SQLite。切换数据库前建议先备份并清理目标库中的旧测试数据，避免历史记录干扰。
+> 切换数据库不会自动迁移节点、设置和会话。先备份并迁移数据，再切换连接配置；不要用清空目标库代替数据迁移。
 
 重启服务使配置生效：
 
 ```bash
-docker compose down
+cd /opt/singbox-proxy-manager
 docker compose up -d
 ```
 
 ### 自定义入站端口范围
 
-首次添加节点时设置起始端口，后续节点将顺延分配。
+在「全局设置」修改起始端口 `start_port`，默认 `30001`。新增节点只读取此设置，不会修改起始端口。
+
+默认自动模式中，新增请求即使提供端口也会重新分配；修改起始端口或关闭「保留入站端口」会按排序重分配未固定节点，固定节点始终保留原端口。开启「保留入站端口」后，排序不改端口，新增／编辑时允许手动设置；留空仍由系统分配。
 
 ---
 
@@ -406,21 +451,18 @@ docker compose up -d
 
 1. **设置强管理员密码**
    - 新数据库首次启动前必须通过环境变量 `ADMIN_PASSWORD` 配置强密码，无论监听外部地址还是回环地址
-   - 已初始化数据库可使用数据库中保存的有效密码；修改环境变量密码后重启会撤销旧会话
+   - 已初始化数据库可使用数据库中保存的有效密码；环境密码同步遵循「登录系统」中的指纹规则
 
 2. **限制访问 IP**（可选）
    ```bash
    # 使用防火墙限制管理端口访问
-   ufw allow from 您的IP to any port 30000
+   read -r -p '允许访问管理端口的来源 IP: ' ALLOWED_IP
+   ufw allow from "$ALLOWED_IP" to any port 30000
    ```
 
 3. **定期备份数据**
-   ```bash
-   # 设置定时备份
-   crontab -e
-   # 添加：每天凌晨2点备份
-   0 2 * * * cp -r /root/sb-proxy/config /root/sb-proxy/config.$(date +\%Y\%m\%d)
-   ```
+   - 使用「数据持久化」的停服备份步骤，或数据库提供方的一致性备份功能；不要直接复制正在运行的 SQLite 数据库
+   - `.env`、数据库、配置快照和备份都包含凭据，保存在私有目录，不上传公开仓库
 
 4. **使用 HTTPS**（生产环境）
    - 建议在前面部署 Nginx 反向代理
@@ -433,29 +475,36 @@ docker compose up -d
 ### 服务无法启动
 ```bash
 # 查看日志
+cd /opt/singbox-proxy-manager
 docker compose logs -f
 
 # 检查端口占用
-ss -tlnp | grep 30000
+ss -tlnp '( sport = :30000 )'
 
-# 重新构建
-docker compose down
-docker compose up -d --build
+# 默认 GHCR 模式：拉取已发布镜像并启动，不编译本地源码
+docker compose pull sb-proxy-ghcr
+docker compose up -d --no-build sb-proxy-ghcr
 ```
+
+新数据库优先检查 `.env` 中是否设置了非空 `ADMIN_PASSWORD`；`.env` 缺失时 Compose 会报错。使用 `local` 模式时，启动命令为 `docker compose up -d --build sb-proxy-local`。
 
 ### 内置内核释放或启动失败
 
 1. 确认下载了匹配系统和 CPU 架构的管理程序。
 2. 确认 `CONFIG_DIR` 可写，且该目录所在文件系统未使用 `noexec` 挂载。
 3. `CONFIG_DIR/kernels` 必须是普通目录，不能是符号链接。损坏或缺失的内核会在重启管理程序时自动恢复。
-4. 开发构建若提示 `sing-box binary not found`，使用 Go 1.26.11 运行 `scripts/build-sing-box.sh /绝对路径/sing-box`，并设置 `SINGBOX_BINARY`。正式发行不需要这一步。
+4. 开发构建若提示 `sing-box binary not found`，使用 Go 1.26.11 运行 `/opt/singbox-proxy-manager/scripts/build-sing-box.sh /opt/singbox-proxy-manager/release-binaries/sing-box`，并将 `SINGBOX_BINARY` 设为该输出文件路径。正式发行不需要这一步。
 
 ### 从源码构建单文件
 
-先在前端目录运行 `npm ci && npm run build`，然后用 Go 1.26.11 执行：
+使用 Node.js 22 和 Go 1.26.11：
 
 ```bash
-./scripts/build-release.sh "$PWD/release-binaries/singbox-proxy-manager"
+cd /opt/singbox-proxy-manager/frontend
+npm ci
+npm run build
+cd /opt/singbox-proxy-manager
+/opt/singbox-proxy-manager/scripts/build-release.sh /opt/singbox-proxy-manager/release-binaries/singbox-proxy-manager
 ```
 
 可通过 `GOOS`、`GOARCH` 交叉编译。脚本先独立构建并验证内核，再内置内核及前端构建管理程序，最后校验管理程序编译器版本。相同工作区不允许并发构建不同平台。
@@ -463,7 +512,14 @@ docker compose up -d --build
 ### 代理无法连接
 ```bash
 # 测试代理连通性
-curl --proxy http://用户名:密码@服务器IP:30001 http://httpbin.org/ip
+read -r -p '节点代理地址（host:port）: ' PROXY_ADDRESS
+read -r -p '入站用户名（免认证时留空）: ' PROXY_USERNAME
+if [ -n "$PROXY_USERNAME" ]; then
+  # curl 会交互询问代理密码，不把密码写入 URL 或命令历史
+  curl --proxy "http://$PROXY_ADDRESS" --proxy-user "$PROXY_USERNAME" --connect-timeout 5 --max-time 15 https://api.ipify.org
+else
+  curl --proxy "http://$PROXY_ADDRESS" --connect-timeout 5 --max-time 15 https://api.ipify.org
+fi
 
 # Compose 默认日志输出（包含管理进程与 sing-box）
 docker compose logs -f
@@ -471,44 +527,50 @@ docker compose logs -f
 # 仅当 SBPM_SINGBOX_LOG_OUTPUT=file 或 both 时查看文件日志
 docker exec sb-proxy tail -f /app/config/singbox.log
 
-# 检查端口监听
-docker exec sb-proxy ss -tlnp | grep sing-box
+# host 网络模式下在宿主机检查节点监听端口（按实际节点端口调整）
+ss -tlnp '( sport = :30001 )'
 ```
 
 ### 节点 IP 检测失败
 - 检查服务器网络连接
 - 确认节点配置正确
-- 查看后端日志：`docker compose logs sb-proxy`
+- 查看后端日志：`docker compose logs --tail=200 sb-proxy-ghcr`；`local` 模式使用服务名 `sb-proxy-local`。`sb-proxy` 是容器名，不是 Compose 服务名
 
 ---
 
-## 📊 性能优化
+## 📊 资源管理
 
-### 资源占用
-- **单进程模式**：10个节点仅使用 ~40MB 内存
-- **多节点支持**：理论支持上百个节点（受端口限制）
-
-### 推荐配置
-- **CPU**：1核心以上
-- **内存**：512MB 以上
-- **硬盘**：1GB 以上
+- 常驻 sing-box 进程统一管理已启用节点；配置校验及上游 IP 检测会临时启动额外内核进程
+- 并发数与超时可通过 `.env` 的五个校验／检测参数控制，默认值与允许范围见 [运维技术说明](OPERATIONS.md#并发与超时参数)
+- 容器日志与可选文件日志均有轮转限制；配置目录还需为数据库、配置快照和释放的内核预留磁盘空间
+- 实际资源消耗取决于协议、并发连接和流量，不以节点数量推算固定内存占用
 
 ---
 
 ## 🔄 更新升级
 
+先按「数据持久化」备份，保留 `.env` 与配置卷，然后按实际部署方式升级。
+
+### 默认 GHCR 镜像部署
+
 ```bash
-# 拉取最新代码
-git pull
-
-# 重新构建并启动
-docker compose down
-docker compose up -d --build
-
-# 数据会自动保留（./config 目录）
+cd /opt/singbox-proxy-manager
+git pull --ff-only origin main
+docker compose pull sb-proxy-ghcr
+docker compose up -d --no-build sb-proxy-ghcr
 ```
 
-面板会定期检查 `SBPM_UPDATE_CHECK_REPO` 的 GitHub Release；如果最新版本高于当前版本，版本标签旁会显示向上箭头，点击可打开对应 Release。
+`git pull` 只更新仓库中的文档、部署配置与源码；运行程序来自 `GHCR_IMAGE` 指定的已发布镜像。等待对应版本 CI 完成镜像发布后再拉取；固定版本标签时先修改 `.env` 的 `GHCR_IMAGE`。该服务没有 `build` 配置，`--build` 不会编译本地源码。
+
+### local 源码构建部署
+
+```bash
+cd /opt/singbox-proxy-manager
+git pull --ff-only origin main
+docker compose up -d --build sb-proxy-local
+```
+
+仅在已使用 `COMPOSE_PROFILES=local` 的部署中执行；首次从 GHCR 切换需先按「切换镜像来源」移除旧模式容器。两种升级均保留原配置卷。独立二进制部署按「单文件升级与数据目录」操作。
 
 ---
 
@@ -524,12 +586,6 @@ docker compose up -d --build
 
 ---
 
-## ⚠️ 免责声明
-
-本项目仅供学习和研究使用。使用本软件所产生的任何后果由使用者自行承担，开发者不承担任何责任。
-
----
-
 ## 📮 联系方式
 
 如有问题或建议，欢迎通过以下方式联系：
@@ -540,7 +596,7 @@ docker compose up -d --build
 
 <div align="center">
 
-**[⬆ 回到顶部](#singbox-代理转发管理系统)**
+**[⬆ 回到顶部](#top)**
 
 Made with ❤️ | [GitHub](https://github.com/cheluen/singbox-proxy-manager)
 

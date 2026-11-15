@@ -179,12 +179,14 @@ func waitForTCPReady(ctx context.Context, addr string, maxWait time.Duration) er
 	}
 }
 
-// CheckProxyIP checks the IP and location through a proxy
-// proxyAddr should be in format "host:port" or "username:password@host:port"
+// CheckProxyIP checks the exit IP and location through the given proxy.
+// proxyAddr must be host:port (or [IPv6]:port), without a scheme or credentials.
+// Pass credentials through username and password; leave both empty for no authentication.
 func CheckProxyIP(proxyAddr string, username string, password string) (*IPInfo, error) {
 	return CheckProxyIPContext(context.Background(), proxyAddr, username, password)
 }
 
+// CheckProxyIPContext supports cancellation with the same address and credential contract as CheckProxyIP.
 func CheckProxyIPContext(
 	ctx context.Context,
 	proxyAddr string,

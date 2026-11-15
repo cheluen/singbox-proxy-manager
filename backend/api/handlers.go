@@ -1759,7 +1759,7 @@ func (h *Handler) BatchDeleteNodes(c *gin.Context) {
 	})
 }
 
-// ReorderNodes reorders proxy nodes and updates inbound ports
+// ReorderNodes 更新节点排序；自动模式仅重分配未固定端口，保留模式不改端口。
 func (h *Handler) ReorderNodes(c *gin.Context) {
 	var req struct {
 		Nodes []struct {

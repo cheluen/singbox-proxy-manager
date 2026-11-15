@@ -48,7 +48,7 @@ function SettingsFormBody({ ctl, onDone }) {
       onDone()
       return
     }
-    // 关闭「保留入站端口」会让所有节点按顺序重新分配端口，属于破坏性变更，需要二次确认。
+    // 关闭「保留入站端口」会重分配未固定节点的端口，固定端口不变；可能影响客户端连接，需二次确认。
     if (saved.preserve_inbound_ports && update.preserve_inbound_ports === false) {
       const confirmed = await ctl.helpers.confirm({ title: t('warning'), content: t('preserve_inbound_ports_disable_warning'), okText: t('confirm'), danger: true })
       if (!confirmed) return

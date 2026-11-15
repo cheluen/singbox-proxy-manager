@@ -196,7 +196,7 @@ type VLESSConfig struct {
 	UUID       string `json:"uuid"`
 	Flow       string `json:"flow,omitempty"`
 	Encryption string `json:"encryption,omitempty"`
-	Network    string `json:"network,omitempty"` // tcp, kcp, ws, http, quic, grpc, httpupgrade
+	Network    string `json:"network,omitempty"` // tcp, ws, http/h2, quic, grpc, httpupgrade; KCP/mKCP is unsupported
 	// OutboundNetwork is the native sing-box tcp/udp limiter. Network remains
 	// the legacy transport-type field for backward compatibility.
 	OutboundNetwork ListableString `json:"outbound_network,omitempty"`
@@ -216,7 +216,7 @@ type VLESSConfig struct {
 	EarlyDataHeader string            `json:"early_data_header,omitempty"`
 	// gRPC options
 	ServiceName string `json:"service_name,omitempty"`
-	// TCP/KCP/QUIC options
+	// Legacy share-link fields; these do not enable KCP/mKCP or extended QUIC options.
 	HeaderType string `json:"header_type,omitempty"`
 	Seed       string `json:"seed,omitempty"`
 	// HTTPUpgrade options
@@ -238,7 +238,7 @@ type VMESSConfig struct {
 	UUID            string         `json:"uuid"`
 	AlterID         int            `json:"alter_id"`
 	Security        string         `json:"security,omitempty"` // auto, aes-128-gcm, aes-128-cfb, chacha20-poly1305, none, zero
-	Network         string         `json:"network,omitempty"`  // tcp, kcp, ws, http, quic, grpc, httpupgrade
+	Network         string         `json:"network,omitempty"`  // tcp, ws, http/h2, quic, grpc, httpupgrade; KCP/mKCP is unsupported
 	OutboundNetwork ListableString `json:"outbound_network,omitempty"`
 	TLS             string         `json:"tls,omitempty"` // none, tls
 	SNI             string         `json:"sni,omitempty"`
@@ -256,7 +256,7 @@ type VMESSConfig struct {
 	// HTTP options
 	Method   string   `json:"method,omitempty"`
 	HTTPPath []string `json:"http_path,omitempty"`
-	// TCP/KCP/QUIC options
+	// Legacy share-link fields; these do not enable KCP/mKCP or extended QUIC options.
 	HeaderType string `json:"header_type,omitempty"`
 	Seed       string `json:"seed,omitempty"`
 	// HTTPUpgrade options
@@ -398,10 +398,9 @@ type WireGuardPeerConfig struct {
 	PersistentKeepaliveInterval int      `json:"persistent_keepalive_interval,omitempty"`
 }
 
-// WireGuardConfig represents sing-box wireguard outbound configuration.
-// The structure keeps a small set of app-level compatibility fields
-// (allowed_ips, domain_resolver_strategy) that are converted when generating
-// the final sing-box config.
+// WireGuardConfig stores app-level WireGuard data rendered into sing-box endpoints, not outbounds.
+// Legacy fields such as local_address and system_interface, along with allowed_ips
+// and domain_resolver_strategy, are converted to native endpoint fields during generation.
 type WireGuardConfig struct {
 	Server                 string                `json:"server,omitempty"`
 	ServerPort             int                   `json:"server_port,omitempty"`
@@ -501,8 +500,9 @@ func InitDB(db *sql.DB) error {
 	return nil
 }
 
-// ReconcileAdminPassword applies ADMIN_PASSWORD only when its bcrypt fingerprint
-// differs from the environment value observed on the previous successful start.
+// ReconcileAdminPassword requires ADMIN_PASSWORD when the database has no valid password.
+// An existing valid password without an environment fingerprint only records the first fingerprint.
+// Once recorded, a changed non-empty environment password replaces the hash and revokes sessions.
 func ReconcileAdminPassword(db *sql.DB, environmentPassword string) error {
 	environmentPasswordProvided := strings.TrimSpace(environmentPassword) != ""
 	if environmentPasswordProvided && len([]byte(environmentPassword)) > BcryptMaxPasswordBytes {

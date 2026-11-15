@@ -293,6 +293,7 @@ func normalizeNodeSortOrderTx(ctx context.Context, tx *sql.Tx) error {
 	return nil
 }
 
+// reassignAutomaticPortsTx 按排序重分配未固定节点的端口，预留并跳过所有固定端口。
 func reassignAutomaticPortsTx(ctx context.Context, tx *sql.Tx, startPort int) error {
 	if err := validateStartPort(startPort); err != nil {
 		return err
