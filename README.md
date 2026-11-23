@@ -6,7 +6,7 @@
 
 <img src="./logo.svg" alt="SingBox Proxy Manager Logo" width="96" />
 
-![Version](https://img.shields.io/badge/version-1.7.22-blue.svg)
+![Version](https://img.shields.io/badge/version-1.7.23-blue.svg)
 ![License](https://img.shields.io/badge/license-MIT-green.svg)
 ![SingBox](https://img.shields.io/badge/sing--box-1.12.12-orange.svg)
 
@@ -43,6 +43,9 @@
 - 筛选后批量操作仅作用于可见节点；单条和批量 IP 检测共享并发预算，支持中止。
 - 协议编辑保留原始扩展配置，支持原生 TLS、WireGuard 多 Peer 和历史保留字节格式。
 - 前端、后端、发行文件和构建指纹对齐；窗口尺寸变化不会清空正在编辑的表单。
+- 内置静态服务按 `Accept-Encoding` 权重协商预压缩 `.br`／`.gz`，同权重优先 Brotli，选不到压缩表示时原版兜底；存在压缩变体时设置 `Vary: Accept-Encoding`，404 不使用一年期 `immutable` 缓存。
+- HEAD 忽略 `Range` 并返回完整长度；GET 范围请求直接回退原文，由标准库处理 206／416，不在压缩表示上截取范围。
+- 首页和 SPA 页面使用启动时注入运行参数后的 HTML；若注入改写内容，仅一次性生成并缓存 gzip，不返回过期压缩包。原版 ETag 保持兼容，压缩强 ETag 在启动时依据实际压缩字节计算；`If-Match` 优先于 `If-None-Match`，304／412 不残留错误的压缩长度。
 
 前端开发工具使用 Node.js 22。持续验证包含核心逻辑、对比度与词条审计、浏览器交互以及真实 sing-box 全链路回归。
 
@@ -100,7 +103,7 @@ docker compose logs -f
 # 下载适合平台的单文件（示例：Linux amd64）
 mkdir -p /opt/singbox-proxy-manager
 cd /opt/singbox-proxy-manager
-APP_VERSION=1.7.22
+APP_VERSION=1.7.23
 curl -fL -o /opt/singbox-proxy-manager/singbox-proxy-manager "https://github.com/cheluen/singbox-proxy-manager/releases/download/v${APP_VERSION}/singbox-proxy-manager-linux-amd64"
 chmod +x /opt/singbox-proxy-manager/singbox-proxy-manager
 # 首次启动设置自己的管理员密码；之后可在管理面板修改
@@ -366,7 +369,7 @@ docker compose up -d
 CI 会自动发布以下镜像标签到 GHCR，并提供 `linux/amd64` + `linux/arm64` 多架构清单：
 
 - `ghcr.io/cheluen/singbox-proxy-manager:latest`
-- 版本标签：`v` 加项目版本，例如 `ghcr.io/cheluen/singbox-proxy-manager:v1.7.22`
+- 版本标签：`v` 加项目版本，例如 `ghcr.io/cheluen/singbox-proxy-manager:v1.7.23`
 - 提交标签：完整 Git 提交 SHA；用于固定某次发布构建
 
 镜像构建会复用对应版本 Release 中的 Linux 二进制，确保二进制发布与容器发布支持的架构一致。

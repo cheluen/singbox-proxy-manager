@@ -1,6 +1,7 @@
 package services
 
 import (
+	"context"
 	"encoding/json"
 	"net/url"
 	"os"
@@ -147,7 +148,7 @@ func TestGeneratorVLESSRealityKeepsNativeOnlyCredentials(t *testing.T) {
 		if buildErr != nil {
 			t.Fatalf("build native-only VLESS Reality config: %v", buildErr)
 		}
-		if validateErr := service.ValidateConfig(configJSON); validateErr != nil {
+		if validateErr := service.ValidateConfigContext(context.Background(), configJSON); validateErr != nil {
 			t.Fatalf("sing-box 1.12.12 rejected native-only VLESS Reality config: %v\n%s", validateErr, configJSON)
 		}
 	}
@@ -833,7 +834,7 @@ func TestRealSingBoxAcceptsNativeOutboundMatrix(t *testing.T) {
 			if err != nil {
 				t.Fatalf("BuildGlobalConfig: %v", err)
 			}
-			if err := service.ValidateConfig(configJSON); err != nil {
+			if err := service.ValidateConfigContext(context.Background(), configJSON); err != nil {
 				t.Fatalf("sing-box 1.12.12 rejected generated %s config: %v\n%s", testCase.name, err, configJSON)
 			}
 		})

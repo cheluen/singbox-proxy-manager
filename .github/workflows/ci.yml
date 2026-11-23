@@ -534,6 +534,14 @@ jobs:
           npm run test:e2e:full-stack-system
           npm run test:e2e:full-stack-node-list
 
+      - name: 验证预压缩静态资源与真实浏览器协商
+        working-directory: frontend
+        env:
+          SBPM_TEST_BINARY: ${{ github.workspace }}/release-binaries/singbox-proxy-manager-linux-amd64
+        run: |
+          export PUPPETEER_EXECUTABLE_PATH="$(command -v google-chrome || command -v chromium)"
+          npm run test:e2e:precompressed-static
+
       - name: Set up QEMU
         uses: docker/setup-qemu-action@v3
 

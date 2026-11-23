@@ -376,7 +376,7 @@ exec sleep 300
 	if inboundPort != 30001 {
 		t.Fatalf("failed settings request changed node port to %d", inboundPort)
 	}
-	valid, err := handler.isValidAdminSession(token)
+	valid, err := handler.isValidAdminSessionContext(context.Background(), token)
 	if err != nil || !valid {
 		t.Fatalf("failed settings request invalidated the previous session: valid=%v err=%v", valid, err)
 	}

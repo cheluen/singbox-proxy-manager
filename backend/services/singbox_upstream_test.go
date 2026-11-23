@@ -1,6 +1,7 @@
 package services
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -269,7 +270,7 @@ func TestRealSingBoxAcceptsManagedUpstreamProtocolMatrix(t *testing.T) {
 			if err != nil {
 				t.Fatalf("BuildGlobalConfig: %v", err)
 			}
-			if err := service.ValidateConfig(configJSON); err != nil {
+			if err := service.ValidateConfigContext(context.Background(), configJSON); err != nil {
 				t.Fatalf("real sing-box rejected %s upstream: %v\n%s", definition.Type, err, configJSON)
 			}
 		})
@@ -289,7 +290,7 @@ func TestRealSingBoxAcceptsManagedUpstreamProtocolMatrix(t *testing.T) {
 			if err != nil {
 				t.Fatalf("BuildGlobalConfig: %v", err)
 			}
-			if err := service.ValidateConfig(configJSON); err != nil {
+			if err := service.ValidateConfigContext(context.Background(), configJSON); err != nil {
 				t.Fatalf("real sing-box rejected managed %s node: %v\n%s", definition.Type, err, configJSON)
 			}
 		})

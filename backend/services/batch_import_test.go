@@ -149,7 +149,7 @@ func TestExpandBatchImportSources_Base64Subscription(t *testing.T) {
 	src := "trojan://pass123@example.com:443#A\nvless://00000000-0000-0000-0000-000000000000@example.com:443?security=tls&type=ws&path=%2Fws&host=example.com#B\n"
 	encoded := base64.StdEncoding.EncodeToString([]byte(src))
 
-	items, failures, err := ExpandBatchImportSources(context.Background(), []string{encoded})
+	items, failures, err := ExpandBatchImportSourcesWithType(context.Background(), []string{encoded}, BatchImportSourceAuto)
 	if err != nil {
 		t.Fatalf("ExpandBatchImportSources: %v", err)
 	}
@@ -181,7 +181,7 @@ func TestShareLinkImportItemsCarryParsedConfiguration(t *testing.T) {
 				t.Fatal(err)
 			}
 			for _, source := range []string{link, base64.StdEncoding.EncodeToString([]byte(link + "\n"))} {
-				items, failures, err := ExpandBatchImportSources(context.Background(), []string{source})
+				items, failures, err := ExpandBatchImportSourcesWithType(context.Background(), []string{source}, BatchImportSourceAuto)
 				if err != nil || len(failures) != 0 || len(items) != 1 {
 					t.Fatalf("展开失败：items=%d failures=%+v err=%v", len(items), failures, err)
 				}
@@ -262,7 +262,7 @@ proxies:
     password: p
 `
 
-	items, failures, err := ExpandBatchImportSources(context.Background(), []string{yaml})
+	items, failures, err := ExpandBatchImportSourcesWithType(context.Background(), []string{yaml}, BatchImportSourceAuto)
 	if err != nil {
 		t.Fatalf("ExpandBatchImportSources: %v", err)
 	}
@@ -329,7 +329,7 @@ func TestExpandBatchImportSources_SubscriptionURL(t *testing.T) {
 	}))
 	t.Cleanup(srv.Close)
 
-	items, failures, err := ExpandBatchImportSources(context.Background(), []string{srv.URL + "/sub"})
+	items, failures, err := ExpandBatchImportSourcesWithType(context.Background(), []string{srv.URL + "/sub"}, BatchImportSourceAuto)
 	if err != nil {
 		t.Fatalf("ExpandBatchImportSources: %v", err)
 	}
@@ -359,7 +359,7 @@ proxies:
     dialer-proxy: warp-selector
 `
 
-	items, failures, err := ExpandBatchImportSources(context.Background(), []string{yaml})
+	items, failures, err := ExpandBatchImportSourcesWithType(context.Background(), []string{yaml}, BatchImportSourceAuto)
 	if err != nil {
 		t.Fatalf("ExpandBatchImportSources: %v", err)
 	}

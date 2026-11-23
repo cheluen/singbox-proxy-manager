@@ -10,10 +10,8 @@ import (
 	"fmt"
 	"io/fs"
 	"log"
-	"mime"
 	"net"
 	"net/http"
-	"net/textproto"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -531,6 +529,7 @@ func registerFrontendRoutes(r *gin.Engine, frontendDistDir string, appVersion st
 	if err != nil {
 		return fmt.Errorf("read index.html: %w", err)
 	}
+	rawIndexContent := bytes.Clone(indexContent)
 
 	nodesVirtualThreshold := readIntEnv("SBPM_NODES_VIRTUAL_THRESHOLD", 120)
 	if nodesVirtualThreshold < 0 {
@@ -556,31 +555,29 @@ func registerFrontendRoutes(r *gin.Engine, frontendDistDir string, appVersion st
 
 	indexFingerprint := calcContentFingerprint(indexContent)
 	indexETag := fmt.Sprintf("\"sbpm-%s\"", indexFingerprint)
+	indexVariants, err := prepareIndexVariants(assetsFS, rawIndexContent, indexContent)
+	if err != nil {
+		return fmt.Errorf("prepare index compression: %w", err)
+	}
+	indexETags := map[string]string{"": indexETag}
+	for encoding, content := range indexVariants {
+		indexETags[encoding] = fmt.Sprintf("\"sbpm-%s-%s\"", calcContentFingerprint(content), encoding)
+	}
 	log.Printf("Serving frontend assets from %s", sourceName)
 
 	serveIndex := func(c *gin.Context) {
 		c.Header("Cache-Control", indexCacheControlHeader)
 		c.Header("Pragma", "no-cache")
 		c.Header("Expires", "0")
-		c.Header("ETag", indexETag)
 		c.Header("X-App-Version", appVersion)
 		c.Header("X-Frontend-Fingerprint", indexFingerprint)
+		representation := chooseStaticRepresentation(c.Writer, c.Request, indexContent, indexVariants)
+		c.Header("ETag", indexETags[representation.encoding])
 
-		if ifNoneMatchMatchesCurrentETag(c.GetHeader("If-None-Match"), indexETag) {
-			c.Status(http.StatusNotModified)
-			c.Abort()
-			return
-		}
-
-		http.ServeContent(c.Writer, c.Request, "index.html", time.Time{}, bytes.NewReader(indexContent))
+		serveStaticRepresentation(c.Writer, c.Request, "index.html", indexContent, time.Time{}, representation)
 		c.Abort()
 	}
 
-	assetsDirFS, err := fs.Sub(assetsFS, "assets")
-	if err != nil {
-		return fmt.Errorf("read assets dir: %w", err)
-	}
-	assetsFileServer := http.StripPrefix("/assets/", http.FileServer(http.FS(assetsDirFS)))
 	withAssetsHeaders := func(c *gin.Context) {
 		c.Header("Cache-Control", assetsCacheControlHeader)
 		c.Header("X-App-Version", appVersion)
@@ -588,27 +585,36 @@ func registerFrontendRoutes(r *gin.Engine, frontendDistDir string, appVersion st
 		c.Next()
 	}
 
-	assetsHandler := gin.WrapH(assetsFileServer)
+	assetsHandler := func(c *gin.Context) {
+		fileName := strings.TrimPrefix(c.Param("filepath"), "/")
+		if !validStaticPath(fileName) || servePrecompressedStaticFile(c.Writer, c.Request, assetsFS, "assets/"+fileName) != nil {
+			c.Writer.Header().Del("Cache-Control")
+			if c.Request.Method == http.MethodHead {
+				c.Header("Content-Type", "text/plain; charset=utf-8")
+				c.Status(http.StatusNotFound)
+			} else {
+				http.NotFound(c.Writer, c.Request)
+			}
+		}
+		c.Abort()
+	}
 	r.GET("/assets/*filepath", withAssetsHeaders, assetsHandler)
 	r.HEAD("/assets/*filepath", withAssetsHeaders, assetsHandler)
 
 	serveStaticFile := func(route string, fileName string) {
 		handler := func(c *gin.Context) {
-			content, readErr := fs.ReadFile(assetsFS, fileName)
-			if readErr != nil {
-				c.JSON(http.StatusNotFound, gin.H{"error": "not found"})
-				return
-			}
-
-			contentType := mime.TypeByExtension(filepath.Ext(fileName))
-			if contentType == "" {
-				contentType = "application/octet-stream"
-			}
-
 			c.Header("Cache-Control", assetsCacheControlHeader)
 			c.Header("X-App-Version", appVersion)
 			c.Header("X-Frontend-Fingerprint", indexFingerprint)
-			c.Data(http.StatusOK, contentType, content)
+			if err := servePrecompressedStaticFile(c.Writer, c.Request, assetsFS, fileName); err != nil {
+				c.Writer.Header().Del("Cache-Control")
+				if c.Request.Method == http.MethodHead {
+					c.Header("Content-Type", "application/json; charset=utf-8")
+					c.Status(http.StatusNotFound)
+				} else {
+					c.JSON(http.StatusNotFound, gin.H{"error": "not found"})
+				}
+			}
 		}
 		r.GET(route, handler)
 		r.HEAD(route, handler)
@@ -665,76 +671,6 @@ func logSingBoxDependencyGuideIfNeeded(err error, configDir string) {
 	log.Printf("Binary deploy guide: ensure sing-box is installed for your OS/arch and executable.")
 	log.Printf("Binary deploy guide: set SINGBOX_BINARY=/absolute/path/to/sing-box in .env (recommended).")
 	log.Printf("Binary deploy guide: fallback search order is PATH -> %s/sing-box -> executable directory.", configDir)
-}
-
-func ifNoneMatchMatchesCurrentETag(ifNoneMatch string, currentETag string) bool {
-	if ifNoneMatch == "" || currentETag == "" {
-		return false
-	}
-
-	buf := ifNoneMatch
-	for {
-		buf = textproto.TrimString(buf)
-		if len(buf) == 0 {
-			break
-		}
-		if buf[0] == ',' {
-			buf = buf[1:]
-			continue
-		}
-		if buf[0] == '*' {
-			rest := textproto.TrimString(buf[1:])
-			if rest == "" || rest[0] == ',' {
-				return true
-			}
-		}
-
-		etag, remain := scanETagToken(buf)
-		if etag == "" {
-			buf = skipToNextETagToken(buf)
-			continue
-		}
-		if etagWeakMatch(etag, currentETag) {
-			return true
-		}
-		buf = remain
-	}
-
-	return false
-}
-
-func scanETagToken(s string) (etag string, remain string) {
-	s = textproto.TrimString(s)
-	start := 0
-	if strings.HasPrefix(s, "W/") {
-		start = 2
-	}
-	if len(s[start:]) < 2 || s[start] != '"' {
-		return "", ""
-	}
-
-	for i := start + 1; i < len(s); i++ {
-		c := s[i]
-		switch {
-		case c == 0x21 || c >= 0x23 && c <= 0x7E || c >= 0x80:
-		case c == '"':
-			return s[:i+1], s[i+1:]
-		default:
-			return "", ""
-		}
-	}
-	return "", ""
-}
-
-func etagWeakMatch(a string, b string) bool {
-	return strings.TrimPrefix(a, "W/") == strings.TrimPrefix(b, "W/")
-}
-
-func skipToNextETagToken(s string) string {
-	if idx := strings.IndexByte(s, ','); idx >= 0 {
-		return s[idx+1:]
-	}
-	return ""
 }
 
 func apiCorsMiddlewareFromEnv() gin.HandlerFunc {

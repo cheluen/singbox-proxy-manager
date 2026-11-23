@@ -44,10 +44,6 @@ func hashSessionToken(token string) string {
 	return hex.EncodeToString(sum[:])
 }
 
-func (h *Handler) isValidAdminSession(token string) (bool, error) {
-	return h.isValidAdminSessionContext(context.Background(), token)
-}
-
 func (h *Handler) isValidAdminSessionContext(ctx context.Context, token string) (bool, error) {
 	if token == "" {
 		return false, nil
@@ -76,18 +72,6 @@ func (h *Handler) isValidAdminSessionContext(ctx context.Context, token string) 
 	default:
 		return false, err
 	}
-}
-
-func (h *Handler) createAdminSession(c *gin.Context) (string, time.Time, error) {
-	ctx := context.Background()
-	if c != nil && c.Request != nil {
-		ctx = c.Request.Context()
-	}
-	var generation int64
-	if err := h.db.QueryRowContext(ctx, "SELECT auth_generation FROM settings WHERE singleton_key = 1").Scan(&generation); err != nil {
-		return "", time.Time{}, err
-	}
-	return createAdminSessionWithGeneration(ctx, c, h.db, generation)
 }
 
 type adminSessionExecer interface {

@@ -467,9 +467,8 @@ func (s *SingBoxService) buildGlobalConfigContext(
 	return s.marshalConfig(config)
 }
 
-// GenerateGlobalConfig renders and writes the unified configuration file for
-// all enabled nodes. It performs no kernel validation; use BuildGlobalConfig +
-// ValidateConfig + ApplyConfig when replacing the config of a running service.
+// GenerateGlobalConfig 为所有启用节点生成并写入统一配置，不执行内核校验；替换运行中的配置时，
+// 应依次调用 BuildGlobalConfig、ValidateConfigContext 和 ApplyConfig。
 func (s *SingBoxService) GenerateGlobalConfig(nodes []models.ProxyNode, settings ...models.Settings) error {
 	configJSON, err := s.BuildGlobalConfig(nodes, settings...)
 	if err != nil {
@@ -522,13 +521,8 @@ func writeSensitiveFileAtomically(path string, content []byte) error {
 	return nil
 }
 
-// ValidateConfig runs `sing-box check` against a candidate configuration
-// without touching the running process or the live config file. On rejection
-// the kernel's own error output is returned so the caller can surface it.
-func (s *SingBoxService) ValidateConfig(configJSON []byte) error {
-	return s.ValidateConfigContext(context.Background(), configJSON)
-}
-
+// ValidateConfigContext 在调用方上下文及校验超时内执行 sing-box check，
+// 不修改运行进程或正式配置；拒绝时返回内核诊断信息。
 func (s *SingBoxService) ValidateConfigContext(ctx context.Context, configJSON []byte) error {
 	if ctx == nil {
 		ctx = context.Background()

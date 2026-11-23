@@ -275,7 +275,7 @@ proxies:
 			serverPort := reserveLiveProtocolPort(t, testCase.serverNetwork)
 			serverLog := startLiveSingBoxProcess(t, binary, testCase.serverConfig(t, serverPort))
 
-			items, failures, err := ExpandBatchImportSources(context.Background(), []string{testCase.clashYAML(serverPort)})
+			items, failures, err := ExpandBatchImportSourcesWithType(context.Background(), []string{testCase.clashYAML(serverPort)}, BatchImportSourceAuto)
 			if err != nil || len(failures) != 0 || len(items) != 1 {
 				t.Fatalf("import failed: items=%#v failures=%#v err=%v", items, failures, err)
 			}
@@ -291,7 +291,7 @@ proxies:
 			if err != nil {
 				t.Fatalf("build imported client config: %v", err)
 			}
-			if err := clientService.ValidateConfig(clientConfig); err != nil {
+			if err := clientService.ValidateConfigContext(context.Background(), clientConfig); err != nil {
 				t.Fatalf("validate imported client config: %v\n%s", err, clientConfig)
 			}
 			if err := clientService.ApplyConfig(clientConfig); err != nil {

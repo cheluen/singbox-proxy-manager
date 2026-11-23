@@ -1,8 +1,47 @@
 # 开发与运维维护记录
 
-当前项目版本：1.7.22。
+当前项目版本：1.7.23。
 
-以下 1.7.21 及以前章节保留历史版本含义，不作为 1.7.22 的新测试记录。
+以下 1.7.22 及以前章节保留历史版本含义，不作为 1.7.23 的新测试记录。
+
+## 1.7.23 精简重构与最终实测
+
+实测日期：2026-11-23。此节取代前两轮 1.7.23 过程记录，按最终源码描述行为。版本仍为 1.7.23，`go.mod`、`go.sum` 不变，没有新增 Go 依赖。
+
+### 保留关键保障，删除重复复杂度
+
+- 编码协商保留合法 q、显式压缩编码拒绝、权重比较、`identity`、通配符及 `x-gzip`；没有可接受的压缩表示时一律原版兜底。仅有压缩变体时追加并去重编码 Vary；无变体字体保持原版。GET Range 直接使用原文处理 206／416，HEAD 和其他非 GET 请求忽略 Range，不修改原请求。
+- 路径校验拒绝 `..`、空字节、反斜杠和目录，只服务普通文件，不再逐段检查符号链接。404 清除一年期 immutable 缓存；缺失品牌 GET 保留 JSON，HEAD 无响应体。
+- 首页 meta 改写后启动阶段一次性生成内存 gzip，不复用旧压缩包；未改写时复用构建产物。原版 ETag 保持兼容，压缩强 ETag 按实际压缩字节初始化。
+- 压缩包装器只在 200 时设置编码和准确长度，304／412 清除压缩元数据。标准库统一评估条件请求，If-Match 优先于 If-None-Match；弱匹配、多值、通配符和旧首页路由测试继续覆盖生产入口。
+- 删除 ETag 手工解析死函数家族及对应纯函数测试；删除给测试脚本写的元测试。静态服务回归使用核心表驱动矩阵和真实 `httptest.NewServer`＋`http.Client`，读取响应体以发现传输协议错误，而不只检查 Recorder 状态码。
+- E2E 使用 Node 原始 HTTP 响应读取压缩字节，删除与 Go 单测重复的数百次 curl 穷举，只验证真实嵌入二进制、代表性资源和前后端浏览器链路。二进制复制至无 `.env` 的临时目录，数据库与默认 meta 环境变量显式置空，并验证临时 SQLite 文件创建；保留动态版本、浏览器路径兼容、受管进程和 finally 清理。
+- 先前删除的四个生产零调用包装入口仍保持删除，原会话、批量导入和配置校验测试直接覆盖真实生产入口。后端版本、前端清单与锁文件根版本、README 徽标及安装示例均为 1.7.23。
+
+### 最新命令与结果
+
+本地为 4GB、无 swap 容器。安装、Go 编译、完整回归、前端构建、系统与浏览器测试均在独立远端 Linux 构建主机的隔离临时目录 `/tmp/sbpm-verify-1723` 进行，使用 Go 1.26.11、Node 22.23.3、`/usr/bin/chromium`。Go 设置 `GOTOOLCHAIN=go1.26.11 GOMAXPROCS=2 GOMEMLIMIT=2GiB`，GOCACHE、GOTMPDIR、TMPDIR 位于验证目录的独立子目录。设置 `SINGBOX_TEST_BINARY` 启用真实 sing-box 1.12.12 回归，发行归档 SHA-256 校验通过。
+
+| 实际命令 | 最终结果 |
+| --- | --- |
+| `go test -json ./backend -count=1` | 定向测试通过 |
+| `go test -race -json ./...` | 563 个测试／子测试通过，0 失败；6 个未配置远程数据库测试和 1 个未启用嵌入标签的测试跳过 |
+| `go test -tags frontend_dist -json ./backend/...` | 542 个测试／子测试通过，0 失败；嵌入资源回归通过，仅 6 个未配置远程数据库测试跳过 |
+| `go vet ./...` | 退出码 0 |
+| `go build -tags frontend_dist -o /tmp/sbpm-verify-1723/sbpm ./backend` | 真实嵌入单文件二进制编译成功 |
+| `cd frontend && npm ci --no-audit --no-fund && npm run build` | 构建成功；8 个资源预压缩，原文 1129.6 kB → Brotli 298.6 kB |
+| `npm run lint`、`npm run test:core`、`npm run test:version-sync` | lint 0 错误；核心 47／47 通过；六处版本一致 |
+| `npm run test:e2e:precompressed-static` | 34 项真实 HTTP 请求通过；默认阈值 120 与覆盖 42 两模式通过，均确认 embedded 与隔离 SQLite |
+| 真实 Chromium＋CDP＋DevTools CLI | 8 个实际 JS／CSS／SVG 响应均为 200 Brotli；console／page error 均为 0；登录→节点→登出→旧 token 401 通过；1 次页面快照通过 |
+| 本地 `cd frontend && npm run test:version-sync` | 六处版本均为 1.7.23，退出码 0 |
+
+E2E 实际环境变量：`SBPM_TEST_BINARY=/tmp/sbpm-verify-1723/sbpm`、`SINGBOX_BINARY=/tmp/sbpm-verify-1723/sing-box-1.12.12-linux-amd64/sing-box`、`SBPM_DEVTOOLS_CLI=/tmp/sbpm-verify-1723/devtools/node_modules/.bin/chrome-devtools`、`PUPPETEER_EXECUTABLE_PATH=/usr/bin/chromium`；同时将 `CHROME_BIN` 设为不存在路径验证优先级。代表性 JS／CSS／两种品牌 SVG 的 br、gzip、原版逐字节一致，HEAD 全长空体、Range 原文 206、woff2 原版、首页最终 meta 与 304 均实测通过。脚本另以不存在二进制运行一次，确认失败路径仍清理临时目录，未新增元测试。
+
+首次完整竞态运行遇到既有运行时重启测试的一次时序失败；原测试定向重跑通过，随后两次完整竞态回归通过，没有修改该运行时测试。最终独立只读复核未发现需修复 Bug。CI YAML 解析与二进制／浏览器传值检查通过，仍为 16 个作业，既有预压缩步骤可用。
+
+### 清理与检查点
+
+测试脚本完成后关闭后端、Chromium、DevTools CLI，删除短路径浏览器临时目录、SQLite 和配置。最新前端 dist 与格式化源码已回传，双方产物清单 SHA-256 均为 `08d950e02723e9b87caf78940e56c85d30dccc4760a2f1c0c69188957429bcc1`。远端临时验证目录 `/tmp/sbpm-verify-1723` 已彻底删除，包括源码、二进制、缓存、发行内核和日志；进程复核无本次残留，短路径浏览器临时目录数量为 0。本地没有安装依赖或启动测试服务，只保留正式源码与前端产物。
 
 ## GitHub Actions 存储与权限优化（1.7.22）
 

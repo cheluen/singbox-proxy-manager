@@ -33,7 +33,7 @@ func TestClashImportRejectsCertificateFingerprintWithoutDowngrade(t *testing.T) 
     client-fingerprint: %q
     skip-cert-verify: true
 `, proxyType, strings.Repeat("ab", 32), clientFingerprint)
-				items, failures, err := ExpandBatchImportSources(context.Background(), []string{content})
+				items, failures, err := ExpandBatchImportSourcesWithType(context.Background(), []string{content}, BatchImportSourceAuto)
 				if err != nil || len(items) != 0 || len(failures) != 1 || !strings.Contains(failures[0].Error, "fingerprint") {
 					t.Fatalf("certificate pin was not rejected: items=%d failures=%+v err=%v", len(items), failures, err)
 				}
@@ -46,7 +46,7 @@ func TestClashClientFingerprintRemainsSeparateFromCertificatePinning(t *testing.
 	content := `proxies:
   - {name: client-fingerprint, type: trojan, server: proxy.example, port: 443, password: test, client-fingerprint: chrome, skip-cert-verify: true}
 `
-	items, failures, err := ExpandBatchImportSources(context.Background(), []string{content})
+	items, failures, err := ExpandBatchImportSourcesWithType(context.Background(), []string{content}, BatchImportSourceAuto)
 	if err != nil || len(items) != 1 || len(failures) != 0 {
 		t.Fatalf("client fingerprint rejected: items=%d failures=%+v err=%v", len(items), failures, err)
 	}
@@ -62,7 +62,7 @@ func TestClashSOCKSTLSIsRejectedWhilePlainSOCKSRemainsSupported(t *testing.T) {
 		for _, tls := range []bool{false, true} {
 			t.Run(fmt.Sprintf("%s/tls=%t", proxyType, tls), func(t *testing.T) {
 				content := fmt.Sprintf("proxies:\n  - {name: socks, type: %s, server: proxy.example, port: 1080, tls: %t}\n", proxyType, tls)
-				items, failures, err := ExpandBatchImportSources(context.Background(), []string{content})
+				items, failures, err := ExpandBatchImportSourcesWithType(context.Background(), []string{content}, BatchImportSourceAuto)
 				if err != nil {
 					t.Fatal(err)
 				}
@@ -123,7 +123,7 @@ proxies:
     network: gun
     grpc-opts: {grpc-service-name: gun-service}
 `
-	items, failures, err := ExpandBatchImportSources(context.Background(), []string{yaml})
+	items, failures, err := ExpandBatchImportSourcesWithType(context.Background(), []string{yaml}, BatchImportSourceAuto)
 	if err != nil {
 		t.Fatalf("ExpandBatchImportSources: %v", err)
 	}
@@ -245,7 +245,7 @@ proxies:
     quic-opts:
       security: aes-128-gcm
 `
-	items, failures, err := ExpandBatchImportSources(context.Background(), []string{yaml})
+	items, failures, err := ExpandBatchImportSourcesWithType(context.Background(), []string{yaml}, BatchImportSourceAuto)
 	if err != nil {
 		t.Fatalf("ExpandBatchImportSources: %v", err)
 	}
@@ -269,7 +269,7 @@ payload:
     port: 443
     password: 987654
 `
-	items, failures, err := ExpandBatchImportSources(context.Background(), []string{yaml})
+	items, failures, err := ExpandBatchImportSourcesWithType(context.Background(), []string{yaml}, BatchImportSourceAuto)
 	if err != nil {
 		t.Fatalf("ExpandBatchImportSources: %v", err)
 	}
@@ -309,7 +309,7 @@ proxies:
     plugin: obfs-local
     plugin-opts: {mode: tls, host: cdn.example}
 `
-	items, failures, err := ExpandBatchImportSources(context.Background(), []string{yaml})
+	items, failures, err := ExpandBatchImportSourcesWithType(context.Background(), []string{yaml}, BatchImportSourceAuto)
 	if err != nil {
 		t.Fatalf("ExpandBatchImportSources: %v", err)
 	}
@@ -340,7 +340,7 @@ proxies:
         port: 51820
         public-key: public
 `
-	items, failures, err := ExpandBatchImportSources(context.Background(), []string{yaml})
+	items, failures, err := ExpandBatchImportSourcesWithType(context.Background(), []string{yaml}, BatchImportSourceAuto)
 	if err != nil {
 		t.Fatalf("ExpandBatchImportSources: %v", err)
 	}
@@ -368,7 +368,7 @@ proxies:
     public-key: ` + testWireGuardPeerPublicKey + `
     persistent-keepalive-interval: 25
 `
-	items, failures, err := ExpandBatchImportSources(context.Background(), []string{yaml})
+	items, failures, err := ExpandBatchImportSourcesWithType(context.Background(), []string{yaml}, BatchImportSourceAuto)
 	if err != nil || len(failures) != 0 || len(items) != 1 {
 		t.Fatalf("items=%#v failures=%#v err=%v", items, failures, err)
 	}
@@ -395,7 +395,7 @@ proxies:
 		if buildErr != nil {
 			t.Fatalf("BuildGlobalConfig: %v", buildErr)
 		}
-		if validateErr := service.ValidateConfig(configJSON); validateErr != nil {
+		if validateErr := service.ValidateConfigContext(context.Background(), configJSON); validateErr != nil {
 			t.Fatalf("sing-box rejected keepalive WireGuard config: %v\n%s", validateErr, configJSON)
 		}
 	}
@@ -412,7 +412,7 @@ proxies:
   - {name: socks-space, type: socks5, server: socks.example, port: 1080, username: " socks user ", password: " socks secret "}
   - {name: http-space, type: http, server: http.example, port: 8080, username: " http user ", password: " http secret "}
 `
-	items, failures, err := ExpandBatchImportSources(context.Background(), []string{yaml})
+	items, failures, err := ExpandBatchImportSourcesWithType(context.Background(), []string{yaml}, BatchImportSourceAuto)
 	if err != nil || len(failures) != 0 || len(items) != 7 {
 		t.Fatalf("items=%#v failures=%#v err=%v", items, failures, err)
 	}
@@ -460,7 +460,7 @@ proxies:
     password: ""
     skip-cert-verify: true
 `
-	items, failures, err := ExpandBatchImportSources(context.Background(), []string{yaml})
+	items, failures, err := ExpandBatchImportSourcesWithType(context.Background(), []string{yaml}, BatchImportSourceAuto)
 	if err != nil || len(failures) != 0 || len(items) != 2 {
 		t.Fatalf("items=%#v failures=%#v err=%v", items, failures, err)
 	}
@@ -495,7 +495,7 @@ proxies:
     ech-opts:
       enable: true
 `
-	items, failures, err := ExpandBatchImportSources(context.Background(), []string{yaml})
+	items, failures, err := ExpandBatchImportSourcesWithType(context.Background(), []string{yaml}, BatchImportSourceAuto)
 	if err != nil || len(failures) != 0 || len(items) != 2 {
 		t.Fatalf("items=%#v failures=%#v err=%v", items, failures, err)
 	}
@@ -522,7 +522,7 @@ proxies:
 		if buildErr != nil {
 			t.Fatalf("BuildGlobalConfig: %v", buildErr)
 		}
-		if validateErr := service.ValidateConfig(configJSON); validateErr != nil {
+		if validateErr := service.ValidateConfigContext(context.Background(), configJSON); validateErr != nil {
 			t.Fatalf("sing-box rejected normalized Clash ECH configs: %v\n%s", validateErr, configJSON)
 		}
 	}
@@ -537,7 +537,7 @@ func TestBatchImportAuditHTTPProxyAndSubscriptionDisambiguation(t *testing.T) {
 	if err != nil {
 		t.Fatalf("buildHTTPProxyShareLink: %v", err)
 	}
-	items, failures, err := ExpandBatchImportSources(context.Background(), []string{proxyLink})
+	items, failures, err := ExpandBatchImportSourcesWithType(context.Background(), []string{proxyLink}, BatchImportSourceAuto)
 	if err != nil || len(failures) != 0 || len(items) != 1 || items[0].Link != proxyLink {
 		t.Fatalf("marked HTTP proxy was fetched/misclassified: items=%#v failures=%#v err=%v", items, failures, err)
 	}
@@ -552,7 +552,7 @@ func TestBatchImportAuditHTTPProxyAndSubscriptionDisambiguation(t *testing.T) {
 	}))
 	t.Cleanup(server.Close)
 	authURL := strings.Replace(server.URL, "://", "://user:pass@", 1) + "/sub"
-	items, failures, err = ExpandBatchImportSources(context.Background(), []string{authURL})
+	items, failures, err = ExpandBatchImportSourcesWithType(context.Background(), []string{authURL}, BatchImportSourceAuto)
 	if err != nil || len(failures) != 0 || len(items) != 1 || !strings.HasPrefix(items[0].Link, "trojan://") {
 		t.Fatalf("basic-auth subscription not fetched first: items=%#v failures=%#v err=%v", items, failures, err)
 	}
@@ -564,7 +564,7 @@ func TestBatchImportAuditHTTPProxyAndSubscriptionDisambiguation(t *testing.T) {
 	}))
 	t.Cleanup(uppercaseServer.Close)
 	uppercaseURL := strings.Replace(uppercaseServer.URL, "http://", "HTTP://", 1)
-	items, failures, err = ExpandBatchImportSources(context.Background(), []string{uppercaseURL})
+	items, failures, err = ExpandBatchImportSourcesWithType(context.Background(), []string{uppercaseURL}, BatchImportSourceAuto)
 	if err != nil || len(failures) != 0 || len(items) != 1 || !strings.HasPrefix(items[0].Link, "trojan://") || uppercaseHits.Load() != 1 {
 		t.Fatalf("uppercase HTTP subscription was not fetched: hits=%d items=%#v failures=%#v err=%v", uppercaseHits.Load(), items, failures, err)
 	}
@@ -574,7 +574,7 @@ func TestBatchImportAuditHTTPProxyAndSubscriptionDisambiguation(t *testing.T) {
 	}))
 	t.Cleanup(aliasServer.Close)
 	aliasLink := aliasServer.URL + "?allow_insecure=1#proxy"
-	items, failures, err = ExpandBatchImportSources(context.Background(), []string{aliasLink})
+	items, failures, err = ExpandBatchImportSourcesWithType(context.Background(), []string{aliasLink}, BatchImportSourceAuto)
 	if err != nil || len(failures) != 1 || len(items) != 0 {
 		t.Fatalf("invalid subscription payload silently became a proxy: items=%#v failures=%#v err=%v", items, failures, err)
 	}
@@ -582,7 +582,7 @@ func TestBatchImportAuditHTTPProxyAndSubscriptionDisambiguation(t *testing.T) {
 	cancelledContext, cancel := context.WithCancel(context.Background())
 	cancel()
 	defaultPortProxy := "http://127.0.0.1"
-	items, failures, err = ExpandBatchImportSources(cancelledContext, []string{defaultPortProxy})
+	items, failures, err = ExpandBatchImportSourcesWithType(cancelledContext, []string{defaultPortProxy}, BatchImportSourceAuto)
 	if err != nil || len(failures) != 1 || len(items) != 0 {
 		t.Fatalf("failed subscription silently became a proxy: items=%#v failures=%#v err=%v", items, failures, err)
 	}
@@ -604,7 +604,7 @@ func TestBatchImportAuditSubscriptionHTTPFailuresNeverBecomeProxyNodes(t *testin
 			}))
 			t.Cleanup(server.Close)
 
-			items, failures, err := ExpandBatchImportSources(context.Background(), []string{server.URL})
+			items, failures, err := ExpandBatchImportSourcesWithType(context.Background(), []string{server.URL}, BatchImportSourceAuto)
 			if err != nil || len(items) != 0 || len(failures) != 1 {
 				t.Fatalf("HTTP %d subscription became an item: items=%#v failures=%#v err=%v", status, items, failures, err)
 			}
@@ -623,7 +623,7 @@ func TestBatchImportAuditHTMLSubscriptionCannotImportPageLinks(t *testing.T) {
 	}))
 	t.Cleanup(server.Close)
 
-	items, failures, err := ExpandBatchImportSources(context.Background(), []string{server.URL})
+	items, failures, err := ExpandBatchImportSourcesWithType(context.Background(), []string{server.URL}, BatchImportSourceAuto)
 	if err != nil || len(items) != 0 || len(failures) != 1 {
 		t.Fatalf("HTML page links became proxy nodes: items=%#v failures=%#v err=%v", items, failures, err)
 	}
@@ -640,7 +640,7 @@ func TestBatchImportAuditMislabelledBOMHTMLCannotImportPageLinks(t *testing.T) {
 	}))
 	t.Cleanup(server.Close)
 
-	items, failures, err := ExpandBatchImportSources(context.Background(), []string{server.URL})
+	items, failures, err := ExpandBatchImportSourcesWithType(context.Background(), []string{server.URL}, BatchImportSourceAuto)
 	if err != nil || len(items) != 0 || len(failures) != 1 {
 		t.Fatalf("mislabelled BOM HTML page links became proxy nodes: items=%#v failures=%#v err=%v", items, failures, err)
 	}
@@ -656,7 +656,7 @@ proxies:
   - {name: empty-hy2, type: hysteria2, server: hy2.example, port: 443, password: ""}
   - {name: empty-anytls, type: anytls, server: anytls.example, port: 443, password: ""}
 `
-	items, failures, err := ExpandBatchImportSources(context.Background(), []string{yaml})
+	items, failures, err := ExpandBatchImportSourcesWithType(context.Background(), []string{yaml}, BatchImportSourceAuto)
 	if err != nil || len(failures) != 0 || len(items) != 3 {
 		t.Fatalf("explicit empty passwords were rejected: items=%#v failures=%#v err=%v", items, failures, err)
 	}
@@ -682,7 +682,7 @@ proxies:
   - {name: missing-hy2, type: hysteria2, server: hy2.example, port: 443}
   - {name: missing-anytls, type: anytls, server: anytls.example, port: 443}
 `
-	items, failures, err := ExpandBatchImportSources(context.Background(), []string{yaml})
+	items, failures, err := ExpandBatchImportSourcesWithType(context.Background(), []string{yaml}, BatchImportSourceAuto)
 	if err != nil || len(items) != 0 || len(failures) != 3 {
 		t.Fatalf("missing passwords were not rejected independently: items=%#v failures=%#v err=%v", items, failures, err)
 	}
@@ -698,7 +698,7 @@ func TestBatchImportAuditHysteria2SalamanderStillRequiresPassword(t *testing.T) 
 proxies:
   - {name: invalid-obfs, type: hysteria2, server: hy2.example, port: 443, password: "", obfs: salamander, obfs-password: ""}
 `
-	items, failures, err := ExpandBatchImportSources(context.Background(), []string{yaml})
+	items, failures, err := ExpandBatchImportSourcesWithType(context.Background(), []string{yaml}, BatchImportSourceAuto)
 	if err != nil || len(items) != 0 || len(failures) != 1 {
 		t.Fatalf("empty salamander password was not isolated: items=%#v failures=%#v err=%v", items, failures, err)
 	}
@@ -710,7 +710,7 @@ proxies:
 func TestBatchImportAuditShortBase64Subscription(t *testing.T) {
 	payload := "ss://YWVzLTEyOC1nY206cA@example.com:1"
 	encoded := base64.RawStdEncoding.EncodeToString([]byte(payload))
-	items, failures, err := ExpandBatchImportSources(context.Background(), []string{encoded})
+	items, failures, err := ExpandBatchImportSourcesWithType(context.Background(), []string{encoded}, BatchImportSourceAuto)
 	if err != nil || len(failures) != 0 || len(items) != 1 || items[0].Link != payload {
 		t.Fatalf("short base64 subscription failed: items=%#v failures=%#v err=%v", items, failures, err)
 	}
@@ -740,7 +740,7 @@ proxies:
     plugin: obfs-local
     plugin-opts: {mode: tls, host: example.com}
 `
-	items, failures, err := ExpandBatchImportSources(context.Background(), []string{yaml})
+	items, failures, err := ExpandBatchImportSourcesWithType(context.Background(), []string{yaml}, BatchImportSourceAuto)
 	if err != nil || len(failures) != 0 || len(items) != 2 {
 		t.Fatalf("import plugins: items=%#v failures=%#v err=%v", items, failures, err)
 	}
@@ -752,7 +752,7 @@ proxies:
 		if err != nil {
 			t.Fatalf("BuildGlobalConfig %s: %v", item.Name, err)
 		}
-		if err := service.ValidateConfig(configJSON); err != nil {
+		if err := service.ValidateConfigContext(context.Background(), configJSON); err != nil {
 			t.Fatalf("sing-box rejected normalized %s plugin: %v\n%s", item.Name, err, configJSON)
 		}
 	}

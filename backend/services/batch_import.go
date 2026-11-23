@@ -142,10 +142,6 @@ type ImportFailure struct {
 	Error  string
 }
 
-func ExpandBatchImportSources(ctx context.Context, sources []string) ([]ImportItem, []ImportFailure, error) {
-	return ExpandBatchImportSourcesWithType(ctx, sources, BatchImportSourceAuto)
-}
-
 func ParseBatchImportSourceType(raw string) (BatchImportSourceType, error) {
 	normalized := strings.ToLower(strings.TrimSpace(raw))
 	if normalized == "" {

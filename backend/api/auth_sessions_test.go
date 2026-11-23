@@ -1,6 +1,7 @@
 package api
 
 import (
+	"context"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -12,6 +13,16 @@ import (
 	"github.com/gin-gonic/gin"
 	"golang.org/x/crypto/bcrypt"
 )
+
+func createTestAdminSession(t *testing.T, handler *Handler) (string, time.Time, error) {
+	t.Helper()
+	ctx := context.Background()
+	var generation int64
+	if err := handler.db.QueryRowContext(ctx, "SELECT auth_generation FROM settings WHERE singleton_key = 1").Scan(&generation); err != nil {
+		t.Fatalf("query auth generation: %v", err)
+	}
+	return createAdminSessionWithGeneration(ctx, nil, handler.db, generation)
+}
 
 func TestLoginAndPanelPasswordChangeUseDatabaseWhenEnvironmentPasswordExists(t *testing.T) {
 	gin.SetMode(gin.TestMode)
@@ -89,7 +100,7 @@ func TestCreateAdminSession_DefaultTTLIs168Hours(t *testing.T) {
 		return nil, nil
 	})
 
-	_, expiry, err := h.createAdminSession(nil)
+	_, expiry, err := createTestAdminSession(t, h)
 	if err != nil {
 		t.Fatalf("create session: %v", err)
 	}
@@ -108,7 +119,7 @@ func TestCreateAdminSession_TTLFromEnvIsUsed(t *testing.T) {
 		return nil, nil
 	})
 
-	_, expiry, err := h.createAdminSession(nil)
+	_, expiry, err := createTestAdminSession(t, h)
 	if err != nil {
 		t.Fatalf("create session: %v", err)
 	}
@@ -127,7 +138,7 @@ func TestCreateAdminSession_InvalidTTLFromEnvFallsBackToDefault(t *testing.T) {
 		return nil, nil
 	})
 
-	_, expiry, err := h.createAdminSession(nil)
+	_, expiry, err := createTestAdminSession(t, h)
 	if err != nil {
 		t.Fatalf("create session: %v", err)
 	}
@@ -145,7 +156,7 @@ func TestLogoutRevokesCurrentSession(t *testing.T) {
 		return nil, nil
 	})
 
-	token, _, err := h.createAdminSession(nil)
+	token, _, err := createTestAdminSession(t, h)
 	if err != nil {
 		t.Fatalf("create session: %v", err)
 	}
@@ -162,7 +173,7 @@ func TestLogoutRevokesCurrentSession(t *testing.T) {
 		t.Fatalf("unexpected status: %d", rec.Code)
 	}
 
-	ok, err := h.isValidAdminSession(token)
+	ok, err := h.isValidAdminSessionContext(context.Background(), token)
 	if err != nil {
 		t.Fatalf("validate session: %v", err)
 	}
@@ -199,7 +210,7 @@ func TestCreateAdminSessionCleansExpiredAndInvalidGenerationSessions(t *testing.
 		}
 	}
 
-	if _, _, err := h.createAdminSession(nil); err != nil {
+	if _, _, err := createTestAdminSession(t, h); err != nil {
 		t.Fatalf("create session: %v", err)
 	}
 	var count int
@@ -227,7 +238,7 @@ func TestAdminSessionExpiresAtBoundary(t *testing.T) {
 	); err != nil {
 		t.Fatalf("seed boundary session: %v", err)
 	}
-	valid, err := h.isValidAdminSession(token)
+	valid, err := h.isValidAdminSessionContext(context.Background(), token)
 	if err != nil {
 		t.Fatalf("validate boundary session: %v", err)
 	}

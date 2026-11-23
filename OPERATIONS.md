@@ -26,6 +26,22 @@
 
 源码依据：[启动与环境加载](backend/main.go)、[Compose 配置](docker-compose.yml)、[内核命令与环境过滤](backend/services/singbox_command.go)。
 
+## 内置静态资源与压缩缓存
+
+`frontend` 的 `npm run build` 为不小于 1024 字节的文本资源生成 `.br` 和 `.gz`。磁盘目录与 `frontend_dist` 嵌入模式共用同一个静态服务，覆盖 `/assets/*`、`/logo.svg` 和 `/brand-mark.svg`。文件缺失及目录请求返回 404，不提供目录列表；拒绝路径中的 `..`、空字节和反斜杠，只服务普通文件。404 不携带一年期 `immutable` 缓存头，缺失 SVG 的 GET 保留 JSON，HEAD 返回空响应体。
+
+服务按 `Accept-Encoding` 协商，支持大小写、合法 `q` 权重、`*` 和 `x-gzip`（响应统一为 `gzip`）。压缩编码的显式 `q=0` 不会被通配符重新允许；未显式声明的 `identity` 继承 `*` 的权重。同权重按 `br`、`gzip`、`identity` 排序，较高权重的 `identity` 返回原文件。请求不携带压缩编码、没有可接受的压缩变体或字体没有预压缩产物时，一律原版兜底，不额外拒绝原版。
+
+存在压缩变体时追加 `Vary: Accept-Encoding`，保留其他 Vary 值、版本与前端指纹头；无变体字体不强制设置编码 Vary。MIME 始终取原文件扩展名，未知扩展名从原文嗅探。压缩资源仅在提交 200 响应时设置 `Content-Encoding` 和准确的压缩体 `Content-Length`；304、412 等无响应体结果不残留压缩元数据。
+
+HEAD 及其他非 GET 请求忽略 `Range`，HEAD 返回与同编码普通请求一致的完整长度且不写响应体。GET 携带 `Range` 时直接回退原文，交给标准库处理 206、416 及多段范围，不在压缩表示上截取范围。
+
+首页及 SPA fallback 在启动时注入 `SBPM_NODES_VIRTUAL_THRESHOLD`、`SBPM_BATCH_CHECK_IP_CONCURRENCY`。仅当最终 HTML 与构建原文完全相同时复用内置 `.br`／`.gz`；发生改写时使用标准库以最佳压缩级别生成一次 gzip，压缩后小于原文才启用，不做每请求动态压缩。此时仅支持 Brotli 的客户端得到正确原文，支持 gzip 的客户端得到正确的缓存 gzip，不会读到旧 meta 标签。
+
+首页保持原有无压缩 ETag `"sbpm-<indexFingerprint>"`；Brotli、gzip 分别使用 `"sbpm-<compressedFingerprint>-br"`、`"sbpm-<compressedFingerprint>-gzip"`，压缩指纹在启动时按实际压缩字节计算，相同 HTML 重压后的字节变化会改变强 ETag。条件请求统一由标准库按 RFC 顺序评估：先 `If-Match`（强匹配，不满足返回 412），再 `If-None-Match`（GET／HEAD 弱匹配，命中返回 304），支持多值列表与 `*`。304 保留 ETag、Vary、缓存及版本头。反向代理必须保留协商头，避免跨编码复用缓存。
+
+源码依据：[静态服务](backend/static_assets.go)、[路由及首页初始化](backend/main.go)、[预压缩构建](frontend/tools/precompress.mjs)。
+
 ## 并发与超时参数
 
 以下五项在两种 Compose 模式中均会传入容器，独立二进制也使用相同变量：

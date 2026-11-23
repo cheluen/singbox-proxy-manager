@@ -39,7 +39,7 @@ fi
 
 	service := NewSingBoxService(t.TempDir())
 	startedAt := time.Now()
-	err := service.ValidateConfig([]byte(`{"inbounds":[]}`))
+	err := service.ValidateConfigContext(context.Background(), []byte(`{"inbounds":[]}`))
 	if !errors.Is(err, context.DeadlineExceeded) {
 		t.Fatalf("expected validation deadline, got %v", err)
 	}
@@ -112,7 +112,7 @@ sleep 300
 	for index := 0; index < requests; index++ {
 		go func() {
 			defer workers.Done()
-			errorsCh <- service.ValidateConfig([]byte(`{"inbounds":[]}`))
+			errorsCh <- service.ValidateConfigContext(context.Background(), []byte(`{"inbounds":[]}`))
 		}()
 	}
 

@@ -1,6 +1,7 @@
 package services
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"os"
@@ -270,11 +271,11 @@ func TestValidateConfigSurfacesKernelError(t *testing.T) {
 	t.Setenv("SINGBOX_BINARY", writeScriptedSingBox(t))
 	service := NewSingBoxService(t.TempDir())
 
-	if err := service.ValidateConfig([]byte(`{"inbounds":[]}`)); err != nil {
+	if err := service.ValidateConfigContext(context.Background(), []byte(`{"inbounds":[]}`)); err != nil {
 		t.Fatalf("valid config must pass: %v", err)
 	}
 
-	err := service.ValidateConfig([]byte(`{"inbounds":[],"comment":"BAD_MARKER"}`))
+	err := service.ValidateConfigContext(context.Background(), []byte(`{"inbounds":[],"comment":"BAD_MARKER"}`))
 	if err == nil {
 		t.Fatalf("invalid config must be rejected")
 	}
@@ -404,7 +405,7 @@ func TestRealSingBoxAcceptsGeneratedWireGuardConfig(t *testing.T) {
 		t.Fatalf("generated config is not valid JSON: %v", err)
 	}
 
-	if err := service.ValidateConfig(configJSON); err != nil {
+	if err := service.ValidateConfigContext(context.Background(), configJSON); err != nil {
 		t.Fatalf("real sing-box rejected the generated endpoint config: %v", err)
 	}
 }
@@ -435,7 +436,7 @@ func TestRealSingBoxAcceptsEditedWireGuardDomainResolver(t *testing.T) {
 	if err != nil {
 		t.Fatalf("BuildGlobalConfig with edited resolver: %v", err)
 	}
-	if err := service.ValidateConfig(configJSON); err != nil {
+	if err := service.ValidateConfigContext(context.Background(), configJSON); err != nil {
 		t.Fatalf("real sing-box rejected edited WireGuard resolver config: %v\n%s", err, configJSON)
 	}
 }

@@ -1,6 +1,7 @@
 package services
 
 import (
+	"context"
 	"encoding/base64"
 	"encoding/binary"
 	"encoding/json"
@@ -186,7 +187,7 @@ func TestShareLinkAuditRealSingBoxAcceptsNormalizedSSPluginURLs(t *testing.T) {
 		if err != nil {
 			t.Fatalf("BuildGlobalConfig %s: %v", name, err)
 		}
-		if err := service.ValidateConfig(configJSON); err != nil {
+		if err := service.ValidateConfigContext(context.Background(), configJSON); err != nil {
 			t.Fatalf("sing-box rejected normalized %s URL plugin: %v\n%s", name, err, configJSON)
 		}
 	}
@@ -350,7 +351,7 @@ func TestShareLinkAuditTUICAllowsEmptyPassword(t *testing.T) {
 			if buildErr != nil {
 				t.Fatalf("build empty-password TUIC config: %v", buildErr)
 			}
-			if validateErr := service.ValidateConfig(configJSON); validateErr != nil {
+			if validateErr := service.ValidateConfigContext(context.Background(), configJSON); validateErr != nil {
 				t.Fatalf("sing-box rejected empty-password TUIC config: %v\n%s", validateErr, configJSON)
 			}
 		}
@@ -656,7 +657,7 @@ func TestShareLinkAuditNativeWebSocketHostListsRoundTrip(t *testing.T) {
 		if err != nil {
 			t.Fatalf("build native Host-list config: %v", err)
 		}
-		if err := realService.ValidateConfig(configJSON); err != nil {
+		if err := realService.ValidateConfigContext(context.Background(), configJSON); err != nil {
 			t.Fatalf("sing-box 1.12.12 rejected native Host-list headers: %v\n%s", err, configJSON)
 		}
 	}
@@ -780,7 +781,7 @@ func TestShareLinkAuditNativeV2RayRoundTrip(t *testing.T) {
 		if buildErr != nil {
 			t.Fatalf("build native round-trip config: %v", buildErr)
 		}
-		if validateErr := service.ValidateConfig(configJSON); validateErr != nil {
+		if validateErr := service.ValidateConfigContext(context.Background(), configJSON); validateErr != nil {
 			t.Fatalf("sing-box rejected native round-trip config: %v\n%s", validateErr, configJSON)
 		}
 	}
@@ -1062,7 +1063,7 @@ func TestShareLinkAuditTLSInferenceSurvivesPersistenceAndBuild(t *testing.T) {
 			if test.validate {
 				if realBinary := os.Getenv("SINGBOX_TEST_BINARY"); realBinary != "" {
 					t.Setenv("SINGBOX_BINARY", realBinary)
-					if err := service.ValidateConfig(configJSON); err != nil {
+					if err := service.ValidateConfigContext(context.Background(), configJSON); err != nil {
 						t.Fatalf("sing-box rejected persisted %s config: %v\n%s", test.name, err, configJSON)
 					}
 				}
@@ -1129,7 +1130,7 @@ func TestShareLinkAuditAnyTLSKeepsExplicitIPServerName(t *testing.T) {
 		if err != nil {
 			t.Fatalf("BuildGlobalConfig: %v", err)
 		}
-		if err := service.ValidateConfig(configJSON); err != nil {
+		if err := service.ValidateConfigContext(context.Background(), configJSON); err != nil {
 			t.Fatalf("sing-box rejected AnyTLS IP server_name: %v\n%s", err, configJSON)
 		}
 	}
@@ -1195,7 +1196,7 @@ func TestShareLinkAuditNormalizesMixedCaseUTLSFingerprint(t *testing.T) {
 				if err != nil {
 					t.Fatalf("BuildGlobalConfig: %v", err)
 				}
-				if err := service.ValidateConfig(configJSON); err != nil {
+				if err := service.ValidateConfigContext(context.Background(), configJSON); err != nil {
 					t.Fatalf("sing-box rejected normalized fingerprint: %v\n%s", err, configJSON)
 				}
 			}
@@ -1357,7 +1358,7 @@ func TestShareLinkAuditECHConfigListRoundTrip(t *testing.T) {
 
 	if realBinary := os.Getenv("SINGBOX_TEST_BINARY"); realBinary != "" {
 		t.Setenv("SINGBOX_BINARY", realBinary)
-		if err := service.ValidateConfig(configJSON); err != nil {
+		if err := service.ValidateConfigContext(context.Background(), configJSON); err != nil {
 			t.Fatalf("sing-box rejected normalized ECH config lists: %v\n%s", err, configJSON)
 		}
 	}
@@ -1493,7 +1494,7 @@ func TestShareLinkAuditWireGuardKeepaliveDefaultsAllowedIPs(t *testing.T) {
 		if buildErr != nil {
 			t.Fatalf("BuildGlobalConfig: %v", buildErr)
 		}
-		if validateErr := service.ValidateConfig(configJSON); validateErr != nil {
+		if validateErr := service.ValidateConfigContext(context.Background(), configJSON); validateErr != nil {
 			t.Fatalf("sing-box rejected WireGuard keepalive config: %v\n%s", validateErr, configJSON)
 		}
 	}
