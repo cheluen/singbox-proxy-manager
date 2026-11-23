@@ -49,11 +49,11 @@
     "@fontsource-variable/jetbrains-mono": "^5.2.0",
     "antd": "^5.27.6",
     "axios": "^1.19.0",
-    "i18next": "^23.7.6",
+    "i18next": "^27.2.6",
     "lucide-react": "^1.71.0",
     "react": "^18.2.0",
     "react-dom": "^18.2.0",
-    "react-i18next": "^13.5.0"
+    "react-i18next": "^18.0.3"
   },
   "devDependencies": {
     "@eslint/js": "^9.15.0",
