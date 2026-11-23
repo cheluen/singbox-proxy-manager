@@ -1,29 +1,76 @@
 package services
 
 import (
+	"context"
 	"encoding/json"
-	"os"
-	"path/filepath"
 	"testing"
 
 	"sb-proxy/backend/models"
 )
 
-func loadGeneratedConfigMap(t *testing.T, dir string) map[string]interface{} {
-	t.Helper()
-
-	configPath := filepath.Join(dir, "config.json")
-	data, err := os.ReadFile(configPath)
-	if err != nil {
-		t.Fatalf("read generated config: %v", err)
+func TestMarshalConfigPreservesCanonicalEncoding(t *testing.T) {
+	config := SingBoxConfig{
+		Log: LogConfig{Level: "info", Timestamp: true},
+		DNS: &DNSConfig{Servers: []DNSServer{{Type: "local", Tag: "local"}}},
+		Inbounds: []InboundConfig{{
+			Type: "mixed", Tag: "in", Listen: "::", Port: 30001,
+			Users: []InboundUser{{Username: "user", Password: "test-pass"}},
+		}},
+		Outbounds: []OutboundConfig{{
+			Type: "direct", Tag: "overridden",
+			Extra: map[string]any{"tag": "out", "routing_mark": json.Number("9007199254740993")},
+		}},
+		Route: RouteConfig{Rules: []RouteRule{{Inbound: []string{"in"}, Outbound: "out"}}},
 	}
-
-	var config map[string]interface{}
-	if err := json.Unmarshal(data, &config); err != nil {
-		t.Fatalf("unmarshal generated config: %v", err)
+	const want = `{
+  "dns": {
+    "servers": [
+      {
+        "tag": "local",
+        "type": "local"
+      }
+    ]
+  },
+  "inbounds": [
+    {
+      "listen": "::",
+      "listen_port": 30001,
+      "tag": "in",
+      "type": "mixed",
+      "users": [
+        {
+          "password": "test-pass",
+          "username": "user"
+        }
+      ]
+    }
+  ],
+  "log": {
+    "level": "info",
+    "timestamp": true
+  },
+  "outbounds": [
+    {
+      "routing_mark": 9007199254740993,
+      "tag": "out",
+      "type": "direct"
+    }
+  ],
+  "route": {
+    "rules": [
+      {
+        "inbound": [
+          "in"
+        ],
+        "outbound": "out"
+      }
+    ]
+  }
+}`
+	data, err := marshalConfig(config)
+	if err != nil || string(data) != want {
+		t.Fatalf("unexpected canonical JSON: %s, err=%v", data, err)
 	}
-
-	return config
 }
 
 func routeRulesFromConfig(t *testing.T, config map[string]interface{}) []interface{} {
@@ -134,7 +181,7 @@ func TestBuildGlobalConfigRejectsLegacyUnpairedWhitespaceCredentials(t *testing.
 
 	for _, testCase := range testCases {
 		t.Run(testCase.name, func(t *testing.T) {
-			_, err := service.BuildGlobalConfig([]models.ProxyNode{
+			_, err := service.BuildGlobalConfigContext(context.Background(), []models.ProxyNode{
 				{
 					ID:          1,
 					Name:        "legacy-node",
@@ -153,7 +200,7 @@ func TestBuildGlobalConfigRejectsLegacyUnpairedWhitespaceCredentials(t *testing.
 	}
 }
 
-func TestGenerateGlobalConfigAddsTCPReuseRouting(t *testing.T) {
+func TestBuildGlobalConfigAddsTCPReuseRouting(t *testing.T) {
 	configDir := t.TempDir()
 	service := NewSingBoxService(configDir)
 
@@ -182,11 +229,12 @@ func TestGenerateGlobalConfigAddsTCPReuseRouting(t *testing.T) {
 		},
 	}
 
-	if err := service.GenerateGlobalConfig(nodes); err != nil {
-		t.Fatalf("GenerateGlobalConfig failed: %v", err)
+	data, err := service.BuildGlobalConfigContext(context.Background(), nodes)
+	if err != nil {
+		t.Fatalf("build config: %v", err)
 	}
 
-	config := loadGeneratedConfigMap(t, configDir)
+	config := decodeGeneratedConfig(t, data)
 	rules := routeRulesFromConfig(t, config)
 	inbounds := inboundsFromConfig(t, config)
 
@@ -211,7 +259,7 @@ func TestGenerateGlobalConfigAddsTCPReuseRouting(t *testing.T) {
 	}
 }
 
-func TestGenerateGlobalConfigRespectsTCPReuseSwitch(t *testing.T) {
+func TestBuildGlobalConfigRespectsTCPReuseSwitch(t *testing.T) {
 	configDir := t.TempDir()
 	service := NewSingBoxService(configDir)
 
@@ -240,11 +288,12 @@ func TestGenerateGlobalConfigRespectsTCPReuseSwitch(t *testing.T) {
 		},
 	}
 
-	if err := service.GenerateGlobalConfig(nodes); err != nil {
-		t.Fatalf("GenerateGlobalConfig failed: %v", err)
+	data, err := service.BuildGlobalConfigContext(context.Background(), nodes)
+	if err != nil {
+		t.Fatalf("build config: %v", err)
 	}
 
-	config := loadGeneratedConfigMap(t, configDir)
+	config := decodeGeneratedConfig(t, data)
 	rules := routeRulesFromConfig(t, config)
 	if idx := findRuleIndexByAuthUser(rules, "target+30005"); idx >= 0 {
 		t.Fatalf("did not expect auth_user route for disabled tcp reuse node")
@@ -256,7 +305,7 @@ func TestGenerateGlobalConfigRespectsTCPReuseSwitch(t *testing.T) {
 	}
 }
 
-func TestGenerateGlobalConfigSkipsTCPReuseForNodeWithoutInboundAuth(t *testing.T) {
+func TestBuildGlobalConfigSkipsTCPReuseForNodeWithoutInboundAuth(t *testing.T) {
 	configDir := t.TempDir()
 	service := NewSingBoxService(configDir)
 
@@ -285,11 +334,12 @@ func TestGenerateGlobalConfigSkipsTCPReuseForNodeWithoutInboundAuth(t *testing.T
 		},
 	}
 
-	if err := service.GenerateGlobalConfig(nodes); err != nil {
-		t.Fatalf("GenerateGlobalConfig failed: %v", err)
+	data, err := service.BuildGlobalConfigContext(context.Background(), nodes)
+	if err != nil {
+		t.Fatalf("build config: %v", err)
 	}
 
-	config := loadGeneratedConfigMap(t, configDir)
+	config := decodeGeneratedConfig(t, data)
 	rules := routeRulesFromConfig(t, config)
 	if idx := findRuleIndexByAuthUser(rules, "node-2+30005"); idx >= 0 {
 		t.Fatalf("did not expect auth_user route for node without inbound auth")
@@ -301,7 +351,7 @@ func TestGenerateGlobalConfigSkipsTCPReuseForNodeWithoutInboundAuth(t *testing.T
 	}
 }
 
-func TestGenerateGlobalConfigRejectsUsernameWithPlus(t *testing.T) {
+func TestBuildGlobalConfigRejectsUsernameWithPlus(t *testing.T) {
 	configDir := t.TempDir()
 	service := NewSingBoxService(configDir)
 
@@ -319,7 +369,7 @@ func TestGenerateGlobalConfigRejectsUsernameWithPlus(t *testing.T) {
 		},
 	}
 
-	if err := service.GenerateGlobalConfig(nodes); err == nil {
+	if _, err := service.BuildGlobalConfigContext(context.Background(), nodes); err == nil {
 		t.Fatalf("expected username with '+' to be rejected")
 	}
 }

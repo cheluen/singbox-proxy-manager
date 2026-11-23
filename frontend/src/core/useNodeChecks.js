@@ -1,4 +1,4 @@
-// 「测 IP」任务调度：并发执行、可中途停止、进度可观测。语义与线上面板的 runNodeIPChecks 一致。
+// 单条和批量 IP 检测共用并发队列。
 import { useCallback, useEffect, useRef, useState } from 'react'
 import api from './api'
 
@@ -15,11 +15,12 @@ const isCanceled = (error, controller) =>
 
 // onResult(id, data, { updateFinal })：写回出口信息；onClear(id)：清空出口信息。
 export function useNodeChecks({ onResult, onClear, onFinished }) {
+  const [concurrency] = useState(readConcurrency)
   const [checkingIds, setCheckingIds] = useState(() => new Set())
   const [progress, setProgress] = useState(null)
   const runsRef = useRef(new Set())
   const reservedIdsRef = useRef(new Set())
-  const slotsRef = useRef({ active: 0, waiters: [] })
+  const activeCountRef = useRef(0)
   const progressRunRef = useRef(null)
   const mountedRef = useRef(false)
   const callbacksRef = useRef({ onResult, onClear, onFinished })
@@ -38,38 +39,34 @@ export function useNodeChecks({ onResult, onClear, onFinished }) {
     })
   }, [])
 
-  const acquireSlot = useCallback((run) => {
-    if (run.cancelled) return Promise.resolve(false)
-    const slots = slotsRef.current
-    if (slots.active < readConcurrency()) {
-      slots.active += 1
-      return Promise.resolve(true)
+  const finishRun = useCallback((run) => {
+    if (run.controllers.size > 0 || (!run.cancelled && run.cursor < run.ids.length)) return
+    runsRef.current.delete(run)
+    for (const id of run.ids) reservedIdsRef.current.delete(id)
+    if (progressRunRef.current === run) {
+      progressRunRef.current = null
+      if (mountedRef.current) setProgress(null)
     }
-    return new Promise((resolve) => slots.waiters.push({ run, resolve }))
+    const outcome = {
+      total: run.ids.length,
+      completed: run.completed,
+      failures: run.failures,
+      stopped: run.cancelled,
+      done: run.completed + run.failures.length,
+    }
+    run.resolve(outcome)
+    if (mountedRef.current) callbacksRef.current.onFinished?.(outcome, { silent: run.silent })
   }, [])
 
-  const releaseSlot = useCallback(() => {
-    const slots = slotsRef.current
-    while (slots.waiters.length > 0) {
-      const waiter = slots.waiters.shift()
-      if (waiter.run.cancelled) {
-        waiter.resolve(false)
-        continue
-      }
-      waiter.resolve(true)
-      return
-    }
-    slots.active -= 1
-  }, [])
+  const cancelRun = useCallback((run) => {
+    run.cancelled = true
+    for (const controller of run.controllers) controller.abort()
+    finishRun(run)
+  }, [finishRun])
 
   const stopChecks = useCallback(() => {
-    for (const run of runsRef.current) {
-      run.cancelled = true
-      run.controllers.forEach((controller) => controller.abort())
-      run.controllers.clear()
-    }
-    for (const waiter of slotsRef.current.waiters.splice(0)) waiter.resolve(false)
-  }, [])
+    for (const run of runsRef.current) cancelRun(run)
+  }, [cancelRun])
 
   // 组件卸载时终止全部进行中的检测。
   useEffect(() => {
@@ -80,78 +77,69 @@ export function useNodeChecks({ onResult, onClear, onFinished }) {
     }
   }, [stopChecks])
 
-  const runChecks = useCallback(async (nodeIds, { silent = false } = {}) => {
-    if (!mountedRef.current) return null
-    const ids = Array.from(new Set(nodeIds)).filter((id) => id !== null && id !== undefined && !reservedIdsRef.current.has(id))
-    if (ids.length === 0) return null
-    for (const id of ids) reservedIdsRef.current.add(id)
-
-    const run = { cancelled: false, controllers: new Set() }
-    runsRef.current.add(run)
-    const total = ids.length
-    const failures = []
-    let completed = 0
-    let cursor = 0
-    const showProgress = total > 1 && !progressRunRef.current
-    if (showProgress) {
-      progressRunRef.current = run
-      setProgress({ total, done: 0, failed: 0 })
-    }
-
-    const worker = async () => {
-      while (!run.cancelled) {
-        const index = cursor
-        cursor += 1
-        if (index >= total) return
-        const id = ids[index]
-        const controller = new AbortController()
-        run.controllers.add(controller)
-        markChecking(id, true)
-        let acquired = false
-        try {
-          // 单条检测与多个批量任务共享并发预算，而不是各自再开一组请求。
-          acquired = await acquireSlot(run)
-          if (!acquired || run.cancelled || !mountedRef.current) return
-          const response = await api.post(`/nodes/${id}/check-ip`, null, { signal: controller.signal })
-          if (run.cancelled || !mountedRef.current) return
-          callbacksRef.current.onResult(id, response.data, { updateFinal: true })
-          completed += 1
-        } catch (error) {
-          if (isCanceled(error, controller)) {
-            run.cancelled = true
-            return
-          }
-          const status = error?.response?.status
-          if (mountedRef.current && typeof status === 'number' && (status === 429 || status >= 500)) {
-            callbacksRef.current.onClear(id)
-          }
-          if (mountedRef.current && Object.prototype.hasOwnProperty.call(error?.response?.data || {}, 'upstream')) {
-            callbacksRef.current.onResult(id, error.response.data, { updateFinal: false })
-          }
-          failures.push({ id, error: error?.response?.data?.error || '' })
-        } finally {
-          run.controllers.delete(controller)
-          if (acquired) releaseSlot()
-          markChecking(id, false)
-          if (showProgress && !run.cancelled && mountedRef.current) {
-            setProgress({ total, done: completed + failures.length, failed: failures.length })
-          }
+  const drainQueue = useCallback(function drain() {
+    const execute = async (run, id, controller) => {
+      try {
+        const response = await api.post(`/nodes/${id}/check-ip`, null, { signal: controller.signal })
+        if (run.cancelled || !mountedRef.current) return
+        callbacksRef.current.onResult(id, response.data, { updateFinal: true })
+        run.completed += 1
+      } catch (error) {
+        if (isCanceled(error, controller)) {
+          cancelRun(run)
+          return
         }
+        const { status, data } = error.response || {}
+        if (mountedRef.current && !run.cancelled) {
+          if (status === 429 || status >= 500) callbacksRef.current.onClear(id)
+          if (Object.prototype.hasOwnProperty.call(data || {}, 'upstream')) {
+            callbacksRef.current.onResult(id, data, { updateFinal: false })
+          }
+          run.failures.push({ id, error: data?.error || '' })
+        }
+      } finally {
+        run.controllers.delete(controller)
+        activeCountRef.current -= 1
+        markChecking(id, false)
+        if (progressRunRef.current === run && !run.cancelled && mountedRef.current) {
+          setProgress({ total: run.ids.length, done: run.completed + run.failures.length, failed: run.failures.length })
+        }
+        finishRun(run)
+        drain()
       }
     }
 
-    await Promise.all(Array.from({ length: Math.min(readConcurrency(), total) }, worker))
-    runsRef.current.delete(run)
-    for (const id of ids) reservedIdsRef.current.delete(id)
-    if (showProgress) {
-      progressRunRef.current = null
-      if (mountedRef.current) setProgress(null)
+    while (mountedRef.current && activeCountRef.current < concurrency) {
+      const run = [...runsRef.current].find((candidate) => !candidate.cancelled && candidate.cursor < candidate.ids.length)
+      if (!run) return
+      runsRef.current.delete(run)
+      runsRef.current.add(run)
+      const id = run.ids[run.cursor]
+      run.cursor += 1
+      const controller = new AbortController()
+      run.controllers.add(controller)
+      activeCountRef.current += 1
+      markChecking(id, true)
+      void execute(run, id, controller)
     }
+  }, [cancelRun, concurrency, finishRun, markChecking])
 
-    const outcome = { total, completed, failures, stopped: run.cancelled, done: completed + failures.length }
-    if (mountedRef.current) callbacksRef.current.onFinished?.(outcome, { silent })
-    return outcome
-  }, [acquireSlot, markChecking, releaseSlot])
+  const runChecks = useCallback(async (nodeIds, { silent = false } = {}) => {
+    if (!mountedRef.current) return null
+    const ids = [...new Set(nodeIds)].filter((id) => id != null && !reservedIdsRef.current.has(id))
+    if (ids.length === 0) return null
+    for (const id of ids) reservedIdsRef.current.add(id)
+
+    return new Promise((resolve) => {
+      const run = { ids, silent, resolve, cursor: 0, completed: 0, failures: [], cancelled: false, controllers: new Set() }
+      runsRef.current.add(run)
+      if (ids.length > 1 && !progressRunRef.current) {
+        progressRunRef.current = run
+        setProgress({ total: ids.length, done: 0, failed: 0 })
+      }
+      drainQueue()
+    })
+  }, [drainQueue])
 
   return { checkingIds, progress, runChecks, stopChecks }
 }

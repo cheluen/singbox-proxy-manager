@@ -6,10 +6,10 @@ import (
 	"unicode"
 )
 
-// QMarkToPostgres rewrites database/sql question-mark placeholders to
+// qMarkToPostgres rewrites database/sql question-mark placeholders to
 // PostgreSQL positional placeholders while leaving quoted strings, quoted
 // identifiers, dollar-quoted strings, and SQL comments untouched.
-func QMarkToPostgres(query string) string {
+func qMarkToPostgres(query string) string {
 	if !strings.Contains(query, "?") {
 		return query
 	}
@@ -122,9 +122,6 @@ func copyBlockComment(out *strings.Builder, query string, start int) int {
 }
 
 func dollarQuoteTag(query string, start int) (string, bool) {
-	if start >= len(query) || query[start] != '$' {
-		return "", false
-	}
 	end := start + 1
 	for end < len(query) && query[end] != '$' {
 		r := rune(query[end])
@@ -133,7 +130,7 @@ func dollarQuoteTag(query string, start int) (string, bool) {
 		}
 		end++
 	}
-	if end >= len(query) || query[end] != '$' {
+	if end >= len(query) {
 		return "", false
 	}
 	return query[start : end+1], true

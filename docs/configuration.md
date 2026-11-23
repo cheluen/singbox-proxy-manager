@@ -1,6 +1,6 @@
 # 配置、数据库与运维指南
 
-本文档提供 SingBox Proxy Manager（`1.7.23`）完整的环境变量参考、多数据库配置、数据持久化、安全加固与故障排查指南。
+本文档提供 SingBox Proxy Manager（`1.7.24`）完整的环境变量参考、多数据库配置、数据持久化、安全加固与故障排查指南。
 
 ---
 
@@ -65,7 +65,6 @@
 | `SBPM_SINGBOX_RECOVERY_BASE_DELAY` | `1s` | `10ms–1m` | R | 指数退避恢复基准延迟 |
 | `SBPM_SINGBOX_RECOVERY_MAX_DELAY` | `30s` | `base_delay–10m` | R | 指数退避恢复最大延迟上限 |
 | `SBPM_SINGBOX_RECOVERY_STABLE_WINDOW` | `1m` | `10ms–1h` | R | 稳定运行判定窗口：下一次非预期退出时，若此前连续存活时长达到该值则清零既往恢复计数 |
-| `SBPM_SKIP_PORT_AVAILABILITY_CHECK` | `false` | 空/`0`/`false` 为否，其他非空为是 | R | 跳过新建节点分配端口时的本机 TCP 试绑检查（一般仅测试使用） |
 | `SBPM_BATCH_CHECK_IP_CONCURRENCY` | `3` | 正整数 | R / F | 注入前端的批量测 IP 共享并发额度（非后端全局 API 限流） |
 | `SBPM_NODES_VIRTUAL_THRESHOLD` | `120` | 非负整数 | R / F | 前端节点列表首批及每次滚动追加渲染行数；设为 `0` 表示一次全量渲染 |
 | `SBPM_IPCHECK_URLS` | 内置 7 个公共服务 | 逗号或空白分隔 HTTP(S) URL | R | 自定义出口 IP 检测端点列表；默认并发竞速查询 `ip2location / ip.sb / ipwho.is / ipapi.co / myip / ipify / ip-api` |
@@ -110,7 +109,6 @@
 | `GHCR_IMAGE` | `ghcr.io/cheluen/singbox-proxy-manager:latest` | C | `ghcr` profile 使用的镜像地址 |
 | `LOCAL_IMAGE` | `singbox-proxy-manager:local` | C | `local` profile 构建的本地镜像标签 |
 | `CONFIG_VOLUME_HOST` | `./config` | C | Compose 挂载到容器 `/app/config` 的宿主机目录 |
-| `SINGBOX_VERSION` | `1.12.12` | C | 仅构建期参数且脚本强制要求为 `1.12.12`，不可用于运行时更换内核 |
 | `GO_MODULE_PROXY` / `GOPROXY` | `https://proxy.golang.org,direct` | C | Docker 本地构建 Go 模块代理 |
 | `GO_SUM_DB` / `GOSUMDB` | `sum.golang.org` | C | Docker 本地构建 Go 校验和数据库 |
 | `APP_VERSION` | `frontend/package.json` 版本 | F | 前端构建版本号覆盖（不修改后端 `version.txt`） |
@@ -129,7 +127,7 @@
 - 上述 7 项全部为空时，若 `TURSO_DATABASE_URL` 与 `TURSO_AUTH_TOKEN` 均非空则连接 Turso/libSQL；仅配置其中一项时会记录提示并降级为本地 SQLite。
 - **SQLite**（默认）：使用纯 Go `modernc.org/sqlite` 写入 `<CONFIG_DIR>/proxy.db`，开启 WAL、外键约束与 `10s` `busy_timeout`，固定 1 打开 / 1 空闲连接。
 - **PostgreSQL**：支持 `postgres://` 与 `postgresql://`（基于 `pgx/v5`），内部自动转换 SQL 占位符（`?` → `$1`）。
-- **MySQL / TiDB**：支持 `mysql://` 与标准 `@tcp/@unix` DSN；未显式配置时默认开启 `parseTime`（不覆盖显式 `parseTime=false`），强制开启 `clientFoundRows`；连接公网主机默认启用 TLS，节点/配置字段自动使用 `LONGTEXT NOT NULL`。
+- **MySQL / TiDB**：支持 `mysql://` 与标准 `@tcp/@unix` DSN；未显式配置时默认开启 `parseTime`（不覆盖显式 `parseTime=false`），强制开启 `clientFoundRows`；连接公网主机在未显式指定 `tls` 参数时默认启用 TLS（显式 `tls=false` 或空 `tls=` 均会被保留），节点/配置字段自动使用 `LONGTEXT NOT NULL`。
 - **Turso / libSQL**：固定 1 打开 / 0 空闲 / 1ns 连接寿命以规避驱动会话复用异常。
 
 数据库启动后自动创建并增量补齐四张应用表（无独立 `schema_version` 表）：

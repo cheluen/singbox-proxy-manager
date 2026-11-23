@@ -20,7 +20,7 @@ type nodeMutationTable struct {
 func captureNodeMutationTables(ctx context.Context, tx *sql.Tx) ([]nodeMutationTable, error) {
 	tables := []struct{ name, columns string }{
 		{"proxy_nodes", models.ProxyNodeSelectColumns},
-		{"settings", models.RuntimeSettingsSelectColumns + ", admin_password, admin_password_env_fingerprint, auth_generation"},
+		{"settings", models.SettingsSnapshotColumns},
 	}
 	snapshots := make([]nodeMutationTable, 0, len(tables))
 	for _, table := range tables {
@@ -67,7 +67,7 @@ func captureNodeMutationTable(ctx context.Context, tx *sql.Tx, name, columns str
 	return snapshot, rows.Err()
 }
 
-func (coordinator *NodeMutationCoordinator) commitCandidate(
+func (coordinator *nodeMutationCoordinator) commitCandidate(
 	ctx context.Context,
 	before, after []nodeMutationTable,
 ) error {

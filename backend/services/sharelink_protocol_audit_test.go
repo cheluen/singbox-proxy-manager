@@ -183,7 +183,7 @@ func TestShareLinkAuditRealSingBoxAcceptsNormalizedSSPluginURLs(t *testing.T) {
 			t.Fatalf("parse plugin URL %d: %v", index, err)
 		}
 		node := nativeTestNode(t, index+1, name, proxyType, parsed)
-		configJSON, err := service.BuildGlobalConfig([]models.ProxyNode{node})
+		configJSON, err := service.BuildGlobalConfigContext(context.Background(), []models.ProxyNode{node})
 		if err != nil {
 			t.Fatalf("BuildGlobalConfig %s: %v", name, err)
 		}
@@ -345,7 +345,7 @@ func TestShareLinkAuditTUICAllowsEmptyPassword(t *testing.T) {
 		if realBinary := os.Getenv("SINGBOX_TEST_BINARY"); realBinary != "" {
 			t.Setenv("SINGBOX_BINARY", realBinary)
 			service := NewSingBoxService(t.TempDir())
-			configJSON, buildErr := service.BuildGlobalConfig([]models.ProxyNode{
+			configJSON, buildErr := service.BuildGlobalConfigContext(context.Background(), []models.ProxyNode{
 				nativeTestNode(t, 300+index, name, proxyType, parsed),
 			})
 			if buildErr != nil {
@@ -653,7 +653,7 @@ func TestShareLinkAuditNativeWebSocketHostListsRoundTrip(t *testing.T) {
 	if realBinary := os.Getenv("SINGBOX_TEST_BINARY"); realBinary != "" {
 		t.Setenv("SINGBOX_BINARY", realBinary)
 		realService := NewSingBoxService(t.TempDir())
-		configJSON, err := realService.BuildGlobalConfig(nodes)
+		configJSON, err := realService.BuildGlobalConfigContext(context.Background(), nodes)
 		if err != nil {
 			t.Fatalf("build native Host-list config: %v", err)
 		}
@@ -774,7 +774,7 @@ func TestShareLinkAuditNativeV2RayRoundTrip(t *testing.T) {
 	if realBinary := os.Getenv("SINGBOX_TEST_BINARY"); realBinary != "" {
 		t.Setenv("SINGBOX_BINARY", realBinary)
 		service := NewSingBoxService(t.TempDir())
-		configJSON, buildErr := service.BuildGlobalConfig([]models.ProxyNode{
+		configJSON, buildErr := service.BuildGlobalConfigContext(context.Background(), []models.ProxyNode{
 			nativeTestNode(t, 31, "native-vless", "vless", parsedVLESS),
 			nativeTestNode(t, 32, "native-trojan", "trojan", parsedTrojan),
 		})
@@ -1039,7 +1039,7 @@ func TestShareLinkAuditTLSInferenceSurvivesPersistenceAndBuild(t *testing.T) {
 			}
 
 			node := nativeTestNode(t, 100+index, name, proxyType, parsed)
-			configJSON, err := service.BuildGlobalConfig([]models.ProxyNode{node})
+			configJSON, err := service.BuildGlobalConfigContext(context.Background(), []models.ProxyNode{node})
 			if err != nil {
 				t.Fatalf("BuildGlobalConfig: %v", err)
 			}
@@ -1124,7 +1124,7 @@ func TestShareLinkAuditAnyTLSKeepsExplicitIPServerName(t *testing.T) {
 	if realBinary := os.Getenv("SINGBOX_TEST_BINARY"); realBinary != "" {
 		t.Setenv("SINGBOX_BINARY", realBinary)
 		service := NewSingBoxService(t.TempDir())
-		configJSON, err := service.BuildGlobalConfig([]models.ProxyNode{
+		configJSON, err := service.BuildGlobalConfigContext(context.Background(), []models.ProxyNode{
 			nativeTestNode(t, 199, "anytls-ip-sni", "anytls", config),
 		})
 		if err != nil {
@@ -1190,7 +1190,7 @@ func TestShareLinkAuditNormalizesMixedCaseUTLSFingerprint(t *testing.T) {
 			if realBinary := os.Getenv("SINGBOX_TEST_BINARY"); realBinary != "" {
 				t.Setenv("SINGBOX_BINARY", realBinary)
 				service := NewSingBoxService(t.TempDir())
-				configJSON, err := service.BuildGlobalConfig([]models.ProxyNode{
+				configJSON, err := service.BuildGlobalConfigContext(context.Background(), []models.ProxyNode{
 					nativeTestNode(t, 210+index, name, proxyType, parsed),
 				})
 				if err != nil {
@@ -1351,7 +1351,7 @@ func TestShareLinkAuditECHConfigListRoundTrip(t *testing.T) {
 	nodes = append(nodes, nativeTestNode(t, 239, "vmess-exported-ech", "vmess", parsedVMess))
 
 	service := NewSingBoxService(t.TempDir())
-	configJSON, err := service.BuildGlobalConfig(nodes)
+	configJSON, err := service.BuildGlobalConfigContext(context.Background(), nodes)
 	if err != nil {
 		t.Fatalf("BuildGlobalConfig ECH round-trip: %v", err)
 	}
@@ -1488,7 +1488,7 @@ func TestShareLinkAuditWireGuardKeepaliveDefaultsAllowedIPs(t *testing.T) {
 
 	if realBinary := os.Getenv("SINGBOX_TEST_BINARY"); realBinary != "" {
 		t.Setenv("SINGBOX_BINARY", realBinary)
-		configJSON, buildErr := service.BuildGlobalConfig([]models.ProxyNode{
+		configJSON, buildErr := service.BuildGlobalConfigContext(context.Background(), []models.ProxyNode{
 			nativeTestNode(t, 330, name, proxyType, parsed),
 		})
 		if buildErr != nil {

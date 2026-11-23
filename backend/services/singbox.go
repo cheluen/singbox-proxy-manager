@@ -1,11 +1,13 @@
 package services
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
+	"maps"
 	"net"
 	"os"
 	"os/exec"
@@ -30,11 +32,9 @@ type SingBoxService struct {
 	process              *exec.Cmd
 	processDone          chan struct{}
 	processErr           error
-	processGeneration    uint64
 	processStartedAt     time.Time
 	stopRequested        bool
 	desiredRunning       bool
-	recoveryRunning      bool
 	recoveryCancel       chan struct{}
 	recoveryEpoch        uint64
 	recoveryAttempts     int
@@ -213,8 +213,8 @@ type DNSConfig struct {
 }
 
 type DNSServer struct {
-	Type string `json:"type,omitempty"`
 	Tag  string `json:"tag"`
+	Type string `json:"type,omitempty"`
 }
 
 type LogConfig struct {
@@ -232,8 +232,8 @@ type InboundConfig struct {
 }
 
 type InboundUser struct {
-	Username string `json:"username"`
 	Password string `json:"password"`
+	Username string `json:"username"`
 }
 
 type OutboundConfig struct {
@@ -275,28 +275,38 @@ type parsedUpstreamProxy struct {
 	Config     interface{}
 	Tag        string
 	Scope      string
+	Outbound   *OutboundConfig
+	Endpoint   *EndpointConfig
 }
 
-// BuildGlobalConfig renders the unified sing-box configuration for all enabled
+// BuildGlobalConfigContext renders the unified sing-box configuration for all enabled
 // nodes and returns it as JSON without touching the filesystem or the running
 // process, so callers can validate it before applying.
-func (s *SingBoxService) BuildGlobalConfig(nodes []models.ProxyNode, settings ...models.Settings) ([]byte, error) {
-	return s.BuildGlobalConfigContext(context.Background(), nodes, settings...)
-}
-
 func (s *SingBoxService) BuildGlobalConfigContext(
 	ctx context.Context,
 	nodes []models.ProxyNode,
 	settings ...models.Settings,
 ) ([]byte, error) {
-	return s.buildGlobalConfigContext(ctx, nodes, "::", settings...)
+	parsedNodes, needsLocalDNS, err := prepareEnabledNodes(nodes)
+	if err != nil {
+		return nil, err
+	}
+	var runtimeSettings models.Settings
+	if len(settings) > 0 {
+		runtimeSettings = settings[0]
+	}
+	upstreams, upstreamNeedsLocalDNS, err := s.prepareManagedUpstreams(ctx, parsedNodes, runtimeSettings)
+	if err != nil {
+		return nil, err
+	}
+	return s.renderGlobalConfig(parsedNodes, upstreams, "::", needsLocalDNS || upstreamNeedsLocalDNS)
 }
 
-func (s *SingBoxService) buildGlobalConfigContext(
-	ctx context.Context,
-	nodes []models.ProxyNode,
+func (s *SingBoxService) renderGlobalConfig(
+	parsedNodes []parsedEnabledNode,
+	upstreams []parsedUpstreamProxy,
 	listenAddress string,
-	settings ...models.Settings,
+	needsLocalDNS bool,
 ) ([]byte, error) {
 	config := SingBoxConfig{
 		Log: LogConfig{
@@ -311,19 +321,6 @@ func (s *SingBoxService) buildGlobalConfigContext(
 		},
 	}
 
-	parsedNodes, needsLocalDNS, err := prepareEnabledNodes(nodes)
-	if err != nil {
-		return nil, err
-	}
-	var runtimeSettings models.Settings
-	if len(settings) > 0 {
-		runtimeSettings = settings[0]
-	}
-	upstreams, upstreamNeedsLocalDNS, err := s.prepareManagedUpstreams(ctx, parsedNodes, runtimeSettings)
-	if err != nil {
-		return nil, err
-	}
-	needsLocalDNS = needsLocalDNS || upstreamNeedsLocalDNS
 	if needsLocalDNS {
 		config.DNS = &DNSConfig{
 			Servers: []DNSServer{{Type: "local", Tag: "local"}},
@@ -331,17 +328,12 @@ func (s *SingBoxService) buildGlobalConfigContext(
 	}
 
 	reuseRoutes := make([]tcpReuseRoute, 0, len(parsedNodes))
-	reuseRouteSet := make(map[string]struct{}, len(parsedNodes))
 	for _, parsedNode := range parsedNodes {
 		node := parsedNode.Node
 		if !node.TCPReuseEnabled || node.Username == "" || node.Password == "" {
 			continue
 		}
 		authUser := fmt.Sprintf("%s+%d", node.Username, node.InboundPort)
-		if _, exists := reuseRouteSet[authUser]; exists {
-			return nil, fmt.Errorf("duplicate tcp reuse auth user %q", authUser)
-		}
-		reuseRouteSet[authUser] = struct{}{}
 		reuseRoutes = append(reuseRoutes, tcpReuseRoute{
 			AuthUser:    authUser,
 			Password:    node.Password,
@@ -351,23 +343,11 @@ func (s *SingBoxService) buildGlobalConfigContext(
 
 	directInboundRoutes := make([]RouteRule, 0, len(parsedNodes))
 	for _, upstream := range upstreams {
-		if upstream.Definition.Type == "wireguard" {
-			wireGuardConfig, ok := upstream.Config.(*models.WireGuardConfig)
-			if !ok {
-				return nil, fmt.Errorf("failed to generate upstream endpoint %q: unexpected config type %T", upstream.Tag, upstream.Config)
-			}
-			endpoint, err := s.generateWireGuardEndpoint(wireGuardConfig, upstream.Tag)
-			if err != nil {
-				return nil, fmt.Errorf("failed to generate upstream endpoint %q: %w", upstream.Tag, err)
-			}
-			config.Endpoints = append(config.Endpoints, endpoint)
-			continue
+		if upstream.Endpoint != nil {
+			config.Endpoints = append(config.Endpoints, *upstream.Endpoint)
+		} else {
+			config.Outbounds = append(config.Outbounds, *upstream.Outbound)
 		}
-		outbound, err := s.generateOutboundFromConfig(upstream.Definition.Type, upstream.Config, upstream.Tag)
-		if err != nil {
-			return nil, fmt.Errorf("failed to generate upstream outbound %q: %w", upstream.Tag, err)
-		}
-		config.Outbounds = append(config.Outbounds, outbound)
 	}
 
 	// Generate inbounds and outbounds for each enabled node.
@@ -407,12 +387,6 @@ func (s *SingBoxService) buildGlobalConfigContext(
 		// selector preserves the node's stable outbound tag while delegating
 		// its traffic to the managed upstream.
 		if parsedNode.ManagedUpstreamTag != "" {
-			if node.Type != "direct" {
-				return nil, fmt.Errorf(
-					"failed to generate outbound for node %d: managed selector is only valid for direct nodes",
-					node.ID,
-				)
-			}
 			config.Outbounds = append(config.Outbounds, OutboundConfig{
 				Type: "selector",
 				Tag:  outboundTag,
@@ -464,20 +438,10 @@ func (s *SingBoxService) buildGlobalConfigContext(
 		Tag:  "direct",
 	})
 
-	return s.marshalConfig(config)
+	return marshalConfig(config)
 }
 
-// GenerateGlobalConfig 为所有启用节点生成并写入统一配置，不执行内核校验；替换运行中的配置时，
-// 应依次调用 BuildGlobalConfig、ValidateConfigContext 和 ApplyConfig。
-func (s *SingBoxService) GenerateGlobalConfig(nodes []models.ProxyNode, settings ...models.Settings) error {
-	configJSON, err := s.BuildGlobalConfig(nodes, settings...)
-	if err != nil {
-		return err
-	}
-	return s.writeConfigFile(configJSON)
-}
-
-func (s *SingBoxService) configPath() string {
+func (s *SingBoxService) ConfigPath() string {
 	return filepath.Join(s.configDir, "config.json")
 }
 
@@ -488,7 +452,7 @@ func (s *SingBoxService) lastGoodConfigPath() string {
 // writeConfigFile writes config.json atomically (temp file + rename) so an
 // interrupted write can never leave a truncated config behind.
 func (s *SingBoxService) writeConfigFile(configJSON []byte) error {
-	return writeSensitiveFileAtomically(s.configPath(), configJSON)
+	return writeSensitiveFileAtomically(s.ConfigPath(), configJSON)
 }
 
 func writeSensitiveFileAtomically(path string, content []byte) error {
@@ -566,7 +530,7 @@ func (s *SingBoxService) ValidateConfigContext(ctx context.Context, configJSON [
 	}
 	cmd.Cancel = func() error { return terminateProcess(cmd) }
 	cmd.WaitDelay = time.Second
-	output := newBoundedCommandOutput(maxSingBoxDiagnosticBytes)
+	output := newBoundedCommandOutput()
 	cmd.Stdout = output
 	cmd.Stderr = output
 	err = cmd.Run()
@@ -577,7 +541,7 @@ func (s *SingBoxService) ValidateConfigContext(ctx context.Context, configJSON [
 		return fmt.Errorf("sing-box config validation did not finish within %s: %w", validationTimeout, validationCtx.Err())
 	}
 	if err != nil {
-		detail := strings.TrimSpace(output.String(4096))
+		detail := strings.TrimSpace(output.String())
 		if detail == "" {
 			detail = err.Error()
 		}
@@ -611,76 +575,77 @@ func (s *SingBoxService) saveLastGoodBytes(configJSON []byte) error {
 	return nil
 }
 
-func (s *SingBoxService) marshalConfig(config SingBoxConfig) ([]byte, error) {
-	// Custom marshaling to handle Extra fields
-	type Alias SingBoxConfig
-
-	// Convert to map for custom marshaling
-	data, err := json.Marshal((Alias)(config))
-	if err != nil {
-		return nil, err
+func marshalConfig(config SingBoxConfig) ([]byte, error) {
+	route := map[string]any{}
+	if config.Route.Final != "" {
+		route["final"] = config.Route.Final
 	}
-
-	var result map[string]interface{}
-	if err := json.Unmarshal(data, &result); err != nil {
-		return nil, err
+	if len(config.Route.Rules) > 0 {
+		route["rules"] = configObjects(config.Route.Rules)
 	}
-
-	// Merge Extra fields for inbounds
-	if inbounds, ok := result["inbounds"].([]interface{}); ok {
-		for i, inbound := range inbounds {
-			if inboundMap, ok := inbound.(map[string]interface{}); ok {
-				if i < len(config.Inbounds) && config.Inbounds[i].Extra != nil {
-					for k, v := range config.Inbounds[i].Extra {
-						inboundMap[k] = v
-					}
-				}
-			}
-		}
+	result := map[string]any{
+		"log":       config.Log,
+		"inbounds":  configObjects(config.Inbounds),
+		"outbounds": configObjects(config.Outbounds),
+		"route":     route,
 	}
-
-	// Merge Extra fields for outbounds
-	if outbounds, ok := result["outbounds"].([]interface{}); ok {
-		for i, outbound := range outbounds {
-			if outboundMap, ok := outbound.(map[string]interface{}); ok {
-				if i < len(config.Outbounds) && config.Outbounds[i].Extra != nil {
-					for k, v := range config.Outbounds[i].Extra {
-						outboundMap[k] = v
-					}
-				}
-			}
-		}
+	if config.DNS != nil {
+		result["dns"] = config.DNS
 	}
-
-	// Merge Extra fields for endpoints
-	if endpoints, ok := result["endpoints"].([]interface{}); ok {
-		for i, endpoint := range endpoints {
-			if endpointMap, ok := endpoint.(map[string]interface{}); ok {
-				if i < len(config.Endpoints) && config.Endpoints[i].Extra != nil {
-					for k, v := range config.Endpoints[i].Extra {
-						endpointMap[k] = v
-					}
-				}
-			}
-		}
+	if len(config.Endpoints) > 0 {
+		result["endpoints"] = configObjects(config.Endpoints)
 	}
-
-	// Merge Extra fields for route rules
-	if route, ok := result["route"].(map[string]interface{}); ok {
-		if rules, ok := route["rules"].([]interface{}); ok {
-			for i, rule := range rules {
-				if ruleMap, ok := rule.(map[string]interface{}); ok {
-					if i < len(config.Route.Rules) && config.Route.Rules[i].Extra != nil {
-						for k, v := range config.Route.Rules[i].Extra {
-							ruleMap[k] = v
-						}
-					}
-				}
-			}
-		}
-	}
-
 	return json.MarshalIndent(result, "", "  ")
+}
+
+func configObjects[T interface{ configFields() map[string]any }](configs []T) []map[string]any {
+	if configs == nil {
+		return nil
+	}
+	objects := make([]map[string]any, len(configs))
+	for index, config := range configs {
+		objects[index] = config.configFields()
+	}
+	return objects
+}
+
+func (inbound InboundConfig) configFields() map[string]any {
+	fields := map[string]any{"type": inbound.Type, "tag": inbound.Tag, "listen": inbound.Listen, "listen_port": inbound.Port}
+	if len(inbound.Users) > 0 {
+		fields["users"] = inbound.Users
+	}
+	maps.Copy(fields, inbound.Extra)
+	return fields
+}
+
+func (outbound OutboundConfig) configFields() map[string]any {
+	fields := map[string]any{"type": outbound.Type, "tag": outbound.Tag}
+	if outbound.Server != "" {
+		fields["server"] = outbound.Server
+	}
+	if outbound.Port != 0 {
+		fields["server_port"] = outbound.Port
+	}
+	maps.Copy(fields, outbound.Extra)
+	return fields
+}
+
+func (endpoint EndpointConfig) configFields() map[string]any {
+	fields := map[string]any{"type": endpoint.Type, "tag": endpoint.Tag}
+	maps.Copy(fields, endpoint.Extra)
+	return fields
+}
+
+func (rule RouteRule) configFields() map[string]any {
+	fields := map[string]any{}
+	if len(rule.Inbound) > 0 {
+		fields["inbound"] = rule.Inbound
+	}
+	if rule.Outbound != "" {
+		fields["outbound"] = rule.Outbound
+	}
+	maps.Copy(fields, rule.Extra)
+	return fields
 }
 
 func prepareEnabledNodes(nodes []models.ProxyNode) ([]parsedEnabledNode, bool, error) {
@@ -861,55 +826,79 @@ type upstreamPortRange struct {
 	end   int
 }
 
+func (ports upstreamPortRange) kernelRange() string {
+	return fmt.Sprintf("%d:%d", ports.start, ports.end)
+}
+
 type upstreamDialTarget struct {
 	host  string
 	ports []upstreamPortRange
 }
 
 func (s *SingBoxService) ValidateUpstreamDefinition(definition models.ProxyDefinition) error {
-	_, _, err := s.parseManagedUpstreamDefinition(definition)
+	_, err := s.parseManagedUpstreamDefinition(definition, "")
 	return err
 }
 
 func (s *SingBoxService) parseManagedUpstreamDefinition(
 	definition models.ProxyDefinition,
-) (models.ProxyDefinition, interface{}, error) {
+	tag string,
+) (parsedUpstreamProxy, error) {
 	definition.Type = strings.ToLower(strings.TrimSpace(definition.Type))
 	definition.Config = strings.TrimSpace(definition.Config)
 	if definition.Type == "" {
-		return models.ProxyDefinition{}, nil, upstreamValidationErrorf("upstream proxy type is required")
+		return parsedUpstreamProxy{}, upstreamValidationErrorf("upstream proxy type is required")
 	}
 	if definition.Config == "" {
-		return models.ProxyDefinition{}, nil, upstreamValidationErrorf("upstream proxy config is required")
+		return parsedUpstreamProxy{}, upstreamValidationErrorf("upstream proxy config is required")
 	}
 
 	parsedConfig, err := definition.ParseConfig()
 	if err != nil {
-		return models.ProxyDefinition{}, nil, upstreamValidationErrorf("invalid upstream proxy: %v", err)
+		return parsedUpstreamProxy{}, upstreamValidationErrorf("invalid upstream proxy: %v", err)
 	}
 	if detour := strings.TrimSpace(configDetour(parsedConfig)); detour != "" {
-		return models.ProxyDefinition{}, nil, upstreamValidationErrorf(
+		return parsedUpstreamProxy{}, upstreamValidationErrorf(
 			"upstream proxy must not define a nested detour (%q)",
 			detour,
 		)
 	}
 	setConfigDetour(parsedConfig, "")
 
+	upstream := parsedUpstreamProxy{Definition: definition, Config: parsedConfig, Tag: tag}
 	if definition.Type == "wireguard" {
 		wireGuardConfig, ok := parsedConfig.(*models.WireGuardConfig)
 		if !ok {
-			return models.ProxyDefinition{}, nil, upstreamValidationErrorf(
+			return parsedUpstreamProxy{}, upstreamValidationErrorf(
 				"invalid upstream proxy config type %T",
 				parsedConfig,
 			)
 		}
-		if _, err := s.generateWireGuardEndpoint(wireGuardConfig, "managed-upstream-validation"); err != nil {
-			return models.ProxyDefinition{}, nil, upstreamValidationErrorf("invalid upstream proxy: %v", err)
+		endpoint, err := s.generateWireGuardEndpoint(wireGuardConfig, tag)
+		if err != nil {
+			return parsedUpstreamProxy{}, upstreamValidationErrorf("invalid upstream proxy: %v", err)
 		}
-	} else if _, err := s.generateOutboundFromConfig(definition.Type, parsedConfig, "managed-upstream-validation"); err != nil {
-		return models.ProxyDefinition{}, nil, upstreamValidationErrorf("invalid upstream proxy: %v", err)
+		upstream.Endpoint = &endpoint
+	} else {
+		outbound, err := s.generateOutboundFromConfig(definition.Type, parsedConfig, tag)
+		if err != nil {
+			return parsedUpstreamProxy{}, upstreamValidationErrorf("invalid upstream proxy: %v", err)
+		}
+		upstream.Outbound = &outbound
 	}
-	return definition, parsedConfig, nil
+	return upstream, nil
+}
+
+func (upstream parsedUpstreamProxy) usesLocalDNS() (bool, error) {
+	resolver, err := configDomainResolverValue(upstream.Config)
+	if err == nil {
+		var usesLocal bool
+		usesLocal, err = validateGeneratedDomainResolver(resolver)
+		if err == nil {
+			return usesLocal, nil
+		}
+	}
+	return false, upstreamValidationErrorf("%s has invalid domain_resolver: %v", upstream.Scope, err)
 }
 
 func (s *SingBoxService) prepareManagedUpstreams(
@@ -929,25 +918,17 @@ func (s *SingBoxService) prepareManagedUpstreams(
 		tag string,
 		scope string,
 	) (parsedUpstreamProxy, error) {
-		normalized, parsedConfig, err := s.parseManagedUpstreamDefinition(definition)
+		upstream, err := s.parseManagedUpstreamDefinition(definition, tag)
 		if err != nil {
 			return parsedUpstreamProxy{}, fmt.Errorf("%s: %w", scope, err)
 		}
-		resolver, err := configDomainResolverValue(parsedConfig)
+		upstream.Scope = scope
+		usesLocal, err := upstream.usesLocalDNS()
 		if err != nil {
-			return parsedUpstreamProxy{}, upstreamValidationErrorf("%s has invalid domain_resolver: %v", scope, err)
-		}
-		usesLocal, err := validateGeneratedDomainResolver(resolver)
-		if err != nil {
-			return parsedUpstreamProxy{}, upstreamValidationErrorf("%s has invalid domain_resolver: %v", scope, err)
+			return parsedUpstreamProxy{}, err
 		}
 		needsLocalDNS = needsLocalDNS || usesLocal
-		return parsedUpstreamProxy{
-			Definition: normalized,
-			Config:     parsedConfig,
-			Tag:        tag,
-			Scope:      scope,
-		}, nil
+		return upstream, nil
 	}
 
 	var global *parsedUpstreamProxy
@@ -1156,24 +1137,34 @@ func upstreamDialTargets(config interface{}) ([]upstreamDialTarget, error) {
 }
 
 func parseUpstreamPortRange(raw string) (upstreamPortRange, error) {
-	value := strings.TrimSpace(strings.Replace(raw, "-", ":", 1))
-	parts := strings.Split(value, ":")
-	if len(parts) == 1 {
-		port, err := strconv.Atoi(parts[0])
-		if err != nil || port < 1 || port > 65535 {
-			return upstreamPortRange{}, fmt.Errorf("invalid port %q", raw)
+	ports, ranged := parseHysteria2Port(raw)
+	if ports.start != 0 {
+		return ports, nil
+	}
+	if ranged {
+		return upstreamPortRange{}, fmt.Errorf("invalid port range %q", raw)
+	}
+	return upstreamPortRange{}, fmt.Errorf("invalid port %q", raw)
+}
+
+func parseHysteria2Port(raw string) (upstreamPortRange, bool) {
+	value := strings.TrimSpace(raw)
+	if port, err := strconv.Atoi(value); err == nil {
+		if port < 1 || port > 65535 {
+			return upstreamPortRange{}, false
 		}
-		return upstreamPortRange{start: port, end: port}, nil
+		return upstreamPortRange{start: port, end: port}, false
 	}
-	if len(parts) != 2 {
-		return upstreamPortRange{}, fmt.Errorf("invalid port range %q", raw)
+	startText, endText, ranged := strings.Cut(strings.Replace(value, "-", ":", 1), ":")
+	if !ranged {
+		return upstreamPortRange{}, false
 	}
-	start, startErr := strconv.Atoi(strings.TrimSpace(parts[0]))
-	end, endErr := strconv.Atoi(strings.TrimSpace(parts[1]))
+	start, startErr := strconv.Atoi(strings.TrimSpace(startText))
+	end, endErr := strconv.Atoi(strings.TrimSpace(endText))
 	if startErr != nil || endErr != nil || start < 1 || end > 65535 || start > end {
-		return upstreamPortRange{}, fmt.Errorf("invalid port range %q", raw)
+		return upstreamPortRange{}, true
 	}
-	return upstreamPortRange{start: start, end: end}, nil
+	return upstreamPortRange{start: start, end: end}, true
 }
 
 func managerLocalHosts() map[string]struct{} {
@@ -1358,14 +1349,6 @@ func validateDetourGraph(nodes []parsedEnabledNode, edges map[int]int) error {
 		}
 	}
 	return nil
-}
-
-func (s *SingBoxService) generateOutbound(node *models.ProxyNode, tag string) (OutboundConfig, error) {
-	parsedConfig, err := node.ParseConfig()
-	if err != nil {
-		return OutboundConfig{}, err
-	}
-	return s.generateOutboundFromConfig(node.Type, parsedConfig, tag)
 }
 
 func (s *SingBoxService) generateOutboundFromConfig(proxyType string, parsedConfig interface{}, tag string) (OutboundConfig, error) {
@@ -1621,11 +1604,15 @@ func cloneOptionValue(value interface{}) interface{} {
 func generatorOptionMap(value interface{}) (map[string]interface{}, bool) {
 	switch typed := value.(type) {
 	case models.NativeOptions:
-		return cloneOptionValue(map[string]interface{}(typed)).(map[string]interface{}), true
+		return map[string]interface{}(typed), true
 	case map[string]interface{}:
-		return cloneOptionValue(typed).(map[string]interface{}), true
+		return typed, true
 	case map[string]string:
-		return cloneOptionValue(typed).(map[string]interface{}), true
+		options := make(map[string]interface{}, len(typed))
+		for key, value := range typed {
+			options[key] = value
+		}
+		return options, true
 	default:
 		return nil, false
 	}
@@ -1823,19 +1810,22 @@ func generatorNativeTLSEnabled(options models.NativeOptions) bool {
 }
 
 func normalizeGeneratorTransportType(raw string) (string, error) {
-	transportType := strings.ToLower(strings.TrimSpace(raw))
+	transportType := models.NormalizeTransportType(raw)
 	switch transportType {
 	case "", "tcp", "none", "raw":
 		return "", nil
-	case "h2":
-		return "http", nil
-	case "ws", "http", "quic", "grpc", "httpupgrade":
-		return transportType, nil
 	case "kcp", "mkcp":
 		return "", fmt.Errorf("transport %q is not supported by sing-box 1.12.12", raw)
-	default:
-		return "", fmt.Errorf("unknown sing-box transport %q", raw)
 	}
+	if supportsV2RayTransport(transportType) {
+		return transportType, nil
+	}
+	return "", fmt.Errorf("unknown sing-box transport %q", raw)
+}
+
+func supportsV2RayTransport(transportType string) bool {
+	_, supported := generatorTransportAllowedKeys[transportType]
+	return supported
 }
 
 func finalizeGeneratorTransport(legacyType string, legacy map[string]interface{}, native models.NativeOptions, tls map[string]interface{}) (map[string]interface{}, error) {
@@ -2044,15 +2034,10 @@ func generatorNoopQUICHeader(value interface{}) bool {
 }
 
 func normalizeGeneratorPacketEncoding(raw string) (string, error) {
-	value := strings.ToLower(strings.TrimSpace(raw))
-	switch value {
-	case "", "none":
-		return "", nil
-	case "packetaddr", "xudp":
+	if value, ok := packetEncodingValue(raw); ok {
 		return value, nil
-	default:
-		return "", fmt.Errorf("unsupported packet_encoding %q; sing-box 1.12.12 accepts packetaddr or xudp", raw)
 	}
+	return "", fmt.Errorf("unsupported packet_encoding %q; sing-box 1.12.12 accepts packetaddr or xudp", raw)
 }
 
 func resolveGeneratorUDPOverTCP(value interface{}, compatibility models.NativeOptions) (interface{}, error) {
@@ -2424,7 +2409,7 @@ func (s *SingBoxService) generateHysteria2Outbound(config *models.Hysteria2Confi
 			outbound.Extra["down_mbps"] = config.DownMbps
 		}
 	}
-	obfs, err := generatorHysteria2Obfs(config)
+	obfs, err := effectiveHysteria2Obfs(config)
 	if err != nil {
 		return OutboundConfig{}, err
 	}
@@ -2455,47 +2440,31 @@ func (s *SingBoxService) generateHysteria2Outbound(config *models.Hysteria2Confi
 
 func normalizeGeneratorHysteria2ServerPorts(serverPort int, rawPorts models.ListableString) ([]string, error) {
 	ports := make([]string, 0, len(rawPorts))
-	nonEmptyCount := 0
-	for _, rawPort := range rawPorts {
-		if strings.TrimSpace(rawPort) != "" {
-			nonEmptyCount++
-		}
-	}
+	plainPort := 0
 	for _, rawPort := range rawPorts {
 		value := strings.TrimSpace(rawPort)
 		if value == "" {
 			continue
 		}
-		if singlePort, err := strconv.Atoi(value); err == nil {
-			if singlePort < 1 || singlePort > 65535 {
+		portRange, ranged := parseHysteria2Port(value)
+		if portRange.start == 0 {
+			if _, err := strconv.Atoi(value); err == nil {
 				return nil, fmt.Errorf("invalid hysteria2 server port %q", value)
 			}
-			if nonEmptyCount == 1 && singlePort == serverPort {
-				// A normal single-port URI is represented by server_port. sing-box's
-				// server_ports field only accepts ranges such as 2000:3000.
-				continue
-			}
-			// Degenerate ranges preserve mixed explicit ports in a hopping list and
-			// are accepted by sing-box 1.12.12.
-			ports = append(ports, fmt.Sprintf("%d:%d", singlePort, singlePort))
-			continue
+			return nil, fmt.Errorf("invalid hysteria2 server port range %q", strings.Replace(value, "-", ":", 1))
 		}
-		value = strings.Replace(value, "-", ":", 1)
-		parts := strings.Split(value, ":")
-		if len(parts) != 2 {
-			return nil, fmt.Errorf("invalid hysteria2 server port range %q", value)
+		if !ranged {
+			plainPort = portRange.start
 		}
-		start, startErr := strconv.Atoi(strings.TrimSpace(parts[0]))
-		end, endErr := strconv.Atoi(strings.TrimSpace(parts[1]))
-		if startErr != nil || endErr != nil || start < 1 || end > 65535 || start > end {
-			return nil, fmt.Errorf("invalid hysteria2 server port range %q", value)
-		}
-		ports = append(ports, fmt.Sprintf("%d:%d", start, end))
+		ports = append(ports, portRange.kernelRange())
+	}
+	if len(ports) == 1 && plainPort != 0 && plainPort == serverPort {
+		return ports[:0], nil
 	}
 	return ports, nil
 }
 
-func generatorHysteria2Obfs(config *models.Hysteria2Config) (map[string]interface{}, error) {
+func effectiveHysteria2Obfs(config *models.Hysteria2Config) (map[string]interface{}, error) {
 	legacyPassword := config.ObfsPassword
 	if legacyPassword == "" {
 		legacyPassword = config.SalamanderPassword
@@ -2513,17 +2482,11 @@ func generatorHysteria2Obfs(config *models.Hysteria2Config) (map[string]interfac
 			// explicit clear and must not fall back to stale compatibility fields.
 			return nil, nil
 		}
-		base = map[string]interface{}{"type": typeName}
-		if config.ObfsPassword != "" {
-			base["password"] = config.ObfsPassword
-		}
-	case models.NativeOptions:
-		base = cloneOptionValue(map[string]interface{}(typed)).(map[string]interface{})
-		if legacyPassword != "" {
-			base["password"] = legacyPassword
-		}
-	case map[string]interface{}:
-		base = cloneOptionValue(typed).(map[string]interface{})
+		base = map[string]interface{}{"type": typeName, "password": config.ObfsPassword}
+	case models.NativeOptions, map[string]interface{}:
+		options, _ := generatorOptionMap(typed)
+		base = make(map[string]interface{}, len(options)+1)
+		maps.Copy(base, options)
 		if legacyPassword != "" {
 			base["password"] = legacyPassword
 		}
@@ -2569,7 +2532,7 @@ func (s *SingBoxService) generateTUICOutbound(config *models.TUICConfig, tag str
 	if config.UDPOverStream {
 		outbound.Extra["udp_over_stream"] = true
 	}
-	if config.ZeroRTTHandshake || config.ReduceRTT {
+	if config.ZeroRTTEnabled() {
 		outbound.Extra["zero_rtt_handshake"] = true
 	}
 	if config.Heartbeat != "" {
@@ -2748,20 +2711,6 @@ func (s *SingBoxService) generateHTTPProxyOutbound(config *models.HTTPProxyConfi
 	return outbound, nil
 }
 
-// generateWireGuardEndpointForNode parses the node config and renders a
-// WireGuard endpoint in the sing-box 1.11+ format.
-func (s *SingBoxService) generateWireGuardEndpointForNode(node *models.ProxyNode, tag string) (EndpointConfig, error) {
-	parsedConfig, err := node.ParseConfig()
-	if err != nil {
-		return EndpointConfig{}, err
-	}
-	config, ok := parsedConfig.(*models.WireGuardConfig)
-	if !ok {
-		return EndpointConfig{}, fmt.Errorf("unexpected config type for wireguard node: %T", parsedConfig)
-	}
-	return s.generateWireGuardEndpoint(config, tag)
-}
-
 func (s *SingBoxService) generateWireGuardEndpoint(config *models.WireGuardConfig, tag string) (EndpointConfig, error) {
 	if len(config.LocalAddress) == 0 {
 		return EndpointConfig{}, fmt.Errorf("wireguard local_address is required")
@@ -2796,29 +2745,9 @@ func (s *SingBoxService) generateWireGuardEndpoint(config *models.WireGuardConfi
 		endpoint.Extra["workers"] = config.Workers
 	}
 
-	resolver, err := wireGuardDomainResolverValue(config)
+	dialer, err := wireGuardDialerOptions(config)
 	if err != nil {
 		return EndpointConfig{}, fmt.Errorf("invalid wireguard domain_resolver: %w", err)
-	}
-	dialer := models.DialerOptions{
-		Detour:              config.Detour,
-		BindInterface:       config.BindInterface,
-		Inet4BindAddress:    config.Inet4BindAddress,
-		Inet6BindAddress:    config.Inet6BindAddress,
-		ProtectPath:         config.ProtectPath,
-		RoutingMark:         config.RoutingMark,
-		ReuseAddr:           config.ReuseAddr,
-		NetNS:               config.NetNS,
-		ConnectTimeout:      config.ConnectTimeout,
-		TCPFastOpen:         config.TCPFastOpen,
-		TCPMultiPath:        config.TCPMultiPath,
-		UDPFragment:         config.UDPFragment,
-		DomainResolver:      resolver,
-		NetworkStrategy:     config.NetworkStrategy,
-		NetworkType:         config.NetworkType,
-		FallbackNetworkType: config.FallbackNetworkType,
-		FallbackDelay:       config.FallbackDelay,
-		DomainStrategy:      config.DomainStrategy,
 	}
 	if err := applyGeneratorDialerOptions(endpoint.Extra, dialer); err != nil {
 		return EndpointConfig{}, err
@@ -2871,10 +2800,10 @@ func (s *SingBoxService) generateWireGuardEndpoint(config *models.WireGuardConfi
 
 // Start starts the single sing-box process
 func (s *SingBoxService) Start() error {
-	configJSON, err := os.ReadFile(s.configPath())
+	configJSON, err := os.ReadFile(s.ConfigPath())
 	if err != nil {
 		if os.IsNotExist(err) {
-			return fmt.Errorf("config file not found: %s", s.configPath())
+			return fmt.Errorf("config file not found: %s", s.ConfigPath())
 		}
 		return fmt.Errorf("failed to read config file: %w", err)
 	}
@@ -2882,7 +2811,7 @@ func (s *SingBoxService) Start() error {
 }
 
 func (s *SingBoxService) startProcessLocked(configHash string) error {
-	configPath := s.configPath()
+	configPath := s.ConfigPath()
 	if _, err := os.Stat(configPath); err != nil {
 		return fmt.Errorf("failed to access config file: %w", err)
 	}
@@ -2923,8 +2852,6 @@ func (s *SingBoxService) startProcessLocked(configHash string) error {
 	done := make(chan struct{})
 	startedAt := time.Now()
 	s.mu.Lock()
-	s.processGeneration++
-	generation := s.processGeneration
 	s.process = cmd
 	s.processDone = done
 	s.processErr = nil
@@ -2937,8 +2864,6 @@ func (s *SingBoxService) startProcessLocked(configHash string) error {
 	}
 	s.runtimeStatus = SingBoxRuntimeStatus{
 		State:             "starting",
-		Running:           true,
-		PID:               cmd.Process.Pid,
 		StartedAt:         startedAt.Unix(),
 		ApplyStage:        applyStage,
 		DesiredConfigHash: desiredHash,
@@ -2946,7 +2871,7 @@ func (s *SingBoxService) startProcessLocked(configHash string) error {
 	}
 	s.mu.Unlock()
 
-	go s.watchProcess(cmd, logCloser, processGuard, done, generation)
+	go s.watchProcess(cmd, logCloser, processGuard, done)
 
 	timer := time.NewTimer(singBoxStartupGrace())
 	defer timer.Stop()
@@ -2963,7 +2888,7 @@ func (s *SingBoxService) startProcessLocked(configHash string) error {
 	}
 
 	s.mu.Lock()
-	if s.process != cmd || s.processGeneration != generation {
+	if s.process != cmd {
 		exitErr := s.processErr
 		s.mu.Unlock()
 		if exitErr == nil {
@@ -2972,7 +2897,6 @@ func (s *SingBoxService) startProcessLocked(configHash string) error {
 		return fmt.Errorf("sing-box exited during startup: %w", exitErr)
 	}
 	s.runtimeStatus.State = "running"
-	s.runtimeStatus.Running = true
 	s.runtimeStatus.Degraded = false
 	s.runtimeStatus.Message = ""
 	s.runtimeStatus.ActiveConfigHash = configHash
@@ -2999,7 +2923,6 @@ func (s *SingBoxService) watchProcess(
 	logCloser io.Closer,
 	processGuard io.Closer,
 	done chan struct{},
-	generation uint64,
 ) {
 	err := cmd.Wait()
 	_ = processGuard.Close()
@@ -3008,7 +2931,7 @@ func (s *SingBoxService) watchProcess(
 	shouldRecover := false
 
 	s.mu.Lock()
-	if s.process == cmd && s.processGeneration == generation {
+	if s.process == cmd {
 		expected := s.stopRequested
 		startedAt := s.processStartedAt
 		desiredHash := s.runtimeStatus.DesiredConfigHash
@@ -3103,7 +3026,7 @@ func (s *SingBoxService) RuntimeStatus() SingBoxRuntimeStatus {
 	defer s.mu.RUnlock()
 	status := s.runtimeStatus
 	status.Running = s.process != nil
-	if s.process != nil && s.process.Process != nil {
+	if s.process != nil {
 		status.PID = s.process.Process.Pid
 	}
 	return status
@@ -3117,34 +3040,72 @@ func (s *SingBoxService) MarkDegraded(err error) {
 	defer s.mu.Unlock()
 	s.runtimeStatus.State = "degraded"
 	s.runtimeStatus.Degraded = true
-	s.runtimeStatus.Running = s.process != nil
 	s.runtimeStatus.Message = err.Error()
-	if s.process != nil && s.process.Process != nil {
-		s.runtimeStatus.PID = s.process.Process.Pid
-	}
 }
 
 func (s *SingBoxService) StartPreservedConfig() error {
-	currentErr := s.Start()
+	s.operationMu.Lock()
+	defer s.operationMu.Unlock()
+	snapshot, err := s.captureRuntimeApplySnapshot()
+	if err != nil {
+		return err
+	}
+	if snapshot.processRunning {
+		return nil
+	}
+	s.mu.Lock()
+	s.cancelRecoveryLocked()
+	s.recoveryAttempts = 0
+	s.desiredRunning = false
+	s.mu.Unlock()
+
+	var currentChanged, lastGoodChanged bool
+	startCandidate := func(candidate runtimeFileState, path string) error {
+		if !candidate.exists {
+			return fmt.Errorf("config file not found: %s: %w", path, os.ErrNotExist)
+		}
+		plan := RuntimePlan{configJSON: candidate.content, hash: runtimeConfigHash(candidate.content)}
+		stage, err := s.applyRuntimeCandidateLocked(plan)
+		currentChanged = currentChanged || stage != "write"
+		if err != nil {
+			if stage == "snapshot" {
+				lastGoodChanged = true
+				if stopErr := s.stopProcessLocked(); stopErr != nil {
+					err = combineRuntimeErrors(err, stopErr)
+				}
+			}
+			return fmt.Errorf("runtime %s stage failed: %w", stage, err)
+		}
+		s.mu.Lock()
+		s.desiredRunning = true
+		s.mu.Unlock()
+		s.setApplyStage("committed", plan.hash)
+		s.scheduleRecovery()
+		return nil
+	}
+	currentErr := startCandidate(snapshot.current, s.ConfigPath())
 	if currentErr == nil {
 		return nil
 	}
-	if s.RuntimeStatus().Running {
-		return nil
+	if !snapshot.current.exists || !snapshot.lastGood.exists || !bytes.Equal(snapshot.current.content, snapshot.lastGood.content) {
+		lastGoodErr := startCandidate(snapshot.lastGood, s.lastGoodConfigPath())
+		if lastGoodErr == nil {
+			return nil
+		}
+		currentErr = errors.Join(currentErr, fmt.Errorf("last-good config failed: %w", lastGoodErr))
 	}
-	lastGood, err := os.ReadFile(s.lastGoodConfigPath())
-	if err != nil {
-		return fmt.Errorf("current config failed: %v; last-good config unavailable: %w", currentErr, err)
+	if currentChanged {
+		if err := restoreRuntimeFile(s.ConfigPath(), snapshot.current); err != nil {
+			currentErr = combineRuntimeErrors(currentErr, fmt.Errorf("restore live config: %w", err))
+		}
 	}
-	if err := s.ApplyConfig(lastGood); err != nil {
-		return fmt.Errorf("current config failed: %v; last-good config failed: %w", currentErr, err)
+	if lastGoodChanged {
+		if err := restoreRuntimeFile(s.lastGoodConfigPath(), snapshot.lastGood); err != nil {
+			currentErr = combineRuntimeErrors(currentErr, fmt.Errorf("restore last-good snapshot: %w", err))
+		}
 	}
-	return nil
-}
-
-// Restart restarts the sing-box process
-func (s *SingBoxService) Restart() error {
-	return s.Start()
+	s.MarkDegraded(currentErr)
+	return currentErr
 }
 
 func (s *SingBoxService) cancelRecoveryLocked() {
@@ -3153,12 +3114,11 @@ func (s *SingBoxService) cancelRecoveryLocked() {
 		close(s.recoveryCancel)
 		s.recoveryCancel = nil
 	}
-	s.recoveryRunning = false
 }
 
 func (s *SingBoxService) scheduleRecovery() {
 	s.mu.Lock()
-	if !s.desiredRunning || s.process != nil || s.recoveryRunning {
+	if !s.desiredRunning || s.process != nil || s.recoveryCancel != nil {
 		s.mu.Unlock()
 		return
 	}
@@ -3178,7 +3138,6 @@ func (s *SingBoxService) scheduleRecovery() {
 	epoch := s.recoveryEpoch
 	cancel := make(chan struct{})
 	s.recoveryCancel = cancel
-	s.recoveryRunning = true
 	s.recoveryWG.Add(1)
 	s.mu.Unlock()
 	go s.recoveryLoop(epoch, cancel)
@@ -3224,9 +3183,7 @@ func (s *SingBoxService) recoveryLoop(epoch uint64, cancel <-chan struct{}) {
 		timer := time.NewTimer(delay)
 		select {
 		case <-cancel:
-			if !timer.Stop() {
-				<-timer.C
-			}
+			timer.Stop()
 			return
 		case <-timer.C:
 		}
@@ -3244,17 +3201,17 @@ func (s *SingBoxService) recoveryLoop(epoch uint64, cancel <-chan struct{}) {
 		s.mu.Unlock()
 
 		err := s.recoverProcessLocked()
-		s.operationMu.Unlock()
 		if err == nil {
 			s.markRecoveryConfigMismatch()
+			s.operationMu.Unlock()
 			return
 		}
+		s.operationMu.Unlock()
 
 		s.mu.Lock()
 		if s.recoveryEpoch == epoch {
 			s.runtimeStatus.State = "degraded"
 			s.runtimeStatus.Degraded = true
-			s.runtimeStatus.Running = false
 			s.runtimeStatus.Message = fmt.Sprintf(
 				"sing-box automatic recovery attempt %d failed: %v",
 				s.recoveryAttempts,
@@ -3272,7 +3229,6 @@ func (s *SingBoxService) finishRecoveryLoop(epoch uint64) bool {
 	if s.recoveryEpoch != epoch {
 		return false
 	}
-	s.recoveryRunning = false
 	s.recoveryCancel = nil
 	return s.desiredRunning && s.process == nil &&
 		s.recoveryAttempts < singBoxRecoveryMaxAttempts()
@@ -3292,7 +3248,6 @@ func (s *SingBoxService) markConfigMismatch(action string) {
 	}
 	s.runtimeStatus.State = "degraded"
 	s.runtimeStatus.Degraded = true
-	s.runtimeStatus.Running = true
 	s.runtimeStatus.Message = fmt.Sprintf(
 		"sing-box %s with config %s while desired config is %s; reapply the runtime from the database",
 		action,
@@ -3302,7 +3257,7 @@ func (s *SingBoxService) markConfigMismatch(action string) {
 }
 
 func (s *SingBoxService) recoverProcessLocked() error {
-	current, err := os.ReadFile(s.configPath())
+	current, err := os.ReadFile(s.ConfigPath())
 	if err != nil {
 		return fmt.Errorf("read current config: %w", err)
 	}

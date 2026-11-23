@@ -13,7 +13,7 @@ func TestQMarkToPostgres(t *testing.T) {
 		  /* ? block */
 		  AND f = ?
 	`
-	got := QMarkToPostgres(input)
+	got := qMarkToPostgres(input)
 	want := `
 		SELECT '?' AS literal, "?" AS ident, col
 		FROM table_name

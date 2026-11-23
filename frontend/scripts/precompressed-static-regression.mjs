@@ -9,6 +9,7 @@ import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { brotliDecompressSync, gunzipSync } from 'node:zlib'
 import puppeteer from 'puppeteer-core'
+import { findBrowserExecutable, stopProcess } from './test-harness.mjs'
 
 const frontend = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
 const binary = path.resolve(process.env.SBPM_TEST_BINARY || path.join(frontend, '..', 'sb-proxy'))
@@ -41,17 +42,10 @@ function startProcess(command, environment) {
   child.stderr.on('data', (chunk) => { managed.log += chunk })
   return managed
 }
-async function stopProcess(managed) {
-  if (!managed || !managed.child.pid || managed.finished) return
-  managed.child.kill('SIGTERM')
-  const timer = setTimeout(() => { if (!managed.finished) managed.child.kill('SIGKILL') }, 12000)
-  try { await managed.closed } finally { clearTimeout(timer) }
-}
-
 async function checkBrowser(origin) {
   let browser, devtoolsEnvironment
   try {
-    browser = await puppeteer.launch({ executablePath: process.env.PUPPETEER_EXECUTABLE_PATH || process.env.CHROME_BIN || '/usr/bin/chromium', headless: true, userDataDir: path.join(temporary, 'chromium'), env: { ...process.env, TMPDIR: temporary }, args: ['--no-sandbox', '--disable-dev-shm-usage', '--no-proxy-server'] })
+    browser = await puppeteer.launch({ executablePath: findBrowserExecutable(), headless: true, userDataDir: path.join(temporary, 'chromium'), env: { ...process.env, TMPDIR: temporary }, args: ['--no-sandbox', '--disable-dev-shm-usage', '--no-proxy-server'] })
     const page = (await browser.pages())[0]
     const errors = [], responses = []
     page.on('console', (message) => { if (message.type() === 'error') errors.push(message.text()) })
@@ -95,7 +89,7 @@ async function checkBrowser(origin) {
 async function verifyMode(threshold) {
   const origin = `http://127.0.0.1:${await freePort()}`
   const environment = { ...process.env, CONFIG_DIR: path.join(temporary, `config-${threshold}`), PORT: new URL(origin).port, BIND_ADDRESS: '127.0.0.1', ADMIN_PASSWORD: password, SBPM_UPDATE_CHECK_DISABLED: 'true', GOMAXPROCS: '2' }
-  for (const name of ['DATABASE_URL', 'POSTGRES_DATABASE_URL', 'POSTGRES_URL', 'PGSQL_DATABASE_URL', 'PGSQL', 'MYSQL_DATABASE_URL', 'MYSQL', 'TURSO_DATABASE_URL', 'TURSO_AUTH_TOKEN', 'DB_TYPE', 'MYSQL_DATABASE_NAME', 'SBPM_NODES_VIRTUAL_THRESHOLD', 'SBPM_BATCH_CHECK_IP_CONCURRENCY']) environment[name] = ''
+  for (const name of ['DATABASE_URL', 'POSTGRES_DATABASE_URL', 'POSTGRES_URL', 'PGSQL_DATABASE_URL', 'PGSQL', 'MYSQL_DATABASE_URL', 'MYSQL', 'TURSO_DATABASE_URL', 'TURSO_AUTH_TOKEN', 'MYSQL_DATABASE_NAME', 'SBPM_NODES_VIRTUAL_THRESHOLD', 'SBPM_BATCH_CHECK_IP_CONCURRENCY']) environment[name] = ''
   if (threshold === 42) environment.SBPM_NODES_VIRTUAL_THRESHOLD = '42'
   let server
   try {
@@ -150,7 +144,10 @@ async function verifyMode(threshold) {
       assert.equal((await request(origin, '/', { 'Accept-Encoding': encoding, 'If-None-Match': response.headers.etag })).status, 304)
     }
     results.modes.push({ threshold, embedded: true, isolatedSQLite: true })
-  } finally { await stopProcess(server) }
+  } finally {
+    await stopProcess(server?.child, { graceMs: 12000 })
+    await server?.closed
+  }
 }
 try {
   assert.ok(statSync(binary).isFile(), '测试二进制必须是普通文件')

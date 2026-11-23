@@ -2,7 +2,7 @@
 import { useEffect, useRef } from 'react'
 import { Spinner } from './primitives'
 
-export function Toggle({ checked, onChange, busy = false, disabled = false, label, size = 'md', testId }) {
+export function Toggle({ checked, onChange, busy = false, label, testId }) {
   return (
     <button
       type="button"
@@ -11,14 +11,14 @@ export function Toggle({ checked, onChange, busy = false, disabled = false, labe
       aria-label={label}
       data-tip={label}
       data-testid={testId}
-      className={`sb-toggle sb-toggle--${size}${busy ? ' is-busy' : ''}`}
-      disabled={disabled || busy}
+      className={`sb-toggle${busy ? ' is-busy' : ''}`}
+      disabled={busy}
       onClick={(event) => {
         event.stopPropagation()
         onChange(!checked)
       }}
     >
-      <span className="sb-toggle__thumb">{busy ? <Spinner size={size === 'sm' ? 8 : 10} /> : null}</span>
+      <span className="sb-toggle__thumb">{busy ? <Spinner size={8} /> : null}</span>
     </button>
   )
 }

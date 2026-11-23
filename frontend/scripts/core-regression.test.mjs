@@ -66,22 +66,26 @@ test('登录页移除终端装饰与功能说明，不保留废弃样式和词�
   assert.ok(login.includes('<h1 lang="en" data-testid="project-brand">'))
 })
 
-test('设置、内核与版本只接收最新请求结果，卸载后不更新状态', async () => {
+test('列表、设置、内核与版本只接收最新请求结果，卸载后不更新状态', async () => {
   const coordinator = createLatestRequestCoordinator()
   const values = []
-  for (const key of ['settings', 'runtime', 'version']) {
+  const settled = []
+  for (const key of ['nodes', 'settings', 'runtime', 'version']) {
     let finish
     let signal
     const pending = coordinator.run(key, (next) => {
       signal = next
       return new Promise((resolve) => { finish = resolve })
-    }, (value) => values.push(value))
-    await coordinator.run(key, async () => `${key}:new`, (value) => values.push(value))
+    }, (value) => values.push(value), { onSettled: () => settled.push(`${key}:old`) })
+    await coordinator.run(key, async () => `${key}:new`, (value) => values.push(value), {
+      onSettled: () => settled.push(`${key}:new`),
+    })
     assert.equal(signal.aborted, true)
     finish(`${key}:old`)
     await pending
   }
-  assert.deepEqual(values, ['settings:new', 'runtime:new', 'version:new'])
+  assert.deepEqual(values, ['nodes:new', 'settings:new', 'runtime:new', 'version:new'])
+  assert.deepEqual(settled, values)
   let finish
   const pending = coordinator.run('runtime', () => new Promise((resolve) => { finish = resolve }), (value) => values.push(value))
   coordinator.abortAll()
@@ -166,6 +170,19 @@ test('WireGuard 支持历史 Base64，拒绝越界、非法 peer 和保留字节
   assert.throws(() => parsePeersJSON('[{"reserved":[256,0,0]}]'))
 })
 
+test('WireGuard 多 Peer 只校验实际提交的保留字节', () => {
+  const model = createProtocolFormModel(null)
+  const peers = [{ server: 'example.com', server_port: 2408, reserved: [162, 104, 222] }]
+  const values = { ...model.initialValues, wireguard_peers_json: JSON.stringify(peers), wireguard_reserved: '256' }
+  const config = JSON.parse(JSON.stringify(model.buildConfig('wireguard', values)))
+  assert.deepEqual(config.peers, peers)
+  assert.equal(Object.hasOwn(config, 'reserved'), false)
+  assert.throws(() => model.buildConfig('wireguard', { ...values, wireguard_peers_json: '' }), /Reserved bytes/)
+  assert.throws(() => model.buildConfig('wireguard', {
+    ...values, wireguard_peers_json: JSON.stringify([{ ...peers[0], reserved: [256] }]),
+  }), /Reserved bytes/)
+})
+
 const nodes = [
   { id: 1, name: 'Tokyo alpha', type: 'ss', remark: 'primary', inbound_port: 30001, username: 'alice', password: 'secret', enabled: true, node_ip: '203.0.113.1', country_code: 'JP', location: 'Tokyo, Japan', latency: 30 },
   { id: 2, name: 'US beta', type: 'vless', inbound_port: 30002, enabled: true, tcp_reuse_enabled: false, node_ip: '', latency: 0 },
@@ -195,6 +212,8 @@ test('全部筛选项准确匹配，不把 SS 混为 VLESS 或 VMess', () => {
   assert.deepEqual(ids({ status: 'unverified' }), [2])
   assert.deepEqual(ids({ status: 'disabled' }), [3])
   assert.deepEqual(ids({ ports: '30001-30002,30009' }), [1, 2])
+  assert.deepEqual(ids({ ports: '30001-30002，30009', search: 'TOKYO primary' }), [1])
+  assert.deepEqual(ids({ ports: '30001-30000' }), [])
   assert.deepEqual(ids({ regions: ['jp'], username: 'alice', auth: 'on' }), [1])
   assert.deepEqual(ids({ regions: ['-'], tcpReuse: 'off', auth: 'off' }), [2])
   assert.deepEqual(ids({ search: 'primary' }), [1])
@@ -265,4 +284,23 @@ test('过期请求的 401 不清除新登录，当前会话的 401 触发退出'
   assert.equal(api.defaults.headers.common.Authorization, undefined)
   assert.deepEqual(events, ['sbpm-dusk:unauthorized'])
   api.defaults.adapter = adapter
+})
+
+test('旧 TUIC 节点开启 reduce_rtt 时初始化为开启 0-RTT，关闭保存后移除旧别名', () => {
+  const model = createProtocolFormModel({
+    id: 99,
+    name: 'legacy-tuic',
+    type: 'tuic',
+    config: JSON.stringify({
+      server: 'tuic.example.com',
+      server_port: 443,
+      uuid: '2dd61d93-75d8-4da4-ac0e-6aece7eac365',
+      password: 'secret',
+      reduce_rtt: true,
+    }),
+  })
+  assert.equal(model.initialValues.zero_rtt_handshake, true)
+  const saved = model.buildConfig('tuic', { ...model.initialValues, zero_rtt_handshake: false })
+  assert.equal(saved.zero_rtt_handshake, false)
+  assert.equal(Object.hasOwn(saved, 'reduce_rtt'), false)
 })

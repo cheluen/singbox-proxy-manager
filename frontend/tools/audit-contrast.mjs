@@ -19,17 +19,17 @@ const contrast = (a, b) => {
 const TEXT = 4.5
 const UI = 3
 // [前景, 背景, 最低对比度, 用途]
-const pairs = (c, dark) => [
+const PAIRS = [
   ['ink', 'bg', TEXT, '正文 / 页面背景'], ['ink', 'surface', TEXT, '正文 / 卡片'], ['ink', 'surface2', TEXT, '正文 / 次级表面'],
   ['ink2', 'bg', TEXT, '次要文字 / 页面背景'], ['ink2', 'surface', TEXT, '次要文字 / 卡片'], ['ink2', 'surface2', TEXT, '次要文字 / 次级表面'],
   ['ink3', 'bg', TEXT, '辅助文字 / 页面背景'], ['ink3', 'surface', TEXT, '辅助文字 / 卡片'], ['ink3', 'surface2', TEXT, '辅助文字 / 次级表面'],
   ['ink3', 'bg2', TEXT, '辅助文字 / 凹陷背景'], ['ink', 'bg2', TEXT, '正文 / 凹陷背景'],
   ['accentInk', 'accent', TEXT, '主按钮文字'], ['accentInk', 'accentStrong', TEXT, '主按钮文字（悬停）'],
   ['ink', 'accentSoft', TEXT, '选中行文字'], ['ink2', 'accentSoft', TEXT, '选中行次要文字'],
-  [dark ? 'accent' : 'accentStrong', 'surface', TEXT, '链接 / 强调文字'], [dark ? 'accent' : 'accentStrong', 'accentSoft', TEXT, '强调文字 / 强调底'],
+  ['accent', 'surface', TEXT, '链接 / 强调文字'], ['accent', 'accentSoft', TEXT, '强调文字 / 强调底'],
   ['okInk', 'okSoft', TEXT, '「可用」标签'], ['warnInk', 'warnSoft', TEXT, '「未检测」标签'], ['badInk', 'badSoft', TEXT, '「错误」标签'],
   ['okInk', 'surface', TEXT, '成功文字'], ['warnInk', 'surface', TEXT, '警告文字'], ['badInk', 'surface', TEXT, '错误文字'],
-  [dark ? 'bg' : 'accentInk', dark ? 'bad' : 'badInk', TEXT, '危险按钮文字'],
+  ['bg', 'bad', TEXT, '危险按钮文字'],
   ['accent', 'surface', UI, '强调色图形 / 开关开启'], ['accent', 'bg', UI, '焦点环 / 页面背景'],
   ['muted', 'surface', UI, '开关关闭 / 禁用标记'], ['muted', 'surface2', UI, '禁用标记 / 次级表面'],
   ['ok', 'surface', UI, '「可用」图形'], ['ok', 'surface2', UI, '「可用」图形 / 次级表面'],
@@ -40,13 +40,13 @@ const pairs = (c, dark) => [
 let failures = 0
 for (const [id, theme] of Object.entries(THEMES)) {
   const c = theme.colors
-  const rows = pairs(c, theme.dark).map(([fg, bg, min, usage]) => {
+  const rows = PAIRS.map(([fg, bg, min, usage]) => {
     const ratio = contrast(c[fg], c[bg])
     const pass = ratio >= min
     if (!pass) failures += 1
-    return { pass, text: `${pass ? 'PASS' : 'FAIL'}  ${ratio.toFixed(2).padStart(5)} (>=${min})  ${fg.padEnd(12)} on ${bg.padEnd(11)} ${usage}` }
+    return { pass, ratio, text: `${pass ? 'PASS' : 'FAIL'}  ${ratio.toFixed(2).padStart(5)} (>=${min})  ${fg.padEnd(12)} on ${bg.padEnd(11)} ${usage}` }
   })
-  const worst = Math.min(...pairs(c, theme.dark).map(([fg, bg]) => contrast(c[fg], c[bg])))
+  const worst = Math.min(...rows.map((row) => row.ratio))
   const failed = rows.filter((row) => !row.pass)
   process.stdout.write(`\n[${id}] ${rows.length} 组，最低 ${worst.toFixed(2)}，未通过 ${failed.length}\n`)
   const verbose = process.argv.includes('--verbose')

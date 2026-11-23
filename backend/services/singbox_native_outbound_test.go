@@ -144,7 +144,7 @@ func TestGeneratorVLESSRealityKeepsNativeOnlyCredentials(t *testing.T) {
 	if realBinary := os.Getenv("SINGBOX_TEST_BINARY"); realBinary != "" {
 		t.Setenv("SINGBOX_BINARY", realBinary)
 		service := NewSingBoxService(t.TempDir())
-		configJSON, buildErr := service.BuildGlobalConfig([]models.ProxyNode{node})
+		configJSON, buildErr := service.BuildGlobalConfigContext(context.Background(), []models.ProxyNode{node})
 		if buildErr != nil {
 			t.Fatalf("build native-only VLESS Reality config: %v", buildErr)
 		}
@@ -418,7 +418,7 @@ func TestGeneratorHysteria2FormObfsOverridesNativeAndClears(t *testing.T) {
 		},
 		ObfsPassword: "edited-form-password",
 	}
-	obfs, err := generatorHysteria2Obfs(config)
+	obfs, err := effectiveHysteria2Obfs(config)
 	if err != nil {
 		t.Fatalf("merge Hysteria2 obfs: %v", err)
 	}
@@ -429,12 +429,12 @@ func TestGeneratorHysteria2FormObfsOverridesNativeAndClears(t *testing.T) {
 	config.Obfs = "salamander"
 	config.ObfsPassword = ""
 	config.SalamanderPassword = "stale-legacy-password"
-	if _, err = generatorHysteria2Obfs(config); err == nil || !strings.Contains(err.Error(), "non-empty password") {
+	if _, err = effectiveHysteria2Obfs(config); err == nil || !strings.Contains(err.Error(), "non-empty password") {
 		t.Fatalf("salamander without a password must be rejected without resurrecting a stale alias: %v", err)
 	}
 
 	config.Obfs = ""
-	obfs, err = generatorHysteria2Obfs(config)
+	obfs, err = effectiveHysteria2Obfs(config)
 	if err != nil {
 		t.Fatalf("clear Hysteria2 obfs: %v", err)
 	}
@@ -481,22 +481,62 @@ func TestShareExportUsesSameCompatibilityPrecedence(t *testing.T) {
 		t.Fatalf("nil UDP-over-TCP value must preserve export compatibility: enabled=%v version=%d", enabled, version)
 	}
 
-	typeName, password := exportHysteria2Obfs(
-		models.NativeOptions{"type": "salamander", "password": "stale-native-password"},
-		"edited-form-password",
-		"stale-legacy-password",
-	)
-	if typeName != "salamander" || password != "edited-form-password" {
-		t.Fatalf("flat Hysteria2 password must win during export: type=%q password=%q", typeName, password)
-	}
+}
 
-	typeName, password = exportHysteria2Obfs("salamander", "", "stale-legacy-password")
-	if typeName != "salamander" || password != "" {
-		t.Fatalf("form password clear must survive export: type=%q password=%q", typeName, password)
-	}
-	typeName, password = exportHysteria2Obfs(nil, "", "legacy-password")
-	if typeName != "salamander" || password != "legacy-password" {
-		t.Fatalf("legacy password-only Hysteria2 config must export as salamander: type=%q password=%q", typeName, password)
+func TestHysteria2ObfsGenerationAndExportRoundTrip(t *testing.T) {
+	service := &SingBoxService{}
+	for _, test := range []struct {
+		name, flat, legacy, want string
+		obfs                     any
+		invalid                  bool
+	}{
+		{name: "flat overrides native and legacy", obfs: models.NativeOptions{"type": "salamander", "password": "native"}, flat: "  edited  ", legacy: "legacy", want: "  edited  "},
+		{name: "untyped object infers salamander", obfs: map[string]any{}, flat: "flat", want: "flat"},
+		{name: "native whitespace is data", obfs: map[string]any{"type": "salamander", "password": "  "}, want: "  "},
+		{name: "legacy alias alone", legacy: "legacy", want: "legacy"},
+		{name: "native none", obfs: models.NativeOptions{"type": "none"}, flat: "flat", legacy: "legacy"},
+		{name: "flat empty", obfs: "", flat: "stale", legacy: "legacy"},
+		{name: "flat salamander without credential", obfs: "salamander", legacy: "legacy", invalid: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			config := models.Hysteria2Config{
+				Server: "node.example.com", ServerPort: 443, Obfs: test.obfs,
+				ObfsPassword: test.flat, SalamanderPassword: test.legacy,
+			}
+			outbound, outboundErr := service.generateHysteria2Outbound(&config, "hy2-out")
+			link, exportErr := buildHysteria2ShareLink("hy2", &config)
+			if test.invalid {
+				if outboundErr == nil || exportErr == nil || outboundErr.Error() != exportErr.Error() {
+					t.Fatalf("expected matching obfs validation errors: generate=%v export=%v", outboundErr, exportErr)
+				}
+				return
+			}
+			if outboundErr != nil || exportErr != nil {
+				t.Fatalf("generate=%v export=%v", outboundErr, exportErr)
+			}
+			parsed, _, _, err := ParseShareLink(link)
+			if err != nil {
+				t.Fatalf("parse exported link: %v", err)
+			}
+			roundTrip := parsed.(models.Hysteria2Config)
+			regenerated, err := service.generateHysteria2Outbound(&roundTrip, "hy2-out")
+			if err != nil {
+				t.Fatalf("generate imported outbound: %v", err)
+			}
+			for _, result := range []OutboundConfig{outbound, regenerated} {
+				obfs, exists := result.Extra["obfs"]
+				if test.want == "" {
+					if exists {
+						t.Fatal("cleared obfs was restored")
+					}
+					continue
+				}
+				options, ok := obfs.(map[string]any)
+				if !ok || options["type"] != "salamander" || options["password"] != test.want {
+					t.Fatal("obfs credential or mode changed")
+				}
+			}
+		})
 	}
 }
 
@@ -739,7 +779,7 @@ func TestBuildGlobalConfigResolvesDetourAndLocalDNS(t *testing.T) {
 			Detour: "upstream", DomainResolver: map[string]interface{}{"server": "local", "strategy": "prefer_ipv4"},
 		}}),
 	}
-	configJSON, err := service.BuildGlobalConfig(nodes)
+	configJSON, err := service.BuildGlobalConfigContext(context.Background(), nodes)
 	if err != nil {
 		t.Fatalf("BuildGlobalConfig: %v", err)
 	}
@@ -760,14 +800,14 @@ func TestBuildGlobalConfigResolvesDetourAndLocalDNS(t *testing.T) {
 
 	// Existing generated tags are also valid native references.
 	nodes[1] = nativeTestNode(t, 2, "client", "direct", models.DirectConfig{DialerOptions: models.DialerOptions{Detour: "node-1-out"}})
-	if _, err := service.BuildGlobalConfig(nodes); err != nil {
+	if _, err := service.BuildGlobalConfigContext(context.Background(), nodes); err != nil {
 		t.Fatalf("generated outbound tag detour should be accepted: %v", err)
 	}
 
 	// The built-in direct tag wins over a node with the reserved name.
 	nodes[0].Name = "direct"
 	nodes[1] = nativeTestNode(t, 2, "client", "direct", models.DirectConfig{DialerOptions: models.DialerOptions{Detour: "direct"}})
-	configJSON, err = service.BuildGlobalConfig(nodes)
+	configJSON, err = service.BuildGlobalConfigContext(context.Background(), nodes)
 	if err != nil {
 		t.Fatalf("built-in direct detour: %v", err)
 	}
@@ -782,16 +822,16 @@ func TestBuildGlobalConfigRejectsAmbiguousOrInvalidDetours(t *testing.T) {
 		nativeTestNode(t, 1, "same", "direct", models.DirectConfig{}),
 		nativeTestNode(t, 2, "same", "direct", models.DirectConfig{}),
 	}
-	if _, err := service.BuildGlobalConfig(duplicateNames); err != nil {
+	if _, err := service.BuildGlobalConfigContext(context.Background(), duplicateNames); err != nil {
 		t.Fatalf("duplicate names without detour must remain valid: %v", err)
 	}
 	duplicateNames = append(duplicateNames, nativeTestNode(t, 3, "client", "direct", models.DirectConfig{DialerOptions: models.DialerOptions{Detour: "same"}}))
-	if _, err := service.BuildGlobalConfig(duplicateNames); err == nil || !strings.Contains(err.Error(), "ambiguous") {
+	if _, err := service.BuildGlobalConfigContext(context.Background(), duplicateNames); err == nil || !strings.Contains(err.Error(), "ambiguous") {
 		t.Fatalf("ambiguous detour name must fail clearly, got %v", err)
 	}
 
 	self := []models.ProxyNode{nativeTestNode(t, 1, "self", "direct", models.DirectConfig{DialerOptions: models.DialerOptions{Detour: "node-1-out"}})}
-	if _, err := service.BuildGlobalConfig(self); err == nil || !strings.Contains(err.Error(), "itself") {
+	if _, err := service.BuildGlobalConfigContext(context.Background(), self); err == nil || !strings.Contains(err.Error(), "itself") {
 		t.Fatalf("self detour must fail, got %v", err)
 	}
 }
@@ -830,7 +870,7 @@ func TestRealSingBoxAcceptsNativeOutboundMatrix(t *testing.T) {
 	for index, testCase := range tests {
 		t.Run(testCase.name, func(t *testing.T) {
 			node := nativeTestNode(t, index+1, testCase.name, testCase.proxyType, testCase.config)
-			configJSON, err := service.BuildGlobalConfig([]models.ProxyNode{node})
+			configJSON, err := service.BuildGlobalConfigContext(context.Background(), []models.ProxyNode{node})
 			if err != nil {
 				t.Fatalf("BuildGlobalConfig: %v", err)
 			}

@@ -5,7 +5,7 @@ import baseEn from './base-en'
 import extraZh from './extra-zh'
 import extraEn from './extra-en'
 
-export const LANGUAGE_STORAGE_KEY = 'language'
+const LANGUAGE_STORAGE_KEY = 'language'
 export const LANGUAGES = [
   { value: 'zh', label: '中文', short: '中' },
   { value: 'en', label: 'English', short: 'EN' },

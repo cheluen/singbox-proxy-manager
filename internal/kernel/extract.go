@@ -24,7 +24,7 @@ func extract(configDir, content string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	if !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
+	if !info.IsDir() {
 		return "", fmt.Errorf("内核目录不是普通目录: %s", dir)
 	}
 	if err := os.Chmod(dir, 0o700); err != nil {
@@ -43,18 +43,19 @@ func extract(configDir, content string) (string, error) {
 		return "", fmt.Errorf("释放内核: %w", err)
 	}
 	defer func() { _ = os.Remove(tmp.Name()) }()
-	defer tmp.Close()
-	if _, err := io.Copy(tmp, strings.NewReader(content)); err != nil {
+	_, err = io.Copy(tmp, strings.NewReader(content))
+	if err == nil {
+		err = tmp.Chmod(0o700)
+	}
+	if err == nil {
+		err = tmp.Sync()
+	}
+	closeErr := tmp.Close()
+	if err != nil {
 		return "", err
 	}
-	if err := tmp.Chmod(0o700); err != nil {
-		return "", err
-	}
-	if err := tmp.Sync(); err != nil {
-		return "", err
-	}
-	if err := tmp.Close(); err != nil {
-		return "", err
+	if closeErr != nil {
+		return "", closeErr
 	}
 	if !validFile(tmp.Name(), digest, int64(len(content))) {
 		return "", fmt.Errorf("释放的 sing-box 完整性校验失败")

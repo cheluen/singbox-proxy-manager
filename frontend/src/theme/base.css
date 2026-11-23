@@ -16,7 +16,6 @@ body {
   overflow: hidden;
 }
 
-:root { --chrome-h: 0px; }
 .dusk-stage { position: fixed; inset: 0; overflow: hidden; background: var(--bg); }
 
 button, input, select, textarea { font: inherit; color: inherit; }

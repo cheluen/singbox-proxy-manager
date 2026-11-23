@@ -88,6 +88,61 @@ func TestProxyNodeParseConfigIsStrict(t *testing.T) {
 	}
 }
 
+func TestProxyDefinitionNormalizesTransportAliases(t *testing.T) {
+	for _, testCase := range []struct {
+		name        string
+		config      string
+		network     string
+		nativeType  string
+		nativeField string
+	}{
+		{name: "flat legacy gRPC", config: `{"network":" GUN "}`, network: "grpc"},
+		{name: "native legacy HTTP", config: `{"transport_options":{"type":"h2","path":"/example"}}`, nativeType: "http", nativeField: "/example"},
+		{name: "explicit direct wins", config: `{"network":"tcp","transport_options":{"type":"ws","path":"/example"}}`, network: "tcp"},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			definition := ProxyDefinition{Type: "vless", Config: testCase.config}
+			parsed, err := definition.ParseConfig()
+			if err != nil {
+				t.Fatal(err)
+			}
+			config := parsed.(*VLESSConfig)
+			if config.Network != testCase.network {
+				t.Fatalf("expected network %q, got %q", testCase.network, config.Network)
+			}
+			if testCase.nativeType == "" {
+				if len(config.TransportOptions) != 0 {
+					t.Fatalf("unexpected native transport options: %v", config.TransportOptions)
+				}
+			} else if config.TransportOptions["type"] != testCase.nativeType || config.TransportOptions["path"] != testCase.nativeField {
+				t.Fatalf("native transport was not normalized: %v", config.TransportOptions)
+			}
+		})
+	}
+}
+
+func TestProxyDefinitionNormalizesLegacyTUICZeroRTT(t *testing.T) {
+	legacyOnly := ProxyDefinition{Type: "tuic", Config: `{"reduce_rtt":true}`}
+	parsedLegacy, err := legacyOnly.ParseConfig()
+	if err != nil {
+		t.Fatal(err)
+	}
+	legacyConfig := parsedLegacy.(*TUICConfig)
+	if !legacyConfig.ZeroRTTEnabled() || !legacyConfig.ZeroRTTHandshake || legacyConfig.ReduceRTT {
+		t.Fatal("legacy TUIC zero RTT was not normalized to zero_rtt_handshake")
+	}
+
+	explicitOff := ProxyDefinition{Type: "tuic", Config: `{"reduce_rtt":true,"zero_rtt_handshake":false}`}
+	parsedOff, err := explicitOff.ParseConfig()
+	if err != nil {
+		t.Fatal(err)
+	}
+	offConfig := parsedOff.(*TUICConfig)
+	if offConfig.ZeroRTTEnabled() || offConfig.ZeroRTTHandshake || offConfig.ReduceRTT {
+		t.Fatal("explicit zero_rtt_handshake=false should override legacy reduce_rtt")
+	}
+}
+
 func TestProxyNodeParseConfigAcceptsNativeUnionShapes(t *testing.T) {
 	ssNode := ProxyNode{Type: "ss", Config: `{
 		"server":"127.0.0.1","server_port":8388,"method":"aes-128-gcm","password":"secret",

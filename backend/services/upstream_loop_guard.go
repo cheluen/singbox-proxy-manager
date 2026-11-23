@@ -29,7 +29,6 @@ type upstreamHostCollision struct {
 }
 
 type upstreamHostLookup struct {
-	host      string
 	collision upstreamHostCollision
 	addresses []netip.Addr
 	err       error
@@ -55,7 +54,7 @@ func (s *SingBoxService) validateManagedUpstreamInboundCollisions(
 	sort.Ints(orderedPorts)
 
 	lookups := make([]upstreamHostLookup, 0)
-	lookupIndexes := make(map[string]int)
+	lookupHosts := make(map[string]struct{})
 	for _, upstream := range upstreams {
 		targets, err := upstreamDialTargets(upstream.Config)
 		if err != nil {
@@ -82,11 +81,11 @@ func (s *SingBoxService) validateManagedUpstreamInboundCollisions(
 				if collision.host == "" {
 					return upstreamValidationErrorf("%s has an empty dial target", upstream.Scope)
 				}
-				if _, exists := lookupIndexes[collision.host]; exists {
+				if _, exists := lookupHosts[collision.host]; exists {
 					continue
 				}
-				lookupIndexes[collision.host] = len(lookups)
-				lookups = append(lookups, upstreamHostLookup{host: collision.host, collision: collision})
+				lookupHosts[collision.host] = struct{}{}
+				lookups = append(lookups, upstreamHostLookup{collision: collision})
 			}
 		}
 	}
@@ -113,7 +112,7 @@ func (s *SingBoxService) validateManagedUpstreamInboundCollisions(
 		go func() {
 			defer workers.Done()
 			for index := range jobs {
-				lookups[index].addresses, lookups[index].err = resolver.LookupNetIP(lookupCtx, "ip", lookups[index].host)
+				lookups[index].addresses, lookups[index].err = resolver.LookupNetIP(lookupCtx, "ip", lookups[index].collision.host)
 			}
 		}()
 	}
@@ -126,7 +125,7 @@ func (s *SingBoxService) validateManagedUpstreamInboundCollisions(
 				lookup.collision.scope,
 				lookup.collision.inboundPort,
 				lookup.collision.nodeID,
-				lookup.host,
+				lookup.collision.host,
 				lookup.err,
 			)
 		}
@@ -136,7 +135,7 @@ func (s *SingBoxService) validateManagedUpstreamInboundCollisions(
 				lookup.collision.scope,
 				lookup.collision.inboundPort,
 				lookup.collision.nodeID,
-				lookup.host,
+				lookup.collision.host,
 			)
 		}
 		for _, address := range lookup.addresses {

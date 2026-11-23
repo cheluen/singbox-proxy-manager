@@ -10,7 +10,7 @@ import { CopyButton, Field, HealthBadge, Latency, Region, SecretText } from './p
 
 const dash = <span className="sb-dim">—</span>
 
-export function Section({ title, action, children, className = '' }) {
+function Section({ title, action, children, className = '' }) {
   return (
     <section className={`sb-section ${className}`}>
       <header className="sb-section__head">
@@ -22,7 +22,7 @@ export function Section({ title, action, children, className = '' }) {
   )
 }
 
-export function ExitSection({ node, checking }) {
+function ExitSection({ node, checking }) {
   const { t } = useTranslation()
   return (
     <Section title={t('section_exit')}>
@@ -32,14 +32,14 @@ export function ExitSection({ node, checking }) {
         <Field label={t('node_ip')}>
           {node.node_ip ? <span className="sb-inline"><span className="mono">{node.node_ip}</span><CopyButton text={node.node_ip} /></span> : dash}
         </Field>
-        <Field label={t('location')}><Region node={node} full /></Field>
+        <Field label={t('location')}><Region node={node} /></Field>
       </dl>
       {node.enabled === false ? <p className="sb-dim sb-section__note">{t('check_disabled_hint')}</p> : null}
     </Section>
   )
 }
 
-export function ConnectSection({ node }) {
+function ConnectSection({ node }) {
   const { t } = useTranslation()
   return (
     <Section title={t('section_connect')}>
@@ -48,7 +48,7 @@ export function ConnectSection({ node }) {
   )
 }
 
-export function InboundSection({ node, act, pinBusy, flagBusy, preservePorts }) {
+function InboundSection({ node, act, pinBusy, flagBusy, preservePorts }) {
   const { t } = useTranslation()
   return (
     <Section title={t('section_inbound')}>
@@ -56,20 +56,20 @@ export function InboundSection({ node, act, pinBusy, flagBusy, preservePorts }) 
         <Field label={t('inbound_port')}><PortChip node={node} act={act} pinBusy={pinBusy} preservePorts={preservePorts} copyable /></Field>
         <Field label={t('tcp_reuse')}>
           <span className="sb-inline">
-            <Toggle size="sm" checked={node.tcp_reuse_enabled !== false} busy={flagBusy} label={t('tcp_reuse')} onChange={() => act.toggleTcpReuse(node)} testId={`node-tcp-reuse-${node.id}`} />
+            <Toggle checked={node.tcp_reuse_enabled !== false} busy={flagBusy} label={t('tcp_reuse')} onChange={() => act.toggleTcpReuse(node)} testId={`node-tcp-reuse-${node.id}`} />
             <span className="sb-dim">{node.tcp_reuse_enabled !== false ? t('enabled') : t('disabled')}</span>
           </span>
         </Field>
         <Field label={t('username')}>
           {node.username ? <span className="sb-inline"><span className="mono">{node.username}</span><CopyButton text={node.username} /></span> : dash}
         </Field>
-        <Field label={t('auth_secret')}><SecretText value={node.password} label={t('auth_secret')} /></Field>
+        <Field label={t('password_auth')}><SecretText value={node.password} label={t('password_auth')} /></Field>
       </dl>
     </Section>
   )
 }
 
-export function OutboundSection({ node }) {
+function OutboundSection({ node }) {
   const { t, i18n } = useTranslation()
   const address = serverAddress(node)
   const locale = i18n.language?.startsWith('zh') ? 'zh' : 'en'
@@ -86,10 +86,11 @@ export function OutboundSection({ node }) {
   )
 }
 
-export function UpstreamSection({ node, act }) {
+function UpstreamSection({ node, act }) {
   const { t } = useTranslation()
   const mode = initialUpstreamMode(node)
   const custom = mode === 'custom'
+  const address = custom ? upstreamAddress(node) : ''
   return (
     <Section
       title={t('upstream_info')}
@@ -104,9 +105,9 @@ export function UpstreamSection({ node, act }) {
         {custom ? (
           <>
             <Field label={t('node_type')}>{node.upstream_type ? protocolLabel(node.upstream_type) : dash}</Field>
-            <Field label={t('upstream_address')}>{upstreamAddress(node) ? <span className="mono">{upstreamAddress(node)}</span> : dash}</Field>
+            <Field label={t('upstream_address')}>{address ? <span className="mono">{address}</span> : dash}</Field>
             <Field label={t('upstream_ip')}>{node.upstream_ip ? <span className="mono">{node.upstream_ip}</span> : dash}</Field>
-            <Field label={t('upstream_location')}><Region location={node.upstream_location} code={node.upstream_country_code} full /></Field>
+            <Field label={t('upstream_location')}><Region location={node.upstream_location} code={node.upstream_country_code} /></Field>
             <Field label={t('upstream_latency')}><Latency value={node.upstream_latency} /></Field>
           </>
         ) : null}
@@ -116,7 +117,7 @@ export function UpstreamSection({ node, act }) {
   )
 }
 
-export function RemarkSection({ node, act }) {
+function RemarkSection({ node, act }) {
   const { t } = useTranslation()
   return (
     <Section title={t('remark')}>

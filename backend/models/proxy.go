@@ -344,6 +344,10 @@ type TUICConfig struct {
 	TLSOptions NativeOptions  `json:"tls_options,omitempty"`
 }
 
+func (config *TUICConfig) ZeroRTTEnabled() bool {
+	return config.ZeroRTTHandshake || config.ReduceRTT
+}
+
 // AnyTLSConfig represents AnyTLS configuration
 type AnyTLSConfig struct {
 	DialerOptions
@@ -440,22 +444,18 @@ type WireGuardConfig struct {
 	Peers                  []WireGuardPeerConfig `json:"peers,omitempty"`
 }
 
-// Settings represents global settings
+// Settings contains the settings used by the runtime and the admin panel.
 type Settings struct {
-	ID                        int       `json:"id"`
-	SingletonKey              int       `json:"-"`
-	StartPort                 int       `json:"start_port"`
-	PreserveInboundPorts      bool      `json:"preserve_inbound_ports"`
-	GlobalUpstreamEnabled     bool      `json:"global_upstream_enabled"`
-	GlobalUpstreamType        string    `json:"global_upstream_type"`
-	GlobalUpstreamConfig      string    `json:"global_upstream_config"`
-	GlobalUpstreamIP          string    `json:"global_upstream_ip"`
-	GlobalUpstreamLocation    string    `json:"global_upstream_location"`
-	GlobalUpstreamCountryCode string    `json:"global_upstream_country_code"`
-	GlobalUpstreamLatency     int       `json:"global_upstream_latency"`
-	GlobalUpstreamError       string    `json:"global_upstream_error"`
-	CreatedAt                 time.Time `json:"created_at"`
-	UpdatedAt                 time.Time `json:"updated_at"`
+	StartPort                 int    `json:"start_port"`
+	PreserveInboundPorts      bool   `json:"preserve_inbound_ports"`
+	GlobalUpstreamEnabled     bool   `json:"global_upstream_enabled"`
+	GlobalUpstreamType        string `json:"global_upstream_type"`
+	GlobalUpstreamConfig      string `json:"global_upstream_config"`
+	GlobalUpstreamIP          string `json:"global_upstream_ip"`
+	GlobalUpstreamLocation    string `json:"global_upstream_location"`
+	GlobalUpstreamCountryCode string `json:"global_upstream_country_code"`
+	GlobalUpstreamLatency     int    `json:"global_upstream_latency"`
+	GlobalUpstreamError       string `json:"global_upstream_error"`
 }
 
 const BcryptMaxPasswordBytes = 72
@@ -605,8 +605,21 @@ func createSchema(db *sql.DB, dialect appdb.Dialect) error {
 		}
 	}
 
-	for _, column := range migrationColumns(dialect) {
-		if err := ensureColumn(db, dialect, column.Table, column.Name, column.AlterSQL); err != nil {
+	columnsByTable := make(map[string]map[string]schemaColumn)
+	for _, migration := range migrationColumns(dialect) {
+		columns, loaded := columnsByTable[migration.Table]
+		if !loaded {
+			var err error
+			columns, err = loadSchemaColumns(db, dialect, migration.Table)
+			if err != nil {
+				return err
+			}
+			columnsByTable[migration.Table] = columns
+		}
+		if _, exists := columns[migration.Name]; exists {
+			continue
+		}
+		if _, err := db.Exec(migration.AlterSQL); err != nil {
 			return err
 		}
 	}
@@ -614,7 +627,7 @@ func createSchema(db *sql.DB, dialect appdb.Dialect) error {
 		return err
 	}
 	if dialect == appdb.DialectMySQL {
-		if err := ensureMySQLLongTextColumns(db); err != nil {
+		if err := ensureMySQLLongTextColumns(db, columnsByTable); err != nil {
 			return err
 		}
 	}
@@ -694,7 +707,7 @@ func normalizeSettingsSingleton(db *sql.DB) error {
 	return err
 }
 
-func ensureMySQLLongTextColumns(db *sql.DB) error {
+func ensureMySQLLongTextColumns(db *sql.DB, columnsByTable map[string]map[string]schemaColumn) error {
 	columns := []struct {
 		table string
 		name  string
@@ -704,30 +717,15 @@ func ensureMySQLLongTextColumns(db *sql.DB) error {
 		{table: "settings", name: "global_upstream_config"},
 	}
 	for _, column := range columns {
-		var dataType, isNullable string
-		var defaultValue sql.NullString
-		err := db.QueryRow(`
-			SELECT data_type, is_nullable, column_default
-			FROM information_schema.columns
-			WHERE table_schema = DATABASE()
-			  AND table_name = ?
-			  AND column_name = ?
-		`, column.table, column.name).Scan(&dataType, &isNullable, &defaultValue)
-		if err != nil {
-			return err
-		}
-		if _, err := db.Exec(fmt.Sprintf(
-			"UPDATE %s SET %s = '' WHERE %s IS NULL",
-			column.table,
-			column.name,
-			column.name,
-		)); err != nil {
-			return err
-		}
-		if strings.EqualFold(strings.TrimSpace(dataType), "longtext") &&
-			strings.EqualFold(strings.TrimSpace(isNullable), "NO") &&
-			!defaultValue.Valid {
+		metadata := columnsByTable[column.table][column.name]
+		notNull := strings.EqualFold(strings.TrimSpace(metadata.isNullable), "NO")
+		if notNull && strings.EqualFold(strings.TrimSpace(metadata.dataType), "longtext") && !metadata.defaultValue.Valid {
 			continue
+		}
+		if !notNull {
+			if _, err := db.Exec(fmt.Sprintf("UPDATE %s SET %s = '' WHERE %s IS NULL", column.table, column.name, column.name)); err != nil {
+				return err
+			}
 		}
 		if _, err := db.Exec(fmt.Sprintf(
 			"ALTER TABLE %s MODIFY COLUMN %s LONGTEXT NOT NULL",
@@ -744,6 +742,12 @@ type migrationColumn struct {
 	Table    string
 	Name     string
 	AlterSQL string
+}
+
+type schemaColumn struct {
+	dataType     string
+	isNullable   string
+	defaultValue sql.NullString
 }
 
 func schemaStatements(dialect appdb.Dialect) []string {
@@ -1014,63 +1018,54 @@ func migrationColumns(dialect appdb.Dialect) []migrationColumn {
 	}
 }
 
-func ensureColumn(db *sql.DB, dialect appdb.Dialect, table string, column string, alterSQL string) error {
-	exists, err := columnExists(db, dialect, table, column)
-	if err != nil {
-		return err
-	}
-	if exists {
-		return nil
-	}
-	_, err = db.Exec(alterSQL)
-	return err
-}
-
-func columnExists(db *sql.DB, dialect appdb.Dialect, table string, column string) (bool, error) {
+func loadSchemaColumns(db *sql.DB, dialect appdb.Dialect, table string) (map[string]schemaColumn, error) {
+	var rows *sql.Rows
+	var err error
 	switch dialect {
 	case appdb.DialectPostgres:
-		var count int
-		err := db.QueryRow(`
-			SELECT COUNT(*)
+		rows, err = db.Query(`
+			SELECT column_name
 			FROM information_schema.columns
 			WHERE table_schema = current_schema()
 			  AND table_name = ?
-			  AND column_name = ?
-		`, table, column).Scan(&count)
-		return count > 0, err
+		`, table)
 	case appdb.DialectMySQL:
-		var count int
-		err := db.QueryRow(`
-			SELECT COUNT(*)
+		rows, err = db.Query(`
+			SELECT column_name, data_type, is_nullable, column_default
 			FROM information_schema.columns
 			WHERE table_schema = DATABASE()
 			  AND table_name = ?
-			  AND column_name = ?
-		`, table, column).Scan(&count)
-		return count > 0, err
+		`, table)
 	default:
-		rows, err := db.Query(fmt.Sprintf("PRAGMA table_info(%s)", table))
-		if err != nil {
-			return false, err
-		}
-		defer rows.Close()
-
-		for rows.Next() {
-			var cid int
-			var name string
-			var colType string
-			var notNull int
-			var dflt sql.NullString
-			var pk int
-			if err := rows.Scan(&cid, &name, &colType, &notNull, &dflt, &pk); err != nil {
-				return false, err
-			}
-			if name == column {
-				return true, nil
-			}
-		}
-		return false, rows.Err()
+		rows, err = db.Query(fmt.Sprintf("PRAGMA table_info(%s)", table))
 	}
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	columns := make(map[string]schemaColumn)
+	for rows.Next() {
+		var name string
+		var metadata schemaColumn
+		switch dialect {
+		case appdb.DialectPostgres:
+			err = rows.Scan(&name)
+		case appdb.DialectMySQL:
+			err = rows.Scan(&name, &metadata.dataType, &metadata.isNullable, &metadata.defaultValue)
+		default:
+			var columnID, notNull, primaryKey int
+			err = rows.Scan(&columnID, &name, &metadata.dataType, &notNull, &metadata.defaultValue, &primaryKey)
+		}
+		if err != nil {
+			return nil, err
+		}
+		if dialect == appdb.DialectMySQL {
+			name = strings.ToLower(name)
+		}
+		columns[name] = metadata
+	}
+	return columns, rows.Err()
 }
 
 func ensureUniqueIndex(db *sql.DB, dialect appdb.Dialect, indexName string, table string, column string) error {
@@ -1143,6 +1138,11 @@ func (p ProxyDefinition) ParseConfig() (interface{}, error) {
 			return nil, fmt.Errorf("invalid %s config: trailing JSON value", proxyType)
 		}
 		return nil, fmt.Errorf("invalid %s config: %w", proxyType, err)
+	}
+
+	switch config.(type) {
+	case *DirectConfig, *SSConfig, *SOCKS5Config, *WireGuardConfig:
+		return config, nil
 	}
 
 	var rawFields map[string]json.RawMessage
@@ -1227,6 +1227,10 @@ func reconcileNativeCompatibilityFields(config interface{}, rawFields map[string
 			fingerprint: &typed.Fingerprint,
 		})
 	case *TUICConfig:
+		if !rawConfigHasField(rawFields, "zero_rtt_handshake") {
+			typed.ZeroRTTHandshake = typed.ZeroRTTEnabled()
+		}
+		typed.ReduceRTT = false
 		reconcileNativeTLSCompatibility(rawFields, nativeTLSCompatibilityFields{
 			options: &typed.TLSOptions, serverName: &typed.SNI,
 			insecure: &typed.InsecureSkipVerify, alpnList: &typed.ALPN,
@@ -1354,19 +1358,24 @@ func reconcileNativeTLSCompatibility(rawFields map[string]json.RawMessage, field
 }
 
 func reconcileNativeTransportCompatibility(rawFields map[string]json.RawMessage, fields nativeTransportCompatibilityFields) {
-	if fields.options == nil || fields.network == nil || len(*fields.options) == 0 {
+	*fields.network = NormalizeTransportType(*fields.network)
+	if len(*fields.options) == 0 {
 		return
 	}
 	options := *fields.options
-	network := normalizeCompatibilityTransportType(*fields.network)
+	network := *fields.network
 	if rawConfigHasField(rawFields, "network") {
-		if network == "" {
+		switch network {
+		case "", "tcp", "none", "raw":
 			*fields.options = nil
 			return
 		}
 		options["type"] = network
 	} else if network == "" {
-		network = normalizeCompatibilityTransportType(nativeCompatibilityString(options["type"]))
+		if nativeNetwork, ok := options["type"].(string); ok {
+			network = NormalizeTransportType(nativeNetwork)
+			options["type"] = network
+		}
 	}
 
 	switch network {
@@ -1504,21 +1513,15 @@ func nativeCompatibilityMap(value interface{}) map[string]interface{} {
 	}
 }
 
-func nativeCompatibilityString(value interface{}) string {
-	text, _ := value.(string)
-	return text
-}
-
-func normalizeCompatibilityTransportType(value string) string {
-	switch strings.ToLower(strings.TrimSpace(value)) {
-	case "", "tcp", "none", "raw":
-		return ""
+func NormalizeTransportType(value string) string {
+	value = strings.ToLower(strings.TrimSpace(value))
+	switch value {
 	case "h2":
 		return "http"
 	case "gun":
 		return "grpc"
 	default:
-		return strings.ToLower(strings.TrimSpace(value))
+		return value
 	}
 }
 

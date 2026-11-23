@@ -1,7 +1,7 @@
 // 节点筛选条件模型（纯函数）。覆盖线上面板的全部筛选能力（状态 / 开关 / 类型 / 端口范围 / 名称 /
 // 备注 / IP / 位置 / 地区 / 用户名 / TCP 复用），但改成「搜索框 + 状态分段 + 结构化条件」的组合。
-import { matchInboundPortFilter, normalizeCountryCode, parseCountryName } from './nodeModel.js'
-import { hasInboundAuth, matchesSearch, nodeHealth, protocolLabel } from './nodeView.js'
+import { matchInboundPortFilter, normalizeCountryCode, parseCountryName, parseInboundPortFilterExpression } from './nodeModel.js'
+import { compileSearch, hasInboundAuth, nodeHealth, protocolLabel } from './nodeView.js'
 
 export const EMPTY_CRITERIA = Object.freeze({
   search: '',
@@ -15,25 +15,28 @@ export const EMPTY_CRITERIA = Object.freeze({
 })
 
 export const UNKNOWN_REGION = '-'
-export const regionOf = (node) => normalizeCountryCode(node?.country_code) || UNKNOWN_REGION
+const regionOf = (node) => normalizeCountryCode(node?.country_code) || UNKNOWN_REGION
 
 const triState = (wanted, actual) => wanted === 'any' || (wanted === 'on') === actual
 
 export const filterNodes = (nodes, criteria) => {
-  const c = { ...EMPTY_CRITERIA, ...criteria }
-  const types = new Set(c.types)
-  const regions = new Set(c.regions)
-  const ports = String(c.ports || '').trim()
-  if (!hasActiveCriteria(c)) return nodes
+  const active = { ...EMPTY_CRITERIA, ...criteria }
+  if (!hasActiveCriteria(active)) return nodes
+  const types = new Set(active.types)
+  const regions = new Set(active.regions)
+  const ports = String(active.ports || '').trim()
+  const portRanges = ports ? parseInboundPortFilterExpression(ports) : null
+  if (ports && !portRanges) return []
+  const matchesSearch = compileSearch(active.search)
   return nodes.filter((node) => {
-    if (c.status !== 'all' && nodeHealth(node) !== c.status) return false
+    if (active.status !== 'all' && nodeHealth(node) !== active.status) return false
     if (types.size > 0 && !types.has(node.type)) return false
     if (regions.size > 0 && !regions.has(regionOf(node))) return false
-    if (ports && !matchInboundPortFilter(node.inbound_port, ports)) return false
-    if (c.username && node.username !== c.username) return false
-    if (!triState(c.tcpReuse, node.tcp_reuse_enabled !== false)) return false
-    if (!triState(c.auth, hasInboundAuth(node))) return false
-    return matchesSearch(node, c.search)
+    if (portRanges && !matchInboundPortFilter(node.inbound_port, portRanges)) return false
+    if (active.username && node.username !== active.username) return false
+    if (!triState(active.tcpReuse, node.tcp_reuse_enabled !== false)) return false
+    if (!triState(active.auth, hasInboundAuth(node))) return false
+    return matchesSearch(node)
   })
 }
 

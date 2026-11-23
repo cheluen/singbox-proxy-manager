@@ -13,7 +13,6 @@ x-sb-proxy-common: &sb-proxy-common
     - CONFIG_DIR=${CONFIG_DIR:-/app/config}
     - TZ=${TZ:-UTC+8}
     - ADMIN_PASSWORD=${ADMIN_PASSWORD:-}
-    - SINGBOX_BINARY=${SINGBOX_BINARY:-}
     - SINGBOX_ENV_ALLOWLIST=${SINGBOX_ENV_ALLOWLIST:-}
     - SBPM_SINGBOX_CHECK_CONCURRENCY=${SBPM_SINGBOX_CHECK_CONCURRENCY:-4}
     - SBPM_SINGBOX_CHECK_TIMEOUT=${SBPM_SINGBOX_CHECK_TIMEOUT:-10s}
@@ -83,6 +82,5 @@ services:
     build:
       context: .
       args:
-        SINGBOX_VERSION: ${SINGBOX_VERSION:-1.12.12}
         GOPROXY: ${GO_MODULE_PROXY:-https://proxy.golang.org,direct}
         GOSUMDB: ${GO_SUM_DB:-sum.golang.org}

@@ -87,33 +87,40 @@ func validStaticPath(fileName string) bool {
 	return fileName != "" && fileName != "." && fs.ValidPath(path.Clean(fileName))
 }
 
-func readRegularStaticFile(assetsFS fs.FS, fileName string) ([]byte, time.Time, error) {
+func readRegularStaticFile(assetsFS fs.FS, fileName string) ([]byte, error) {
+	file, _, err := openRegularStaticFile(assetsFS, fileName)
+	if err != nil {
+		return nil, err
+	}
+	defer file.Close()
+	return io.ReadAll(file)
+}
+
+func openRegularStaticFile(assetsFS fs.FS, fileName string) (fs.File, fs.FileInfo, error) {
 	if !validStaticPath(fileName) {
-		return nil, time.Time{}, fs.ErrNotExist
+		return nil, nil, fs.ErrNotExist
 	}
 	file, err := assetsFS.Open(path.Clean(fileName))
 	if err != nil {
-		return nil, time.Time{}, err
+		return nil, nil, err
 	}
-	defer file.Close()
 	info, err := file.Stat()
 	if err != nil {
-		return nil, time.Time{}, err
+		_ = file.Close()
+		return nil, nil, err
 	}
 	if !info.Mode().IsRegular() {
-		return nil, time.Time{}, fs.ErrNotExist
+		_ = file.Close()
+		return nil, nil, fs.ErrNotExist
 	}
-	content, err := io.ReadAll(file)
-	return content, info.ModTime(), err
+	return file, info, nil
 }
 
 func readStaticVariants(assetsFS fs.FS, fileName string) map[string][]byte {
 	variants := make(map[string][]byte)
-	if !strings.HasSuffix(fileName, ".br") && !strings.HasSuffix(fileName, ".gz") {
-		for encoding, suffix := range map[string]string{"br": ".br", "gzip": ".gz"} {
-			if content, _, err := readRegularStaticFile(assetsFS, fileName+suffix); err == nil && len(content) > 0 {
-				variants[encoding] = content
-			}
+	for encoding, name := range staticVariantNames(assetsFS, fileName) {
+		if content, err := readRegularStaticFile(assetsFS, name); err == nil && len(content) > 0 {
+			variants[encoding] = content
 		}
 	}
 	return variants
@@ -145,14 +152,18 @@ func chooseStaticRepresentation(writer http.ResponseWriter, request *http.Reques
 	if len(variants) > 0 {
 		addVaryAcceptEncoding(writer.Header())
 	}
-	if request.Method == http.MethodGet && request.Header.Get("Range") != "" {
-		return staticRepresentation{content: original}
-	}
-	encoding := selectStaticEncoding(strings.Join(request.Header.Values("Accept-Encoding"), ","), variants["br"] != nil, variants["gzip"] != nil)
+	encoding := selectStaticRequestEncoding(request, variants["br"] != nil, variants["gzip"] != nil)
 	if encoding != "" {
 		return staticRepresentation{encoding: encoding, content: variants[encoding]}
 	}
 	return staticRepresentation{content: original}
+}
+
+func selectStaticRequestEncoding(request *http.Request, hasBrotli, hasGzip bool) string {
+	if request.Method == http.MethodGet && request.Header.Get("Range") != "" {
+		return ""
+	}
+	return selectStaticEncoding(strings.Join(request.Header.Values("Accept-Encoding"), ","), hasBrotli, hasGzip)
 }
 
 type encodedStaticResponseWriter struct {
@@ -172,11 +183,7 @@ func (writer *encodedStaticResponseWriter) WriteHeader(status int) {
 	writer.ResponseWriter.WriteHeader(status)
 }
 
-func serveStaticRepresentation(writer http.ResponseWriter, request *http.Request, fileName string, original []byte, modTime time.Time, representation staticRepresentation) {
-	contentType := mime.TypeByExtension(path.Ext(fileName))
-	if contentType == "" {
-		contentType = http.DetectContentType(original)
-	}
+func serveStaticRepresentation(writer http.ResponseWriter, request *http.Request, fileName, contentType string, modTime time.Time, representation staticRepresentation) {
 	writer.Header().Set("Content-Type", contentType)
 	if representation.encoding != "" {
 		writer = &encodedStaticResponseWriter{ResponseWriter: writer, encoding: representation.encoding, contentSize: len(representation.content)}
@@ -191,10 +198,58 @@ func serveStaticRepresentation(writer http.ResponseWriter, request *http.Request
 }
 
 func servePrecompressedStaticFile(writer http.ResponseWriter, request *http.Request, assetsFS fs.FS, fileName string) error {
-	original, modTime, err := readRegularStaticFile(assetsFS, fileName)
-	if err == nil {
-		representation := chooseStaticRepresentation(writer, request, original, readStaticVariants(assetsFS, fileName))
-		serveStaticRepresentation(writer, request, fileName, original, modTime, representation)
+	original, info, err := openRegularStaticFile(assetsFS, fileName)
+	if err != nil {
+		return err
 	}
-	return err
+	defer original.Close()
+	variants := staticVariantNames(assetsFS, fileName)
+	var representation staticRepresentation
+	for {
+		encoding := selectStaticRequestEncoding(request, variants["br"] != "", variants["gzip"] != "")
+		if encoding == "" {
+			representation.content, err = io.ReadAll(original)
+			if err != nil {
+				return err
+			}
+			break
+		}
+		content, readErr := readRegularStaticFile(assetsFS, variants[encoding])
+		if readErr == nil && len(content) > 0 {
+			representation = staticRepresentation{encoding: encoding, content: content}
+			break
+		}
+		delete(variants, encoding)
+	}
+	contentType := mime.TypeByExtension(path.Ext(fileName))
+	if contentType == "" {
+		sample := representation.content
+		if representation.encoding != "" {
+			sample, err = io.ReadAll(io.LimitReader(original, 512))
+			if err != nil {
+				return err
+			}
+		}
+		contentType = http.DetectContentType(sample)
+	}
+	if len(variants) > 0 {
+		addVaryAcceptEncoding(writer.Header())
+	}
+	serveStaticRepresentation(writer, request, fileName, contentType, info.ModTime(), representation)
+	return nil
+}
+
+func staticVariantNames(assetsFS fs.FS, fileName string) map[string]string {
+	if strings.HasSuffix(fileName, ".br") || strings.HasSuffix(fileName, ".gz") {
+		return nil
+	}
+	variants := make(map[string]string, 2)
+	for encoding, suffix := range map[string]string{"br": ".br", "gzip": ".gz"} {
+		name := path.Clean(fileName + suffix)
+		info, err := fs.Stat(assetsFS, name)
+		if err == nil && info.Mode().IsRegular() && info.Size() > 0 {
+			variants[encoding] = name
+		}
+	}
+	return variants
 }

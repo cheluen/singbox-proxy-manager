@@ -1,6 +1,6 @@
 # 协议支持、导入导出与链接规范
 
-本文档记录 SingBox Proxy Manager（`1.7.23`）支持的全部代理协议、面板表单字段、`sing-box 1.12.12` 配置映射规则、分享链接与结构化批量导入规范，以及导出与手动去重边界。
+本文档记录 SingBox Proxy Manager（`1.7.24`）支持的全部代理协议、面板表单字段、`sing-box 1.12.12` 配置映射规则、分享链接与结构化批量导入规范，以及导出与手动去重边界。
 
 ---
 
@@ -33,8 +33,9 @@
 
 ### 协议合法性校验要点
 
-- **传输层限制**：支持 `tcp / ws / http / quic / grpc / httpupgrade`（`h2` 自动映射为 `http`）；拒绝 `kcp / mkcp` 及未知传输类型。
+- **传输层限制**：支持 `tcp / ws / http / quic / grpc / httpupgrade`（`h2` 自动映射为 `http`，`gun` 自动映射为 `grpc`）；拒绝 `kcp / mkcp` 及未知传输类型。
 - **VLESS 限制**：仅允许 `none` 加密，不支持 Reality `spider_x` 参数；Packet Encoding 仅允许实现支持的值（如 `packetaddr`、`xudp`）。
+- **TUIC / Hysteria2 兼容归一**：TUIC 旧别名 `reduce_rtt` 自动归一化至 `zero_rtt_handshake`（显式提交 `zero_rtt_handshake: false` 时优先生效并清除旧别名）；Hysteria2 出站生成与分享导出共用同一套有效混淆解析规则。
 - **WireGuard 配置位置**：按 `sing-box 1.12` 规范生成至顶层 `endpoints`，使用 `local` 域名解析器时会自动注入对应 DNS 配置。
 
 ---

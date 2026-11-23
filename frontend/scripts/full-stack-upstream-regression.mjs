@@ -1,5 +1,6 @@
 import { legacyClick as clickButton, editNode as openNodeEditor, waitOverlaysClosed, clickControl, openNodeMenu } from './ui-driver.mjs'
 import { findTestPortRange } from './test-ports.mjs'
+import { findBrowserExecutable, stopProcess } from './test-harness.mjs'
 import fs from 'node:fs'
 import http from 'node:http'
 import net from 'node:net'
@@ -31,24 +32,6 @@ const assert = (condition, message) => {
 }
 
 const sleep = (milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds))
-
-const browserExecutable = () => {
-  if (process.env.PUPPETEER_EXECUTABLE_PATH) return process.env.PUPPETEER_EXECUTABLE_PATH
-  for (const candidate of [
-    '/usr/bin/google-chrome',
-    '/usr/bin/google-chrome-stable',
-    '/usr/bin/chromium-browser',
-    '/usr/bin/chromium',
-  ]) {
-    try {
-      fs.accessSync(candidate, fs.constants.X_OK)
-      return candidate
-    } catch {
-      // Continue looking for an installed browser.
-    }
-  }
-  return undefined
-}
 
 const waitForHTTP = async (url, timeoutMilliseconds) => {
   const deadline = Date.now() + timeoutMilliseconds
@@ -121,18 +104,6 @@ const runCommand = (command, args) =>
     child.on('error', (error) => resolve({ code: -1, stdout, stderr: `${stderr}${error.message}` }))
     child.on('exit', (code) => resolve({ code, stdout, stderr }))
   })
-
-const stopProcess = async (child) => {
-  if (!child || child.exitCode !== null) return
-  child.kill('SIGTERM')
-  await Promise.race([
-    new Promise((resolve) => child.once('exit', resolve)),
-    sleep(8000).then(() => {
-      if (child.exitCode === null) child.kill('SIGKILL')
-    }),
-  ])
-}
-
 
 const setInput = async (page, selector, value) => {
   await page.waitForSelector(selector, { visible: true, timeout: 10000 })
@@ -357,7 +328,7 @@ try {
   await waitForHTTP(`${BASE_URL}/api/version`, BACKEND_READY_TIMEOUT)
   browser = await puppeteer.launch({
     headless: true,
-    executablePath: browserExecutable(),
+    executablePath: findBrowserExecutable(),
     args: ['--no-sandbox', '--disable-setuid-sandbox'],
   })
   const page = await browser.newPage()

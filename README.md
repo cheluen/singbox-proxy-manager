@@ -5,7 +5,7 @@
   <p>将各类主流协议节点集中管理，一键转为独立的本地 HTTP / SOCKS5 混合代理端口</p>
 
   <p>
-    <a href="https://github.com/cheluen/singbox-proxy-manager/releases"><img src="https://img.shields.io/badge/version-1.7.23-blue.svg" alt="Version" /></a>
+    <a href="https://github.com/cheluen/singbox-proxy-manager/releases"><img src="https://img.shields.io/badge/version-1.7.24-blue.svg" alt="Version" /></a>
     <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-green.svg" alt="MIT License" /></a>
     <img src="https://img.shields.io/badge/sing--box-1.12.12-orange.svg" alt="sing-box 1.12.12" />
     <img src="https://img.shields.io/badge/Go-1.26.11-00ADD8.svg" alt="Go 1.26.11" />
@@ -186,7 +186,7 @@ docker compose --profile ghcr logs --tail=50
 ```bash
 mkdir -p singbox-proxy-manager && cd singbox-proxy-manager
 
-APP_VERSION=1.7.23
+APP_VERSION=1.7.24
 OS=linux      # 可选：linux / darwin / freebsd
 ARCH=amd64    # 可选：amd64 / arm64
 

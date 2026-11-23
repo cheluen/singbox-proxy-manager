@@ -1,4 +1,8 @@
-// 图标库（lucide）里没有的少量图形：GitHub 标记、健康状态形状、信号格。
+// 图标库（lucide）里没有的少量图形：GitHub 标记、健康状态形状、信号格，以及统一菜单图标包装。
+
+export function MenuIcon({ icon: IconComponent, ...props }) {
+  return <IconComponent size={15} strokeWidth={1.75} aria-hidden="true" {...props} />
+}
 
 export function GithubMark({ size = 16 }) {
   return (

@@ -34,9 +34,7 @@ wait
 	t.Setenv("SINGBOX_ENV_ALLOWLIST", "SBPM_TEST_CHILD_PID_FILE")
 
 	service := NewSingBoxService(configDir)
-	if err := service.GenerateGlobalConfig(nil); err != nil {
-		t.Fatalf("generate config: %v", err)
-	}
+	writeRuntimeConfigFixture(t, service)
 	if err := service.Start(); err != nil {
 		t.Fatalf("start: %v", err)
 	}

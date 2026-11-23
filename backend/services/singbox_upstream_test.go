@@ -50,7 +50,7 @@ func TestBuildGlobalConfigAppliesManagedUpstreamModes(t *testing.T) {
 		GlobalUpstreamConfig:  `{"server":"global.example.com","server_port":1080,"username":"u","password":"p"}`,
 	}
 
-	data, err := service.BuildGlobalConfig(nodes, settings)
+	data, err := service.BuildGlobalConfigContext(context.Background(), nodes, settings)
 	if err != nil {
 		t.Fatalf("build config: %v", err)
 	}
@@ -112,7 +112,7 @@ func TestBuildGlobalConfigRejectsRouteNumberLocalInboundUpstream(t *testing.T) {
 		{ID: 2, Name: "target", Type: "direct", Config: `{}`, InboundPort: 32002, Enabled: true, UpstreamMode: models.UpstreamModeNone},
 	}
 
-	_, err := service.BuildGlobalConfig(nodes)
+	_, err := service.BuildGlobalConfigContext(context.Background(), nodes)
 	if err == nil || !IsUpstreamValidationError(err) || !strings.Contains(err.Error(), "route-number") {
 		t.Fatalf("expected route-number recursion guard, got %v", err)
 	}
@@ -128,7 +128,7 @@ func TestBuildGlobalConfigRejectsHysteriaPortRangeContainingInbound(t *testing.T
 		},
 	}
 
-	_, err := service.BuildGlobalConfig(nodes)
+	_, err := service.BuildGlobalConfigContext(context.Background(), nodes)
 	if err == nil || !strings.Contains(err.Error(), "33001") {
 		t.Fatalf("expected hopping-port inbound collision, got %v", err)
 	}
@@ -143,7 +143,7 @@ func TestBuildGlobalConfigRejectsLocalDirectOverrideUpstream(t *testing.T) {
 		UpstreamType: "direct", UpstreamConfig: `{"override_address":"127.0.0.1"}`,
 	}
 
-	_, err := service.BuildGlobalConfig([]models.ProxyNode{node})
+	_, err := service.BuildGlobalConfigContext(context.Background(), []models.ProxyNode{node})
 	if err == nil || !IsUpstreamValidationError(err) || !strings.Contains(err.Error(), "32001") {
 		t.Fatalf("expected local direct override recursion guard, got %v", err)
 	}
@@ -157,12 +157,12 @@ func TestBuildGlobalConfigRejectsIdenticalAndNestedUpstreams(t *testing.T) {
 		Enabled: true, UpstreamMode: models.UpstreamModeGlobal,
 	}
 	settings := models.Settings{GlobalUpstreamEnabled: true, GlobalUpstreamType: "socks5", GlobalUpstreamConfig: config}
-	if _, err := service.BuildGlobalConfig([]models.ProxyNode{node}, settings); err == nil || !strings.Contains(err.Error(), "identical") {
+	if _, err := service.BuildGlobalConfigContext(context.Background(), []models.ProxyNode{node}, settings); err == nil || !strings.Contains(err.Error(), "identical") {
 		t.Fatalf("expected identical global upstream rejection, got %v", err)
 	}
 
 	node.Type = "socks5h"
-	if _, err := service.BuildGlobalConfig([]models.ProxyNode{node}, settings); err == nil || !strings.Contains(err.Error(), "identical") {
+	if _, err := service.BuildGlobalConfigContext(context.Background(), []models.ProxyNode{node}, settings); err == nil || !strings.Contains(err.Error(), "identical") {
 		t.Fatalf("expected SOCKS5 alias identity rejection, got %v", err)
 	}
 
@@ -171,7 +171,7 @@ func TestBuildGlobalConfigRejectsIdenticalAndNestedUpstreams(t *testing.T) {
 	node.UpstreamMode = models.UpstreamModeCustom
 	node.UpstreamType = "socks5"
 	node.UpstreamConfig = `{"server":"proxy.example.com","server_port":1080,"detour":"node-1-out"}`
-	if _, err := service.BuildGlobalConfig([]models.ProxyNode{node}); err == nil || !strings.Contains(err.Error(), "nested detour") {
+	if _, err := service.BuildGlobalConfigContext(context.Background(), []models.ProxyNode{node}); err == nil || !strings.Contains(err.Error(), "nested detour") {
 		t.Fatalf("expected nested detour rejection, got %v", err)
 	}
 }
@@ -187,7 +187,7 @@ func TestGlobalUpstreamIdentityOnlyChecksFollowers(t *testing.T) {
 					UpstreamMode: mode, UpstreamType: "http", UpstreamConfig: `{"server":"custom.example.com","server_port":8080}`},
 				{ID: 2, Type: "direct", Config: `{}`, InboundPort: 34002, Enabled: true, UpstreamMode: models.UpstreamModeGlobal},
 			}
-			data, err := service.BuildGlobalConfig(nodes, settings)
+			data, err := service.BuildGlobalConfigContext(context.Background(), nodes, settings)
 			if mode == models.UpstreamModeGlobal {
 				if err == nil || !IsUpstreamValidationError(err) {
 					t.Fatalf("identical following node must be rejected: %v", err)
@@ -216,7 +216,7 @@ func TestBuildGlobalConfigGeneratesWireGuardCustomUpstreamEndpoint(t *testing.T)
 		ID: 9, Name: "wg-upstream", Type: "direct", Config: `{}`, InboundPort: 35009, Enabled: true,
 		UpstreamMode: models.UpstreamModeCustom, UpstreamType: "wireguard", UpstreamConfig: testWireGuardFlatConfig,
 	}
-	data, err := service.BuildGlobalConfig([]models.ProxyNode{node})
+	data, err := service.BuildGlobalConfigContext(context.Background(), []models.ProxyNode{node})
 	if err != nil {
 		t.Fatalf("build config: %v", err)
 	}
@@ -266,7 +266,7 @@ func TestRealSingBoxAcceptsManagedUpstreamProtocolMatrix(t *testing.T) {
 				InboundPort: 37000 + index, Enabled: true, UpstreamMode: models.UpstreamModeCustom,
 				UpstreamType: definition.Type, UpstreamConfig: definition.Config,
 			}
-			configJSON, err := service.BuildGlobalConfig([]models.ProxyNode{node})
+			configJSON, err := service.BuildGlobalConfigContext(context.Background(), []models.ProxyNode{node})
 			if err != nil {
 				t.Fatalf("BuildGlobalConfig: %v", err)
 			}
@@ -286,7 +286,7 @@ func TestRealSingBoxAcceptsManagedUpstreamProtocolMatrix(t *testing.T) {
 				InboundPort: 37100 + index, Enabled: true, UpstreamMode: models.UpstreamModeCustom,
 				UpstreamType: customUpstream.Type, UpstreamConfig: customUpstream.Config,
 			}
-			configJSON, err := service.BuildGlobalConfig([]models.ProxyNode{node})
+			configJSON, err := service.BuildGlobalConfigContext(context.Background(), []models.ProxyNode{node})
 			if err != nil {
 				t.Fatalf("BuildGlobalConfig: %v", err)
 			}

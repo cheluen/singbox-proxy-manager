@@ -50,9 +50,11 @@ func (s *SingBoxService) checkUpstreamIPContext(
 	}
 	checkCtx, cancelCheck := context.WithTimeout(ctx, checkTimeout)
 	defer cancelCheck()
-	if err := s.ValidateUpstreamDefinition(definition); err != nil {
+	upstream, err := s.parseManagedUpstreamDefinition(definition, "node-1-upstream")
+	if err != nil {
 		return nil, err
 	}
+	upstream.Scope = "node 1 custom upstream proxy"
 	release, err := acquireExecutionSlot(checkCtx, s.upstreamCheckSlots, "upstream IP check")
 	if err != nil {
 		return nil, err
@@ -63,10 +65,17 @@ func (s *SingBoxService) checkUpstreamIPContext(
 	if err != nil {
 		return nil, err
 	}
+	usesLocalDNS, err := upstream.usesLocalDNS()
+	if err != nil {
+		return nil, fmt.Errorf("build isolated upstream check config: %w", err)
+	}
+	if upstream.Definition.Type == "direct" && directUpstreamIsEmpty(upstream.Config) {
+		return nil, fmt.Errorf("build isolated upstream check config: %w", upstreamValidationErrorf("node 1 custom upstream proxy must not be identical to its outbound"))
+	}
 	var lastErr error
 	usedPorts := make(map[int]struct{}, upstreamIPCheckMaxAttempts)
 	for attempt := 1; attempt <= upstreamIPCheckMaxAttempts; attempt++ {
-		info, attemptErr, retryable := s.runUpstreamIPCheckAttempt(checkCtx, definition, checker, binary, usedPorts)
+		info, attemptErr, retryable := s.runUpstreamIPCheckAttempt(checkCtx, upstream, usesLocalDNS, checker, binary, usedPorts)
 		if attemptErr == nil {
 			return info, nil
 		}
@@ -80,7 +89,8 @@ func (s *SingBoxService) checkUpstreamIPContext(
 
 func (s *SingBoxService) runUpstreamIPCheckAttempt(
 	ctx context.Context,
-	definition models.ProxyDefinition,
+	upstream parsedUpstreamProxy,
+	usesLocalDNS bool,
 	checker upstreamIPChecker,
 	binary string,
 	usedPorts map[int]struct{},
@@ -96,19 +106,17 @@ func (s *SingBoxService) runUpstreamIPCheckAttempt(
 	}
 	username := "upstream-ip-check"
 	password := hex.EncodeToString(credentialBytes)
-	configJSON, err := s.buildGlobalConfigContext(ctx, []models.ProxyNode{{
-		ID:             1,
-		Name:           "upstream-ip-check",
-		Type:           "direct",
-		Config:         `{}`,
-		InboundPort:    port,
-		Username:       username,
-		Password:       password,
-		UpstreamMode:   models.UpstreamModeCustom,
-		UpstreamType:   definition.Type,
-		UpstreamConfig: definition.Config,
-		Enabled:        true,
-	}}, "127.0.0.1")
+	node := models.ProxyNode{ID: 1, Type: "direct", InboundPort: port, Username: username, Password: password}
+	upstreams := []parsedUpstreamProxy{upstream}
+	if err := s.validateManagedUpstreamInboundCollisions(ctx, upstreams, map[int]*models.ProxyNode{port: &node}); err != nil {
+		return nil, fmt.Errorf("build isolated upstream check config: %w", err), false
+	}
+	configJSON, err := s.renderGlobalConfig([]parsedEnabledNode{{
+		Node:               &node,
+		InboundTag:         "node-1-in",
+		OutboundTag:        "node-1-out",
+		ManagedUpstreamTag: upstream.Tag,
+	}}, upstreams, "127.0.0.1", usesLocalDNS)
 	if err != nil {
 		return nil, fmt.Errorf("build isolated upstream check config: %w", err), false
 	}
@@ -135,8 +143,8 @@ func (s *SingBoxService) runUpstreamIPCheckAttempt(
 	if err != nil {
 		return nil, fmt.Errorf("prepare isolated upstream check process: %w", err), true
 	}
-	stdout := newBoundedCommandOutput(maxSingBoxDiagnosticBytes)
-	stderr := newBoundedCommandOutput(maxSingBoxDiagnosticBytes)
+	stdout := newBoundedCommandOutput()
+	stderr := newBoundedCommandOutput()
 	cmd.Stdout = stdout
 	cmd.Stderr = stderr
 	if err := cmd.Start(); err != nil {
@@ -190,7 +198,7 @@ func (s *SingBoxService) runUpstreamIPCheckAttempt(
 	case processErr = <-processDone:
 		processExited = true
 		cancelAttempt()
-		return nil, upstreamProcessExitError(processErr, stdout.String(4096), stderr.String(4096)), true
+		return nil, upstreamProcessExitError(processErr, stdout.String(), stderr.String()), true
 	case result := <-checkDone:
 		if result.err == nil {
 			return result.info, nil, false
@@ -198,11 +206,11 @@ func (s *SingBoxService) runUpstreamIPCheckAttempt(
 		select {
 		case processErr = <-processDone:
 			processExited = true
-			return nil, upstreamProcessExitError(processErr, stdout.String(4096), stderr.String(4096)), true
+			return nil, upstreamProcessExitError(processErr, stdout.String(), stderr.String()), true
 		default:
 		}
 		stopProcess()
-		checkErr := appendUpstreamProcessDetail(result.err, stderr.String(4096))
+		checkErr := appendUpstreamProcessDetail(result.err, stderr.String())
 		return nil, checkErr, errors.Is(result.err, ErrProxyNotReady)
 	case <-ctx.Done():
 		cancelAttempt()
@@ -224,9 +232,6 @@ func upstreamProcessExitError(processErr error, stdout, stderr string) error {
 
 func appendUpstreamProcessDetail(base error, detail string) error {
 	detail = strings.TrimSpace(detail)
-	if len(detail) > 4096 {
-		detail = detail[len(detail)-4096:]
-	}
 	if detail == "" {
 		return base
 	}

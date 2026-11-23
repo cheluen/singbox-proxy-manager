@@ -45,14 +45,3 @@ kill "$pipe_watcher" 2>/dev/null || true
 wait "$pipe_watcher" 2>/dev/null || true
 exit "$status"
 `
-
-func terminateProcess(cmd *exec.Cmd) error {
-	if cmd == nil || cmd.Process == nil {
-		return nil
-	}
-	err := syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
-	if err == syscall.ESRCH {
-		return nil
-	}
-	return err
-}

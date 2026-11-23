@@ -85,7 +85,7 @@ func TestRestartRuntimeReadOnlyUsesTwoQueries(t *testing.T) {
 		t.Fatal(err)
 	}
 	handler.db = db
-	handler.nodeMutations = NewNodeMutationCoordinator(db, handler.singBoxService)
+	handler.nodeMutations = newNodeMutationCoordinator(db, handler.singBoxService)
 	for index := range 16 {
 		insertTestNodeWithPortAndOrder(t, db, "restart-node", 31001+index, index)
 	}

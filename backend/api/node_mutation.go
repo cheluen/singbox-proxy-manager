@@ -4,37 +4,35 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
-	"sync"
 
 	"sb-proxy/backend/models"
 	"sb-proxy/backend/services"
 )
 
-type NodeMutationOperation struct {
+type nodeMutationOperation struct {
 	ApplyRuntime bool
 	Mutate       func(context.Context, *sql.Tx) error
 }
 
-type NodeMutationCoordinator struct {
-	mu             sync.Mutex
+type nodeMutationCoordinator struct {
 	db             *sql.DB
 	singBoxService *services.SingBoxService
 	runtimeApplier *services.RuntimeApplier
 }
 
-func NewNodeMutationCoordinator(db *sql.DB, singBoxService *services.SingBoxService) *NodeMutationCoordinator {
-	return &NodeMutationCoordinator{
+func newNodeMutationCoordinator(db *sql.DB, singBoxService *services.SingBoxService) *nodeMutationCoordinator {
+	if db == nil || singBoxService == nil {
+		return nil
+	}
+	return &nodeMutationCoordinator{
 		db:             db,
 		singBoxService: singBoxService,
 		runtimeApplier: services.NewRuntimeApplier(singBoxService),
 	}
 }
 
-// ReapplyRuntime 只读取节点和设置，与数据修改共用互斥锁，但不创建数据库事务或快照。
-func (coordinator *NodeMutationCoordinator) ReapplyRuntime(ctx context.Context) error {
-	coordinator.mu.Lock()
-	defer coordinator.mu.Unlock()
-
+// reapplyRuntime 由调用方持有写锁，只读取节点和设置，不创建数据库事务或快照。
+func (coordinator *nodeMutationCoordinator) reapplyRuntime(ctx context.Context) error {
 	nodes, err := models.LoadProxyNodes(ctx, coordinator.db)
 	if err != nil {
 		return err
@@ -65,16 +63,10 @@ func (coordinator *NodeMutationCoordinator) ReapplyRuntime(ctx context.Context) 
 	return nil
 }
 
-func (coordinator *NodeMutationCoordinator) Execute(
+func (coordinator *nodeMutationCoordinator) execute(
 	ctx context.Context,
-	operation NodeMutationOperation,
+	operation nodeMutationOperation,
 ) ([]models.ProxyNode, error) {
-	if operation.Mutate == nil {
-		return nil, fmt.Errorf("node mutation callback is required")
-	}
-	coordinator.mu.Lock()
-	defer coordinator.mu.Unlock()
-
 	tx, err := coordinator.db.BeginTx(ctx, nil)
 	if err != nil {
 		return nil, err
@@ -139,56 +131,27 @@ func (coordinator *NodeMutationCoordinator) Execute(
 	return candidateNodes, nil
 }
 
-type nodeOrderPortSnapshot struct {
-	ID                int
-	SortOrder         int
-	InboundPort       int
-	InboundPortPinned bool
-}
-
-func snapshotNodeOrderPorts(ctx context.Context, tx *sql.Tx) ([]nodeOrderPortSnapshot, error) {
-	rows, err := tx.QueryContext(ctx, `
-		SELECT id, sort_order, inbound_port, inbound_port_pinned
-		FROM proxy_nodes
-		ORDER BY sort_order ASC
-	`)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-
-	snapshots := make([]nodeOrderPortSnapshot, 0)
-	for rows.Next() {
-		var snapshot nodeOrderPortSnapshot
-		if err := rows.Scan(
-			&snapshot.ID,
-			&snapshot.SortOrder,
-			&snapshot.InboundPort,
-			&snapshot.InboundPortPinned,
-		); err != nil {
-			return nil, err
-		}
-		snapshots = append(snapshots, snapshot)
-	}
-	if err := rows.Err(); err != nil {
-		return nil, err
-	}
-	return snapshots, nil
-}
-
 func normalizeNodeSortOrderTx(ctx context.Context, tx *sql.Tx) error {
-	rows, err := tx.QueryContext(ctx, "SELECT id FROM proxy_nodes ORDER BY sort_order ASC, id ASC")
+	rows, err := tx.QueryContext(ctx, "SELECT id, sort_order FROM proxy_nodes ORDER BY sort_order ASC, id ASC")
 	if err != nil {
 		return err
 	}
-	ids := make([]int, 0)
+	type sortChange struct {
+		id        int
+		sortOrder int
+	}
+	var changes []sortChange
+	sortOrder := 0
 	for rows.Next() {
-		var id int
-		if err := rows.Scan(&id); err != nil {
+		var id, previousOrder int
+		if err := rows.Scan(&id, &previousOrder); err != nil {
 			rows.Close()
 			return err
 		}
-		ids = append(ids, id)
+		if previousOrder != sortOrder {
+			changes = append(changes, sortChange{id: id, sortOrder: sortOrder})
+		}
+		sortOrder++
 	}
 	if err := rows.Err(); err != nil {
 		rows.Close()
@@ -198,12 +161,12 @@ func normalizeNodeSortOrderTx(ctx context.Context, tx *sql.Tx) error {
 		return err
 	}
 
-	for sortOrder, id := range ids {
+	for _, change := range changes {
 		if _, err := tx.ExecContext(ctx, `
 			UPDATE proxy_nodes
 			SET sort_order = ?, updated_at = CURRENT_TIMESTAMP
 			WHERE id = ?
-		`, sortOrder, id); err != nil {
+		`, change.sortOrder, change.id); err != nil {
 			return err
 		}
 	}
@@ -274,12 +237,14 @@ func reassignAutomaticPortsTx(ctx context.Context, tx *sql.Tx, startPort int) er
 		if err := validateInboundPort(nextPort); err != nil {
 			return fmt.Errorf("node %d: %w", state.id, err)
 		}
-		if _, err := tx.ExecContext(ctx, `
-			UPDATE proxy_nodes
-			SET inbound_port = ?, updated_at = CURRENT_TIMESTAMP
-			WHERE id = ?
-		`, nextPort, state.id); err != nil {
-			return err
+		if state.port != nextPort {
+			if _, err := tx.ExecContext(ctx, `
+				UPDATE proxy_nodes
+				SET inbound_port = ?, updated_at = CURRENT_TIMESTAMP
+				WHERE id = ?
+			`, nextPort, state.id); err != nil {
+				return err
+			}
 		}
 		used[nextPort] = struct{}{}
 		nextPort++

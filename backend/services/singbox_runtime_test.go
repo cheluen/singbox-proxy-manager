@@ -1,12 +1,24 @@
 package services
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 )
+
+func writeRuntimeConfigFixture(t *testing.T, service *SingBoxService) {
+	t.Helper()
+	data, err := service.BuildGlobalConfigContext(context.Background(), nil)
+	if err != nil {
+		t.Fatalf("build fixture config: %v", err)
+	}
+	if err := service.writeConfigFile(data); err != nil {
+		t.Fatalf("write fixture config: %v", err)
+	}
+}
 
 func TestSingBoxWatcherReportsUnexpectedExitAndSecuresFiles(t *testing.T) {
 	configDir := t.TempDir()
@@ -35,9 +47,7 @@ exit 17
 	t.Setenv("SINGBOX_ENV_ALLOWLIST", "SBPM_TEST_STABLE_MARKER")
 
 	service := NewSingBoxService(configDir)
-	if err := service.GenerateGlobalConfig(nil); err != nil {
-		t.Fatalf("generate config: %v", err)
-	}
+	writeRuntimeConfigFixture(t, service)
 	if err := service.Start(); err != nil {
 		t.Fatalf("start should pass the initial stability window: %v", err)
 	}
@@ -76,7 +86,7 @@ exit 17
 	if err := os.WriteFile(stableMarker, []byte("ready"), 0o600); err != nil {
 		t.Fatalf("write stable marker: %v", err)
 	}
-	if err := service.Restart(); err != nil {
+	if err := service.Start(); err != nil {
 		t.Fatalf("manual restart after recovery exhaustion: %v", err)
 	}
 	status = service.RuntimeStatus()
@@ -116,9 +126,7 @@ exit 17
 	t.Setenv("SINGBOX_ENV_ALLOWLIST", "SBPM_TEST_ACTIVE_DIR,SBPM_TEST_OVERLAP_FILE")
 
 	service := NewSingBoxService(configDir)
-	if err := service.GenerateGlobalConfig(nil); err != nil {
-		t.Fatalf("generate config: %v", err)
-	}
+	writeRuntimeConfigFixture(t, service)
 	if err := service.Start(); err != nil {
 		t.Fatalf("start: %v", err)
 	}
@@ -159,7 +167,6 @@ func TestRecoveryLoopReschedulesExitObservedDuringCleanup(t *testing.T) {
 	service := NewSingBoxService(t.TempDir())
 	service.mu.Lock()
 	service.desiredRunning = true
-	service.recoveryRunning = true
 	service.recoveryEpoch = 7
 	service.recoveryAttempts = 1
 	service.process = nil
@@ -171,8 +178,74 @@ func TestRecoveryLoopReschedulesExitObservedDuringCleanup(t *testing.T) {
 	}
 	service.mu.RLock()
 	defer service.mu.RUnlock()
-	if service.recoveryRunning || service.recoveryCancel != nil {
+	if service.recoveryCancel != nil {
 		t.Fatalf("completed recovery state was not cleared")
+	}
+}
+
+func TestStartPreservedConfigTriesEachDistinctSnapshotOnce(t *testing.T) {
+	const bad = `{"fixture":"bad"}`
+	const otherBad = `{"fixture":"other-bad"}`
+	const good = `{"fixture":"good"}`
+	for _, test := range []struct {
+		name, current, lastGood, attempts string
+		wantRunning                       bool
+	}{
+		{name: "identical failed snapshots", current: bad, lastGood: bad, attempts: bad + "\n"},
+		{name: "different failed snapshots", current: bad, lastGood: otherBad, attempts: bad + "\n" + otherBad + "\n"},
+		{name: "fallback after failed current", current: bad, lastGood: good, attempts: bad + "\n" + good + "\n", wantRunning: true},
+		{name: "missing current", lastGood: good, attempts: good + "\n", wantRunning: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			fixtureDir := t.TempDir()
+			binary := filepath.Join(fixtureDir, "fake-sing-box")
+			attemptLog := filepath.Join(fixtureDir, "startup-attempts")
+			script := `#!/bin/sh
+config=$(cat "$3")
+printf '%s\n' "$config" >> "$SBPM_TEST_STARTUP_ATTEMPTS"
+if [ "$config" = '{"fixture":"good"}' ]; then
+  exec sleep 300
+fi
+exit 23
+`
+			if err := os.WriteFile(binary, []byte(script), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			t.Setenv("SBPM_TEST_STARTUP_ATTEMPTS", attemptLog)
+			t.Setenv("SINGBOX_ENV_ALLOWLIST", "SBPM_TEST_STARTUP_ATTEMPTS")
+			t.Setenv("SBPM_SINGBOX_STARTUP_GRACE", "250ms")
+			service := NewSingBoxService(t.TempDir(), WithBinaryPath(binary))
+			t.Cleanup(func() { _ = service.Stop() })
+			for path, data := range map[string]string{service.ConfigPath(): test.current, service.lastGoodConfigPath(): test.lastGood} {
+				if data != "" {
+					if err := os.WriteFile(path, []byte(data), 0o600); err != nil {
+						t.Fatal(err)
+					}
+				}
+			}
+			err := service.StartPreservedConfig()
+			status := service.RuntimeStatus()
+			if (err == nil) != test.wantRunning || status.Running != test.wantRunning || status.RecoveryAttempts != 0 {
+				t.Fatalf("unexpected startup result: status=%+v err=%v", status, err)
+			}
+			attempts, readErr := os.ReadFile(attemptLog)
+			if readErr != nil || string(attempts) != test.attempts {
+				t.Fatalf("unexpected startup attempts: got=%q want=%q err=%v", attempts, test.attempts, readErr)
+			}
+			wantCurrent := test.current
+			if test.wantRunning {
+				wantCurrent = good
+				if status.ActiveConfigHash != runtimeConfigHash([]byte(good)) {
+					t.Fatal("running fallback does not match the active snapshot")
+				}
+			}
+			for path, want := range map[string]string{service.ConfigPath(): wantCurrent, service.lastGoodConfigPath(): test.lastGood} {
+				data, readErr := os.ReadFile(path)
+				if readErr != nil || string(data) != want {
+					t.Fatalf("preserved snapshot changed: path=%s got=%q want=%q err=%v", path, data, want, readErr)
+				}
+			}
+		})
 	}
 }
 

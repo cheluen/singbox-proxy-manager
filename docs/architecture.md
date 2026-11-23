@@ -1,6 +1,6 @@
 # 系统架构与核心机制
 
-本文档基于 `1.7.23` 源码梳理 SingBox Proxy Manager 的核心架构、运行时生命周期与安全边界。
+本文档基于 `1.7.24` 源码梳理 SingBox Proxy Manager 的核心架构、运行时生命周期与安全边界。
 
 ## 1. 总体定位与架构
 
@@ -40,7 +40,7 @@ flowchart LR
 
 | 组件 | 固定基线 | 源码依据 |
 | --- | --- | --- |
-| 应用版本 | `1.7.23`（后端嵌入 `version.txt`） | `internal/version/version.txt` |
+| 应用版本 | `1.7.24`（后端嵌入 `version.txt`） | `internal/version/version.txt` |
 | Go 工具链 | **精确 `1.26.11`**（发行与内核构建强校验） | `go.mod`、`scripts/verify-go-build.sh` |
 | sing-box 内核 | **固定 `1.12.12`**（Go 1.26.11 重编译） | `scripts/build-sing-box.sh` |
 | 前端技术栈 | React 18、Ant Design 5、Axios、i18next、dnd-kit、Lucide、Vite 6（Node `>=22.12.0`） | `frontend/package.json` |
@@ -86,9 +86,9 @@ flowchart LR
 
 ### 2.2 预压缩静态资源与内容协商（`backend/static_assets.go`）
 
-- 前端执行 `npm run build` 时，`frontend/tools/precompress.mjs` 会为所有 `>= 1024` 字节的 `JS / CSS / HTML / SVG / JSON / TXT / MAP` 产物预先生成 `.gz`（gzip 9 级）与 `.br`（Brotli 11 级）文件，随后通过 `go:embed all:dist` 编入二进制。
+- 前端执行 `npm run build` 时，`frontend/tools/precompress.mjs` 会为所有 `>= 1024` 字节的 `JS / CSS / SVG / JSON / TXT / MAP` 产物预先生成 `.gz`（gzip 9 级）与 `.br`（Brotli 11 级）文件，随后通过 `go:embed all:dist` 编入二进制（跳过 `.html`，避免生成启动即被 Go 改写失效的压缩副本）。
 - **统一发行版始终使用嵌入前端**，避免被宿主机遗留的旧版 `frontend/dist` 覆盖；仅非统一发行开发构建允许优先读取磁盘 `frontend/dist`。
-- HTTP 静态分发严格支持 `Accept-Encoding` 内容协商（解析 `q` 权重、通配符、`identity`、`x-gzip`，同权重优先 Brotli）：
+- HTTP 静态分发严格支持 `Accept-Encoding` 内容协商（解析 `q` 权重、通配符、`identity`、`x-gzip`，同权重优先 Brotli），先选定最终编码表示再按需读取目标文件（未知 MIME 仅嗅探原件前 512 字节）：
   - `GET Range` 请求自动回退至未压缩原始内容，确保分片语义正确。
   - `HEAD` 请求不输出响应体，非 `GET` 的 `Range` 头被剥离。
   - 服务端在响应首页 `index.html` 时会注入运行时 `<meta>`（如并发度、列表增量渲染阈值），注入后基于修改后的 HTML 实时生成 gzip，不复用未修改前的 `.br` 文件。

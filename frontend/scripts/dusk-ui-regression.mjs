@@ -8,6 +8,7 @@ import process from 'node:process'
 import { spawn } from 'node:child_process'
 import { fileURLToPath } from 'node:url'
 import puppeteer from 'puppeteer-core'
+import { findBrowserExecutable, stopProcess } from './test-harness.mjs'
 import { assertProjectBrand, clickControl, clickText, closeOverlay, confirmDialog, editNode, openBatchImport, openNodeMenu, saveNodeForm, selectOption, setInput, sleep, toggle, waitOverlaysClosed } from './ui-driver.mjs'
 
 const FRONTEND = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
@@ -217,13 +218,6 @@ const expectRows = async (page, expected) => {
 }
 
 const switchMode = async (page, mode) => clickControl(page, `[data-testid="node-upstream-mode"] [data-mode="${mode}"]`)
-
-const stopChild = async (child) => {
-  if (!child || child.exitCode !== null) return
-  child.kill('SIGTERM')
-  await Promise.race([new Promise((resolve) => child.once('exit', resolve)), sleep(5000)])
-  if (child.exitCode === null) { child.kill('SIGKILL'); await new Promise((resolve) => child.once('exit', resolve)) }
-}
 
 const scenarios = {
   async brand({ page, state }) {
@@ -730,9 +724,7 @@ const scenarios = {
   },
 }
 
-export const SCENARIOS = Object.keys(scenarios)
-
-export async function runRegression(name) {
+async function runRegression(name) {
   assert.ok(scenarios[name], `未知回归场景：${name}`)
   const fixture = createFixture()
   const port = await listen(fixture.server)
@@ -754,7 +746,7 @@ export async function runRegression(name) {
       assert.equal(vite.exitCode, null, `Vite 提前退出：${logs.join('')}`)
       try { return (await fetch(url)).status === 200 } catch { return false }
     }, 'Vite 未启动', 60000)
-    browser = await puppeteer.launch({ headless: true, executablePath: process.env.PUPPETEER_EXECUTABLE_PATH || '/usr/bin/chromium', userDataDir: scratch, args: ['--no-sandbox', '--disable-setuid-sandbox'] })
+    browser = await puppeteer.launch({ headless: true, executablePath: findBrowserExecutable(), userDataDir: scratch, args: ['--no-sandbox', '--disable-setuid-sandbox'] })
     page = await browser.newPage()
     await page.setViewport({ width: 1440, height: 1000 })
     page.setDefaultTimeout(15000)
@@ -799,7 +791,7 @@ export async function runRegression(name) {
     throw new Error(`${name}：${error.stack}\n诊断：${JSON.stringify(diagnostic)}\n请求：${JSON.stringify(fixture.state.requests.slice(-8).map((request) => ({ method: request.method, route: request.route })))}\n${logs.join('')}`)
   } finally {
     await browser?.close().catch(() => {})
-    await stopChild(vite)
+    await stopProcess(vite, { graceMs: 5000 })
     fixture.server.closeAllConnections?.()
     await new Promise((resolve) => fixture.server.close(resolve))
     fs.rmSync(scratch, { recursive: true, force: true })
@@ -808,5 +800,5 @@ export async function runRegression(name) {
 
 if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
   const requested = process.argv[2]
-  for (const scenario of requested ? [requested] : SCENARIOS) await runRegression(scenario)
+  for (const scenario of requested ? [requested] : Object.keys(scenarios)) await runRegression(scenario)
 }

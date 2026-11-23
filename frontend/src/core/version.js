@@ -6,8 +6,6 @@ const normalizeVersion = (value) => {
 }
 
 export const frontendBuildVersion = normalizeVersion(import.meta.env?.VITE_APP_VERSION) || 'dev'
-export const frontendBuildFingerprint =
-  normalizeVersion(import.meta.env?.VITE_APP_FINGERPRINT) || frontendBuildVersion
 
 const sessionRefreshPrefix = 'sbpm-dusk:version-refresh:'
 const attemptedVersions = new Set()

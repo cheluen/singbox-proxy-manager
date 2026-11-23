@@ -3,7 +3,6 @@ package version
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"net/http"
 	"net/url"
@@ -41,7 +40,7 @@ type UpdateChecker struct {
 	mu        sync.Mutex
 	cached    UpdateInfo
 	cachedAt  time.Time
-	cachedFor string
+	cachedErr error
 }
 
 func NewUpdateCheckerFromEnv() *UpdateChecker {
@@ -60,29 +59,8 @@ func NewUpdateCheckerFromEnv() *UpdateChecker {
 	}
 }
 
-func NewUpdateChecker(owner string, repo string, client *http.Client, ttl time.Duration) *UpdateChecker {
-	if client == nil {
-		client = http.DefaultClient
-	}
-	if ttl <= 0 {
-		ttl = 6 * time.Hour
-	}
-	return &UpdateChecker{
-		owner:   strings.TrimSpace(owner),
-		repo:    strings.TrimSpace(repo),
-		client:  client,
-		ttl:     ttl,
-		timeout: 5 * time.Second,
-		now:     time.Now,
-	}
-}
-
-func (c *UpdateChecker) Check(ctx context.Context, currentVersion string) (UpdateInfo, error) {
-	currentVersion = normalizeVersion(currentVersion)
-	info := UpdateInfo{CurrentVersion: currentVersion}
-	if c == nil {
-		return info, fmt.Errorf("update checker is nil")
-	}
+func (c *UpdateChecker) Check(ctx context.Context) (UpdateInfo, error) {
+	info := UpdateInfo{CurrentVersion: Version()}
 	if c.disabled {
 		info.CheckedAt = c.now().UTC().Format(time.RFC3339)
 		return info, nil
@@ -92,44 +70,35 @@ func (c *UpdateChecker) Check(ctx context.Context, currentVersion string) (Updat
 	defer c.mu.Unlock()
 
 	now := c.now()
-	if c.cachedFor == currentVersion && !c.cachedAt.IsZero() && now.Sub(c.cachedAt) < c.ttl {
-		return c.cached, nil
+	info.CheckedAt = now.UTC().Format(time.RFC3339)
+	if err := ctx.Err(); err != nil {
+		info.Error = err.Error()
+		return info, err
+	}
+	if !c.cachedAt.IsZero() && now.Sub(c.cachedAt) < c.ttl {
+		return c.cached, c.cachedErr
 	}
 
-	if c.owner == "" || c.repo == "" {
-		info.CheckedAt = now.UTC().Format(time.RFC3339)
-		info.Error = "update repository is not configured"
-		c.cache(currentVersion, info)
-		return info, errors.New(info.Error)
-	}
-
-	checkCtx := ctx
-	cancel := func() {}
-	if c.timeout > 0 {
-		checkCtx, cancel = context.WithTimeout(ctx, c.timeout)
-	}
+	checkCtx, cancel := context.WithTimeout(ctx, c.timeout)
 	defer cancel()
 
 	latest, err := c.fetchLatestRelease(checkCtx)
-	info.CheckedAt = now.UTC().Format(time.RFC3339)
+	if requestErr := ctx.Err(); requestErr != nil {
+		info.Error = requestErr.Error()
+		return info, requestErr
+	}
 	if err != nil {
 		info.Error = err.Error()
-		c.cache(currentVersion, info)
-		return info, err
+	} else {
+		info.LatestVersion = normalizeVersion(latest.TagName)
+		info.ReleaseURL = latest.HTMLURL
+		info.PublishedAt = latest.PublishedAt
+		info.Available = CompareVersions(info.LatestVersion, info.CurrentVersion) > 0
 	}
-
-	info.LatestVersion = normalizeVersion(latest.TagName)
-	info.ReleaseURL = latest.HTMLURL
-	info.PublishedAt = latest.PublishedAt
-	info.Available = CompareVersions(info.LatestVersion, currentVersion) > 0
-	c.cache(currentVersion, info)
-	return info, nil
-}
-
-func (c *UpdateChecker) cache(currentVersion string, info UpdateInfo) {
-	c.cachedFor = currentVersion
 	c.cached = info
+	c.cachedErr = err
 	c.cachedAt = c.now()
+	return info, err
 }
 
 type githubRelease struct {

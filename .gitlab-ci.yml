@@ -49,22 +49,16 @@ lint-frontend:
       - merge_requests
   allow_failure: false
 
-# 后端可达漏洞扫描
-vulnerability-backend:
-  stage: test
+build-test-kernel:
+  stage: .pre
   image: golang:1.26.11
   script:
-    - GOBIN="$CI_PROJECT_DIR/.ci-bin" go install "golang.org/x/vuln/cmd/govulncheck@$GOVULNCHECK_VERSION"
-    - CGO_ENABLED=0 go build -o "$CI_PROJECT_DIR/.ci-bin/sbpm-govulncheck-target" ./backend
-    - $CI_PROJECT_DIR/.ci-bin/govulncheck -mode=binary "$CI_PROJECT_DIR/.ci-bin/sbpm-govulncheck-target"
     - ./scripts/build-sing-box.sh "$CI_PROJECT_DIR/.ci-bin/sing-box"
-    - $CI_PROJECT_DIR/.ci-bin/govulncheck -mode=binary -json "$CI_PROJECT_DIR/.ci-bin/sing-box" > "$CI_PROJECT_DIR/.ci-bin/sing-box-vulnerabilities.json"
-    - |
-      if grep -E '"osv": "GO-2026-(6809|6859)"' "$CI_PROJECT_DIR/.ci-bin/sing-box-vulnerabilities.json"; then
-        echo 'CVE-2026-111943 或 CVE-2026-97054 仍然存在' >&2
-        exit 1
-      fi
-  only:
+  artifacts:
+    paths:
+      - .ci-bin/sing-box
+    expire_in: 1 day
+  only: &test-kernel-changes
     changes:
       - backend/**/*
       - internal/**/*
@@ -75,16 +69,37 @@ vulnerability-backend:
     refs:
       - main
       - merge_requests
+
+# 后端可达漏洞扫描
+vulnerability-backend:
+  stage: test
+  image: golang:1.26.11
+  dependencies: [build-test-kernel]
+  before_script: &verify-test-kernel
+    - chmod +x .ci-bin/sing-box
+    - ./scripts/verify-go-build.sh .ci-bin/sing-box
+  script:
+    - GOBIN="$CI_PROJECT_DIR/.ci-bin" go install "golang.org/x/vuln/cmd/govulncheck@$GOVULNCHECK_VERSION"
+    - CGO_ENABLED=0 go build -o "$CI_PROJECT_DIR/.ci-bin/sbpm-govulncheck-target" ./backend
+    - $CI_PROJECT_DIR/.ci-bin/govulncheck -mode=binary "$CI_PROJECT_DIR/.ci-bin/sbpm-govulncheck-target"
+    - $CI_PROJECT_DIR/.ci-bin/govulncheck -mode=binary -json "$CI_PROJECT_DIR/.ci-bin/sing-box" > "$CI_PROJECT_DIR/.ci-bin/sing-box-vulnerabilities.json"
+    - |
+      if grep -E '"osv": "GO-2026-(6809|6859)"' "$CI_PROJECT_DIR/.ci-bin/sing-box-vulnerabilities.json"; then
+        echo 'CVE-2026-111943 或 CVE-2026-97054 仍然存在' >&2
+        exit 1
+      fi
+  only: *test-kernel-changes
   allow_failure: false
 
 # 后端Go编译测试
 test-backend:
   stage: test
   image: golang:1.26.11
+  dependencies: [build-test-kernel]
+  before_script: *verify-test-kernel
   script:
     - go mod download
-    - CGO_ENABLED=0 go build -o main ./backend
-    - ./scripts/build-sing-box.sh "$CI_PROJECT_DIR/.ci-bin/sing-box"
+    - CGO_ENABLED=0 go build -o /dev/null ./backend
     - export SINGBOX_TEST_BINARY="$CI_PROJECT_DIR/.ci-bin/sing-box"
     - go test -race -count=1 ./backend/... ./internal/... -v
   cache:
@@ -172,10 +187,7 @@ build-frontend-dist:
     - npm ci
     - npm run test:version-sync
     - npm run build
-    - echo "AUTO_TAG=v$(cat "$CI_PROJECT_DIR/internal/version/version.txt")" > "$CI_PROJECT_DIR/release-version.env"
   artifacts:
-    reports:
-      dotenv: release-version.env
     paths:
       - frontend/dist/
     expire_in: 1 day
@@ -190,8 +202,6 @@ build-freebsd:
   needs:
     - job: build-frontend-dist
       artifacts: true
-  variables:
-    SINGBOX_VERSION: "1.12.12"
   script:
     - go mod download
     - GOOS=freebsd GOARCH=amd64 ./scripts/build-release.sh "$CI_PROJECT_DIR/singbox-proxy-manager-freebsd-amd64"
@@ -211,8 +221,6 @@ build-linux:
   needs:
     - job: build-frontend-dist
       artifacts: true
-  variables:
-    SINGBOX_VERSION: "1.12.12"
   script:
     - go mod download
     - GOOS=linux GOARCH=amd64 ./scripts/build-release.sh "$CI_PROJECT_DIR/singbox-proxy-manager-linux-amd64"
@@ -225,12 +233,24 @@ build-linux:
     - main
     - tags
 
+read-release-version:
+  stage: .pre
+  image: alpine:3.22
+  script:
+    - printf 'AUTO_TAG=v%s\n' "$(cat internal/version/version.txt)" > release-version.env
+  artifacts:
+    reports:
+      dotenv: release-version.env
+    expire_in: 1 day
+  rules: &main-push
+    - if: '$CI_COMMIT_BRANCH == "main" && $CI_PIPELINE_SOURCE == "push"'
+
 # 自动发布到Releases（main分支push时自动创建tag并发布）
 auto-release:
   stage: release
   image: registry.gitlab.com/gitlab-org/cli:latest
   needs:
-    - job: build-frontend-dist
+    - job: read-release-version
       artifacts: true
     - job: build-freebsd
       artifacts: false
@@ -270,9 +290,4 @@ auto-release:
         - name: "singbox-proxy-manager-freebsd-amd64"
           url: "${CI_PROJECT_URL}/-/jobs/artifacts/${CI_COMMIT_SHA}/raw/singbox-proxy-manager-freebsd-amd64?job=build-freebsd"
           link_type: package
-  rules:
-    - if: '$CI_COMMIT_BRANCH == "main" && $CI_PIPELINE_SOURCE == "push"'
-
-# 注意：release-binaries job已移除
-# 因为auto-release会在push到main时自动创建tag和release
-# 如需手动发布，请直接在GitLab UI创建release或使用auto-release生成的release
+  rules: *main-push

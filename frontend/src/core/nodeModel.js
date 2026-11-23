@@ -70,8 +70,6 @@ export const stableConfigSignature = (rawConfig) => {
 
 export const isNodeExportable = (node) => String(node?.type || '').toLowerCase() !== 'direct'
 
-const normalizeFilterText = (value) => String(value ?? '').trim().toLowerCase()
-
 export const parseInboundPortFilterExpression = (value) => {
   const tokens = String(value ?? '')
     .split(/[，,]/)
@@ -101,19 +99,8 @@ export const parseInboundPortFilterExpression = (value) => {
   return ranges
 }
 
-export const matchInboundPortFilter = (port, rawFilterValue) => {
-  const parsedRanges = parseInboundPortFilterExpression(rawFilterValue)
-  if (!parsedRanges) {
-    return normalizeFilterText(port).includes(normalizeFilterText(rawFilterValue))
-  }
-
-  const normalizedPort = Number.parseInt(String(port ?? '').trim(), 10)
-  if (!Number.isInteger(normalizedPort)) {
-    return false
-  }
-
-  return parsedRanges.some(({ start, end }) => normalizedPort >= start && normalizedPort <= end)
-}
+export const matchInboundPortFilter = (port, ranges) =>
+  ranges.some(({ start, end }) => port >= start && port <= end)
 
 export const getNodeStatusCode = (node) => {
   const hasIP = Boolean(String(node?.node_ip || '').trim())

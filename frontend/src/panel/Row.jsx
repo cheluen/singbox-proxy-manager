@@ -38,7 +38,7 @@ export const DuskRow = memo(function DuskRow({ node, index, selected, expanded, 
       <span className="dusk-row__marks">
         <RemarkMark node={node} />
         <UpstreamMark node={node} />
-        {hasInboundAuth(node) ? null : <AuthMark node={node} />}
+        {hasInboundAuth(node) ? null : <AuthMark />}
       </span>
       <div className="dusk-row__meta">
         <ProtocolTag type={node.type} />
@@ -48,7 +48,7 @@ export const DuskRow = memo(function DuskRow({ node, index, selected, expanded, 
         <span className="dusk-row__ip mono truncate">{node.node_ip || '—'}</span>
         <Latency value={node.latency} />
       </div>
-      <Toggle size="sm" checked={!off} busy={flagBusy} label={t('node_enabled_label')} onChange={() => act.toggleEnabled(node)} testId={`node-enabled-${node.id}`} />
+      <Toggle checked={!off} busy={flagBusy} label={t('node_enabled_label')} onChange={() => act.toggleEnabled(node)} testId={`node-enabled-${node.id}`} />
       <NodeMenuButton node={node} act={act} canReorder={canReorder} size="sm" />
       {children}
     </SortableItem>

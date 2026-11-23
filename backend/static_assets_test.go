@@ -187,8 +187,72 @@ func TestStaticRoutesSafetyAndBrandFiles(t *testing.T) {
 		}
 	}
 	for _, name := range []string{"assets/dir", "assets/dir/", "assets/missing.js", "../index.html", "bad\x00", "..\\index.html"} {
-		if _, _, err := readRegularStaticFile(fstest.MapFS{"assets/dir": {Mode: fs.ModeDir}}, name); err == nil {
+		if _, err := readRegularStaticFile(fstest.MapFS{"assets/dir": {Mode: fs.ModeDir}}, name); err == nil {
 			t.Fatalf("unsafe/non-file path accepted: %q", name)
+		}
+	}
+}
+
+type countedStaticFS struct {
+	fs.FS
+	readBytes map[string]int
+}
+
+func (assets countedStaticFS) Open(name string) (fs.File, error) {
+	file, err := assets.FS.Open(name)
+	if err != nil {
+		return nil, err
+	}
+	return &countedStaticFile{File: file, name: name, readBytes: assets.readBytes}, nil
+}
+
+type countedStaticFile struct {
+	fs.File
+	name      string
+	readBytes map[string]int
+}
+
+func (file *countedStaticFile) Read(buffer []byte) (int, error) {
+	read, err := file.File.Read(buffer)
+	file.readBytes[file.name] += read
+	return read, err
+}
+
+func TestServePrecompressedStaticFileReadsOnlySelectedRepresentation(t *testing.T) {
+	original := []byte("<!doctype html>" + strings.Repeat("x", 1024))
+	for _, test := range []struct {
+		name, rangeHeader, wantEncoding string
+		wantBody                        []byte
+		wantOriginalBytes               int
+	}{
+		{name: "assets/app.js", wantEncoding: "br", wantBody: []byte("br")},
+		{name: "assets/no-extension", wantEncoding: "br", wantBody: []byte("br"), wantOriginalBytes: 512},
+		{name: "assets/app.js", rangeHeader: "bytes=0-3", wantBody: original[:4], wantOriginalBytes: len(original)},
+	} {
+		files := countedStaticFS{
+			FS: fstest.MapFS{
+				test.name:         {Data: original},
+				test.name + ".br": {Data: []byte("br")},
+				test.name + ".gz": {Data: []byte("gzip")},
+			},
+			readBytes: make(map[string]int),
+		}
+		request := httptest.NewRequest(http.MethodGet, "/"+test.name, nil)
+		request.Header.Set("Accept-Encoding", "br, gzip")
+		request.Header.Set("Range", test.rangeHeader)
+		recorder := httptest.NewRecorder()
+		if err := servePrecompressedStaticFile(recorder, request, files, test.name); err != nil {
+			t.Fatal(err)
+		}
+		if recorder.Header().Get("Content-Encoding") != test.wantEncoding || recorder.Header().Get("Vary") != "Accept-Encoding" || !bytes.Equal(recorder.Body.Bytes(), test.wantBody) {
+			t.Fatalf("unexpected representation: %v, %q", recorder.Header(), recorder.Body.Bytes())
+		}
+		wantBrotliBytes := 0
+		if test.wantEncoding == "br" {
+			wantBrotliBytes = len(test.wantBody)
+		}
+		if files.readBytes[test.name] != test.wantOriginalBytes || files.readBytes[test.name+".br"] != wantBrotliBytes || files.readBytes[test.name+".gz"] != 0 {
+			t.Fatalf("unexpected reads: %v", files.readBytes)
 		}
 	}
 }

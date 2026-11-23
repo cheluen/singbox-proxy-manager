@@ -11,32 +11,14 @@ import (
 	"time"
 )
 
-type subscriptionResolver interface {
-	LookupNetIP(context.Context, string, string) ([]netip.Addr, error)
-}
-
-type defaultSubscriptionResolver struct {
-	resolver *net.Resolver
-}
-
-func (r defaultSubscriptionResolver) LookupNetIP(
-	ctx context.Context,
-	network string,
-	host string,
-) ([]netip.Addr, error) {
-	return r.resolver.LookupNetIP(ctx, network, host)
-}
-
 type subscriptionTargetPolicy struct {
-	resolver subscriptionResolver
+	resolver netIPResolver
 	dialer   net.Dialer
 }
 
-var subscriptionHTTPClient = newSecureSubscriptionHTTPClient(defaultSubscriptionResolver{
-	resolver: net.DefaultResolver,
-})
+var subscriptionHTTPClient = newSecureSubscriptionHTTPClient(net.DefaultResolver)
 
-func newSecureSubscriptionHTTPClient(resolver subscriptionResolver) *http.Client {
+func newSecureSubscriptionHTTPClient(resolver netIPResolver) *http.Client {
 	policy := &subscriptionTargetPolicy{
 		resolver: resolver,
 		dialer: net.Dialer{

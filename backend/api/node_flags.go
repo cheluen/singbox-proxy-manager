@@ -4,21 +4,15 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
-	"errors"
 	"io"
 	"net/http"
-	"strconv"
 
 	"github.com/gin-gonic/gin"
-
-	"sb-proxy/backend/models"
-	"sb-proxy/backend/services"
 )
 
 func (h *Handler) UpdateNodeFlags(c *gin.Context) {
-	id, err := strconv.Atoi(c.Param("id"))
-	if err != nil || id <= 0 {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid id"})
+	id, ok := parseNodeID(c, true)
+	if !ok {
 		return
 	}
 	var payload struct {
@@ -38,10 +32,10 @@ func (h *Handler) UpdateNodeFlags(c *gin.Context) {
 	}
 	h.nodeWriteMu.Lock()
 	defer h.nodeWriteMu.Unlock()
-	nodes, err := h.nodeMutations.Execute(c.Request.Context(), NodeMutationOperation{
+	nodes, err := h.nodeMutations.execute(c.Request.Context(), nodeMutationOperation{
 		ApplyRuntime: true,
 		Mutate: func(ctx context.Context, tx *sql.Tx) error {
-			node, err := models.LoadProxyNode(ctx, tx, id)
+			node, err := loadNodeForMutation(ctx, tx, id)
 			if err != nil {
 				return err
 			}
@@ -60,14 +54,7 @@ func (h *Handler) UpdateNodeFlags(c *gin.Context) {
 		},
 	})
 	if err != nil {
-		switch {
-		case errors.Is(err, sql.ErrNoRows):
-			c.JSON(http.StatusNotFound, gin.H{"error": "node not found"})
-		case services.IsUpstreamValidationError(err):
-			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
-		default:
-			c.JSON(http.StatusInternalServerError, singboxUpdateError(err))
-		}
+		writeNodeMutationError(c, err, true)
 		return
 	}
 	for _, node := range nodes {

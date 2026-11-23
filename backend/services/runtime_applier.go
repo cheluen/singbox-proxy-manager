@@ -35,7 +35,7 @@ type runtimeApplySnapshot struct {
 type RuntimeApplyTransaction struct {
 	service  *SingBoxService
 	snapshot runtimeApplySnapshot
-	plan     RuntimePlan
+	hash     string
 	done     bool
 	mu       sync.Mutex
 }
@@ -64,7 +64,7 @@ func (a *RuntimeApplier) PrepareContext(
 		return nil, fmt.Errorf("runtime validation stage failed: %w", err)
 	}
 	return &RuntimePlan{
-		configJSON: append([]byte(nil), configJSON...),
+		configJSON: configJSON,
 		hash:       runtimeConfigHash(configJSON),
 	}, nil
 }
@@ -120,7 +120,7 @@ func restoreRuntimeFile(path string, state runtimeFileState) error {
 }
 
 func (s *SingBoxService) captureRuntimeApplySnapshot() (runtimeApplySnapshot, error) {
-	current, err := readRuntimeFile(s.configPath())
+	current, err := readRuntimeFile(s.ConfigPath())
 	if err != nil {
 		return runtimeApplySnapshot{}, fmt.Errorf("failed to read current runtime config: %w", err)
 	}
@@ -153,11 +153,13 @@ func (s *SingBoxService) beginRuntimeApply(plan RuntimePlan) (*RuntimeApplyTrans
 	s.cancelRecoveryLocked()
 	s.recoveryAttempts = 0
 	s.desiredRunning = true
-	s.runtimeStatus.ApplyStage = "writing"
-	s.runtimeStatus.DesiredConfigHash = plan.hash
 	s.mu.Unlock()
 
-	if err := s.writeConfigFile(plan.configJSON); err != nil {
+	stage, err := s.applyRuntimeCandidateLocked(plan)
+	if err != nil {
+		if stage != "write" {
+			return nil, s.failRuntimeApplyLocked(snapshot, plan.hash, stage, err)
+		}
 		s.mu.Lock()
 		s.desiredRunning = snapshot.desiredRunning
 		s.runtimeStatus = snapshot.status
@@ -165,26 +167,33 @@ func (s *SingBoxService) beginRuntimeApply(plan RuntimePlan) (*RuntimeApplyTrans
 		s.operationMu.Unlock()
 		return nil, fmt.Errorf("runtime write stage failed: %w", err)
 	}
+	return &RuntimeApplyTransaction{
+		service:  s,
+		snapshot: snapshot,
+		hash:     plan.hash,
+	}, nil
+}
 
+func (s *SingBoxService) applyRuntimeCandidateLocked(plan RuntimePlan) (string, error) {
+	s.setApplyStage("writing", plan.hash)
+	if err := s.writeConfigFile(plan.configJSON); err != nil {
+		return "write", err
+	}
 	s.setApplyStage("starting", plan.hash)
 	if err := s.stopProcessLocked(); err != nil {
-		return nil, s.failRuntimeApplyLocked(snapshot, plan, "stop", err)
+		return "stop", err
 	}
 	if err := s.startProcessLocked(plan.hash); err != nil {
-		return nil, s.failRuntimeApplyLocked(snapshot, plan, "start", err)
+		return "start", err
 	}
 
 	s.setApplyStage("snapshotting", plan.hash)
 	if err := s.saveLastGoodBytes(plan.configJSON); err != nil {
-		return nil, s.failRuntimeApplyLocked(snapshot, plan, "snapshot", err)
+		return "snapshot", err
 	}
 
 	s.setApplyStage("ready", plan.hash)
-	return &RuntimeApplyTransaction{
-		service:  s,
-		snapshot: snapshot,
-		plan:     plan,
-	}, nil
+	return "", nil
 }
 
 func (s *SingBoxService) setApplyStage(stage string, desiredHash string) {
@@ -196,11 +205,11 @@ func (s *SingBoxService) setApplyStage(stage string, desiredHash string) {
 
 func (s *SingBoxService) failRuntimeApplyLocked(
 	snapshot runtimeApplySnapshot,
-	plan RuntimePlan,
+	failedHash string,
 	stage string,
 	stageErr error,
 ) error {
-	rollbackErr := s.rollbackRuntimeApplyLocked(snapshot, plan.hash)
+	rollbackErr := s.rollbackRuntimeApplyLocked(snapshot, failedHash)
 	s.operationMu.Unlock()
 	if rollbackErr != nil {
 		return fmt.Errorf(
@@ -228,7 +237,7 @@ func (s *SingBoxService) rollbackRuntimeApplyLocked(
 	}
 
 	fallback := selectRuntimeFallback(snapshot)
-	if err := restoreRuntimeFile(s.configPath(), fallback); err != nil {
+	if err := restoreRuntimeFile(s.ConfigPath(), fallback); err != nil {
 		rollbackErr = combineRuntimeErrors(rollbackErr, fmt.Errorf("restore live config: %w", err))
 	}
 
@@ -313,7 +322,8 @@ func (transaction *RuntimeApplyTransaction) Commit() {
 	if transaction.done {
 		return
 	}
-	transaction.service.setApplyStage("committed", transaction.plan.hash)
+	transaction.service.setApplyStage("committed", transaction.hash)
+	transaction.snapshot = runtimeApplySnapshot{}
 	transaction.done = true
 	transaction.service.operationMu.Unlock()
 }
@@ -329,8 +339,9 @@ func (transaction *RuntimeApplyTransaction) Rollback() error {
 	}
 	err := transaction.service.rollbackRuntimeApplyLocked(
 		transaction.snapshot,
-		transaction.plan.hash,
+		transaction.hash,
 	)
+	transaction.snapshot = runtimeApplySnapshot{}
 	transaction.done = true
 	transaction.service.operationMu.Unlock()
 	return err

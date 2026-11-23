@@ -1,26 +1,26 @@
-FROM debian:bookworm-slim
+FROM debian:bookworm-slim AS selector
 
 ARG TARGETARCH
 
+COPY release-binaries/ /tmp/release-binaries/
+
+RUN ARCH="${TARGETARCH:-$(dpkg --print-architecture)}" \
+    && case "${ARCH}" in \
+      amd64|arm64) cp "/tmp/release-binaries/singbox-proxy-manager-linux-${ARCH}" /tmp/singbox-proxy-manager ;; \
+      *) echo "Unsupported TARGETARCH: ${ARCH}" >&2; exit 1 ;; \
+    esac \
+    && chmod +x /tmp/singbox-proxy-manager
+
+FROM debian:bookworm-slim
+
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    ca-certificates curl jq \
+    ca-certificates \
     && apt-get clean \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
-COPY release-binaries/ /app/release-binaries/
-
-RUN ARCH="${TARGETARCH}" \
-    && if [ -z "$ARCH" ]; then ARCH="$(dpkg --print-architecture)"; fi \
-    && case "${ARCH}" in \
-      amd64|arm64) BIN="/app/release-binaries/singbox-proxy-manager-linux-${ARCH}" ;; \
-      *) echo "Unsupported TARGETARCH: ${ARCH}" >&2; exit 1 ;; \
-    esac \
-    && test -f "$BIN" \
-    && cp "$BIN" /app/singbox-proxy-manager \
-    && chmod +x /app/singbox-proxy-manager \
-    && rm -rf /app/release-binaries \
-    && mkdir -p /app/config
+COPY --from=selector /tmp/singbox-proxy-manager /app/singbox-proxy-manager
+RUN mkdir -p /app/config
 
 ENV PORT=30000
 ENV BIND_ADDRESS=0.0.0.0

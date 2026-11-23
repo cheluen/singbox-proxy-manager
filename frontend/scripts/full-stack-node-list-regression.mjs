@@ -7,6 +7,7 @@ import { randomBytes } from 'node:crypto'
 import { spawn } from 'node:child_process'
 import puppeteer from 'puppeteer-core'
 import { findTestPortRange } from './test-ports.mjs'
+import { findBrowserExecutable, stopProcess } from './test-harness.mjs'
 import { clickControl, setInput, sleep } from './ui-driver.mjs'
 
 const binary = process.env.SBPM_E2E_BACKEND_BINARY
@@ -22,16 +23,7 @@ let browser
 let token = ''
 let base = ''
 
-const stopBackend = async () => {
-  if (!backend || backend.exitCode !== null || backend.signalCode !== null) return
-  backend.kill('SIGTERM')
-  await Promise.race([new Promise((resolve) => backend.once('exit', resolve)), sleep(15000)])
-  if (backend.exitCode === null && backend.signalCode === null) {
-    backend.kill('SIGKILL')
-    await new Promise((resolve) => backend.once('exit', resolve))
-    throw new Error('后端未正常停止')
-  }
-}
+const stopBackend = () => stopProcess(backend, { graceMs: 15000, requireGraceful: true })
 const api = async (method, endpoint, body) => {
   const response = await fetch(`${base}/api${endpoint}`, {
     method, headers: { 'Content-Type': 'application/json', Authorization: token },
@@ -72,7 +64,7 @@ try {
   assert.equal(expectedNodes.length, 202)
   await stopBackend()
   browser = await puppeteer.launch({
-    headless: true, executablePath: process.env.PUPPETEER_EXECUTABLE_PATH || '/usr/bin/chromium',
+    headless: true, executablePath: findBrowserExecutable(),
     userDataDir: path.join(scratch, 'browser'), args: ['--no-sandbox', '--disable-setuid-sandbox'],
   })
 

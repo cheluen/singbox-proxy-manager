@@ -1,16 +1,12 @@
 export default {
   // Common
-  version: '版本',
   confirm: '确认',
   cancel: '取消',
   save: '保存',
   delete: '删除',
   edit: '编辑',
-  add: '添加',
   search: '搜索',
   refresh: '刷新',
-  success: '成功',
-  error: '错误',
   warning: '警告',
   stop: '停止',
   frontend_build: '前端构建',
@@ -19,7 +15,6 @@ export default {
   update_available: '发现新版本',
   
   // Login
-  password: '密码',
   login: '登录',
   logout: '退出登录',
   login_failed: '登录失败',

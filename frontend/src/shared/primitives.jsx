@@ -1,7 +1,7 @@
 import { forwardRef, memo, useEffect, useRef, useState } from 'react'
 import { Check, Copy, Eye, EyeOff, Loader } from 'lucide-react'
 import { useTranslation } from 'react-i18next'
-import { normalizeCountryCode, parseCountryName } from '../core/nodeModel'
+import { normalizeCountryCode } from '../core/nodeModel'
 import { copyText, latencyTone, nodeHealth, protocolLabel } from '../core/nodeView'
 import { LANGUAGES, changeLanguage } from '../core/i18n'
 import { HealthGlyph, SignalBars } from './icons'
@@ -12,16 +12,15 @@ export function Spinner({ size = 16 }) {
 }
 
 export const IconButton = forwardRef(function IconButton(
-  { label, icon: IconComponent, onClick, danger, active, busy, disabled, size = 'md', tip, className = '', ...rest },
+  { label, icon: IconComponent, onClick, busy, disabled, size = 'md', tip, className = '', ...rest },
   ref
 ) {
   return (
     <button
       ref={ref}
       type="button"
-      className={`sb-icon-btn sb-icon-btn--${size}${danger ? ' is-danger' : ''}${active ? ' is-active' : ''} ${className}`}
+      className={`sb-icon-btn sb-icon-btn--${size} ${className}`}
       aria-label={label}
-      aria-pressed={typeof active === 'boolean' ? active : undefined}
       data-tip={tip === false ? undefined : tip || label}
       disabled={disabled || busy}
       onClick={onClick}
@@ -69,14 +68,14 @@ export const Latency = memo(function Latency({ value }) {
   )
 })
 
-export const Region = memo(function Region({ node, location = node?.location, code: rawCode = node?.country_code, showName = true, full = false }) {
+export const Region = memo(function Region({ node, location = node?.location, code: rawCode = node?.country_code, showName = true }) {
   const code = normalizeCountryCode(rawCode)
-  const name = full ? String(location || '').trim() : parseCountryName(location)
+  const name = showName ? String(location || '').trim() : ''
   if (!code && !name) return <span className="sb-dim">—</span>
   return (
     <span className="sb-region" title={location || undefined}>
       {code ? <span className="sb-region__code mono">{code.toUpperCase()}</span> : null}
-      {showName && name ? <span className="truncate">{name}</span> : null}
+      {name ? <span className="truncate">{name}</span> : null}
     </span>
   )
 })
@@ -178,7 +177,6 @@ export function Segmented({ value, options, onChange, label, size = 'md', classN
           data-value={option.value}
           onClick={() => onChange(option.value)}
         >
-          {option.icon || null}
           <span>{option.label}</span>
           {typeof option.count === 'number' ? <span className="sb-seg__count mono">{option.count}</span> : null}
         </button>

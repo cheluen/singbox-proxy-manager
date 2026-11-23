@@ -30,11 +30,11 @@ func TestNodeMutationRemoteDatabaseLifecycle(t *testing.T) {
 		t.Fatal(err)
 	}
 	useRealSingBoxForChecks(t)
-	t.Setenv("SBPM_SKIP_PORT_AVAILABILITY_CHECK", "1")
 	t.Setenv("SBPM_SINGBOX_STARTUP_GRACE", "10ms")
 	service := services.NewSingBoxService(t.TempDir())
 	t.Cleanup(func() { _ = service.Stop() })
 	handler := NewHandler(db, service)
+	handler.skipPortAvailabilityCheck = true
 	var ids []int
 	for _, name := range []string{"first", "second"} {
 		response := postJSON(t, handler.CreateNode, http.MethodPost, "/api/nodes", map[string]any{
@@ -125,10 +125,10 @@ sleep 300
 		t.Fatalf("write fake sing-box: %v", err)
 	}
 	t.Setenv("SINGBOX_BINARY", fakeBinary)
-	t.Setenv("SBPM_SKIP_PORT_AVAILABILITY_CHECK", "1")
 	service := services.NewSingBoxService(t.TempDir())
 	t.Cleanup(func() { _ = service.Stop() })
 	handler := NewHandler(db, service)
+	handler.skipPortAvailabilityCheck = true
 
 	payload := map[string]interface{}{
 		"content": strings.Join([]string{
@@ -174,11 +174,11 @@ func TestRemoteDatabaseRepeatedNodeSave(t *testing.T) {
 		t.Fatalf("write fake sing-box: %v", err)
 	}
 	t.Setenv("SINGBOX_BINARY", fakeBinary)
-	t.Setenv("SBPM_SKIP_PORT_AVAILABILITY_CHECK", "1")
 	t.Setenv("SBPM_SINGBOX_STARTUP_GRACE", "10ms")
 	service := services.NewSingBoxService(t.TempDir())
 	t.Cleanup(func() { _ = service.Stop() })
 	handler := NewHandler(db, service)
+	handler.skipPortAvailabilityCheck = true
 
 	if _, err := db.Exec(`
 		INSERT INTO proxy_nodes (

@@ -5,45 +5,43 @@ import { useTranslation } from 'react-i18next'
 import { EMPTY_CRITERIA } from '../core/nodeFilters'
 import { isNodeExportable } from '../core/nodeModel'
 import { OFFICIAL_GITHUB_URL } from '../core/project'
-import { frontendBuildFingerprint, frontendBuildVersion } from '../core/version'
+import { frontendBuildVersion } from '../core/version'
 import { CheckBox } from './controls'
-import { GithubMark } from './icons'
+import { GithubMark, MenuIcon } from './icons'
 import { EmptyState, IconButton, Spinner } from './primitives'
 import { AddMenu } from './menus'
 
-const icon = (Component) => <Component size={15} strokeWidth={1.75} aria-hidden="true" />
-
-// 选中节点后出现的批量操作条。docked = 固定在内容区底部的悬浮条；否则为行内条。
-export function BulkBar({ ctl, variant = 'docked', compact = false }) {
+// 选中节点后出现的底部悬浮批量操作条。
+export function BulkBar({ ctl }) {
   const { t } = useTranslation()
   const count = ctl.selectedIds.size
   if (count === 0) return null
   const exportable = ctl.selectedNodes.some(isNodeExportable)
   const more = {
     items: [
-      { key: 'dedupe', icon: icon(CopyMinus), label: t('outbound_dedup') },
+      { key: 'dedupe', icon: <MenuIcon icon={CopyMinus} />, label: t('outbound_dedup') },
       { type: 'divider' },
-      { key: 'delete', icon: icon(Trash2), label: t('batch_delete'), danger: true },
+      { key: 'delete', icon: <MenuIcon icon={Trash2} />, label: t('batch_delete'), danger: true },
     ],
     onClick: ({ key }) => (key === 'dedupe' ? ctl.dedupeSelected() : ctl.deleteSelected()),
   }
   return (
-    <div className={`sb-bulk sb-bulk--${variant}${compact ? ' sb-bulk--compact' : ''}`} role="toolbar" aria-label={t('bulk_actions')} data-testid="dashboard-toolbar-selection">
+    <div className="sb-bulk sb-bulk--docked" role="toolbar" aria-label={t('bulk_actions')} data-testid="dashboard-toolbar-selection">
       <span className="sb-bulk__count" data-testid="nodes-selected-count">
         <strong className="mono">{count}</strong>
         <span>{t('selected_suffix')}</span>
       </span>
       <span className="sb-bulk__sep" />
-      <Button type="text" icon={icon(Zap)} loading={Boolean(ctl.checks.progress)} onClick={ctl.checkSelected} data-testid="nodes-batch-check">{t('check_ip')}</Button>
-      <Button type="text" icon={icon(KeyRound)} onClick={() => ctl.open({ kind: 'auth' })} data-testid="nodes-batch-auth">{t('set_auth')}</Button>
-      <Button type="text" icon={icon(Download)} loading={Boolean(ctl.working.export)} disabled={!exportable} onClick={ctl.exportSelected} data-testid="nodes-batch-export">{t('export')}</Button>
+      <Button type="text" icon={<MenuIcon icon={Zap} />} loading={Boolean(ctl.checks.progress)} onClick={ctl.checkSelected} data-testid="nodes-batch-check">{t('check_ip')}</Button>
+      <Button type="text" icon={<MenuIcon icon={KeyRound} />} onClick={() => ctl.open({ kind: 'auth' })} data-testid="nodes-batch-auth">{t('set_auth')}</Button>
+      <Button type="text" icon={<MenuIcon icon={Download} />} loading={Boolean(ctl.working.export)} disabled={!exportable} onClick={ctl.exportSelected} data-testid="nodes-batch-export">{t('export')}</Button>
       <span className="sb-bulk__wide">
-        <Button type="text" icon={icon(CopyMinus)} loading={Boolean(ctl.working.dedupe)} onClick={ctl.dedupeSelected} data-testid="nodes-batch-dedupe">{t('outbound_dedup')}</Button>
-        <Button type="text" danger icon={icon(Trash2)} loading={Boolean(ctl.working.delete)} onClick={ctl.deleteSelected} data-testid="nodes-batch-delete">{t('delete')}</Button>
+        <Button type="text" icon={<MenuIcon icon={CopyMinus} />} loading={Boolean(ctl.working.dedupe)} onClick={ctl.dedupeSelected} data-testid="nodes-batch-dedupe">{t('outbound_dedup')}</Button>
+        <Button type="text" danger icon={<MenuIcon icon={Trash2} />} loading={Boolean(ctl.working.delete)} onClick={ctl.deleteSelected} data-testid="nodes-batch-delete">{t('delete')}</Button>
       </span>
       <span className="sb-bulk__narrow">
         <Dropdown menu={more} trigger={['click']} placement="topRight">
-          <Button type="text" icon={icon(Ellipsis)} aria-label={t('more_actions')} data-testid="nodes-batch-more" />
+          <Button type="text" icon={<MenuIcon icon={Ellipsis} />} aria-label={t('more_actions')} data-testid="nodes-batch-more" />
         </Dropdown>
       </span>
       <span className="sb-bulk__sep" />
@@ -82,7 +80,7 @@ export function RuntimeBanner({ ctl, className = '' }) {
         <strong>{t('runtime_degraded')}</strong>
         <span>{ctl.runtime.message || t('runtime_degraded_desc')}</span>
       </div>
-      <Button icon={icon(RotateCcw)} loading={ctl.runtimeRestarting} onClick={ctl.restartRuntime} data-testid="runtime-restart">{t('runtime_restart')}</Button>
+      <Button icon={<MenuIcon icon={RotateCcw} />} loading={ctl.runtimeRestarting} onClick={ctl.restartRuntime} data-testid="runtime-restart">{t('runtime_restart')}</Button>
     </div>
   )
 }
@@ -105,7 +103,7 @@ export function VersionBadge({ ctl, className = '' }) {
   const { t } = useTranslation()
   const update = ctl.version.update
   const available = Boolean(update?.available)
-  const tip = `${t('frontend_build')}: ${frontendBuildVersion} (${frontendBuildFingerprint})`
+  const tip = `${t('frontend_build')}: ${frontendBuildVersion}`
   if (available) {
     return (
       <a className={`sb-version is-update ${className}`} href={update.release_url || `${OFFICIAL_GITHUB_URL}/releases/latest`} target="_blank" rel="noreferrer" data-tip={`${t('update_available')}: ${update.latest_version}`} data-testid="version-badge">

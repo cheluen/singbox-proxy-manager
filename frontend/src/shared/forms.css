@@ -15,7 +15,6 @@
 .sb-form-collapse.ant-collapse { margin: 0 -12px; }
 .sb-form-collapse .ant-collapse-header { font-weight: 550; color: var(--ink-2) !important; }
 .sb-form-footer { position: sticky; bottom: -1px; z-index: 2; display: flex; justify-content: flex-end; flex-wrap: wrap; gap: 8px; margin-top: 18px; padding: 14px 0 2px; border-top: 1px solid var(--line); background: var(--surface); }
-:root[data-theme='dusk'] .ant-modal .sb-form-footer { background: var(--surface); }
 /* 固定操作栏不应遮住通过键盘聚焦或自动滚入视野的表单字段。 */
 .sb-overlay .ant-modal-body { scroll-padding: 16px 0 80px; }
 .sb-code { max-height: 260px; margin: 0; padding: 12px; overflow: auto; border-radius: var(--radius-sm); border: 1px solid var(--line); background: var(--surface-2); font-family: var(--font-mono); font-size: 12px; line-height: 1.55; color: var(--ink); }
@@ -44,8 +43,7 @@
 
 /* ---------- 弹窗内容 ---------- */
 .sb-overlay .ant-modal-content { background: var(--surface); }
-.sb-overlay .ant-modal-body { max-height: calc(100dvh - var(--chrome-h) - 150px); overflow-y: auto; overscroll-behavior: contain; margin: 0 -24px; padding: 4px 24px 0; }
-.sb-overlay.ant-modal-root .ant-modal-wrap, .sb-overlay.ant-modal-root .ant-modal-mask { top: var(--chrome-h); }
+.sb-overlay .ant-modal-body { max-height: calc(100dvh - 150px); overflow-y: auto; overscroll-behavior: contain; margin: 0 -24px; padding: 4px 24px 0; }
 .sb-dialog-title { display: flex; align-items: baseline; gap: 10px; min-width: 0; padding-right: 28px; }
 .sb-dialog-title__sub { font-size: 13px; font-weight: 400; color: var(--ink-3); }
 .sb-dialog-lead { margin-bottom: 14px; color: var(--ink-2); }
@@ -103,26 +101,19 @@
 .sb-active-filters__note { flex-basis: 100%; }
 
 /* ---------- 批量操作条 ---------- */
-.sb-bulk { display: flex; align-items: center; gap: 2px; padding: 5px 6px 5px 14px; border-radius: 999px; background: var(--ink); color: var(--surface); box-shadow: var(--shadow-2); max-width: 100%; }
+.sb-bulk { display: flex; align-items: center; gap: 2px; padding: 5px 6px 5px 14px; border-radius: 999px; background: var(--surface-2); color: var(--ink); box-shadow: 0 0 0 1px var(--line-strong), var(--shadow-2); max-width: 100%; }
 .sb-bulk--docked { position: absolute; left: 50%; bottom: 20px; z-index: 20; transform: translateX(-50%); max-width: calc(100% - 24px); animation: sb-fade-up 0.18s ease-out; }
-.sb-bulk--inline { border-radius: var(--radius); }
 .sb-bulk__count { display: inline-flex; align-items: baseline; gap: 5px; white-space: nowrap; font-size: 13px; }
 .sb-bulk__count strong { font-size: 14px; }
 .sb-bulk__sep { flex: none; width: 1px; height: 18px; margin: 0 6px; background: color-mix(in srgb, currentColor 28%, transparent); }
 .sb-bulk .ant-btn-text { color: inherit; border-radius: 999px; }
 .sb-bulk .ant-btn-text:not(:disabled):hover { background: color-mix(in srgb, currentColor 16%, transparent); color: inherit; }
 .sb-bulk .ant-btn-text:disabled { color: inherit; opacity: 0.4; }
-.sb-bulk .ant-btn-dangerous.ant-btn-text { color: #f0b9ae; }
+.sb-bulk .ant-btn-dangerous.ant-btn-text { color: var(--bad-ink); }
 .sb-bulk .sb-icon-btn { color: inherit; border-radius: 50%; }
 .sb-bulk .sb-icon-btn:hover:not(:disabled) { background: color-mix(in srgb, currentColor 16%, transparent); color: inherit; }
 .sb-bulk__wide { display: inline-flex; gap: 2px; }
 .sb-bulk__narrow { display: none; }
-.sb-bulk--compact { padding-left: 12px; }
-.sb-bulk--compact .ant-btn-text > span:not(.ant-btn-icon) { display: none; }
-.sb-bulk--compact .sb-bulk__wide { display: none; }
-.sb-bulk--compact .sb-bulk__narrow { display: inline-flex; }
-:root[data-theme='dusk'] .sb-bulk { background: var(--surface-2); color: var(--ink); box-shadow: 0 0 0 1px var(--line-strong), var(--shadow-2); }
-:root[data-theme='dusk'] .sb-bulk .ant-btn-dangerous.ant-btn-text { color: var(--bad-ink); }
 
 /* ---------- 进度 / 横幅 / 状态 ---------- */
 .sb-progress { display: flex; align-items: center; gap: 10px; padding: 8px 10px 8px 12px; border-radius: var(--radius-sm); background: var(--accent-soft); color: var(--ink); font-size: 13px; min-width: 0; }
@@ -166,7 +157,7 @@
   .sb-bulk .sb-bulk__narrow { display: inline-flex; }
   .sb-overlay .ant-modal { max-width: calc(100vw - 16px); margin: 8px auto; }
   .sb-overlay .ant-modal-content { padding: 18px 16px; }
-  .sb-overlay .ant-modal-body { margin: 0 -16px; padding: 4px 16px 0; max-height: calc(100dvh - var(--chrome-h) - 120px); }
+  .sb-overlay .ant-modal-body { margin: 0 -16px; padding: 4px 16px 0; max-height: calc(100dvh - 120px); }
   .sb-linkbar__row { flex-direction: column; }
   .sb-progress__text { white-space: normal; }
 }

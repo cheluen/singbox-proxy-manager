@@ -1,9 +1,8 @@
 // 批量操作弹窗内容：批量导入、批量设置认证。
 import { useState } from 'react'
-import { Alert, Button, Checkbox, Form, Input, Switch } from 'antd'
-import { Dices, ShieldCheck, ShieldOff } from 'lucide-react'
+import { Alert, Button, Checkbox, Form, Input } from 'antd'
 import { useTranslation } from 'react-i18next'
-import { randomCredentials } from '../core/credentials'
+import { InboundAuthBox } from './NodeParts'
 import { Segmented } from './primitives'
 
 const SOURCE_TYPES = ['auto', 'subscription', 'http_proxy']
@@ -128,52 +127,15 @@ export function BatchAuthDialogBody({ ctl, count, onDone }) {
   return (
     <Form form={form} layout="vertical" initialValues={{ auth_enabled: true, username: '', password: '' }} onFinish={submit} className="sb-form" data-testid="batch-auth-form">
       <p className="sb-dialog-lead">{t('batch_auth_scope', { count })}</p>
-      <div className={`sb-auth-box${authEnabled ? '' : ' is-open'}`}>
-        <div className="sb-auth-box__head">
-          <span className="sb-auth-box__icon">{authEnabled ? <ShieldCheck size={18} strokeWidth={1.75} /> : <ShieldOff size={18} strokeWidth={1.75} />}</span>
-          <div className="sb-auth-box__text">
-            <strong>{t('inbound_authentication')}</strong>
-            <span>{authEnabled ? t('batch_auth_on_hint') : t('batch_auth_mode_desc')}</span>
-          </div>
-          {authEnabled ? (
-            <Button size="small" type="link" icon={<Dices size={14} strokeWidth={1.75} />} data-testid="auth-generate" onClick={() => {
-              const next = randomCredentials()
-              form.setFieldsValue({ username: next.username, password: next.secret })
-              form.validateFields(['username', 'password']).catch(() => {})
-            }}>
-              {t('auth_generate')}
-            </Button>
-          ) : null}
-          <Form.Item name="auth_enabled" valuePropName="checked" noStyle>
-            <Switch
-              aria-label={t('inbound_authentication')}
-              onChange={(on) => {
-                if (!on) form.setFieldsValue({ username: '', password: '' })
-              }}
-            />
-          </Form.Item>
-        </div>
-        {authEnabled ? (
-          <div className="sb-form-grid sb-auth-box__fields">
-            <Form.Item
-              name="username"
-              label={t('username')}
-              required
-              rules={[{
-                validator: (_, value) => {
-                  if (!value) return Promise.reject(new Error(t('enter_username')))
-                  return String(value).includes('+') ? Promise.reject(new Error(t('username_plus_not_allowed'))) : Promise.resolve()
-                },
-              }]}
-            >
-              <Input autoFocus autoComplete="off" spellCheck={false} data-testid="batch-auth-username" />
-            </Form.Item>
-            <Form.Item name="password" label={t('password_auth')} rules={[{ required: true, message: t('enter_password') }]}>
-              <Input.Password autoComplete="new-password" data-testid="batch-auth-secret" />
-            </Form.Item>
-          </div>
-        ) : null}
-      </div>
+      <InboundAuthBox
+        form={form}
+        authEnabled={authEnabled}
+        onHint={t('batch_auth_on_hint')}
+        offHint={t('batch_auth_mode_desc')}
+        autoFocusUsername
+        usernameTestId="batch-auth-username"
+        passwordTestId="batch-auth-secret"
+      />
       <div className="sb-form-footer">
         <Button onClick={onDone} disabled={saving}>{t('cancel')}</Button>
         <Button type="primary" htmlType="submit" loading={saving} danger={!authEnabled}>{authEnabled ? t('apply_auth') : t('batch_auth_disable_action')}</Button>

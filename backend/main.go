@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"io/fs"
 	"log"
+	"mime"
 	"net"
 	"net/http"
 	"os"
@@ -40,16 +41,13 @@ const (
 	defaultTimezoneLocationName = "Asia/Shanghai"
 )
 
-func openDatabase(configDir string) (*sql.DB, error) {
-	return appdb.Open(configDir)
-}
-
 func loadRuntimeEnvironment() {
-	loadedPaths, err := loadDotEnvFiles(discoverDotEnvPaths())
-	if err != nil {
-		log.Printf("Failed to load .env files: %v", err)
-	} else if len(loadedPaths) > 0 {
-		log.Printf("Loaded environment from: %s", strings.Join(loadedPaths, ", "))
+	if paths := discoverDotEnvPaths(); len(paths) > 0 {
+		if err := godotenv.Load(paths...); err != nil {
+			log.Printf("Failed to load .env files: %v", err)
+		} else {
+			log.Printf("Loaded environment from: %s", strings.Join(paths, ", "))
+		}
 	}
 
 	locationName := applyTimezoneFromEnv()
@@ -84,18 +82,6 @@ func discoverDotEnvPaths() []string {
 	}
 
 	return candidates
-}
-
-func loadDotEnvFiles(paths []string) ([]string, error) {
-	if len(paths) == 0 {
-		return nil, nil
-	}
-
-	if err := godotenv.Load(paths...); err != nil {
-		return nil, err
-	}
-
-	return paths, nil
 }
 
 func applyTimezoneFromEnv() string {
@@ -221,7 +207,7 @@ func main() {
 	}
 
 	// Initialize database
-	db, err := openDatabase(configDir)
+	db, err := appdb.Open(configDir)
 	if err != nil {
 		log.Fatalf("Failed to open database: %v", err)
 	}
@@ -271,18 +257,8 @@ func main() {
 
 	// Public routes
 	apiGroup.GET("/version", func(c *gin.Context) {
-		currentVersion := version.Version()
-		response := gin.H{"version": currentVersion}
-		if updateInfo, err := updateChecker.Check(c.Request.Context(), currentVersion); err == nil {
-			response["update"] = updateInfo
-		} else {
-			response["update"] = version.UpdateInfo{
-				CurrentVersion: currentVersion,
-				Available:      false,
-				Error:          err.Error(),
-			}
-		}
-		c.JSON(http.StatusOK, response)
+		updateInfo, _ := updateChecker.Check(c.Request.Context())
+		c.JSON(http.StatusOK, gin.H{"version": updateInfo.CurrentVersion, "update": updateInfo})
 	})
 	apiGroup.POST("/login", handler.Login)
 
@@ -354,27 +330,27 @@ func main() {
 
 	quit := make(chan os.Signal, 1)
 	signal.Notify(quit, os.Interrupt, syscall.SIGTERM)
+	defer signal.Stop(quit)
 
 	exitCode := 0
+	shutdownHTTP := true
 	select {
 	case err := <-serverErr:
+		shutdownHTTP = false
 		if err != nil && err != http.ErrServerClosed {
 			log.Printf("Failed to start server: %v", err)
 			exitCode = 1
 		}
 	case sig := <-quit:
 		log.Printf("Received signal %s, shutting down gracefully", sig)
-		shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-		if err := srv.Shutdown(shutdownCtx); err != nil {
-			log.Printf("HTTP server shutdown error: %v", err)
-		}
-		cancel()
 	case leaseErr, ok := <-leaseErrors:
 		if !ok {
 			leaseErr = errors.New("database lease monitor stopped unexpectedly")
 		}
 		log.Printf("Lost single-instance database lease, shutting down: %v", leaseErr)
 		exitCode = 1
+	}
+	if shutdownHTTP {
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		if err := srv.Shutdown(shutdownCtx); err != nil {
 			log.Printf("HTTP server shutdown error: %v", err)
@@ -555,6 +531,10 @@ func registerFrontendRoutes(r *gin.Engine, frontendDistDir string, appVersion st
 
 	indexFingerprint := calcContentFingerprint(indexContent)
 	indexETag := fmt.Sprintf("\"sbpm-%s\"", indexFingerprint)
+	indexContentType := mime.TypeByExtension(".html")
+	if indexContentType == "" {
+		indexContentType = http.DetectContentType(indexContent)
+	}
 	indexVariants, err := prepareIndexVariants(assetsFS, rawIndexContent, indexContent)
 	if err != nil {
 		return fmt.Errorf("prepare index compression: %w", err)
@@ -574,7 +554,7 @@ func registerFrontendRoutes(r *gin.Engine, frontendDistDir string, appVersion st
 		representation := chooseStaticRepresentation(c.Writer, c.Request, indexContent, indexVariants)
 		c.Header("ETag", indexETags[representation.encoding])
 
-		serveStaticRepresentation(c.Writer, c.Request, "index.html", indexContent, time.Time{}, representation)
+		serveStaticRepresentation(c.Writer, c.Request, "index.html", indexContentType, time.Time{}, representation)
 		c.Abort()
 	}
 
@@ -643,8 +623,10 @@ func registerFrontendRoutes(r *gin.Engine, frontendDistDir string, appVersion st
 }
 
 func frontendAssetFS(frontendDistDir string) (fs.FS, string, error) {
-	if info, err := os.Stat(frontendDistDir); !kernel.Bundled && err == nil && info.IsDir() {
-		return os.DirFS(frontendDistDir), frontendDistDir, nil
+	if !kernel.Bundled {
+		if info, err := os.Stat(frontendDistDir); err == nil && info.IsDir() {
+			return os.DirFS(frontendDistDir), frontendDistDir, nil
+		}
 	}
 
 	if !frontendassets.HasEmbeddedAssets {
@@ -675,16 +657,6 @@ func logSingBoxDependencyGuideIfNeeded(err error, configDir string) {
 
 func apiCorsMiddlewareFromEnv() gin.HandlerFunc {
 	allowed := parseCommaListEnv("CORS_ALLOWED_ORIGINS")
-	if len(allowed) == 0 {
-		return func(c *gin.Context) {
-			if isAPIRequest(c.Request.URL.Path) && c.Request.Method == http.MethodOptions {
-				c.AbortWithStatus(http.StatusNoContent)
-				return
-			}
-			c.Next()
-		}
-	}
-
 	allowedSet := make(map[string]struct{}, len(allowed))
 	for _, o := range allowed {
 		if o == "*" {

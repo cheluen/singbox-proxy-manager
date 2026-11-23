@@ -33,7 +33,6 @@ const (
 type batchImportExpansionState struct {
 	mu         sync.Mutex
 	visited    map[string]struct{}
-	fetchCount int
 	fetchSlots chan struct{}
 }
 
@@ -50,11 +49,10 @@ func (s *batchImportExpansionState) reserveFetch(rawURL string) error {
 	if _, exists := s.visited[rawURL]; exists {
 		return fmt.Errorf("subscription URL was already processed")
 	}
-	if s.fetchCount >= maxBatchImportFetches {
+	if len(s.visited) >= maxBatchImportFetches {
 		return fmt.Errorf("too many subscription urls (>%d)", maxBatchImportFetches)
 	}
 	s.visited[rawURL] = struct{}{}
-	s.fetchCount++
 	return nil
 }
 
@@ -83,24 +81,24 @@ func expandInputsOrdered(
 		return nil, nil, nil
 	}
 	results := make([]batchExpansionResult, len(inputs))
-	jobs := make(chan int, len(inputs))
-	for index := range inputs {
-		jobs <- index
+	if len(inputs) == 1 {
+		results[0].items, results[0].failures, results[0].err = expand(ctx, inputs[0])
+	} else {
+		jobs := make(chan int, len(inputs))
+		for index := range inputs {
+			jobs <- index
+		}
+		close(jobs)
+		var workers sync.WaitGroup
+		for worker := 0; worker < min(len(inputs), batchImportFetchConcurrency); worker++ {
+			workers.Go(func() {
+				for index := range jobs {
+					results[index].items, results[index].failures, results[index].err = expand(ctx, inputs[index])
+				}
+			})
+		}
+		workers.Wait()
 	}
-	close(jobs)
-
-	workerCount := min(len(inputs), batchImportFetchConcurrency)
-	var workers sync.WaitGroup
-	workers.Add(workerCount)
-	for worker := 0; worker < workerCount; worker++ {
-		go func() {
-			defer workers.Done()
-			for index := range jobs {
-				results[index].items, results[index].failures, results[index].err = expand(ctx, inputs[index])
-			}
-		}()
-	}
-	workers.Wait()
 
 	var items []ImportItem
 	var failures []ImportFailure
@@ -160,68 +158,31 @@ func ParseBatchImportSourceType(raw string) (BatchImportSourceType, error) {
 }
 
 func ExpandBatchImportSourcesWithType(ctx context.Context, sources []string, sourceType BatchImportSourceType) ([]ImportItem, []ImportFailure, error) {
-	parsedSourceType, err := ParseBatchImportSourceType(string(sourceType))
-	if err != nil {
-		return nil, nil, err
+	switch sourceType {
+	case "", BatchImportSourceAuto, BatchImportSourceSubscription, BatchImportSourceHTTPProxy:
+	default:
+		return nil, nil, fmt.Errorf("unsupported batch import source type %q", sourceType)
 	}
 	ctx, cancel := context.WithTimeout(ctx, batchImportTotalTimeout)
 	defer cancel()
 
 	state := newBatchImportExpansionState()
-	if len(sources) > 1 {
-		normalizedSources := make([]string, 0, len(sources))
-		for _, source := range sources {
-			if normalized := normalizeImportText(source); normalized != "" {
-				normalizedSources = append(normalizedSources, normalized)
-			}
+	normalizedSources := make([]string, 0, len(sources))
+	for _, source := range sources {
+		if normalized := normalizeImportText(source); normalized != "" {
+			normalizedSources = append(normalizedSources, normalized)
 		}
-		return expandInputsOrdered(ctx, normalizedSources, func(workerCtx context.Context, source string) ([]ImportItem, []ImportFailure, error) {
-			switch parsedSourceType {
-			case BatchImportSourceSubscription:
-				return expandExplicitSubscriptionSources(workerCtx, source, state)
-			case BatchImportSourceHTTPProxy:
-				return expandExplicitHTTPProxySources(source)
-			default:
-				return expandBatchImportInput(workerCtx, source, 0, true, state)
-			}
-		})
 	}
-
-	var items []ImportItem
-	var failures []ImportFailure
-
-	for _, src := range sources {
-		src = normalizeImportText(src)
-		if src == "" {
-			continue
-		}
-
-		var expItems []ImportItem
-		var expFailures []ImportFailure
-		switch parsedSourceType {
+	return expandInputsOrdered(ctx, normalizedSources, func(workerCtx context.Context, source string) ([]ImportItem, []ImportFailure, error) {
+		switch sourceType {
 		case BatchImportSourceSubscription:
-			expItems, expFailures, err = expandExplicitSubscriptionSources(ctx, src, state)
+			return expandExplicitSubscriptionSources(workerCtx, source, state)
 		case BatchImportSourceHTTPProxy:
-			expItems, expFailures, err = expandExplicitHTTPProxySources(src)
+			return expandExplicitHTTPProxySources(source)
 		default:
-			expItems, expFailures, err = expandBatchImportInput(ctx, src, 0, true, state)
+			return expandBatchImportInput(workerCtx, source, 0, true, state)
 		}
-		if err != nil {
-			failures = append(failures, ImportFailure{
-				Source: summarizeSource(src),
-				Error:  err.Error(),
-			})
-			continue
-		}
-
-		items = append(items, expItems...)
-		failures = append(failures, expFailures...)
-		if len(items)+len(failures) > maxBatchImportItems {
-			return nil, nil, fmt.Errorf("too many nodes (>%d)", maxBatchImportItems)
-		}
-	}
-
-	return items, failures, nil
+	})
 }
 
 func expandBatchImportInput(
@@ -281,7 +242,7 @@ func expandBatchImportInput(
 			return validatedShareLinkItem(input)
 		}
 
-		return fetchAndExpandSubscription(ctx, input, u, depth, state)
+		return fetchAndExpandSubscription(ctx, u, depth, state)
 	}
 
 	return validatedShareLinkItem(input)
@@ -293,10 +254,6 @@ func expandExplicitSubscriptionSources(
 	state *batchImportExpansionState,
 ) ([]ImportItem, []ImportFailure, error) {
 	lines := splitNonEmptyLines(input)
-	if len(lines) == 0 {
-		return nil, nil, nil
-	}
-
 	return expandInputsOrdered(ctx, lines, func(workerCtx context.Context, line string) ([]ImportItem, []ImportFailure, error) {
 		if !isHTTPURL(line) {
 			return nil, nil, fmt.Errorf("subscription source must be an http or https URL")
@@ -306,7 +263,7 @@ func expandExplicitSubscriptionSources(
 			return nil, nil, fmt.Errorf("invalid subscription URL")
 		}
 		u.Scheme = strings.ToLower(u.Scheme)
-		return fetchAndExpandSubscription(workerCtx, line, u, 0, state)
+		return fetchAndExpandSubscription(workerCtx, u, 0, state)
 	})
 }
 
@@ -335,7 +292,6 @@ func expandExplicitHTTPProxySources(input string) ([]ImportItem, []ImportFailure
 
 func fetchAndExpandSubscription(
 	ctx context.Context,
-	source string,
 	u *url.URL,
 	depth int,
 	state *batchImportExpansionState,
@@ -362,36 +318,15 @@ func fetchAndExpandSubscription(
 		}
 		return nil, nil, fmt.Errorf("subscription contains no valid nodes")
 	}
-	for index := range items {
-		if strings.TrimSpace(items[index].Source) == "" {
-			items[index].Source = source
-		}
-	}
 	return items, failures, nil
 }
 
 func validatedShareLinkItem(input string) ([]ImportItem, []ImportFailure, error) {
-	if !isSupportedShareLink(input) {
-		return nil, nil, fmt.Errorf("unsupported link format")
-	}
 	config, proxyType, name, err := ParseShareLink(input)
 	if err != nil {
 		return nil, nil, err
 	}
 	return []ImportItem{{Source: input, Link: input, Config: config, Type: proxyType, Name: name}}, nil, nil
-}
-
-func isSupportedShareLink(input string) bool {
-	lower := strings.ToLower(strings.TrimSpace(input))
-	for _, prefix := range []string{
-		"ss://", "vless://", "vmess://", "trojan://", "hysteria2://", "hy2://", "tuic://", "anytls://",
-		"socks://", "socks5://", "socks5h://", "wireguard://", "wg://", "http://", "https://",
-	} {
-		if strings.HasPrefix(lower, prefix) {
-			return true
-		}
-	}
-	return false
 }
 
 func parseClashMetaYAML(input string) ([]ImportItem, []ImportFailure, bool, error) {
@@ -455,12 +390,16 @@ func convertClashProxyToImportItem(proxy map[string]any) (ImportItem, error) {
 	}
 	server := getString(proxy, "server")
 	port := getInt(proxy, "port")
-	if (rawType == "hysteria2" || rawType == "hy2") && port <= 0 {
-		if firstPort, _, err := parseClashHysteria2Ports(proxy); err != nil {
+	var hysteria2ServerPorts []string
+	if rawType == "hysteria2" || rawType == "hy2" {
+		firstPort, ports, err := parseClashHysteria2Ports(proxy)
+		if err != nil {
 			return ImportItem{}, err
-		} else if firstPort > 0 {
+		}
+		if firstPort > 0 {
 			port = firstPort
 		}
+		hysteria2ServerPorts = ports
 	}
 	if rawType != "wireguard" && rawType != "wg" && (server == "" || port <= 0) {
 		return ImportItem{}, fmt.Errorf("missing server/port")
@@ -510,13 +449,10 @@ func convertClashProxyToImportItem(proxy map[string]any) (ImportItem, error) {
 		}
 		cfg.Network = models.ListableString(network)
 		if getBool(proxy, "udp-over-tcp") || getBool(proxy, "udp_over_tcp") {
-			cfg.UDPOverTCP = true
-			if version := firstPositiveInt(getInt(proxy, "udp-over-tcp-version"), getInt(proxy, "udp_over_tcp_version")); version > 0 {
-				if version > 2 {
-					return ImportItem{}, fmt.Errorf("unsupported udp-over-tcp version: %d", version)
-				}
-				cfg.UDPOverTCPOptions = models.NativeOptions{"enabled": true, "version": version}
-				cfg.UDPOverTCP = cfg.UDPOverTCPOptions
+			version := firstPositiveInt(getInt(proxy, "udp-over-tcp-version"), getInt(proxy, "udp_over_tcp_version"))
+			cfg.UDPOverTCP, cfg.UDPOverTCPOptions, err = importUDPOverTCP(true, version)
+			if err != nil {
+				return ImportItem{}, err
 			}
 		}
 		if cfg.MultiplexConfig, err = buildClashMultiplex(proxy); err != nil {
@@ -776,18 +712,8 @@ func convertClashProxyToImportItem(proxy map[string]any) (ImportItem, error) {
 		if err != nil {
 			return ImportItem{}, err
 		}
-		firstPort, serverPorts, err := parseClashHysteria2Ports(proxy)
-		if err != nil {
-			return ImportItem{}, err
-		}
-		if firstPort > 0 {
-			port = firstPort
-		}
 		obfsType := strings.ToLower(getString(proxy, "obfs"))
-		if obfsType == "none" {
-			obfsType = ""
-		}
-		if obfsType != "" && obfsType != "salamander" {
+		if obfsType != "" && obfsType != "salamander" && obfsType != "none" {
 			return ImportItem{}, fmt.Errorf("unsupported hysteria2 obfs for sing-box 1.12.12: %s", obfsType)
 		}
 		obfsPassword, obfsPasswordPresent := getCredentialStringWithPresence(proxy, "obfs-password", "obfs_password")
@@ -797,7 +723,7 @@ func convertClashProxyToImportItem(proxy map[string]any) (ImportItem, error) {
 		cfg := models.Hysteria2Config{
 			Server:             server,
 			ServerPort:         port,
-			ServerPorts:        models.ListableString(serverPorts),
+			ServerPorts:        models.ListableString(hysteria2ServerPorts),
 			Password:           password,
 			UpMbps:             parseBandwidthMbps(proxy["up"]),
 			DownMbps:           parseBandwidthMbps(proxy["down"]),
@@ -809,8 +735,10 @@ func convertClashProxyToImportItem(proxy map[string]any) (ImportItem, error) {
 			HopInterval:        secondsToDurationString(proxy["hop-interval"]),
 			BrutalDebug:        getBool(proxy, "brutal-debug") || getBool(proxy, "brutal_debug"),
 		}
-		if obfsType != "" {
+		if obfsType == "salamander" {
 			cfg.Obfs = models.NativeOptions{"type": obfsType, "password": obfsPassword}
+		} else if _, present := getCredentialStringWithPresence(proxy, "obfs"); present {
+			cfg.Obfs = obfsType
 		}
 		if alpn := getStringSlice(proxy, "alpn"); len(alpn) > 0 {
 			cfg.ALPN = alpn
@@ -851,7 +779,7 @@ func convertClashProxyToImportItem(proxy map[string]any) (ImportItem, error) {
 			SNI:                getString(proxy, "sni"),
 			Fingerprint:        firstNonEmpty(getString(proxy, "client-fingerprint"), getString(proxy, "client_fingerprint")),
 			InsecureSkipVerify: getBool(proxy, "skip-cert-verify") || getBool(proxy, "skip_cert_verify"),
-			ZeroRTTHandshake:   getBool(proxy, "reduce-rtt") || getBool(proxy, "zero-rtt-handshake") || getBool(proxy, "zero_rtt_handshake"),
+			ZeroRTTHandshake:   getBool(proxy, "reduce-rtt") || getBool(proxy, "reduce_rtt") || getBool(proxy, "zero-rtt-handshake") || getBool(proxy, "zero_rtt_handshake"),
 			UDPOverStream:      getBool(proxy, "udp-over-stream") || getBool(proxy, "udp_over_stream"),
 			Heartbeat:          millisecondsToDurationString(firstMapValueOrNil(proxy, "heartbeat-interval", "heartbeat_interval")),
 			Network:            models.ListableString(network),
@@ -932,7 +860,6 @@ func convertClashProxyToImportItem(proxy map[string]any) (ImportItem, error) {
 			AllowedIPs:      firstNonEmptyStringSlice(getStringSlice(proxy, "allowed-ips"), getStringSlice(proxy, "allowed_ips")),
 			InterfaceName:   firstNonEmpty(getString(proxy, "wireguard-interface-name"), getString(proxy, "wireguard_interface_name")),
 			Network:         getString(proxy, "network"),
-			Detour:          firstNonEmpty(getString(proxy, "dialer-proxy"), getString(proxy, "dialer_proxy")),
 			ConnectTimeout:  secondsToDurationString(firstMapValueOrNil(proxy, "connect-timeout", "connect_timeout")),
 			SystemInterface: getBool(proxy, "system-interface") || getBool(proxy, "system_interface"),
 		}
@@ -1086,13 +1013,10 @@ func convertClashProxyToImportItem(proxy map[string]any) (ImportItem, error) {
 		}
 		cfg.Network = models.ListableString(network)
 		if getBool(proxy, "udp-over-tcp") || getBool(proxy, "udp_over_tcp") {
-			cfg.UDPOverTCP = true
-			if version := firstPositiveInt(getInt(proxy, "udp-over-tcp-version"), getInt(proxy, "udp_over_tcp_version")); version > 0 {
-				if version > 2 {
-					return ImportItem{}, fmt.Errorf("unsupported udp-over-tcp version: %d", version)
-				}
-				cfg.UDPOverTCPOptions = models.NativeOptions{"enabled": true, "version": version}
-				cfg.UDPOverTCP = cfg.UDPOverTCPOptions
+			version := firstPositiveInt(getInt(proxy, "udp-over-tcp-version"), getInt(proxy, "udp_over_tcp_version"))
+			cfg.UDPOverTCP, cfg.UDPOverTCPOptions, err = importUDPOverTCP(true, version)
+			if err != nil {
+				return ImportItem{}, err
 			}
 		}
 		if err := applyClashDialerOptions(&cfg.DialerOptions, proxy); err != nil {
@@ -1218,7 +1142,7 @@ func decodeBase64Subscription(input string) (string, bool, error) {
 	}
 
 	// Looks like base64 but decoding didn't yield recognizable text; treat as error to help users.
-	if len(compact) >= 64 && looksLikeBase64(compact) {
+	if len(compact) >= 64 {
 		return "", false, fmt.Errorf("invalid base64 subscription")
 	}
 	return "", false, nil
@@ -1273,20 +1197,6 @@ func summarizeSource(s string) string {
 func looksLikeClashYAML(input string) bool {
 	lower := strings.ToLower(input)
 	return strings.Contains(lower, "proxies:") || strings.Contains(lower, "payload:") || strings.Contains(lower, "proxy-groups:") || strings.Contains(lower, "proxy-providers:")
-}
-
-func looksLikeBase64(compact string) bool {
-	if len(compact) < 4 {
-		return false
-	}
-	for i := 0; i < len(compact); i++ {
-		c := compact[i]
-		if (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '+' || c == '/' || c == '=' || c == '-' || c == '_' {
-			continue
-		}
-		return false
-	}
-	return true
 }
 
 func getString(m map[string]any, keys ...string) string {
@@ -2128,14 +2038,8 @@ func buildClashTransportOptions(proxy map[string]any) (string, models.NativeOpti
 	if hasMeaningfulClashValue(proxy, "fm", "finalmask", "final-mask", "final_mask", "finalMask", "FinalMask") {
 		return "", nil, fmt.Errorf("FinalMask is not supported by sing-box 1.12.12")
 	}
-	rawNetwork := strings.ToLower(strings.TrimSpace(getString(proxy, "network")))
-	network := rawNetwork
-	switch network {
-	case "h2":
-		network = "http"
-	case "gun":
-		network = "grpc"
-	}
+	rawNetwork := strings.ToLower(getString(proxy, "network"))
+	network := models.NormalizeTransportType(rawNetwork)
 	switch network {
 	case "", "tcp", "raw", "none":
 		if network == "raw" || network == "none" {
@@ -2153,14 +2057,14 @@ func buildClashTransportOptions(proxy map[string]any) (string, models.NativeOpti
 	case "ws":
 		opts, _ := getMap(proxy, "ws-opts", "ws_opts")
 		result := models.NativeOptions{"type": "ws"}
-		setNativeIfNotEmpty(result, "path", getString(opts, "path"))
+		setMapIfNotEmpty(result, "path", getString(opts, "path"))
 		if headers, ok := getMap(opts, "headers"); ok && len(headers) > 0 {
 			result["headers"] = headers
 		}
 		if value := getInt(opts, "max-early-data"); value > 0 {
 			result["max_early_data"] = value
 		}
-		setNativeIfNotEmpty(result, "early_data_header_name", firstNonEmpty(getString(opts, "early-data-header-name"), getString(opts, "early_data_header_name")))
+		setMapIfNotEmpty(result, "early_data_header_name", firstNonEmpty(getString(opts, "early-data-header-name"), getString(opts, "early_data_header_name")))
 		return network, result, nil
 	case "http":
 		key := "http-opts"
@@ -2179,12 +2083,12 @@ func buildClashTransportOptions(proxy map[string]any) (string, models.NativeOpti
 		if hosts := getStringSlice(opts, "host"); len(hosts) > 0 {
 			result["host"] = hosts
 		}
-		setNativeIfNotEmpty(result, "method", getString(opts, "method"))
+		setMapIfNotEmpty(result, "method", getString(opts, "method"))
 		if headers, ok := getMap(opts, "headers"); ok && len(headers) > 0 {
 			result["headers"] = headers
 		}
-		setNativeIfNotEmpty(result, "idle_timeout", secondsToDurationString(firstMapValueOrNil(opts, "idle-timeout", "idle_timeout")))
-		setNativeIfNotEmpty(result, "ping_timeout", secondsToDurationString(firstMapValueOrNil(opts, "ping-timeout", "ping_timeout")))
+		setMapIfNotEmpty(result, "idle_timeout", secondsToDurationString(firstMapValueOrNil(opts, "idle-timeout", "idle_timeout")))
+		setMapIfNotEmpty(result, "ping_timeout", secondsToDurationString(firstMapValueOrNil(opts, "ping-timeout", "ping_timeout")))
 		return network, result, nil
 	case "grpc":
 		opts, _ := getMap(proxy, "grpc-opts", "grpc_opts")
@@ -2206,9 +2110,9 @@ func buildClashTransportOptions(proxy map[string]any) (string, models.NativeOpti
 			return "", nil, fmt.Errorf("grpc multi mode is not supported by sing-box 1.12.12")
 		}
 		result := models.NativeOptions{"type": "grpc"}
-		setNativeIfNotEmpty(result, "service_name", firstNonEmpty(getString(opts, "grpc-service-name"), getString(opts, "service-name"), getString(opts, "service_name")))
-		setNativeIfNotEmpty(result, "idle_timeout", secondsToDurationString(firstMapValueOrNil(opts, "idle-timeout", "idle_timeout")))
-		setNativeIfNotEmpty(result, "ping_timeout", secondsToDurationString(firstMapValueOrNil(opts, "ping-timeout", "ping_timeout")))
+		setMapIfNotEmpty(result, "service_name", firstNonEmpty(getString(opts, "grpc-service-name"), getString(opts, "service-name"), getString(opts, "service_name")))
+		setMapIfNotEmpty(result, "idle_timeout", secondsToDurationString(firstMapValueOrNil(opts, "idle-timeout", "idle_timeout")))
+		setMapIfNotEmpty(result, "ping_timeout", secondsToDurationString(firstMapValueOrNil(opts, "ping-timeout", "ping_timeout")))
 		if getBool(opts, "permit-without-stream") || getBool(opts, "permit_without_stream") {
 			result["permit_without_stream"] = true
 		}
@@ -2216,8 +2120,8 @@ func buildClashTransportOptions(proxy map[string]any) (string, models.NativeOpti
 	case "httpupgrade":
 		opts, _ := getMap(proxy, "httpupgrade-opts", "httpupgrade_opts")
 		result := models.NativeOptions{"type": "httpupgrade"}
-		setNativeIfNotEmpty(result, "host", getString(opts, "host"))
-		setNativeIfNotEmpty(result, "path", getString(opts, "path"))
+		setMapIfNotEmpty(result, "host", getString(opts, "host"))
+		setMapIfNotEmpty(result, "path", getString(opts, "path"))
 		if headers, ok := getMap(opts, "headers"); ok && len(headers) > 0 {
 			result["headers"] = headers
 		}
@@ -2272,12 +2176,6 @@ func firstPositiveInt(values ...int) int {
 		}
 	}
 	return 0
-}
-
-func setNativeIfNotEmpty(target models.NativeOptions, key string, value string) {
-	if strings.TrimSpace(value) != "" {
-		target[key] = value
-	}
 }
 
 func hasNonEmptyMap(source map[string]any, keys ...string) bool {

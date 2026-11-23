@@ -287,7 +287,7 @@ proxies:
 			clientDir := t.TempDir()
 			clientService := NewSingBoxService(clientDir)
 			t.Setenv("SINGBOX_BINARY", binary)
-			clientConfig, err := clientService.BuildGlobalConfig([]models.ProxyNode{node})
+			clientConfig, err := clientService.BuildGlobalConfigContext(context.Background(), []models.ProxyNode{node})
 			if err != nil {
 				t.Fatalf("build imported client config: %v", err)
 			}

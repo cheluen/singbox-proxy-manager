@@ -13,11 +13,16 @@ const ProxyNodeSelectColumns = `
 	enabled, created_at, updated_at
 `
 
-const RuntimeSettingsSelectColumns = `
-	id, singleton_key, start_port, preserve_inbound_ports, global_upstream_enabled,
+const runtimeSettingsSelectColumns = `
+	start_port, preserve_inbound_ports, global_upstream_enabled,
 	global_upstream_type, global_upstream_config, global_upstream_ip,
 	global_upstream_location, global_upstream_country_code, global_upstream_latency,
-	global_upstream_error, created_at, updated_at
+	global_upstream_error
+`
+
+const SettingsSnapshotColumns = `
+	id, singleton_key, ` + runtimeSettingsSelectColumns + `,
+	admin_password, admin_password_env_fingerprint, auth_generation, created_at, updated_at
 `
 
 type rowScanner interface {
@@ -104,12 +109,10 @@ func LoadProxyNode(ctx context.Context, queryer queryRower, id int) (ProxyNode, 
 func LoadRuntimeSettings(ctx context.Context, queryer queryRower) (Settings, error) {
 	var settings Settings
 	err := queryer.QueryRowContext(ctx, `
-		SELECT `+RuntimeSettingsSelectColumns+`
+		SELECT `+runtimeSettingsSelectColumns+`
 		FROM settings
 		WHERE singleton_key = 1
 	`).Scan(
-		&settings.ID,
-		&settings.SingletonKey,
 		&settings.StartPort,
 		&settings.PreserveInboundPorts,
 		&settings.GlobalUpstreamEnabled,
@@ -120,8 +123,6 @@ func LoadRuntimeSettings(ctx context.Context, queryer queryRower) (Settings, err
 		&settings.GlobalUpstreamCountryCode,
 		&settings.GlobalUpstreamLatency,
 		&settings.GlobalUpstreamError,
-		&settings.CreatedAt,
-		&settings.UpdatedAt,
 	)
 	return settings, err
 }

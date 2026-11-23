@@ -15,6 +15,8 @@ export default function App() {
   }, [])
 
   useEffect(() => {
+    // 已登录时由主面板的 useNodeManager 统一拉取 /version，避免首屏重复请求。
+    if (session.token) return undefined
     const controller = new AbortController()
     api.get('/version', { signal: controller.signal })
       .then((response) => {
@@ -22,7 +24,7 @@ export default function App() {
       })
       .catch(() => {})
     return () => controller.abort()
-  }, [])
+  }, [session.token])
 
   return (
     <ThemeProvider>

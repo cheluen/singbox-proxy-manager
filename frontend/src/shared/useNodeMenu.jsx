@@ -6,8 +6,7 @@ import {
 import { useTranslation } from 'react-i18next'
 import { isNodeExportable } from '../core/nodeModel'
 import { buildProxyUrl, copyText } from '../core/nodeView'
-
-const icon = (Component) => <Component size={15} strokeWidth={1.75} aria-hidden="true" />
+import { MenuIcon } from './icons'
 
 export function useNodeMenu(node, { act, canReorder }) {
   const { t } = useTranslation()
@@ -31,21 +30,21 @@ export function useNodeMenu(node, { act, canReorder }) {
     const hasPort = Boolean(node.inbound_port)
     return {
       items: [
-        { key: 'copy-http', icon: icon(Copy), label: t('copy_proxy_http'), disabled: !hasPort },
-        { key: 'copy-socks', icon: icon(Copy), label: t('copy_proxy_socks'), disabled: !hasPort },
+        { key: 'copy-http', icon: <MenuIcon icon={Copy} />, label: t('copy_proxy_http'), disabled: !hasPort },
+        { key: 'copy-socks', icon: <MenuIcon icon={Copy} />, label: t('copy_proxy_socks'), disabled: !hasPort },
         { type: 'divider' },
-        { key: 'check', icon: icon(Zap), label: t('check_ip'), disabled: node.enabled === false },
-        { key: 'edit', icon: icon(Pencil), label: t('edit') },
-        { key: 'upstream', icon: icon(Route), label: t('upstream_mode') },
-        { key: 'replace', icon: icon(ArrowLeftRight), label: t('replace_with_link') },
-        { key: 'export', icon: icon(Download), label: t('export_share_link'), disabled: !isNodeExportable(node) },
+        { key: 'check', icon: <MenuIcon icon={Zap} />, label: t('check_ip'), disabled: node.enabled === false },
+        { key: 'edit', icon: <MenuIcon icon={Pencil} />, label: t('edit') },
+        { key: 'upstream', icon: <MenuIcon icon={Route} />, label: t('upstream_mode') },
+        { key: 'replace', icon: <MenuIcon icon={ArrowLeftRight} />, label: t('replace_with_link') },
+        { key: 'export', icon: <MenuIcon icon={Download} />, label: t('export_share_link'), disabled: !isNodeExportable(node) },
         { type: 'divider' },
-        { key: 'top', icon: icon(ArrowUpToLine), label: t('move_top'), disabled: !canReorder },
-        { key: 'up', icon: icon(ArrowUp), label: t('move_up'), disabled: !canReorder },
-        { key: 'down', icon: icon(ArrowDown), label: t('move_down'), disabled: !canReorder },
-        { key: 'bottom', icon: icon(ArrowDownToLine), label: t('move_bottom'), disabled: !canReorder },
+        { key: 'top', icon: <MenuIcon icon={ArrowUpToLine} />, label: t('move_top'), disabled: !canReorder },
+        { key: 'up', icon: <MenuIcon icon={ArrowUp} />, label: t('move_up'), disabled: !canReorder },
+        { key: 'down', icon: <MenuIcon icon={ArrowDown} />, label: t('move_down'), disabled: !canReorder },
+        { key: 'bottom', icon: <MenuIcon icon={ArrowDownToLine} />, label: t('move_bottom'), disabled: !canReorder },
         { type: 'divider' },
-        { key: 'delete', icon: icon(Trash2), label: t('delete'), danger: true },
+        { key: 'delete', icon: <MenuIcon icon={Trash2} />, label: t('delete'), danger: true },
       ],
       onClick: ({ key, domEvent }) => {
         domEvent?.stopPropagation()

@@ -1,6 +1,6 @@
 # HTTP API 参考
 
-本文档基于 `1.7.23` 后端路由注册（`backend/main.go`、`backend/api/`）整理全部 **26 个业务接口**（2 个公开接口 + 24 个鉴权接口）。
+本文档基于 `1.7.24` 后端路由注册（`backend/main.go`、`backend/api/`）整理全部 **26 个业务接口**（2 个公开接口 + 24 个鉴权接口）。
 
 ---
 
@@ -18,7 +18,7 @@
 
 | 方法与路径 | 请求体 | 响应与行为说明 |
 | --- | --- | --- |
-| `GET /api/version` | 无 | 返回 `{ "version": "1.7.23", "update": { ... } }`。按需检查 GitHub 最新 Release 并缓存 `SBPM_UPDATE_CHECK_TTL`；即使上游查询失败仍返回 HTTP `200` 并在 `update` 中携带错误信息。 |
+| `GET /api/version` | 无 | 返回 `{ "version": "1.7.24", "update": { ... } }`。按需检查 GitHub 最新 Release 并缓存 `SBPM_UPDATE_CHECK_TTL`；即使上游查询失败仍返回 HTTP `200`，且首次失败与缓存命中均统一在 `update` 中携带错误信息与 `checked_at`。 |
 | `POST /api/login` | `{ "password": "..." }` | 验证管理员密码，成功返回 `200` 及 `{ "token": "...", "expiry": 1700000000 }`（`expiry` 为整数 Unix 秒时间戳）；密码错误返回 `401`；触发 IP 限流或全局并发校验上限返回 `429`（附 `Retry-After` 头）。 |
 
 ---

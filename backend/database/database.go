@@ -112,49 +112,31 @@ func OpenURL(rawURL string) (*sql.DB, Dialect, error) {
 	}
 
 	scheme := strings.ToLower(strings.TrimSpace(strings.SplitN(rawURL, ":", 2)[0]))
-	switch scheme {
-	case "postgres", "postgresql":
-		db, err := sql.Open(postgresQMarkDriverName, rawURL)
+	var driverName, dsn string
+	var dialect Dialect
+	switch {
+	case scheme == "postgres" || scheme == "postgresql":
+		driverName, dsn, dialect = postgresQMarkDriverName, rawURL, DialectPostgres
+	case scheme == "mysql" || isMySQLNativeDSN(rawURL):
+		var err error
+		dsn, err = normalizeMySQLDSN(rawURL)
 		if err != nil {
 			return nil, "", err
 		}
-		configureRemotePool(db, DialectPostgres)
-		if err := db.Ping(); err != nil {
-			db.Close()
-			return nil, "", err
-		}
-		return db, DialectPostgres, nil
-	case "mysql":
-		dsn, err := normalizeMySQLDSN(rawURL)
-		if err != nil {
-			return nil, "", err
-		}
-		db, err := sql.Open("mysql", dsn)
-		if err != nil {
-			return nil, "", err
-		}
-		configureRemotePool(db, DialectMySQL)
-		if err := db.Ping(); err != nil {
-			db.Close()
-			return nil, "", err
-		}
-		return db, DialectMySQL, nil
+		driverName, dialect = "mysql", DialectMySQL
 	default:
-		// Also accept native go-sql-driver DSNs through MYSQL_DATABASE_URL.
-		if strings.Contains(rawURL, "@tcp(") || strings.Contains(rawURL, "@unix(") {
-			db, err := sql.Open("mysql", ensureMySQLDSNDefaults(rawURL))
-			if err != nil {
-				return nil, "", err
-			}
-			configureRemotePool(db, DialectMySQL)
-			if err := db.Ping(); err != nil {
-				db.Close()
-				return nil, "", err
-			}
-			return db, DialectMySQL, nil
-		}
 		return nil, "", fmt.Errorf("unsupported database URL scheme %q", scheme)
 	}
+	db, err := sql.Open(driverName, dsn)
+	if err != nil {
+		return nil, "", err
+	}
+	configureRemotePool(db, dialect)
+	if err := db.Ping(); err != nil {
+		db.Close()
+		return nil, "", err
+	}
+	return db, dialect, nil
 }
 
 func firstNonEmptyEnv(keys ...string) string {
@@ -233,7 +215,45 @@ func readDurationEnv(key string, fallback time.Duration) time.Duration {
 	return value
 }
 
-func normalizeMySQLDSN(rawURL string) (string, error) {
+func isMySQLNativeDSN(dsn string) bool {
+	return strings.Contains(dsn, "@tcp(") || strings.Contains(dsn, "@unix(")
+}
+
+func normalizeMySQLDSN(raw string) (string, error) {
+	dsn := raw
+	if strings.HasPrefix(strings.ToLower(raw), "mysql://") || !isMySQLNativeDSN(raw) {
+		var err error
+		dsn, err = mysqlURLToDSN(raw)
+		if err != nil {
+			return "", err
+		}
+	}
+	config, err := mysql.ParseDSN(dsn)
+	if err != nil {
+		return "", err
+	}
+	config.DBName = normalizeMySQLDatabaseName(config.DBName)
+	config.ClientFoundRows = true
+	_, options, _ := strings.Cut(dsn[strings.LastIndexByte(dsn, '/')+1:], "?")
+	parseTimeSpecified := false
+	tlsSpecified := false
+	for option := range strings.SplitSeq(options, "&") {
+		if strings.HasPrefix(option, "parseTime=") {
+			parseTimeSpecified = true
+		} else if strings.HasPrefix(option, "tls=") {
+			tlsSpecified = true
+		}
+	}
+	if !parseTimeSpecified {
+		config.ParseTime = true
+	}
+	if !tlsSpecified && config.TLSConfig == "" && shouldDefaultMySQLTLS(hostFromMySQLAddr(config.Addr)) {
+		config.TLSConfig = "true"
+	}
+	return config.FormatDSN(), nil
+}
+
+func mysqlURLToDSN(rawURL string) (string, error) {
 	parsed, err := url.Parse(rawURL)
 	if err != nil {
 		return "", err
@@ -252,27 +272,19 @@ func normalizeMySQLDSN(rawURL string) (string, error) {
 	if password, ok := parsed.User.Password(); ok {
 		cfg.Passwd = password
 	}
-	cfg.DBName = normalizeMySQLDatabaseName(strings.TrimPrefix(parsed.Path, "/"))
+	cfg.DBName = strings.TrimPrefix(parsed.Path, "/")
 	cfg.Params = map[string]string{}
 
-	query := parsed.Query()
-	for key, values := range query {
-		if len(values) == 0 {
+	for key, values := range parsed.Query() {
+		switch strings.ToLower(key) {
+		case "clientfoundrows":
 			continue
+		case "parsetime":
+			key = "parseTime"
+		case "tls":
+			key = "tls"
 		}
 		cfg.Params[key] = values[len(values)-1]
-	}
-	for key := range cfg.Params {
-		if strings.EqualFold(key, "clientFoundRows") {
-			delete(cfg.Params, key)
-		}
-	}
-	cfg.ClientFoundRows = true
-	if !hasQueryKey(query, "parseTime") {
-		cfg.Params["parseTime"] = "true"
-	}
-	if !hasQueryKey(query, "tls") && shouldDefaultMySQLTLS(parsed.Hostname()) {
-		cfg.Params["tls"] = "true"
 	}
 
 	return cfg.FormatDSN(), nil
@@ -289,34 +301,6 @@ func normalizeMySQLDatabaseName(name string) string {
 	default:
 		return name
 	}
-}
-
-func ensureMySQLDSNDefaults(dsn string) string {
-	cfg, err := mysql.ParseDSN(dsn)
-	if err != nil {
-		return dsn
-	}
-	if cfg.Params == nil {
-		cfg.Params = map[string]string{}
-	}
-	cfg.DBName = normalizeMySQLDatabaseName(cfg.DBName)
-	cfg.ClientFoundRows = true
-	if _, ok := cfg.Params["parseTime"]; !ok && !cfg.ParseTime {
-		cfg.Params["parseTime"] = "true"
-	}
-	if _, ok := cfg.Params["tls"]; !ok && cfg.TLSConfig == "" && shouldDefaultMySQLTLS(hostFromMySQLAddr(cfg.Addr)) {
-		cfg.Params["tls"] = "true"
-	}
-	return cfg.FormatDSN()
-}
-
-func hasQueryKey(values url.Values, key string) bool {
-	for candidate := range values {
-		if strings.EqualFold(candidate, key) {
-			return true
-		}
-	}
-	return false
 }
 
 func shouldDefaultMySQLTLS(host string) bool {
@@ -341,25 +325,20 @@ func hostFromMySQLAddr(addr string) string {
 
 func LastInsertID(ctx context.Context, tx *sql.Tx, result sql.Result, dialect Dialect) (int64, error) {
 	if result != nil {
-		if id, err := result.LastInsertId(); err == nil && id > 0 {
+		id, err := result.LastInsertId()
+		if dialect != DialectPostgres || (err == nil && id > 0) {
+			if err != nil {
+				return 0, err
+			}
 			return id, nil
 		}
 	}
 	if dialect == DialectPostgres {
 		var id int64
-		if err := tx.QueryRowContext(ctx, "SELECT LASTVAL()").Scan(&id); err != nil {
-			return 0, err
-		}
-		return id, nil
+		err := tx.QueryRowContext(ctx, "SELECT LASTVAL()").Scan(&id)
+		return id, err
 	}
-	if result == nil {
-		return 0, fmt.Errorf("missing sql result")
-	}
-	id, err := result.LastInsertId()
-	if err != nil {
-		return 0, err
-	}
-	return id, nil
+	return 0, fmt.Errorf("missing sql result")
 }
 
 type qmarkDriver struct {
@@ -379,26 +358,26 @@ type qmarkConn struct {
 }
 
 func (c *qmarkConn) Prepare(query string) (driver.Stmt, error) {
-	return c.Conn.Prepare(QMarkToPostgres(query))
+	return c.Conn.Prepare(qMarkToPostgres(query))
 }
 
 func (c *qmarkConn) PrepareContext(ctx context.Context, query string) (driver.Stmt, error) {
 	if preparer, ok := c.Conn.(driver.ConnPrepareContext); ok {
-		return preparer.PrepareContext(ctx, QMarkToPostgres(query))
+		return preparer.PrepareContext(ctx, qMarkToPostgres(query))
 	}
 	return nil, driver.ErrSkip
 }
 
 func (c *qmarkConn) ExecContext(ctx context.Context, query string, args []driver.NamedValue) (driver.Result, error) {
 	if execer, ok := c.Conn.(driver.ExecerContext); ok {
-		return execer.ExecContext(ctx, QMarkToPostgres(query), args)
+		return execer.ExecContext(ctx, qMarkToPostgres(query), args)
 	}
 	return nil, driver.ErrSkip
 }
 
 func (c *qmarkConn) QueryContext(ctx context.Context, query string, args []driver.NamedValue) (driver.Rows, error) {
 	if queryer, ok := c.Conn.(driver.QueryerContext); ok {
-		return queryer.QueryContext(ctx, QMarkToPostgres(query), args)
+		return queryer.QueryContext(ctx, qMarkToPostgres(query), args)
 	}
 	return nil, driver.ErrSkip
 }

@@ -1,8 +1,6 @@
-// 因此可以直接交给 protocolForm.js 里原样抽取的 buildConfig 处理；这里只描述「长什么样、何时显示」。
-//
 // kind: text | secret | number | select | switch | textarea
 // group: main（协议参数）| transport（传输）| tls（TLS）| advanced（高级，默认折叠）
-// showWhen(values): 仅控制是否可见。隐藏的字段仍保留在表单中并照常提交，不改变保存结果。
+// showWhen(values): 只控制字段可见性，实际提交的字段由 protocolForm.js 决定。
 
 const opts = (...values) => values.map((value) => (Array.isArray(value) ? { value: value[0], label: value[1] } : { value, label: value }))
 
@@ -16,18 +14,24 @@ const FINGERPRINT = { name: 'fingerprint', en: 'Fingerprint', zh: '客户端指�
 const ALPN_LIST = { name: 'alpn', en: 'ALPN', zh: '英文逗号分隔', kind: 'text', group: 'tls' }
 const SKIP_VERIFY = { en: 'TLS Verify', zh: '证书校验', kind: 'switch', group: 'tls', on: 'Skip Verify', off: 'Verify' }
 const UUID = { name: 'uuid', en: 'UUID', zh: '节点唯一标识', kind: 'text', required: true, span: 2 }
+const PROXY_AUTH_FIELDS = [
+  { name: 'proxy_username', en: 'Proxy Username', zh: '出站用户名', kind: 'text' },
+  { name: 'proxy_password', en: 'Proxy Password', zh: '出站密码', kind: 'secret' },
+]
 
-export const PROTOCOL_FIELDS = {
-  direct: [],
+const protocol = (label, shortLabel, fields = []) => ({ label, shortLabel, fields })
 
-  ss: [
+const PROTOCOLS = {
+  direct: protocol('Direct (Local)', 'Direct'),
+
+  ss: protocol('Shadowsocks', 'SS', [
     { name: 'method', en: 'Method', zh: '加密方式', kind: 'select', required: true, options: opts('aes-128-gcm', 'aes-256-gcm', 'chacha20-ietf-poly1305', '2022-blake3-aes-128-gcm', '2022-blake3-aes-256-gcm') },
     { name: 'ss_password', en: 'Password', zh: '协议密码', kind: 'secret', required: true },
     { name: 'plugin', en: 'Plugin', zh: '插件类型', kind: 'text', group: 'advanced', placeholder: 'obfs-local, v2ray-plugin' },
     { name: 'plugin_opts', en: 'Plugin Options', zh: '插件参数', kind: 'text', group: 'advanced', placeholder: 'obfs=http;obfs-host=www.bing.com' },
-  ],
+  ]),
 
-  vless: [
+  vless: protocol('VLESS', 'VLESS', [
     UUID,
     { name: 'flow', en: 'Flow', zh: '流控', kind: 'select', clearable: true, options: opts(['', 'None'], 'xtls-rprx-vision') },
     { name: 'network', en: 'Network', zh: '传输层协议', kind: 'select', group: 'transport', options: opts(['tcp', 'TCP'], ['ws', 'WebSocket'], ['grpc', 'gRPC'], ['quic', 'QUIC']) },
@@ -39,9 +43,9 @@ export const PROTOCOL_FIELDS = {
     { ...FINGERPRINT, placeholder: 'chrome, firefox, safari', showWhen: tlsOn('security') },
     { name: 'public_key', en: 'Public Key', zh: 'Reality 公钥', kind: 'text', group: 'tls', span: 2, showWhen: (v) => v.security === 'reality' },
     { name: 'short_id', en: 'Short ID', zh: 'Reality 短 ID', kind: 'text', group: 'tls', showWhen: (v) => v.security === 'reality' },
-  ],
+  ]),
 
-  vmess: [
+  vmess: protocol('VMess', 'VMess', [
     UUID,
     { name: 'alter_id', en: 'Alter ID', zh: '额外 ID', kind: 'number', min: 0, max: 65535 },
     { name: 'vmess_security', en: 'Security', zh: '加密策略', kind: 'select', options: opts(['auto', 'Auto'], 'aes-128-gcm', 'aes-128-cfb', 'chacha20-poly1305', ['none', 'None']) },
@@ -51,9 +55,9 @@ export const PROTOCOL_FIELDS = {
     { name: 'tls', en: 'TLS', zh: '传输安全层', kind: 'select', group: 'tls', options: opts(['none', 'None'], ['tls', 'TLS']) },
     { ...SNI, showWhen: tlsOn('tls') },
     { ...ALPN_LIST, placeholder: 'h2, http/1.1', showWhen: tlsOn('tls') },
-  ],
+  ]),
 
-  hy2: [
+  hy2: protocol('Hysteria2', 'HY2', [
     { name: 'hy2_password', en: 'Password', zh: '协议密码', kind: 'secret', span: 2 },
     { name: 'up_mbps', en: 'Upload (Mbps)', zh: '上行带宽限制', kind: 'number', min: 0 },
     { name: 'down_mbps', en: 'Download (Mbps)', zh: '下行带宽限制', kind: 'number', min: 0 },
@@ -75,9 +79,9 @@ export const PROTOCOL_FIELDS = {
     { ...ALPN_LIST, placeholder: 'h3' },
     FINGERPRINT,
     { ...SKIP_VERIFY, name: 'insecure_skip_verify' },
-  ],
+  ]),
 
-  tuic: [
+  tuic: protocol('TUIC', 'TUIC', [
     UUID,
     { name: 'tuic_password', en: 'Password', zh: '协议密码', kind: 'secret', span: 2 },
     { name: 'congestion_control', en: 'Congestion Control', zh: '拥塞控制算法', kind: 'select', options: opts(['cubic', 'Cubic'], ['new_reno', 'New Reno'], ['bbr', 'BBR']) },
@@ -87,9 +91,9 @@ export const PROTOCOL_FIELDS = {
     FINGERPRINT,
     { ...SKIP_VERIFY, name: 'insecure_skip_verify' },
     { name: 'zero_rtt_handshake', en: '0-RTT Handshake', zh: '启用 0-RTT', kind: 'switch', group: 'advanced', on: '0-RTT', off: 'Normal' },
-  ],
+  ]),
 
-  trojan: [
+  trojan: protocol('Trojan', 'Trojan', [
     { name: 'trojan_password', en: 'Password', zh: '协议密码', kind: 'secret', span: 2 },
     { name: 'network', en: 'Network', zh: '传输层协议', kind: 'select', group: 'transport', options: opts(['tcp', 'TCP'], ['ws', 'WebSocket'], ['grpc', 'gRPC'], ['http', 'HTTP'], ['httpupgrade', 'HTTPUpgrade']) },
     { name: 'host', en: 'Host Header', zh: 'HTTP Host 头', kind: 'text', group: 'transport', placeholder: 'example.com', showWhen: hasPath },
@@ -100,9 +104,9 @@ export const PROTOCOL_FIELDS = {
     { ...ALPN_LIST, placeholder: 'h2, http/1.1' },
     { ...FINGERPRINT, placeholder: 'chrome, firefox' },
     { ...SKIP_VERIFY, name: 'insecure' },
-  ],
+  ]),
 
-  anytls: [
+  anytls: protocol('AnyTLS', 'AnyTLS', [
     { name: 'anytls_password', en: 'Password', zh: '协议密码', kind: 'secret', span: 2 },
     { ...SNI, placeholder: 'example.com' },
     { ...ALPN_LIST, placeholder: 'h2,http/1.1' },
@@ -111,22 +115,19 @@ export const PROTOCOL_FIELDS = {
     { name: 'idle_session_check_interval', en: 'Idle Check Interval', zh: '空闲会话检查间隔', kind: 'text', group: 'advanced', placeholder: '30s' },
     { name: 'idle_session_timeout', en: 'Idle Timeout', zh: '空闲会话超时', kind: 'text', group: 'advanced', placeholder: '10m' },
     { name: 'min_idle_session', en: 'Min Idle Sessions', zh: '最小空闲会话数', kind: 'number', group: 'advanced', min: 0 },
-  ],
+  ]),
 
-  socks5: [
-    { name: 'proxy_username', en: 'Proxy Username', zh: '出站用户名', kind: 'text' },
-    { name: 'proxy_password', en: 'Proxy Password', zh: '出站密码', kind: 'secret' },
-  ],
+  socks5: protocol('SOCKS5', 'SOCKS5', PROXY_AUTH_FIELDS),
+  socks5h: protocol('SOCKS5H', 'SOCKS5H', PROXY_AUTH_FIELDS),
 
-  http: [
-    { name: 'proxy_username', en: 'Proxy Username', zh: '出站用户名', kind: 'text' },
-    { name: 'proxy_password', en: 'Proxy Password', zh: '出站密码', kind: 'secret' },
+  http: protocol('HTTP Proxy', 'HTTP', [
+    ...PROXY_AUTH_FIELDS,
     { name: 'proxy_tls', en: 'Transport Type', zh: 'HTTP / HTTPS', kind: 'switch', group: 'tls', on: 'HTTPS', off: 'HTTP' },
     { name: 'proxy_sni', en: 'SNI', zh: 'HTTPS 的 SNI', kind: 'text', group: 'tls', placeholder: 'example.com', showWhen: (v) => Boolean(v.proxy_tls) },
     { ...SKIP_VERIFY, name: 'proxy_insecure', showWhen: (v) => Boolean(v.proxy_tls) },
-  ],
+  ]),
 
-  wireguard: [
+  wireguard: protocol('Cloudflare WireGuard', 'WireGuard', [
     { name: 'wireguard_local_address', en: 'Local Address', zh: '每行一个 CIDR', kind: 'textarea', rows: 3, required: true, span: 2, placeholder: '172.16.0.2/32\n2606:4700:110:8765::2/128' },
     { name: 'wireguard_private_key', en: 'Private Key', zh: '本地私钥', kind: 'secret', required: true, span: 2 },
     {
@@ -156,19 +157,18 @@ export const PROTOCOL_FIELDS = {
       extra: { en: 'When provided, peers JSON takes precedence over the single-peer fields above', zh: '填写后将优先使用该 JSON 中的 peers 配置' },
       placeholder: '[\n  {\n    "server": "engage.cloudflareclient.com",\n    "server_port": 2408,\n    "public_key": "peer-public-key",\n    "allowed_ips": ["0.0.0.0/0", "::/0"],\n    "reserved": [162, 104, 222]\n  }\n]',
     },
-  ],
+  ]),
 }
 
-PROTOCOL_FIELDS.socks5h = PROTOCOL_FIELDS.socks5
+export const proxyTypes = Object.entries(PROTOCOLS).map(([value, { label }]) => ({ value, label }))
+export const protocolLabel = (type) => PROTOCOLS[type]?.shortLabel || String(type || '-').toUpperCase()
 
-export const FIELD_GROUPS = ['main', 'transport', 'tls', 'advanced']
-
-export const fieldsForType = (type) => PROTOCOL_FIELDS[type] || []
+const FIELD_GROUPS = ['main', 'transport', 'tls', 'advanced']
 
 // 按分组整理字段，保持声明顺序。
 export const groupFields = (type) => {
   const groups = new Map(FIELD_GROUPS.map((group) => [group, []]))
-  for (const field of fieldsForType(type)) {
+  for (const field of PROTOCOLS[type]?.fields || []) {
     groups.get(field.group || 'main').push(field)
   }
   return FIELD_GROUPS.map((group) => ({ group, fields: groups.get(group) })).filter((entry) => entry.fields.length > 0)

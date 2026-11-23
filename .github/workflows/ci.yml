@@ -13,7 +13,6 @@ env:
   GO_VERSION: "1.26.11"
   GOVULNCHECK_VERSION: "v1.7.0"
   NODE_VERSION: "22"
-  SINGBOX_VERSION: "1.12.12"
   GOTOOLCHAIN: "local"
   DOCKER_BUILD_RECORD_UPLOAD: "false"
 
@@ -190,6 +189,14 @@ jobs:
         run: npm run build
         working-directory: frontend
 
+      - name: Upload frontend dist artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: frontend-dist
+          path: frontend/dist
+          if-no-files-found: error
+          retention-days: 1
+
   test-frontend-e2e:
     runs-on: ubuntu-latest
     timeout-minutes: 20
@@ -252,7 +259,7 @@ jobs:
         working-directory: frontend
 
   test-upstream-full-stack:
-    needs: [build-test-kernel]
+    needs: [build-test-kernel, test-frontend-build]
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
@@ -265,11 +272,15 @@ jobs:
           cache: npm
           cache-dependency-path: frontend/package-lock.json
 
-      - name: Install and build frontend
-        run: |
-          npm ci
-          npm run build
+      - name: Install frontend dependencies
+        run: npm ci
         working-directory: frontend
+
+      - name: Download frontend dist artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: frontend-dist
+          path: frontend/dist
 
       - name: Set up Go
         uses: actions/setup-go@v5
@@ -473,7 +484,7 @@ jobs:
 
   test-release-image-build:
     runs-on: ubuntu-latest
-    needs: [test-system-local-deploy]
+    needs: [test-system-local-deploy, test-frontend-build, build-test-kernel]
     steps:
       - uses: actions/checkout@v4
 
@@ -488,9 +499,11 @@ jobs:
         run: npm ci
         working-directory: frontend
 
-      - name: Build frontend dist for embedded binary
-        run: npm run build
-        working-directory: frontend
+      - name: Download frontend dist artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: frontend-dist
+          path: frontend/dist
 
       - name: Set up Go
         uses: actions/setup-go@v5
@@ -556,47 +569,32 @@ jobs:
           push: false
           platforms: linux/amd64,linux/arm64
 
-  build-frontend-dist:
-    runs-on: ubuntu-latest
-    needs: [test-release-image-build]
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Set up Node.js
-        uses: actions/setup-node@v4
-        with:
-          node-version: ${{ env.NODE_VERSION }}
-          cache: npm
-          cache-dependency-path: frontend/package-lock.json
-
-      - name: Install frontend dependencies
-        run: npm ci
-        working-directory: frontend
-
-      - name: Build frontend dist
-        run: npm run build
-        working-directory: frontend
-
-      - name: Upload frontend dist artifact
+      - name: Upload verified Linux amd64 binary
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
         uses: actions/upload-artifact@v4
         with:
-          name: frontend-dist
-          path: frontend/dist
+          name: singbox-proxy-manager-linux-amd64
+          path: release-binaries/singbox-proxy-manager-linux-amd64
+          if-no-files-found: error
+          retention-days: 1
+
+      - name: Upload verified Linux arm64 binary
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        uses: actions/upload-artifact@v4
+        with:
+          name: singbox-proxy-manager-linux-arm64
+          path: release-binaries/singbox-proxy-manager-linux-arm64
+          if-no-files-found: error
           retention-days: 1
 
   build-binaries:
     runs-on: ubuntu-latest
-    needs: [build-frontend-dist]
+    needs: [test-frontend-build, test-release-image-build]
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     strategy:
       fail-fast: false
       matrix:
         include:
-          - goos: linux
-            goarch: amd64
-          - goos: linux
-            goarch: arm64
           - goos: freebsd
             goarch: amd64
           - goos: freebsd
@@ -634,11 +632,12 @@ jobs:
           name: singbox-proxy-manager-${{ matrix.goos }}-${{ matrix.goarch }}
           path: |
             release-binaries/singbox-proxy-manager-${{ matrix.goos }}-${{ matrix.goarch }}
+          if-no-files-found: error
           retention-days: 1
 
   create-release:
     runs-on: ubuntu-latest
-    needs: [build-binaries]
+    needs: [test-release-image-build, build-binaries]
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     permissions:
       contents: write
@@ -660,6 +659,11 @@ jobs:
 
       - name: Prepare checksums
         run: |
+          for os in linux freebsd darwin; do
+            for arch in amd64 arm64; do
+              test -s "release-binaries/singbox-proxy-manager-${os}-${arch}"
+            done
+          done
           chmod +x release-binaries/singbox-proxy-manager-*
           (cd release-binaries && sha256sum singbox-proxy-manager-* > checksums.txt)
 
@@ -745,7 +749,7 @@ jobs:
 
   cleanup-artifacts:
     runs-on: ubuntu-latest
-    needs: [test-release-image-build, build-binaries, create-release, build-ghcr]
+    needs: [vulnerability-backend, test-backend, test-upstream-full-stack, test-system-local-deploy, test-release-image-build, build-binaries, create-release, build-ghcr]
     if: always() && (github.event_name == 'push' || github.event.pull_request.head.repo.full_name == github.repository)
     permissions:
       actions: write
@@ -754,6 +758,12 @@ jobs:
         shell: bash
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          VULN_RESULT: ${{ needs.vulnerability-backend.result }}
+          TEST_BACKEND_RESULT: ${{ needs.test-backend.result }}
+          UPSTREAM_RESULT: ${{ needs.test-upstream-full-stack.result }}
+          SYSTEM_RESULT: ${{ needs.test-system-local-deploy.result }}
+          RELEASE_IMAGE_RESULT: ${{ needs.test-release-image-build.result }}
+          BUILD_BINARIES_RESULT: ${{ needs.build-binaries.result }}
           CREATE_RELEASE_RESULT: ${{ needs.create-release.result }}
         run: |
           artifact_list="${RUNNER_TEMP}/sbpm-run-artifacts.tsv"
@@ -768,14 +778,25 @@ jobs:
             exit 0
           fi
 
+          all_ok_or_skipped() {
+            for status in "$@"; do
+              case "$status" in
+                success|skipped) ;;
+                *) return 1 ;;
+              esac
+            done
+          }
+
           while IFS=$'\t' read -r artifact_id artifact_name; do
             case "$artifact_name" in
-              sing-box-test-kernel|frontend-dist|*.dockerbuild) ;;
+              sing-box-test-kernel)
+                all_ok_or_skipped "$VULN_RESULT" "$TEST_BACKEND_RESULT" "$UPSTREAM_RESULT" "$SYSTEM_RESULT" "$RELEASE_IMAGE_RESULT" || continue
+                ;;
+              frontend-dist)
+                all_ok_or_skipped "$UPSTREAM_RESULT" "$RELEASE_IMAGE_RESULT" "$BUILD_BINARIES_RESULT" || continue
+                ;;
               singbox-proxy-manager-*)
-                case "$CREATE_RELEASE_RESULT" in
-                  success|skipped) ;;
-                  *) continue ;;
-                esac
+                all_ok_or_skipped "$CREATE_RELEASE_RESULT" || continue
                 ;;
               *) continue ;;
             esac

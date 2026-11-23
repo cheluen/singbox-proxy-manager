@@ -6,7 +6,7 @@ const BATCH_IMPORT_TIMEOUT_MS = 120000
 
 export function useNodeActions(manager) {
   const {
-    helpers, nodesRef, visibleRef, loadNodes, loadSettings, setNodes, selectedIds, clearSelection,
+    helpers, nodesRef, visibleRef, loadNodes, loadSettings, setNodes, selectedNodesRef, clearSelection,
     checks, checkNodes, filtersActive, preservePorts, setWorking, setRuntime, setRuntimeRestarting, setOverlay,
   } = manager
   const { t, notify, confirm, onPasswordChanged, errorText, outboundSignature, isNodeExportable } = helpers
@@ -29,11 +29,6 @@ export function useNodeActions(manager) {
       setWorking((prev) => ({ ...prev, [key]: false }))
     }
   }, [setWorking])
-
-  const selectedInOrder = useCallback(
-    () => nodesRef.current.filter((node) => selectedIds.has(node.id)),
-    [nodesRef, selectedIds]
-  )
 
   /* ---------- 排序 ---------- */
 
@@ -84,7 +79,7 @@ export function useNodeActions(manager) {
   /* ---------- 批量操作 ---------- */
 
   const deleteSelected = useCallback(async () => {
-    const ids = selectedInOrder().map((node) => node.id)
+    const ids = selectedNodesRef.current.map((node) => node.id)
     if (ids.length === 0) return
     const confirmed = await confirm({ title: t('batch_delete_confirm', { count: ids.length }), content: t('delete_node_desc'), okText: t('delete'), danger: true })
     if (!confirmed) return
@@ -98,12 +93,12 @@ export function useNodeActions(manager) {
       }
       await loadNodes({ silent: true })
     })
-  }, [clearSelection, confirm, errorText, loadNodes, notify, selectedInOrder, t, track])
+  }, [clearSelection, confirm, errorText, loadNodes, notify, selectedNodesRef, t, track])
 
   const dedupeSelected = useCallback(async () => {
     const seen = new Set()
     const duplicates = []
-    for (const node of selectedInOrder()) {
+    for (const node of selectedNodesRef.current) {
       const signature = outboundSignature(node)
       if (seen.has(signature)) duplicates.push(node.id)
       else seen.add(signature)
@@ -123,15 +118,17 @@ export function useNodeActions(manager) {
       }
       await loadNodes({ silent: true })
     })
-  }, [confirm, errorText, loadNodes, notify, outboundSignature, selectedInOrder, t, track])
+  }, [confirm, errorText, loadNodes, notify, outboundSignature, selectedNodesRef, t, track])
 
   const applyBatchAuth = useCallback(async (auth) => {
     if (auth.auth_enabled === false) {
       const confirmed = await confirm({ title: t('batch_auth_disable_action'), content: t('auth_open_warning'), okText: t('confirm'), danger: true })
       if (!confirmed) return false
     }
+    const ids = selectedNodesRef.current.map((node) => node.id)
+    if (ids.length === 0) return false
     try {
-      await api.post('/nodes/batch-auth', { node_ids: selectedInOrder().map((node) => node.id), ...auth })
+      await api.post('/nodes/batch-auth', { node_ids: ids, ...auth })
       notify.success(t('auth_updated'))
       await loadNodes({ silent: true })
       return true
@@ -139,9 +136,9 @@ export function useNodeActions(manager) {
       notify.error(errorText(error, t('server_error')))
       return false
     }
-  }, [confirm, errorText, loadNodes, notify, selectedInOrder, t])
+  }, [confirm, errorText, loadNodes, notify, selectedNodesRef, t])
 
-  const checkSelected = useCallback(() => checkNodes(selectedInOrder().map((node) => node.id)), [checkNodes, selectedInOrder])
+  const checkSelected = useCallback(() => checkNodes(selectedNodesRef.current.map((node) => node.id)), [checkNodes, selectedNodesRef])
   const checkVisible = useCallback(() => checkNodes(visibleRef.current.map((node) => node.id)), [checkNodes, visibleRef])
 
   /* ---------- 导出 ---------- */
@@ -160,7 +157,7 @@ export function useNodeActions(manager) {
   }), [errorText, isNodeExportable, notify, setOverlay, t, track])
 
   const exportSelected = useCallback(() => track('export', async () => {
-    const ids = selectedInOrder().filter(isNodeExportable).map((node) => node.id)
+    const ids = selectedNodesRef.current.filter(isNodeExportable).map((node) => node.id)
     if (ids.length === 0) {
       notify.warning(t('no_exportable_nodes'))
       return
@@ -174,7 +171,7 @@ export function useNodeActions(manager) {
     } catch (error) {
       notify.error(errorText(error, t('server_error')))
     }
-  }), [errorText, isNodeExportable, notify, selectedInOrder, setOverlay, t, track])
+  }), [errorText, isNodeExportable, notify, selectedNodesRef, setOverlay, t, track])
 
   /* ---------- 导入 ---------- */
 
@@ -182,8 +179,8 @@ export function useNodeActions(manager) {
   const parseLink = useCallback(async (link) => {
     try {
       const response = await api.post('/parse-link', { link: String(link || '').trim() })
-      const { type, name, config } = response.data || {}
-      return { type, name, config: typeof config === 'string' ? config : JSON.stringify(config || {}), enabled: true }
+      const { type, name, config } = response.data
+      return { type, name, config, enabled: true }
     } catch (error) {
       throw new Error(errorText(error, t('invalid_link')))
     }
@@ -201,11 +198,11 @@ export function useNodeActions(manager) {
         { timeout: BATCH_IMPORT_TIMEOUT_MS, signal: controller.signal }
       )
       if (!mountedRef.current) return null
-      const { success = 0, failed = 0, results = [] } = response.data || {}
-      const importedIds = results.filter((item) => item?.success && item?.id).map((item) => Number(item.id)).filter(Number.isFinite)
+      const { success, failed, results } = response.data
+      const importedIds = results.filter((item) => item.success).map((item) => item.id)
       await loadNodes({ silent: true })
       if (mountedRef.current && enabled && importedIds.length > 0) checks.runChecks(importedIds)
-      return { success, failed, errors: results.filter((item) => item?.success === false) }
+      return { success, failed, errors: results.filter((item) => item.success === false) }
     } catch (error) {
       if (!mountedRef.current || error?.code === 'ERR_CANCELED') return null
       const data = error.response?.data
@@ -254,14 +251,11 @@ export function useNodeActions(manager) {
 
   const checkGlobalUpstream = useCallback(async () => {
     try {
-      const response = await api.post('/settings/upstream/check-ip')
+      await api.post('/settings/upstream/check-ip')
       await loadSettings()
       notify.success(t('upstream_check_success'))
-      return { ok: true, data: response.data }
     } catch (error) {
-      const text = errorText(error, t('server_error'))
-      notify.error(text)
-      return { ok: false, error: text }
+      notify.error(errorText(error, t('server_error')))
     }
   }, [errorText, loadSettings, notify, t])
 

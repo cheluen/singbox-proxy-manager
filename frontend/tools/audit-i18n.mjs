@@ -1,77 +1,96 @@
-// 词条审计：源码里引用的每个 key 必须在中英文词条里都存在；中英文新增词条的 key 集合必须一致。
-import { existsSync, readdirSync, readFileSync } from 'node:fs'
+import { readdirSync, readFileSync } from 'node:fs'
 import path from 'node:path'
 import process from 'node:process'
-import { fileURLToPath, pathToFileURL } from 'node:url'
+import { fileURLToPath } from 'node:url'
+import { Linter } from 'eslint'
+import baseZh from '../src/core/i18n/base-zh.js'
+import baseEn from '../src/core/i18n/base-en.js'
+import extraZh from '../src/core/i18n/extra-zh.js'
+import extraEn from '../src/core/i18n/extra-en.js'
 
-const SRC = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', 'src')
-const load = async (name) => {
-  const file = path.join(SRC, 'core', 'i18n', name)
-  return existsSync(file) ? (await import(pathToFileURL(file).href)).default : {}
+const src = fileURLToPath(new URL('../src/', import.meta.url))
+const zh = { ...baseZh, ...extraZh }
+const en = { ...baseEn, ...extraEn }
+const sourceTypes = ['auto', 'subscription', 'http_proxy']
+const templateValues = {
+  'upstream_mode_hint_*': ['none', 'global', 'custom', 'legacy'],
+  'import_source_*': sourceTypes,
+  'import_source_*_hint': sourceTypes,
 }
-const baseZh = await load('base-zh.js')
-const baseEn = await load('base-en.js')
-const zh = { ...baseZh, ...(await load('extra-zh.js')) }
-const en = { ...baseEn, ...(await load('extra-en.js')) }
-const extraZh = await load('extra-zh.js')
-const extraEn = await load('extra-en.js')
 
-const walk = (dir) =>
-  readdirSync(dir, { withFileTypes: true }).flatMap((entry) => {
-    const full = path.join(dir, entry.name)
-    return entry.isDirectory() ? walk(full) : /\.(jsx?|mjs)$/.test(entry.name) ? [full] : []
-  })
+const walk = (directory) => readdirSync(directory, { withFileTypes: true }).flatMap((entry) => {
+  const full = path.join(directory, entry.name)
+  if (entry.isDirectory()) return full === path.join(src, 'core', 'i18n') ? [] : walk(full)
+  return /\.(jsx?|mjs)$/.test(entry.name) ? [full] : []
+})
 
-const used = new Map()
-const note = (key, file) => used.set(key, [...(used.get(key) || []), path.relative(SRC, file)])
-// 动态拼接的 key：在这里列出其全部取值。
-const DYNAMIC = {
-  'upstream_mode_hint_': ['none', 'global', 'custom', 'legacy'],
-  'import_source_': ['auto', 'subscription', 'http_proxy'],
-}
-const DYNAMIC_HINT = ['auto', 'subscription', 'http_proxy'].map((value) => `import_source_${value}_hint`)
-
-for (const file of walk(SRC)) {
-  if (file.includes(`${path.sep}i18n${path.sep}`)) continue
-  const text = readFileSync(file, 'utf8')
-  // 对象映射间接引用的基础词条也计入，避免把动态标签误判为死词条。
-  for (const match of text.matchAll(/['"]([a-z][a-z0-9_]*)['"]/g)) {
-    if (match[1] in baseZh || match[1] in baseEn) note(match[1], file)
+function readTranslationKeys(expression, sourceCode) {
+  if (expression?.type === 'Literal' && typeof expression.value === 'string') return [expression.value]
+  if (expression?.type === 'ConditionalExpression') {
+    const consequent = readTranslationKeys(expression.consequent, sourceCode)
+    const alternate = readTranslationKeys(expression.alternate, sourceCode)
+    return consequent && alternate ? [...consequent, ...alternate] : null
   }
-  for (const match of text.matchAll(/\bt\(\s*'([a-z0-9_]+)'/g)) note(match[1], file)
-  for (const match of text.matchAll(/\bt\(\s*[a-zA-Z]+\s*\?\s*'([a-z0-9_]+)'\s*:\s*'([a-z0-9_]+)'/g)) { note(match[1], file); note(match[2], file) }
-  for (const match of text.matchAll(/key:\s*'((?:login_point|demo)_[a-z0-9_]+)'/g)) note(match[1], file)
-  for (const match of text.matchAll(/\bt\(`([a-z0-9_]+)\$\{/g)) {
-    const prefix = match[1]
-    if (DYNAMIC[prefix]) {
-      for (const value of DYNAMIC[prefix]) note(`${prefix}${value}`, file)
-      if (prefix === 'import_source_') for (const key of DYNAMIC_HINT) note(key, file)
-    } else {
-      note(`<unknown dynamic prefix: ${prefix}>`, file)
+  if (expression?.type === 'TemplateLiteral' && expression.expressions.length === 1) {
+    const [prefix, suffix] = expression.quasis.map((quasi) => quasi.value.cooked)
+    return templateValues[`${prefix}*${suffix}`]?.map((value) => `${prefix}${value}${suffix}`) ?? null
+  }
+  if (expression?.type === 'MemberExpression' && expression.computed && expression.object.type === 'Identifier') {
+    let scope = sourceCode.getScope(expression)
+    while (scope && !scope.set.has(expression.object.name)) scope = scope.upper
+    const definition = scope?.set.get(expression.object.name)?.defs[0]
+    const initializer = definition?.node.init
+    if (definition?.parent?.kind === 'const' && initializer?.type === 'ObjectExpression') {
+      const properties = initializer.properties
+      if (properties.every(({ type, value }) => type === 'Property' && value.type === 'Literal' && typeof value.value === 'string')) {
+        return properties.map(({ value }) => value.value)
+      }
     }
   }
+  return null
 }
-// GROUP_TITLE 等通过对象间接引用的 key
-for (const key of ['form_group_protocol', 'form_group_transport', 'form_group_tls', 'form_group_advanced']) note(key, path.join(SRC, 'shared', 'NodeEditor.jsx'))
 
-const missingZh = [...used.keys()].filter((key) => !(key in zh)).sort()
-const missingEn = [...used.keys()].filter((key) => !(key in en)).sort()
-const onlyZh = Object.keys(extraZh).filter((key) => !(key in extraEn))
-const onlyEn = Object.keys(extraEn).filter((key) => !(key in extraZh))
-const unusedExtra = Object.keys(extraZh).filter((key) => !used.has(key))
-const unusedBase = Object.keys(baseZh).filter((key) => !used.has(key))
-const onlyBaseZh = Object.keys(baseZh).filter((key) => !(key in baseEn))
-const onlyBaseEn = Object.keys(baseEn).filter((key) => !(key in baseZh))
-
-const print = (title, list) => { if (list.length) process.stdout.write(`${title} (${list.length}):\n  ${list.join('\n  ')}\n`) }
-print('中文缺失', process.argv.includes('--where') ? missingZh.map((key) => `${key}  <- ${[...new Set(used.get(key))].join(', ')}`) : missingZh)
-print('英文缺失', missingEn.filter((key) => !missingZh.includes(key)))
-print('仅中文新增词条有', onlyZh)
-print('仅英文新增词条有', onlyEn)
-print('新增词条未被使用', unusedExtra)
-print('基础词条未被使用', unusedBase)
-print('仅中文基础词条有', onlyBaseZh)
-print('仅英文基础词条有', onlyBaseEn)
-const failed = missingZh.length + missingEn.length + onlyZh.length + onlyEn.length + unusedExtra.length + unusedBase.length + onlyBaseZh.length + onlyBaseEn.length
+const used = new Map()
+const translations = {
+  create(context) {
+    return {
+      CallExpression(node) {
+        if (node.callee.type !== 'Identifier' || node.callee.name !== 't') return
+        const keys = readTranslationKeys(node.arguments[0], context.sourceCode)
+        if (!keys) {
+          context.report({ node, message: '无法确定翻译词条的取值' })
+          return
+        }
+        for (const key of keys) {
+          if (!used.has(key)) used.set(key, new Set())
+          used.get(key).add(path.relative(src, context.filename))
+        }
+      },
+    }
+  },
+}
+const auditConfig = {
+  files: ['**/*.{js,jsx,mjs}'],
+  languageOptions: { parserOptions: { ecmaFeatures: { jsx: true } } },
+  plugins: { audit: { rules: { translations } } },
+  rules: { 'audit/translations': 'error' },
+}
+const linter = new Linter({ cwd: src })
+const unresolved = walk(src).flatMap((file) =>
+  linter.verify(readFileSync(file, 'utf8'), [auditConfig], { filename: file, allowInlineConfig: false }).map((message) =>
+    `${path.relative(src, file)}:${message.line ?? 1} ${message.message}`))
+const formatMissing = (keys) => process.argv.includes('--where') ? keys.map((key) => `${key}  <- ${[...used.get(key)].join(', ')}`) : keys
+const issues = [
+  ['无法审计的翻译调用或语法', unresolved],
+  ['中文缺失', formatMissing([...used.keys()].filter((key) => !Object.hasOwn(zh, key)).sort())],
+  ['英文缺失', formatMissing([...used.keys()].filter((key) => !Object.hasOwn(en, key)).sort())],
+  ['仅中文有', Object.keys(zh).filter((key) => !Object.hasOwn(en, key))],
+  ['仅英文有', Object.keys(en).filter((key) => !Object.hasOwn(zh, key))],
+  ['词条未被使用', [...new Set([...Object.keys(zh), ...Object.keys(en)])].filter((key) => !used.has(key)).sort()],
+]
+for (const [title, list] of issues) {
+  if (list.length) process.stdout.write(`${title} (${list.length}):\n  ${list.join('\n  ')}\n`)
+}
+const failed = issues.reduce((total, [, list]) => total + list.length, 0)
 process.stdout.write(`引用 ${used.size} 个 key；${failed === 0 ? '词条审计通过' : `词条审计失败：${failed} 项`}\n`)
-process.exit(failed === 0 ? 0 : 1)
+process.exitCode = failed === 0 ? 0 : 1

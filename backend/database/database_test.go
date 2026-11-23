@@ -5,6 +5,8 @@ import (
 	"log"
 	"strings"
 	"testing"
+
+	"github.com/go-sql-driver/mysql"
 )
 
 func TestLogSelectedDatabaseDoesNotExposeTursoCredentials(t *testing.T) {
@@ -66,10 +68,24 @@ func TestNormalizeMySQLDSNDoesNotForceTLSForLocalhost(t *testing.T) {
 	}
 }
 
-func TestEnsureMySQLDSNDefaultsOverridesChangedRowsMode(t *testing.T) {
-	dsn := ensureMySQLDSNDefaults("user:pass@tcp(127.0.0.1:3306)/appdb?clientFoundRows=false")
-	if !strings.Contains(dsn, "clientFoundRows=true") {
-		t.Fatalf("native dsn should force matched-row semantics: %q", dsn)
+func TestNormalizeMySQLDSNPreservesExplicitOptions(t *testing.T) {
+	for _, raw := range []string{
+		"user@tcp(db.example.com:3306)/appdb?clientFoundRows=false&parseTime=false&tls=false&charset=utf8mb4",
+		"mysql://user@db.example.com:3306/appdb?clientFoundRows=false&parseTime=false&tls=false&charset=utf8mb4",
+		"user@tcp(db.example.com:3306)/appdb?clientFoundRows=false&parseTime=false&tls=&charset=utf8mb4",
+		"mysql://user@db.example.com:3306/appdb?clientFoundRows=false&parseTime=false&tls=&charset=utf8mb4",
+	} {
+		dsn, err := normalizeMySQLDSN(raw)
+		if err != nil {
+			t.Fatal(err)
+		}
+		config, err := mysql.ParseDSN(dsn)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !config.ClientFoundRows || config.ParseTime || config.TLS != nil || config.TLSConfig == "true" || !strings.Contains(dsn, "charset=utf8mb4") {
+			t.Fatalf("expected matched rows and explicit time, TLS and charset options for %q, got %q", raw, dsn)
+		}
 	}
 }
 

@@ -36,8 +36,14 @@ const reconcile = (previous, next) => {
   return changed ? merged : previous
 }
 
+const restrictSelection = (selected, visibleIds) => {
+  if (selected.size === 0) return selected
+  const scoped = new Set([...selected].filter((id) => visibleIds.has(id)))
+  return scoped.size === selected.size ? selected : scoped
+}
+
 export function useNodeManager({ t, notify, confirm, onPasswordChanged }) {
-  const [nodes, setNodes] = useState([])
+  const [nodes, setNodeState] = useState([])
   const [loading, setLoading] = useState(false)
   const [loaded, setLoaded] = useState(false)
   const [criteria, setCriteria] = useState(EMPTY_CRITERIA)
@@ -52,91 +58,89 @@ export function useNodeManager({ t, notify, confirm, onPasswordChanged }) {
   const [working, setWorking] = useState({})
 
   const nodesRef = useRef(nodes)
-  const requestRef = useRef({ sequence: 0, controller: null })
+  const runtimeRequest = useRef(null)
   const [resources] = useState(createLatestRequestCoordinator)
-  const setRuntime = useCallback((next) => {
+  const invalidateRuntime = useCallback(() => {
     resources.invalidate('runtime')
-    setRuntimeState(next)
+    runtimeRequest.current = null
   }, [resources])
-  useEffect(() => {
-    nodesRef.current = nodes
-  }, [nodes])
+  const setRuntime = useCallback((next) => {
+    invalidateRuntime()
+    setRuntimeState(next)
+  }, [invalidateRuntime])
 
   const preservePorts = Boolean(settings?.preserve_inbound_ports)
   const visibleNodes = useMemo(() => filterNodes(nodes, criteria), [nodes, criteria])
+  const visibleIds = useMemo(() => new Set(visibleNodes.map((node) => node.id)), [visibleNodes])
   const summary = useMemo(() => summarizeNodes(nodes), [nodes])
   const facets = useMemo(() => collectFacets(nodes), [nodes])
   const filtersActive = hasActiveCriteria(criteria)
   const canReorder = (!filtersActive || preservePorts) && visibleNodes.length > 1
-  const scopedSelectedIds = useMemo(() => {
-    const visible = new Set(visibleNodes.map((node) => node.id))
-    const scoped = new Set([...selectedIds].filter((id) => visible.has(id)))
-    return scoped.size === selectedIds.size ? selectedIds : scoped
-  }, [selectedIds, visibleNodes])
-  const selectedNodes = useMemo(() => nodes.filter((node) => scopedSelectedIds.has(node.id)), [nodes, scopedSelectedIds])
+  const scopedSelectedIds = useMemo(() => restrictSelection(selectedIds, visibleIds), [selectedIds, visibleIds])
+  const selectedNodes = useMemo(() => scopedSelectedIds.size > 0
+    ? visibleNodes.filter((node) => scopedSelectedIds.has(node.id))
+    : [], [visibleNodes, scopedSelectedIds])
   const visibleRef = useRef(visibleNodes)
+  const selectedNodesRef = useRef(selectedNodes)
   useEffect(() => {
+    nodesRef.current = nodes
     visibleRef.current = visibleNodes
-  }, [visibleNodes])
+    selectedNodesRef.current = selectedNodes
+  }, [nodes, visibleNodes, selectedNodes])
 
   // 选择只对当前可见的节点有效：筛选变化后自动丢弃不可见的选中项，避免误操作看不见的节点。
   useEffect(() => {
-    setSelectedIds((prev) => {
-      if (prev.size === 0) return prev
-      const visible = new Set(visibleNodes.map((node) => node.id))
-      const next = new Set([...prev].filter((id) => visible.has(id)))
-      return next.size === prev.size ? prev : next
-    })
-  }, [visibleNodes])
+    if (scopedSelectedIds === selectedIds) return
+    setSelectedIds((prev) => prev === selectedIds ? scopedSelectedIds : restrictSelection(prev, visibleIds))
+  }, [scopedSelectedIds, selectedIds, visibleIds])
 
-  const abortPendingLoad = useCallback(() => {
-    requestRef.current.controller?.abort()
-    requestRef.current.sequence += 1
-    requestRef.current.controller = null
-  }, [])
+  const setNodes = useCallback((next) => {
+    resources.invalidate('nodes')
+    setLoading(false)
+    setNodeState(next)
+  }, [resources])
 
   const patchNode = useCallback((id, patch) => {
-    abortPendingLoad()
-    setLoading(false)
-    setNodes((prev) => prev.map((node) => (node.id === id ? { ...node, ...(typeof patch === 'function' ? patch(node) : patch) } : node)))
-  }, [abortPendingLoad])
+    setNodes((prev) => prev.map((node) => (node.id === id ? { ...node, ...patch } : node)))
+  }, [setNodes])
 
-  const loadNodes = useCallback(async ({ silent = false } = {}) => {
-    const previous = requestRef.current
-    previous.controller?.abort()
-    const controller = new AbortController()
-    const sequence = previous.sequence + 1
-    requestRef.current = { sequence, controller }
+  const loadNodes = useCallback(({ silent = false } = {}) => {
     if (!silent) setLoading(true)
-    try {
-      const response = await api.get('/nodes', { signal: controller.signal })
-      if (requestRef.current.sequence !== sequence) return
-      setNodes((prev) => reconcile(prev, response.data || []))
-      setLoaded(true)
-    } catch (error) {
-      if (requestRef.current.sequence === sequence && error?.code !== 'ERR_CANCELED') {
-        notify.error(t('network_error'))
+    return resources.run(
+      'nodes',
+      (signal) => api.get('/nodes', { signal }),
+      (response) => {
+        setNodeState((prev) => reconcile(prev, response.data || []))
+        setLoaded(true)
+      },
+      {
+        onError: (error) => {
+          if (error?.code !== 'ERR_CANCELED') notify.error(t('network_error'))
+        },
+        onSettled: () => setLoading(false),
       }
-    } finally {
-      if (requestRef.current.sequence === sequence) {
-        requestRef.current.controller = null
-        setLoading(false)
-      }
-    }
-  }, [notify, t])
+    )
+  }, [notify, resources, t])
 
   const loadSettings = useCallback(() => resources.run(
     'settings',
     (signal) => api.get('/settings', { signal }),
     (response) => setSettings(response.data || null),
-    () => setSettings(null)
+    { onError: () => setSettings(null) }
   ), [resources])
 
-  const loadRuntime = useCallback(() => resources.run(
-    'runtime',
-    (signal) => api.get('/runtime/status', { signal }),
-    (response) => setRuntimeState(response.data || null)
-  ), [resources])
+  const loadRuntime = useCallback(() => {
+    if (runtimeRequest.current) return runtimeRequest.current
+    const request = resources.run(
+      'runtime',
+      (signal) => api.get('/runtime/status', { signal }),
+      (response) => setRuntimeState(response.data || null)
+    ).finally(() => {
+      if (runtimeRequest.current === request) runtimeRequest.current = null
+    })
+    runtimeRequest.current = request
+    return request
+  }, [resources])
 
   const loadVersion = useCallback(() => resources.run(
     'version',
@@ -150,27 +154,49 @@ export function useNodeManager({ t, notify, confirm, onPasswordChanged }) {
         notify.warning(t('frontend_version_mismatch', { server: check.serverVersion || '-', client: check.frontendVersion || '-' }))
       }
     },
-    () => setVersion({ server: '', update: null })
+    { onError: () => setVersion({ server: '', update: null }) }
   ), [notify, resources, t])
 
-  const refreshAll = useCallback(async ({ silent = false } = {}) => {
-    await Promise.all([loadNodes({ silent }), loadSettings(), loadRuntime(), loadVersion()])
+  const refreshAll = useCallback(async () => {
+    await Promise.all([loadNodes(), loadSettings(), loadRuntime(), loadVersion()])
   }, [loadNodes, loadRuntime, loadSettings, loadVersion])
 
   useEffect(() => {
+    let timer
+    let activePoll
+    const pollRuntime = async () => {
+      if (document.hidden || activePoll) return
+      const request = loadRuntime()
+      activePoll = request
+      await request
+      if (activePoll !== request) return
+      activePoll = null
+      if (!document.hidden) timer = window.setTimeout(pollRuntime, RUNTIME_POLL_MS)
+    }
+    const syncVisibility = () => {
+      window.clearTimeout(timer)
+      if (document.hidden) {
+        activePoll = null
+        invalidateRuntime()
+      } else {
+        void pollRuntime()
+      }
+    }
     loadNodes()
     loadSettings()
-    loadRuntime()
     loadVersion()
-    const poll = window.setInterval(loadRuntime, RUNTIME_POLL_MS)
+    syncVisibility()
+    document.addEventListener('visibilitychange', syncVisibility)
     window.addEventListener(EXTERNAL_CHANGE_EVENT, refreshAll)
     return () => {
-      window.clearInterval(poll)
+      activePoll = null
+      window.clearTimeout(timer)
+      document.removeEventListener('visibilitychange', syncVisibility)
       window.removeEventListener(EXTERNAL_CHANGE_EVENT, refreshAll)
-      abortPendingLoad()
+      runtimeRequest.current = null
       resources.abortAll()
     }
-  }, [abortPendingLoad, loadNodes, loadRuntime, loadSettings, loadVersion, refreshAll, resources])
+  }, [invalidateRuntime, loadNodes, loadRuntime, loadSettings, loadVersion, refreshAll, resources])
 
   /* ---------- 测 IP ---------- */
 
@@ -234,8 +260,8 @@ export function useNodeManager({ t, notify, confirm, onPasswordChanged }) {
     })
   }, [])
   const selectAllVisible = useCallback((on) => {
-    setSelectedIds(on ? new Set(visibleRef.current.map((node) => node.id)) : new Set())
-  }, [])
+    setSelectedIds(on ? visibleIds : new Set())
+  }, [visibleIds])
   const clearSelection = useCallback(() => setSelectedIds(new Set()), [])
 
   /* ---------- 单节点操作 ---------- */
@@ -302,7 +328,7 @@ export function useNodeManager({ t, notify, confirm, onPasswordChanged }) {
       notify.error(errorText(error, t('server_error')))
       return false
     }
-  }, [confirm, loadNodes, notify, t])
+  }, [confirm, loadNodes, notify, setNodes, t])
 
   const saveNode = useCallback(async (values, editing, { autoCheck = false } = {}) => {
     if (values.auth_enabled === false && (!editing || (editing.username && editing.password))) {
@@ -358,7 +384,7 @@ export function useNodeManager({ t, notify, confirm, onPasswordChanged }) {
     selectedIds: scopedSelectedIds, selectedNodes, toggleSelect, selectAllVisible, clearSelection,
     settings, preservePorts, loadSettings, runtime, setRuntime, runtimeRestarting, setRuntimeRestarting, version,
     flagBusy, pinBusy, working, setWorking, overlay, setOverlay, canReorder,
-    checks, checkNodes, loadNodes, refreshAll, patchNode, setNodes, nodesRef, visibleRef,
+    checks, checkNodes, loadNodes, refreshAll, patchNode, setNodes, nodesRef, visibleRef, selectedNodesRef,
     toggleEnabled: (node) => toggleFlag(node, 'enabled'),
     toggleTcpReuse: (node) => toggleFlag(node, 'tcp_reuse_enabled'),
     togglePortPin, saveRemark, removeNode, saveNode, replaceNode, saveUpstream,

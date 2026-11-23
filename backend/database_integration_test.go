@@ -3,7 +3,10 @@ package main
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"reflect"
 	"strings"
@@ -11,6 +14,10 @@ import (
 	"testing"
 	"time"
 
+	"github.com/gin-gonic/gin"
+	"golang.org/x/crypto/bcrypt"
+
+	"sb-proxy/backend/api"
 	appdb "sb-proxy/backend/database"
 	"sb-proxy/backend/models"
 )
@@ -31,7 +38,7 @@ func TestLocalSQLiteDatabaseIntegration(t *testing.T) {
 	}
 	t.Setenv("ADMIN_PASSWORD", "")
 
-	db, err := openDatabase(t.TempDir())
+	db, err := appdb.Open(t.TempDir())
 	if err != nil {
 		t.Fatalf("open local SQLite database: %v", err)
 	}
@@ -50,7 +57,7 @@ func TestDatabaseURLIntegration(t *testing.T) {
 	t.Setenv("TURSO_AUTH_TOKEN", "")
 	t.Setenv("ADMIN_PASSWORD", "")
 
-	db, err := openDatabase(t.TempDir())
+	db, err := appdb.Open(t.TempDir())
 	if err != nil {
 		t.Fatalf("open database: %v", err)
 	}
@@ -80,7 +87,7 @@ func TestTursoDatabaseIntegration(t *testing.T) {
 	t.Setenv("TURSO_AUTH_TOKEN", tursoToken)
 	t.Setenv("ADMIN_PASSWORD", "")
 
-	db, err := openDatabase(t.TempDir())
+	db, err := appdb.Open(t.TempDir())
 	if err != nil {
 		t.Fatalf("open Turso database: %v", err)
 	}
@@ -166,8 +173,77 @@ func runDatabaseIntegrationContract(t *testing.T, db *sql.DB) {
 	verifySharedReadContract(t, db, node)
 
 	verifyUpstreamMigrationContract(t, db, largeUpstreamConfig)
+	verifyAdminSessionContract(t, db)
 	if dialect == appdb.DialectSQLite || dialect == appdb.DialectTurso {
 		verifySQLiteWriterSerialization(t, db)
+	}
+}
+
+func verifyAdminSessionContract(t *testing.T, db *sql.DB) {
+	t.Helper()
+	gin.SetMode(gin.TestMode)
+	const loginPassword = "session-integration-fixture"
+	const userAgent = "session-integration"
+	const clientIP = "192.0.2.42"
+	hash, err := bcrypt.GenerateFromPassword([]byte(loginPassword), bcrypt.MinCost)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`
+		UPDATE settings SET admin_password = ?, auth_generation = 2 WHERE singleton_key = 1
+	`, string(hash)); err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().Unix()
+	if _, err := db.Exec(`
+		INSERT INTO admin_sessions (token_hash, auth_generation, expires_at)
+		VALUES ('expired-fixture', 2, ?), ('old-generation-fixture', 1, ?)
+	`, now-1, now+3600); err != nil {
+		t.Fatal(err)
+	}
+	handler := api.NewHandler(db, nil)
+	router := gin.New()
+	router.POST("/api/login", handler.Login)
+	router.POST("/api/logout", handler.AuthMiddleware(), handler.Logout)
+	loginRequest := httptest.NewRequest(http.MethodPost, "/api/login", strings.NewReader(`{"password":"`+loginPassword+`"}`))
+	loginRequest.Header.Set("Content-Type", "application/json")
+	loginRequest.Header.Set("User-Agent", userAgent)
+	loginRequest.RemoteAddr = clientIP + ":43210"
+	loginResponse := httptest.NewRecorder()
+	router.ServeHTTP(loginResponse, loginRequest)
+	if loginResponse.Code != http.StatusOK {
+		t.Fatalf("签发会话失败（%s）：%d %s", appdb.DialectFor(db), loginResponse.Code, loginResponse.Body.String())
+	}
+	var session struct {
+		Token  string `json:"token"`
+		Expiry int64  `json:"expiry"`
+	}
+	if err := json.Unmarshal(loginResponse.Body.Bytes(), &session); err != nil || session.Token == "" || session.Expiry <= now {
+		t.Fatalf("签发会话响应字段错误：%v", err)
+	}
+	var count, generation int
+	var expiry int64
+	var storedAgent, storedIP string
+	var createdAt time.Time
+	if err := db.QueryRow("SELECT COUNT(*) FROM admin_sessions").Scan(&count); err != nil || count != 1 {
+		t.Fatalf("过期或旧代次会话未清理：count=%d err=%v", count, err)
+	}
+	if err := db.QueryRow("SELECT auth_generation, expires_at, user_agent, ip, created_at FROM admin_sessions").
+		Scan(&generation, &expiry, &storedAgent, &storedIP, &createdAt); err != nil {
+		t.Fatal(err)
+	}
+	if generation != 2 || expiry != session.Expiry || storedAgent != userAgent || storedIP != clientIP || createdAt.IsZero() {
+		t.Fatal("会话代次、到期时间或审计列写入错误")
+	}
+	logoutRequest := httptest.NewRequest(http.MethodPost, "/api/logout", nil)
+	logoutRequest.Header.Set("Authorization", "Bearer "+session.Token)
+	logoutResponse := httptest.NewRecorder()
+	router.ServeHTTP(logoutResponse, logoutRequest)
+	if logoutResponse.Code != http.StatusOK {
+		t.Fatalf("注销会话失败：%d %s", logoutResponse.Code, logoutResponse.Body.String())
+	}
+	if err := db.QueryRow("SELECT COUNT(*) FROM admin_sessions").Scan(&count); err != nil || count != 0 {
+		t.Fatalf("注销后会话仍存在：count=%d err=%v", count, err)
 	}
 }
 
@@ -184,8 +260,12 @@ func verifySharedReadContract(t *testing.T, db *sql.DB, expected models.ProxyNod
 		t.Fatalf("共用节点列表读取不符：nodes=%d err=%v", len(nodes), err)
 	}
 	settings, err := models.LoadRuntimeSettings(ctx, db)
-	if err != nil || settings.ID <= 0 || settings.SingletonKey != 1 || settings.PreserveInboundPorts {
+	if err != nil || settings.StartPort != 30001 || settings.PreserveInboundPorts {
 		t.Fatalf("共用设置读取不符：settings=%+v err=%v", settings, err)
+	}
+	var settingsID int
+	if err := db.QueryRowContext(ctx, "SELECT id FROM settings WHERE singleton_key = 1").Scan(&settingsID); err != nil || settingsID <= 0 {
+		t.Fatalf("设置单例不存在：id=%d err=%v", settingsID, err)
 	}
 	tx, err := db.BeginTx(ctx, nil)
 	if err != nil {

@@ -71,7 +71,7 @@ func TestBuildGlobalConfigRejectsDomainResolvingToLocalInbound(t *testing.T) {
 	service.resolver = resolver
 	node := managedUpstreamLoopTestNode("loop.example.test", 35123, 35123)
 
-	_, err := service.BuildGlobalConfig([]models.ProxyNode{node})
+	_, err := service.BuildGlobalConfigContext(context.Background(), []models.ProxyNode{node})
 	if err == nil || !IsUpstreamValidationError(err) {
 		t.Fatalf("expected resolved local upstream rejection, got %v", err)
 	}
@@ -89,7 +89,7 @@ func TestBuildGlobalConfigAllowsResolvedRemoteAddressAndSkipsIrrelevantPorts(t *
 	}}
 	service := NewSingBoxService(t.TempDir())
 	service.resolver = remoteResolver
-	if _, err := service.BuildGlobalConfig([]models.ProxyNode{
+	if _, err := service.BuildGlobalConfigContext(context.Background(), []models.ProxyNode{
 		managedUpstreamLoopTestNode("remote.example.test", 35124, 35124),
 	}); err != nil {
 		t.Fatalf("remote upstream was rejected: %v", err)
@@ -100,7 +100,7 @@ func TestBuildGlobalConfigAllowsResolvedRemoteAddressAndSkipsIrrelevantPorts(t *
 
 	skippedResolver := &controlledNetIPResolver{err: errors.New("DNS must not be used")}
 	service.resolver = skippedResolver
-	if _, err := service.BuildGlobalConfig([]models.ProxyNode{
+	if _, err := service.BuildGlobalConfigContext(context.Background(), []models.ProxyNode{
 		managedUpstreamLoopTestNode("unrelated.example.test", 443, 35125),
 	}); err != nil {
 		t.Fatalf("non-colliding upstream triggered DNS validation: %v", err)
@@ -114,7 +114,7 @@ func TestBuildGlobalConfigFailsClosedWhenCollisionDomainCannotResolve(t *testing
 	resolver := &controlledNetIPResolver{err: errors.New("resolver unavailable")}
 	service := NewSingBoxService(t.TempDir())
 	service.resolver = resolver
-	_, err := service.BuildGlobalConfig([]models.ProxyNode{
+	_, err := service.BuildGlobalConfigContext(context.Background(), []models.ProxyNode{
 		managedUpstreamLoopTestNode("unknown.example.test", 35126, 35126),
 	})
 	if err == nil || !strings.Contains(err.Error(), "cannot safely dial") || !strings.Contains(err.Error(), "resolver unavailable") {

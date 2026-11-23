@@ -225,7 +225,7 @@ func TestUpdateSettingsAppliesGlobalUpstreamAndRejectsConflicts(t *testing.T) {
 	if err != nil {
 		t.Fatalf("load nodes: %v", err)
 	}
-	configJSON, err := handler.singBoxService.BuildGlobalConfig(nodes, settings)
+	configJSON, err := handler.singBoxService.BuildGlobalConfigContext(context.Background(), nodes, settings)
 	if err != nil {
 		t.Fatalf("build persisted state: %v", err)
 	}

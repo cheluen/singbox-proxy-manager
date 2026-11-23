@@ -233,18 +233,16 @@ exec sleep 300
 	}
 	t.Setenv("SINGBOX_BINARY", fakeBinary)
 	t.Setenv("SBPM_SINGBOX_STARTUP_GRACE", "500ms")
-	t.Setenv("SBPM_SKIP_PORT_AVAILABILITY_CHECK", "1")
 
 	service := services.NewSingBoxService(configDir)
 	handler := NewHandler(db, service)
+	handler.skipPortAvailabilityCheck = true
 	nodeID := insertTestNode(t, db)
 	nodes, err := models.LoadProxyNodes(context.Background(), handler.db)
 	if err != nil {
 		t.Fatalf("load initial nodes: %v", err)
 	}
-	if err := service.GenerateGlobalConfig(nodes); err != nil {
-		t.Fatalf("generate initial config: %v", err)
-	}
+	writeTestRuntimeConfig(t, service, nodes)
 	if err := service.Start(); err != nil {
 		t.Fatalf("start initial runtime: %v", err)
 	}
@@ -322,10 +320,10 @@ exec sleep 300
 	}
 	t.Setenv("SINGBOX_BINARY", fakeBinary)
 	t.Setenv("SBPM_SINGBOX_STARTUP_GRACE", "10ms")
-	t.Setenv("SBPM_SKIP_PORT_AVAILABILITY_CHECK", "1")
 
 	service := services.NewSingBoxService(t.TempDir())
 	handler := NewHandler(db, service)
+	handler.skipPortAvailabilityCheck = true
 	t.Cleanup(func() {
 		_ = service.Stop()
 		_ = db.Close()
@@ -343,7 +341,7 @@ exec sleep 300
 	`, string(oldHash)); err != nil {
 		t.Fatalf("seed settings: %v", err)
 	}
-	token, _, err := createAdminSessionWithGeneration(context.Background(), nil, db, 7)
+	token, _, err := createAdminSessionWithGeneration(context.Background(), db, 7, "", "")
 	if err != nil {
 		t.Fatalf("seed session: %v", err)
 	}
@@ -376,9 +374,9 @@ exec sleep 300
 	if inboundPort != 30001 {
 		t.Fatalf("failed settings request changed node port to %d", inboundPort)
 	}
-	valid, err := handler.isValidAdminSessionContext(context.Background(), token)
-	if err != nil || !valid {
-		t.Fatalf("failed settings request invalidated the previous session: valid=%v err=%v", valid, err)
+	hash, err := handler.verifiedAdminSessionHash(context.Background(), token)
+	if err != nil || hash == "" {
+		t.Fatalf("failed settings request invalidated the previous session: %v", err)
 	}
 }
 
@@ -405,7 +403,6 @@ exec sleep 300
 	}
 	t.Setenv("SINGBOX_BINARY", fakeBinary)
 	t.Setenv("SBPM_SINGBOX_STARTUP_GRACE", "10ms")
-	t.Setenv("SBPM_SKIP_PORT_AVAILABILITY_CHECK", "1")
 
 	serviceWriteErr := fmt.Errorf("last-good volume is read-only")
 	serviceConfigDir := t.TempDir()
@@ -419,18 +416,17 @@ exec sleep 300
 		}),
 	)
 	handler := NewHandler(db, service)
+	handler.skipPortAvailabilityCheck = true
 	nodeID := insertTestNode(t, db)
 	nodes, err := models.LoadProxyNodes(context.Background(), db)
 	if err != nil {
 		t.Fatalf("load initial nodes: %v", err)
 	}
-	if err := service.GenerateGlobalConfig(nodes); err != nil {
-		t.Fatalf("generate initial config: %v", err)
-	}
+	writeTestRuntimeConfig(t, service, nodes)
 	if err := service.Start(); err != nil {
 		t.Fatalf("start initial runtime: %v", err)
 	}
-	initialLiveConfig, err := os.ReadFile(filepath.Join(serviceConfigDir, "config.json"))
+	initialLiveConfig, err := os.ReadFile(service.ConfigPath())
 	if err != nil {
 		t.Fatalf("read initial live config: %v", err)
 	}

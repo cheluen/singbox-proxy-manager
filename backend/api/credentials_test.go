@@ -4,12 +4,12 @@ import "testing"
 
 func TestGenerateRandomUsernameExcludesPlus(t *testing.T) {
 	for i := 0; i < 256; i++ {
-		username, err := generateRandomUsername(12)
+		username, err := generateRandomString(12)
 		if err != nil {
-			t.Fatalf("generateRandomUsername failed: %v", err)
+			t.Fatalf("generateRandomString failed: %v", err)
 		}
-		if len(username) == 0 {
-			t.Fatalf("generated username should not be empty")
+		if len(username) != 12 {
+			t.Fatalf("unexpected generated username length: %d", len(username))
 		}
 		for _, ch := range username {
 			if ch == '+' {

@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"encoding/pem"
 	"fmt"
+	"maps"
 	"net"
 	"net/url"
 	"strconv"
@@ -118,16 +119,9 @@ func parseSSLink(link string) (interface{}, string, string, error) {
 		config.Network = models.ListableString(network)
 	}
 	if enabled, present := queryBool(params, "udp_over_tcp", "udp-over-tcp", "uot"); present {
-		config.UDPOverTCP = enabled
-		if version := queryPositiveInt(params, "udp_over_tcp_version", "udp-over-tcp-version", "uot_version"); version > 0 {
-			if version > 2 {
-				return nil, "", "", fmt.Errorf("unsupported udp-over-tcp version: %d", version)
-			}
-			config.UDPOverTCPOptions = models.NativeOptions{
-				"enabled": enabled,
-				"version": version,
-			}
-			config.UDPOverTCP = models.NativeOptions(config.UDPOverTCPOptions)
+		config.UDPOverTCP, config.UDPOverTCPOptions, err = importUDPOverTCP(enabled, queryPositiveInt(params, "udp_over_tcp_version", "udp-over-tcp-version", "uot_version"))
+		if err != nil {
+			return nil, "", "", err
 		}
 	}
 	if multiplex, present, multiplexErr := parseMultiplexQuery(params); multiplexErr != nil {
@@ -431,15 +425,6 @@ func rejectUnsupportedJSONProperty(fields map[string]json.RawMessage, feature st
 func queryPositiveInt(values url.Values, keys ...string) int {
 	raw := firstQueryValue(values, keys...)
 	value, err := strconv.Atoi(strings.TrimSpace(raw))
-	if err != nil || value <= 0 {
-		return 0
-	}
-	return value
-}
-
-func queryNonNegativeInt(values url.Values, keys ...string) int {
-	raw := firstQueryValue(values, keys...)
-	value, err := strconv.Atoi(strings.TrimSpace(raw))
 	if err != nil || value < 0 {
 		return 0
 	}
@@ -488,15 +473,21 @@ func normalizeFingerprint(raw string) string {
 }
 
 func normalizePacketEncoding(raw string) (string, error) {
-	value := strings.ToLower(strings.TrimSpace(raw))
-	if value == "none" {
-		value = ""
-	}
-	switch value {
-	case "", "packetaddr", "xudp":
+	if value, ok := packetEncodingValue(raw); ok {
 		return value, nil
+	}
+	return "", fmt.Errorf("unsupported packet encoding for sing-box 1.12.12: %s", raw)
+}
+
+func packetEncodingValue(raw string) (string, bool) {
+	value := strings.ToLower(strings.TrimSpace(raw))
+	switch value {
+	case "", "none":
+		return "", true
+	case "packetaddr", "xudp":
+		return value, true
 	default:
-		return "", fmt.Errorf("unsupported packet encoding for sing-box 1.12.12: %s", raw)
+		return "", false
 	}
 }
 
@@ -631,13 +622,7 @@ func buildV2RayTransportOptions(params url.Values) (string, map[string]any, erro
 	if err := rejectUnsupportedShareParameter(params, "FinalMask", "fm", "finalmask", "finalMask", "FinalMask", "final-mask", "final_mask"); err != nil {
 		return "", nil, err
 	}
-	transportType := strings.ToLower(strings.TrimSpace(firstQueryValue(params, "type", "transport")))
-	switch transportType {
-	case "h2":
-		transportType = "http"
-	case "gun":
-		transportType = "grpc"
-	}
+	transportType := models.NormalizeTransportType(firstQueryValue(params, "type", "transport"))
 	switch transportType {
 	case "", "none", "tcp", "raw":
 		if headerType := strings.ToLower(strings.TrimSpace(firstQueryValue(params, "headerType", "header_type", "header-type"))); headerType != "" && headerType != "none" {
@@ -752,11 +737,8 @@ func decodeShareECHConfigList(raw string) ([]byte, error) {
 		return nil, fmt.Errorf("empty ECH config list")
 	}
 
-	if block, rest := pem.Decode([]byte(trimmed)); block != nil {
-		if block.Type != "ECH CONFIGS" || len(bytes.TrimSpace(rest)) != 0 || !validECHConfigList(block.Bytes) {
-			return nil, fmt.Errorf("invalid ECH CONFIGS PEM")
-		}
-		return append([]byte(nil), block.Bytes...), nil
+	if decoded, err := decodeECHConfigPEM(trimmed); decoded != nil || err != nil {
+		return decoded, err
 	}
 
 	candidates := []string{compactECHConfigBase64(raw, strings.Contains(raw, " "))}
@@ -776,12 +758,22 @@ func decodeShareECHConfigList(raw string) ([]byte, error) {
 }
 
 func decodeNativeECHConfigList(config []string) ([]byte, error) {
-	raw := strings.Join(config, "\n")
-	block, rest := pem.Decode([]byte(raw))
-	if block == nil || block.Type != "ECH CONFIGS" || len(bytes.TrimSpace(rest)) != 0 || !validECHConfigList(block.Bytes) {
+	decoded, err := decodeECHConfigPEM(strings.Join(config, "\n"))
+	if decoded == nil && err == nil {
 		return nil, fmt.Errorf("invalid ECH CONFIGS PEM")
 	}
-	return append([]byte(nil), block.Bytes...), nil
+	return decoded, err
+}
+
+func decodeECHConfigPEM(raw string) ([]byte, error) {
+	block, rest := pem.Decode([]byte(raw))
+	if block == nil {
+		return nil, nil
+	}
+	if block.Type != "ECH CONFIGS" || len(bytes.TrimSpace(rest)) != 0 || !validECHConfigList(block.Bytes) {
+		return nil, fmt.Errorf("invalid ECH CONFIGS PEM")
+	}
+	return block.Bytes, nil
 }
 
 func compactECHConfigBase64(raw string, spacesAsPlus bool) string {
@@ -983,16 +975,16 @@ func shareTLSStringListField(options map[string]interface{}, key string, path st
 	}
 }
 
-func shareTLSNestedField(options map[string]interface{}, key string, path string) (map[string]interface{}, bool, error) {
-	value, present := options[key]
-	if !present || value == nil {
-		return nil, present, nil
+func shareTLSNestedField(options map[string]interface{}, key string) (map[string]interface{}, error) {
+	value := options[key]
+	if value == nil {
+		return nil, nil
 	}
 	nested, ok := generatorOptionMap(value)
 	if !ok {
-		return nil, true, fmt.Errorf("tls_options.%s must be an object", path)
+		return nil, fmt.Errorf("tls_options.%s must be an object", key)
 	}
-	return nested, true, nil
+	return nested, nil
 }
 
 func equalShareTLSStrings(left string, right string) bool {
@@ -1023,8 +1015,10 @@ func ensureShareTLSNested(options *models.NativeOptions, key string) map[string]
 	nested, _ := generatorOptionMap(root[key])
 	if nested == nil {
 		nested = map[string]interface{}{}
-		root[key] = nested
+	} else {
+		nested = maps.Clone(nested)
 	}
+	root[key] = nested
 	return nested
 }
 
@@ -1038,7 +1032,7 @@ func reconcileShareTLSOptions(native models.NativeOptions, parameters shareTLSPa
 		disableSNI:  parameters.disableSNI,
 		publicKey:   strings.TrimSpace(parameters.publicKey),
 		shortID:     strings.TrimSpace(parameters.shortID),
-		options:     native,
+		options:     maps.Clone(native),
 	}
 
 	root := map[string]interface{}(result.options)
@@ -1063,7 +1057,7 @@ func reconcileShareTLSOptions(native models.NativeOptions, parameters shareTLSPa
 		return shareTLSResult{}, err
 	}
 
-	reality, _, err := shareTLSNestedField(root, "reality", "reality")
+	reality, err := shareTLSNestedField(root, "reality")
 	if err != nil {
 		return shareTLSResult{}, err
 	}
@@ -1210,7 +1204,7 @@ func reconcileShareTLSOptions(native models.NativeOptions, parameters shareTLSPa
 		result.disableSNI = nativeDisableSNI
 	}
 
-	utls, _, err := shareTLSNestedField(root, "utls", "utls")
+	utls, err := shareTLSNestedField(root, "utls")
 	if err != nil {
 		return shareTLSResult{}, err
 	}
@@ -1235,8 +1229,7 @@ func reconcileShareTLSOptions(native models.NativeOptions, parameters shareTLSPa
 			nested["enabled"] = true
 			nested["fingerprint"] = result.fingerprint
 		} else if utls != nil {
-			utls["enabled"] = false
-			ensureShareTLSOptions(&result.options)["utls"] = utls
+			ensureShareTLSNested(&result.options, "utls")["enabled"] = false
 		}
 	} else if utlsEnabled {
 		result.fingerprint = normalizeFingerprint(nativeFingerprint)
@@ -1276,7 +1269,7 @@ func reconcileShareTLSOptions(native models.NativeOptions, parameters shareTLSPa
 		}
 	}
 
-	ech, _, err := shareTLSNestedField(root, "ech", "ech")
+	ech, err := shareTLSNestedField(root, "ech")
 	if err != nil {
 		return shareTLSResult{}, err
 	}
@@ -1315,8 +1308,7 @@ func reconcileShareTLSOptions(native models.NativeOptions, parameters shareTLSPa
 				nested["config"] = normalizedNativeConfig
 			}
 		} else if ech != nil {
-			ech["enabled"] = false
-			ensureShareTLSOptions(&result.options)["ech"] = ech
+			ensureShareTLSNested(&result.options, "ech")["enabled"] = false
 		}
 	}
 	if result.mode == "reality" && finalECHEnabled {
@@ -1406,43 +1398,28 @@ func normalizeHysteria2Ports(raw string) (int, []string, error) {
 	parts := strings.Split(raw, ",")
 	normalized := make([]string, 0, len(parts))
 	firstPort := 0
-	hasRange := false
 	for _, part := range parts {
 		part = strings.TrimSpace(part)
 		if part == "" {
 			return 0, nil, fmt.Errorf("invalid empty hysteria2 port")
 		}
-		rangeSeparator := ""
-		if strings.Contains(part, "-") {
-			rangeSeparator = "-"
-		} else if strings.Contains(part, ":") {
-			rangeSeparator = ":"
-		}
-		if rangeSeparator != "" {
-			rangeParts := strings.SplitN(part, rangeSeparator, 2)
-			start, startErr := strconv.Atoi(strings.TrimSpace(rangeParts[0]))
-			end, endErr := strconv.Atoi(strings.TrimSpace(rangeParts[1]))
-			if startErr != nil || endErr != nil || start <= 0 || end > 65535 || start > end {
+		ports, ranged := parseHysteria2Port(part)
+		if ports.start == 0 {
+			if ranged {
 				return 0, nil, fmt.Errorf("invalid hysteria2 port range: %s", part)
 			}
-			if firstPort == 0 {
-				firstPort = start
-			}
-			normalized = append(normalized, fmt.Sprintf("%d:%d", start, end))
-			hasRange = true
-			continue
-		}
-		port, err := strconv.Atoi(part)
-		if err != nil || port <= 0 || port > 65535 {
 			return 0, nil, fmt.Errorf("invalid hysteria2 port: %s", part)
 		}
 		if firstPort == 0 {
-			firstPort = port
+			firstPort = ports.start
 		}
-		normalized = append(normalized, strconv.Itoa(port))
-	}
-	if len(normalized) == 1 && !hasRange {
-		return firstPort, nil, nil
+		if ranged {
+			normalized = append(normalized, ports.kernelRange())
+		} else if len(parts) == 1 {
+			return firstPort, nil, nil
+		} else {
+			normalized = append(normalized, strconv.Itoa(ports.start))
+		}
 	}
 	return firstPort, normalized, nil
 }
@@ -1867,7 +1844,7 @@ func parseVMESSURLLink(link string) (interface{}, string, string, error) {
 		Server:              parsed.Host,
 		ServerPort:          parsed.Port,
 		UUID:                parsed.URL.User.Username(),
-		AlterID:             queryNonNegativeInt(params, "alterId", "alter_id", "aid"),
+		AlterID:             queryPositiveInt(params, "alterId", "alter_id", "aid"),
 		Security:            cipher,
 		Network:             transportType,
 		TLS:                 tlsResult.mode,
@@ -1911,20 +1888,15 @@ func parseVMESSURLLink(link string) (interface{}, string, string, error) {
 	if nativeTransport, present, nativeErr := parseNativeOptionsQuery(params, "transport_options"); nativeErr != nil {
 		return nil, "", "", nativeErr
 	} else if present {
-		nativeType := strings.ToLower(nativeString(nativeTransport["type"]))
-		if nativeType == "h2" {
-			nativeType = "http"
-			nativeTransport["type"] = nativeType
-		}
-		switch nativeType {
-		case "ws", "http", "quic", "grpc", "httpupgrade":
-		default:
+		nativeType := models.NormalizeTransportType(nativeString(nativeTransport["type"]))
+		if !supportsV2RayTransport(nativeType) {
 			return nil, "", "", fmt.Errorf("invalid vmess transport_options type: %s", nativeType)
 		}
 		if config.Network != "" && config.Network != nativeType {
 			return nil, "", "", fmt.Errorf("vmess transport type conflicts with transport_options")
 		}
 		config.Network = nativeType
+		nativeTransport["type"] = nativeType
 		config.TransportOptions = nativeTransport
 	}
 	if rawMultiplex := strings.TrimSpace(params.Get("multiplex")); rawMultiplex != "" {
@@ -1969,19 +1941,14 @@ func parseV2RayNativeTransportQuery(values url.Values, currentType string) (mode
 	if err != nil || !present {
 		return nil, currentType, present, err
 	}
-	transportType := strings.ToLower(nativeString(options["type"]))
-	if transportType == "h2" {
-		transportType = "http"
-		options["type"] = transportType
-	}
-	switch transportType {
-	case "ws", "http", "quic", "grpc", "httpupgrade":
-	default:
+	transportType := models.NormalizeTransportType(nativeString(options["type"]))
+	if !supportsV2RayTransport(transportType) {
 		return nil, currentType, true, fmt.Errorf("invalid transport_options type: %s", transportType)
 	}
 	if currentType != "" && currentType != transportType {
 		return nil, currentType, true, fmt.Errorf("transport type conflicts with transport_options")
 	}
+	options["type"] = transportType
 	return options, transportType, true, nil
 }
 
@@ -2136,10 +2103,7 @@ func parseHysteria2Link(link string) (interface{}, string, string, error) {
 		return nil, "", "", fmt.Errorf("hysteria2 certificate pinning is not supported by sing-box 1.12.12")
 	}
 	obfs := strings.ToLower(strings.TrimSpace(params.Get("obfs")))
-	if obfs == "none" {
-		obfs = ""
-	}
-	if obfs != "" && obfs != "salamander" {
+	if obfs != "" && obfs != "salamander" && obfs != "none" {
 		return nil, "", "", fmt.Errorf("unsupported hysteria2 obfs for sing-box 1.12.12: %s", obfs)
 	}
 	insecure, insecurePresent, err := queryTLSBool(params, "insecure", "allowInsecure", "allow_insecure")
@@ -2186,7 +2150,7 @@ func parseHysteria2Link(link string) (interface{}, string, string, error) {
 		DownMbps:           parseBandwidthMbps(params.Get("down")),
 		BrutalUpMbps:       queryPositiveInt(params, "brutal_up_mbps", "brutal-up-mbps"),
 		BrutalDownMbps:     queryPositiveInt(params, "brutal_down_mbps", "brutal-down-mbps"),
-		ObfsPassword:       firstQueryValue(params, "obfs-password", "obfs_password"),
+		ObfsPassword:       params.Get("obfs-password"),
 		SalamanderPassword: params.Get("salamander"),
 		SNI:                tlsResult.serverName,
 		ALPN:               tlsResult.alpn,
@@ -2196,13 +2160,18 @@ func parseHysteria2Link(link string) (interface{}, string, string, error) {
 		HopInterval:        hopInterval,
 	}
 	if config.ObfsPassword == "" {
+		config.ObfsPassword = params.Get("obfs_password")
+	}
+	if config.ObfsPassword == "" {
 		config.ObfsPassword = config.SalamanderPassword
 	}
-	if obfs != "" {
+	if obfs == "salamander" {
 		if config.ObfsPassword == "" {
 			return nil, "", "", fmt.Errorf("missing obfs-password for hysteria2 salamander obfuscation")
 		}
 		config.Obfs = models.NativeOptions{"type": obfs, "password": config.ObfsPassword}
+	} else if params.Has("obfs") {
+		config.Obfs = obfs
 	}
 	if len(serverPorts) > 0 {
 		config.ServerPorts = models.ListableString(serverPorts)
@@ -2426,13 +2395,9 @@ func parseSOCKS5Link(link string) (interface{}, string, string, error) {
 		cfg.Network = models.ListableString(network)
 	}
 	if enabled, present := queryBool(params, "udp_over_tcp", "udp-over-tcp", "uot"); present {
-		cfg.UDPOverTCP = enabled
-		if version := queryPositiveInt(params, "udp_over_tcp_version", "udp-over-tcp-version", "uot_version"); version > 0 {
-			if version > 2 {
-				return nil, "", "", fmt.Errorf("unsupported udp-over-tcp version: %d", version)
-			}
-			cfg.UDPOverTCPOptions = models.NativeOptions{"enabled": enabled, "version": version}
-			cfg.UDPOverTCP = models.NativeOptions(cfg.UDPOverTCPOptions)
+		cfg.UDPOverTCP, cfg.UDPOverTCPOptions, err = importUDPOverTCP(enabled, queryPositiveInt(params, "udp_over_tcp_version", "udp-over-tcp-version", "uot_version"))
+		if err != nil {
+			return nil, "", "", err
 		}
 	}
 	if err := applyURLDialerOptions(&cfg.DialerOptions, params); err != nil {
@@ -2445,6 +2410,17 @@ func parseSOCKS5Link(link string) (interface{}, string, string, error) {
 	}
 
 	return cfg, proxyType, parsed.Name, nil
+}
+
+func importUDPOverTCP(enabled bool, version int) (any, models.NativeOptions, error) {
+	if version <= 0 {
+		return enabled, nil, nil
+	}
+	if version > 2 {
+		return nil, nil, fmt.Errorf("unsupported udp-over-tcp version: %d", version)
+	}
+	options := models.NativeOptions{"enabled": enabled, "version": version}
+	return options, options, nil
 }
 
 func parseHTTPProxyLink(link string) (interface{}, string, string, error) {

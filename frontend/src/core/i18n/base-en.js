@@ -1,16 +1,12 @@
 export default {
   // Common
-  version: 'Version',
   confirm: 'Confirm',
   cancel: 'Cancel',
   save: 'Save',
   delete: 'Delete',
   edit: 'Edit',
-  add: 'Add',
   search: 'Search',
   refresh: 'Refresh',
-  success: 'Success',
-  error: 'Error',
   warning: 'Warning',
   stop: 'Stop',
   frontend_build: 'Frontend build',
@@ -19,7 +15,6 @@ export default {
   update_available: 'Update available',
   
   // Login
-  password: 'Password',
   login: 'Login',
   logout: 'Logout',
   login_failed: 'Login failed',

@@ -60,20 +60,10 @@ func TestGenerateTrojanOutbound(t *testing.T) {
 			"X-Test": "1",
 		},
 	}
-	cfgBytes, _ := json.Marshal(rawCfg)
-
-	node := models.ProxyNode{
-		ID:          1,
-		Name:        "trojan",
-		Type:        "trojan",
-		Config:      string(cfgBytes),
-		InboundPort: 30010,
-	}
-
 	svc := &SingBoxService{}
-	out, err := svc.generateOutbound(&node, "trojan-out")
+	out, err := svc.generateTrojanOutbound(&rawCfg, "trojan-out")
 	if err != nil {
-		t.Fatalf("generateOutbound error: %v", err)
+		t.Fatalf("generate Trojan outbound: %v", err)
 	}
 	if out.Type != "trojan" || out.Tag != "trojan-out" {
 		t.Fatalf("unexpected outbound meta: %+v", out)
@@ -140,19 +130,10 @@ func TestGenerateVLESSOutboundSplitsALPN(t *testing.T) {
 		SNI:        "sni.example.com",
 		ALPN:       "h2,http/1.1",
 	}
-	cfgBytes, _ := json.Marshal(rawCfg)
-	node := models.ProxyNode{
-		ID:          1,
-		Name:        "vless",
-		Type:        "vless",
-		Config:      string(cfgBytes),
-		InboundPort: 30010,
-	}
-
 	svc := &SingBoxService{}
-	out, err := svc.generateOutbound(&node, "vless-out")
+	out, err := svc.generateVLESSOutbound(&rawCfg, "vless-out")
 	if err != nil {
-		t.Fatalf("generateOutbound error: %v", err)
+		t.Fatalf("generate VLESS outbound: %v", err)
 	}
 	tls, ok := out.Extra["tls"].(map[string]interface{})
 	if !ok {
@@ -176,19 +157,10 @@ func TestGenerateVMessOutboundSplitsALPN(t *testing.T) {
 		SNI:        "sni.example.com",
 		ALPN:       "h2,http/1.1",
 	}
-	cfgBytes, _ := json.Marshal(rawCfg)
-	node := models.ProxyNode{
-		ID:          1,
-		Name:        "vmess",
-		Type:        "vmess",
-		Config:      string(cfgBytes),
-		InboundPort: 30010,
-	}
-
 	svc := &SingBoxService{}
-	out, err := svc.generateOutbound(&node, "vmess-out")
+	out, err := svc.generateVMESSOutbound(&rawCfg, "vmess-out")
 	if err != nil {
-		t.Fatalf("generateOutbound error: %v", err)
+		t.Fatalf("generate VMess outbound: %v", err)
 	}
 	tls, ok := out.Extra["tls"].(map[string]interface{})
 	if !ok {
@@ -258,20 +230,10 @@ func TestGenerateWireGuardOutboundUsesPeersWhenAllowedIPsPresent(t *testing.T) {
 		DomainResolverStrategy: "prefer_ipv4",
 		UDPFragment:            &udpFragment,
 	}
-	cfgBytes, _ := json.Marshal(rawCfg)
-
-	node := models.ProxyNode{
-		ID:          1,
-		Name:        "warp",
-		Type:        "wireguard",
-		Config:      string(cfgBytes),
-		InboundPort: 30010,
-	}
-
 	svc := &SingBoxService{}
-	out, err := svc.generateWireGuardEndpointForNode(&node, "wireguard-out")
+	out, err := svc.generateWireGuardEndpoint(&rawCfg, "wireguard-out")
 	if err != nil {
-		t.Fatalf("generateWireGuardEndpointForNode error: %v", err)
+		t.Fatalf("generate WireGuard endpoint: %v", err)
 	}
 	if out.Type != "wireguard" || out.Tag != "wireguard-out" {
 		t.Fatalf("unexpected endpoint meta: %+v", out)
@@ -373,13 +335,10 @@ func TestParseAndExportSOCKS5HLink(t *testing.T) {
 
 func TestGenerateSOCKS5HOutboundUsesSingBoxSocksType(t *testing.T) {
 	rawCfg := models.SOCKS5Config{Server: "proxy.example.com", ServerPort: 1080, Username: "u", Password: "p"}
-	cfgBytes, _ := json.Marshal(rawCfg)
-	node := models.ProxyNode{ID: 1, Name: "socks5h", Type: "socks5h", Config: string(cfgBytes), InboundPort: 30010}
-
 	svc := &SingBoxService{}
-	out, err := svc.generateOutbound(&node, "socks5h-out")
+	out, err := svc.generateOutboundFromConfig("socks5h", &rawCfg, "socks5h-out")
 	if err != nil {
-		t.Fatalf("generateOutbound error: %v", err)
+		t.Fatalf("generate SOCKS5H outbound: %v", err)
 	}
 	if out.Type != "socks" || out.Tag != "socks5h-out" || out.Server != "proxy.example.com" || out.Port != 1080 {
 		t.Fatalf("unexpected outbound: %+v", out)

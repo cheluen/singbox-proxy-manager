@@ -298,7 +298,6 @@ func checkWithSOCKS5(ctx context.Context, proxyAddr string, username string, pas
 type ipCheckServiceResult struct {
 	info      *IPInfo
 	err       error
-	service   string
 	latency   time.Duration
 	hasGeo    bool
 	hasIPOnly bool
@@ -331,20 +330,13 @@ func checkWithServicesRacingLimited(
 		return nil, fmt.Errorf("no ip check services configured")
 	}
 
-	ctx, cancel := context.WithTimeout(ctx, ipCheckTotalDeadline)
+	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
 	results := make(chan ipCheckServiceResult, len(services))
-	semaphore := make(chan struct{}, ipCheckServicesMaxConcurrency)
 
 	startService := func(service string) {
 		go func() {
-			select {
-			case semaphore <- struct{}{}:
-			case <-ctx.Done():
-				return
-			}
-			defer func() { <-semaphore }()
 			if globalSlots != nil {
 				select {
 				case globalSlots <- struct{}{}:
@@ -363,7 +355,6 @@ func checkWithServicesRacingLimited(
 			res := ipCheckServiceResult{
 				info:    info,
 				err:     err,
-				service: service,
 				latency: latency,
 			}
 			if err == nil && info != nil && info.IP != "" {

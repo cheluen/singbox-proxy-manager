@@ -1,8 +1,9 @@
 // 节点信息的可复用展示块：端口、认证、前置代理、备注、连接方式。
 import { memo, useEffect, useState } from 'react'
-import { Button, Input } from 'antd'
-import { Eye, EyeOff, Route, ShieldCheck, ShieldOff, StickyNote, TriangleAlert } from 'lucide-react'
+import { Button, Form, Input, Switch } from 'antd'
+import { Dices, Eye, EyeOff, Route, ShieldCheck, ShieldOff, StickyNote, TriangleAlert } from 'lucide-react'
 import { useTranslation } from 'react-i18next'
+import { randomCredentials } from '../core/credentials'
 import { buildHostPort, buildProxyUrl, hasInboundAuth, initialUpstreamMode, panelHost, reuseUsername, shellQuote } from '../core/nodeView'
 import { PinGlyph } from './icons'
 import { upstreamModeLabel } from './labels'
@@ -35,17 +36,76 @@ export const PortChip = memo(function PortChip({ node, act, pinBusy = false, pre
   )
 })
 
-export const AuthMark = memo(function AuthMark({ node, withText = false }) {
+export const AuthMark = memo(function AuthMark() {
   const { t } = useTranslation()
-  const on = hasInboundAuth(node)
-  const label = on ? `${t('inbound_authentication')}: ${node.username}` : t('auth_open_warning')
+  const label = t('auth_open_warning')
   return (
-    <span className={`sb-auth-mark${on ? '' : ' is-open'}`} role="img" aria-label={label} data-tip={label}>
-      {on ? <ShieldCheck size={14} strokeWidth={1.75} /> : <ShieldOff size={14} strokeWidth={1.75} />}
-      {withText ? <span className="truncate">{on ? node.username : t('auth_none')}</span> : null}
+    <span className="sb-auth-mark is-open" role="img" aria-label={label} data-tip={label}>
+      <ShieldOff size={14} strokeWidth={1.75} />
     </span>
   )
 })
+
+// 入站认证开关 + 随机凭据 + 用户名/密码表单块（节点编辑与批量设密共用）。
+export function InboundAuthBox({ form, authEnabled, onHint, offHint, autoFocusUsername = false, usernameTestId, passwordTestId }) {
+  const { t } = useTranslation()
+  return (
+    <div className={`sb-auth-box${authEnabled ? '' : ' is-open'}`}>
+      <div className="sb-auth-box__head">
+        <span className="sb-auth-box__icon">{authEnabled ? <ShieldCheck size={18} strokeWidth={1.75} /> : <ShieldOff size={18} strokeWidth={1.75} />}</span>
+        <div className="sb-auth-box__text">
+          <strong>{t('inbound_authentication')}</strong>
+          <span>{authEnabled ? onHint : offHint}</span>
+        </div>
+        {authEnabled ? (
+          <Button size="small" type="link" icon={<Dices size={14} strokeWidth={1.75} />} data-testid="auth-generate" onClick={() => {
+            const next = randomCredentials()
+            form.setFieldsValue({ username: next.username, password: next.secret })
+            form.validateFields(['username', 'password']).catch(() => {})
+          }}>
+            {t('auth_generate')}
+          </Button>
+        ) : null}
+        <Form.Item name="auth_enabled" valuePropName="checked" noStyle>
+          <Switch
+            aria-label={t('inbound_authentication')}
+            onChange={(on) => {
+              if (!on) form.setFieldsValue({ username: '', password: '' })
+            }}
+          />
+        </Form.Item>
+      </div>
+      {authEnabled ? (
+        <div className="sb-form-grid sb-auth-box__fields">
+          <Form.Item
+            name="username"
+            label={t('username')}
+            required
+            dependencies={['auth_enabled']}
+            rules={[{
+              validator: (_, value) => {
+                if (!form.getFieldValue('auth_enabled')) return Promise.resolve()
+                if (!value) return Promise.reject(new Error(t('enter_username')))
+                return String(value).includes('+') ? Promise.reject(new Error(t('username_plus_not_allowed'))) : Promise.resolve()
+              },
+            }]}
+          >
+            <Input autoFocus={autoFocusUsername} autoComplete="off" spellCheck={false} data-testid={usernameTestId} />
+          </Form.Item>
+          <Form.Item
+            name="password"
+            label={t('password_auth')}
+            required
+            dependencies={['auth_enabled']}
+            rules={[{ validator: (_, value) => (!form.getFieldValue('auth_enabled') || value ? Promise.resolve() : Promise.reject(new Error(t('enter_password')))) }]}
+          >
+            <Input.Password autoComplete="new-password" data-testid={passwordTestId} />
+          </Form.Item>
+        </div>
+      ) : null}
+    </div>
+  )
+}
 
 export const UpstreamMark = memo(function UpstreamMark({ node }) {
   const { t } = useTranslation()
@@ -69,7 +129,7 @@ export const RemarkMark = memo(function RemarkMark({ node }) {
 })
 
 // 备注：就地编辑，有改动时才出现保存 / 还原。
-export function RemarkEditor({ node, act, rows = 3 }) {
+export function RemarkEditor({ node, act }) {
   const { t } = useTranslation()
   const original = node.remark ?? ''
   const [draft, setDraft] = useState(original)
@@ -85,7 +145,7 @@ export function RemarkEditor({ node, act, rows = 3 }) {
     <div className="sb-remark">
       <Input.TextArea
         value={draft}
-        autoSize={{ minRows: rows, maxRows: 10 }}
+        autoSize={{ minRows: 3, maxRows: 10 }}
         placeholder={t('remark_empty_hint')}
         aria-label={t('remark')}
         onChange={(event) => setDraft(event.target.value)}

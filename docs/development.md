@@ -158,17 +158,17 @@ rm -f /tmp/sbpm-upstream-e2e-backend
 
 触发条件：推送至 `main` 或面向 `main` 的 Pull Request（并非由 tag 触发）。
 
-1. **构建测试内核与静态检查**：重编译 `sing-box 1.12.12`，并行执行 `golangci-lint`、`govulncheck`（扫描管理程序与内核并阻断 `GO-2026-6809` / `GO-2026-6859`）、Go `-race` 测试、前端 ESLint、生产依赖 `npm audit`、`test:core`、`audit`、`test:version-sync`、`build` 以及 21 项前端 E2E 矩阵。
-2. **全栈与容器系统测试**：执行真实上游与协议导入全栈回归、`docker compose --profile local` 源码构建系统测试（验证 Shadowsocks 与 Direct 真实 HTTP/SOCKS5 转发）、单文件发行回归、`full-stack-system` / `full-stack-node-list` / `precompressed-static` 浏览器验证，以及 `Dockerfile.release`（`linux/amd64` + `linux/arm64`）多架构构建验证。
+1. **构建测试内核与静态检查**：重编译 `sing-box 1.12.12`，并行执行 `golangci-lint`、`govulncheck`（扫描管理程序与内核并阻断 `GO-2026-6809` / `GO-2026-6859`）、Go `-race` 测试、前端 ESLint、生产依赖 `npm audit`、`test:core`、`audit`、`test:version-sync`、`build`（上传共享 `frontend-dist` 产物供下游复用）以及 21 项前端 E2E 矩阵。
+2. **全栈与容器系统测试**：复用 `frontend-dist` 与测试内核执行真实上游与协议导入全栈回归、`docker compose --profile local` 源码构建系统测试（验证 Shadowsocks 与 Direct 真实 HTTP/SOCKS5 转发）、单文件发行回归（在 `main` push 时上传已验收的 Linux AMD64/ARM64 二进制供发布直接复用）、`full-stack-system` / `full-stack-node-list` / `precompressed-static` 浏览器验证，以及 `Dockerfile.release`（`linux/amd64` + `linux/arm64` 两阶段按架构单文件复制）多架构构建验证。
 3. **自动发布（仅 `main` push 通过后执行）**：
-   - 交叉构建 **6 平台统一单文件**（Linux / FreeBSD / macOS × `amd64` / `arm64`，无 Windows 发布矩阵）并生成 `checksums.txt`。
+   - `build-binaries` 复用 `frontend-dist` 补齐 FreeBSD / macOS 4 平台统一单文件，连同已验收的 Linux 2 平台产物共汇总 **6 平台统一单文件**（无 Windows 发布矩阵）并生成 `checksums.txt`。
    - 创建或更新 `v<version>` GitHub Release。
    - 复用 Release 中的 Linux 二进制构建并推送 GHCR 多架构镜像（`linux/amd64`, `linux/arm64`），同时打标 `<sha>`、`v<version>`、`v<version>-linux-amd64-arm64`、`latest`。
-   - 末尾自动清理本次运行产生的临时 Artifacts。
+   - 末尾按消费作业结果条件清理本次运行产生的临时 Artifacts（若有消费作业失败则保留对应共享产物直至 1 天自动过期，确保失败作业可直接重跑）。
 
 ### 4.2 GitLab CI（`.gitlab-ci.yml`）
 
-包含 `lint / test / build / release` 四个阶段，覆盖 Go lint、漏洞扫描、race 测试、前端构建与版本一致性检查、GitLab Registry 镜像推送及 `linux/amd64`、`freebsd/amd64` 单文件构建。相比 GitHub Actions，GitLab 流水线不包含同等的浏览器全栈、Compose 实测、单文件运行回归链及 6 平台完整发布矩阵。
+包含 `lint / test / build / release` 四个阶段，共享校验后的测试内核产物，覆盖 Go lint、漏洞扫描、race 测试、前端构建与版本一致性检查、GitLab Registry 镜像推送及 `linux/amd64`、`freebsd/amd64` 单文件构建。相比 GitHub Actions，GitLab 流水线不包含同等的浏览器全栈、Compose 实测、单文件运行回归链及 6 平台完整发布矩阵。
 
 > 两条流水线均未内置外部 PostgreSQL / MySQL / Turso 实例，远程数据库集成测试需按需在独立测试库手动触发。
 

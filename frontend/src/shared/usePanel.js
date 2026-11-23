@@ -3,7 +3,7 @@ import { App } from 'antd'
 import { useTranslation } from 'react-i18next'
 import { useNodeController } from '../core/useNodeController'
 
-export function useFeedback() {
+function useFeedback() {
   const { message, modal } = App.useApp()
   const pending = useRef(new Set())
   // 面板卸载（切换设计、退出登录）时关闭仍然打开的确认框，并按「取消」处理，
@@ -51,7 +51,7 @@ export function useFeedback() {
 }
 
 export function usePanel(session) {
-  const { t, i18n } = useTranslation()
+  const { t } = useTranslation()
   const { notify, confirm } = useFeedback()
   const ctl = useNodeController({
     t,
@@ -73,5 +73,5 @@ export function usePanel(session) {
       }),
     []
   )
-  return { ctl, act, t, i18n, notify, confirm }
+  return { ctl, act, t }
 }

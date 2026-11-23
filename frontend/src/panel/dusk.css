@@ -76,7 +76,7 @@
 .dusk-palette__input { display: flex; align-items: center; gap: 10px; padding: 0 14px; height: 50px; border-bottom: 1px solid var(--line); color: var(--ink-3); }
 .dusk-palette__input input { flex: 1; min-width: 0; height: 100%; border: 0; outline: 0; background: transparent; color: var(--ink); font-size: 15px; }
 .dusk-palette__input input::placeholder { color: var(--ink-3); }
-.dusk-palette__list { max-height: min(420px, calc(100dvh - var(--chrome-h) - 220px)); overflow-y: auto; padding: 6px; }
+.dusk-palette__list { max-height: min(420px, calc(100dvh - 220px)); overflow-y: auto; padding: 6px; }
 .dusk-palette__group { display: block; padding: 8px 10px 4px; font-size: 11px; font-weight: 650; letter-spacing: 0.06em; text-transform: uppercase; color: var(--ink-3); }
 .dusk-palette__item { display: flex; align-items: center; gap: 10px; width: 100%; height: 36px; padding: 0 10px; border: 0; border-radius: var(--radius-sm); background: transparent; color: var(--ink-2); text-align: left; }
 .dusk-palette__item[aria-selected='true'] { background: var(--accent-soft); color: var(--ink); }
@@ -107,9 +107,6 @@
   .dusk-top__brand { gap: 8px; }
   .dusk-top .sb-wordmark { flex-direction: column; gap: 2px; }
   .dusk-top .sb-wordmark__descriptor { font-size: 11px; }
-  .dusk-cmd { margin-left: 0; }
-  .dusk-cmd > span, .dusk-cmd .sb-kbd { display: none; }
-  .dusk-cmd { width: 32px; padding: 0; justify-content: center; }
   .dusk-bar { flex-wrap: wrap; padding: 8px 10px; }
   .dusk-bar__status { order: 5; flex-basis: 100%; }
   .dusk-bar__search { flex: 1 1 140px; }

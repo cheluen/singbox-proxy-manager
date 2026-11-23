@@ -370,25 +370,24 @@ func TestAPIRequestBodyLimitMiddlewareRejectsLargePayload(t *testing.T) {
 	}
 }
 
-func TestLoadDotEnvFilesRespectsExistingVariables(t *testing.T) {
+func TestLoadRuntimeEnvironmentRespectsExistingVariables(t *testing.T) {
+	t.Setenv("TZ", "UTC")
+	previousLocal := time.Local
+	t.Cleanup(func() { time.Local = previousLocal })
 	t.Setenv("TEST_EXISTING_KEY", "from-env")
+	t.Setenv("TEST_NEW_KEY", "")
 	if err := os.Unsetenv("TEST_NEW_KEY"); err != nil {
 		t.Fatalf("unset TEST_NEW_KEY: %v", err)
 	}
 
-	envPath := filepath.Join(t.TempDir(), ".env")
+	t.Chdir(t.TempDir())
+	envPath := ".env"
 	content := "TEST_EXISTING_KEY=from-dotenv\nTEST_NEW_KEY=loaded-from-dotenv\n"
 	if err := os.WriteFile(envPath, []byte(content), 0o644); err != nil {
 		t.Fatalf("write .env: %v", err)
 	}
 
-	loaded, err := loadDotEnvFiles([]string{envPath})
-	if err != nil {
-		t.Fatalf("load .env: %v", err)
-	}
-	if len(loaded) != 1 || loaded[0] != envPath {
-		t.Fatalf("unexpected loaded paths: %+v", loaded)
-	}
+	loadRuntimeEnvironment()
 
 	if got := os.Getenv("TEST_EXISTING_KEY"); got != "from-env" {
 		t.Fatalf("existing env should take precedence, got %q", got)

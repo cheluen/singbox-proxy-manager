@@ -2,6 +2,7 @@ package version
 
 import (
 	"context"
+	"errors"
 	"io"
 	"net/http"
 	"strings"
@@ -62,8 +63,19 @@ func TestCompareVersionsFollowsSemverPrereleasePrecedence(t *testing.T) {
 	}
 }
 
+func newTestUpdateChecker(t *testing.T, transport roundTripFunc) *UpdateChecker {
+	t.Helper()
+	t.Setenv("SBPM_UPDATE_CHECK_REPO", "owner/repo")
+	t.Setenv("SBPM_UPDATE_CHECK_DISABLED", "false")
+	t.Setenv("SBPM_UPDATE_CHECK_TTL", "1h")
+	t.Setenv("SBPM_UPDATE_CHECK_TIMEOUT", "5s")
+	checker := NewUpdateCheckerFromEnv()
+	checker.client = &http.Client{Transport: transport}
+	return checker
+}
+
 func TestUpdateCheckerCheckUsesLatestRelease(t *testing.T) {
-	client := &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+	checker := newTestUpdateChecker(t, func(req *http.Request) (*http.Response, error) {
 		if req.URL.Path != "/repos/owner/repo/releases/latest" {
 			t.Fatalf("unexpected path: %s", req.URL.Path)
 		}
@@ -72,18 +84,67 @@ func TestUpdateCheckerCheckUsesLatestRelease(t *testing.T) {
 		}
 		return &http.Response{
 			StatusCode: http.StatusOK,
-			Body:       io.NopCloser(strings.NewReader(`{"tag_name":"v1.4.0","html_url":"https://github.com/owner/repo/releases/v1.4.0","published_at":"2026-05-15T00:00:00Z"}`)),
+			Body:       io.NopCloser(strings.NewReader(`{"tag_name":"v99.0.0","html_url":"https://github.com/owner/repo/releases/v99.0.0","published_at":"2026-05-15T00:00:00Z"}`)),
 			Header:     http.Header{},
 		}, nil
-	})}
-	checker := NewUpdateChecker("owner", "repo", client, time.Hour)
+	})
 	checker.now = func() time.Time { return time.Date(2026, 5, 15, 0, 0, 0, 0, time.UTC) }
 
-	info, err := checker.Check(context.Background(), "1.3.17")
+	info, err := checker.Check(context.Background())
 	if err != nil {
 		t.Fatalf("Check failed: %v", err)
 	}
-	if !info.Available || info.LatestVersion != "1.4.0" || info.ReleaseURL == "" {
+	if !info.Available || info.CurrentVersion != Version() || info.LatestVersion != "99.0.0" || info.ReleaseURL == "" || info.CheckedAt == "" {
 		t.Fatalf("unexpected update info: %+v", info)
+	}
+}
+
+func TestUpdateCheckerFailureSharesTimestampAndErrorWithCache(t *testing.T) {
+	now := time.Date(2026, 5, 15, 0, 0, 0, 0, time.UTC)
+	requests := 0
+	checker := newTestUpdateChecker(t, func(_ *http.Request) (*http.Response, error) {
+		requests++
+		return &http.Response{StatusCode: http.StatusBadGateway, Body: http.NoBody}, nil
+	})
+	checker.now = func() time.Time { return now }
+	ctx := context.Background()
+	first, err := checker.Check(ctx)
+	if err == nil || first.Error != err.Error() || first.CheckedAt != now.Format(time.RFC3339) || first.Available || first.CurrentVersion != Version() {
+		t.Fatalf("unexpected first failure: %+v, %v", first, err)
+	}
+	now = now.Add(time.Minute)
+	cached, cacheErr := checker.Check(ctx)
+	if cached != first || cacheErr != err || requests != 1 {
+		t.Fatalf("cached failure changed: %+v, %v, requests=%d", cached, cacheErr, requests)
+	}
+	now = now.Add(time.Hour)
+	expired, err := checker.Check(ctx)
+	if err == nil || expired.CheckedAt != now.Format(time.RFC3339) || requests != 2 {
+		t.Fatalf("expired failure was not refreshed: %+v, %v, requests=%d", expired, err, requests)
+	}
+}
+
+func TestUpdateCheckerCancellationDoesNotCacheFailure(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	requests := 0
+	checker := newTestUpdateChecker(t, func(req *http.Request) (*http.Response, error) {
+		requests++
+		if requests == 1 {
+			cancel()
+			return nil, req.Context().Err()
+		}
+		return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader(`{"tag_name":"v99.0.0"}`))}, nil
+	})
+	failed, err := checker.Check(ctx)
+	if !errors.Is(err, context.Canceled) || failed.CheckedAt == "" || failed.Error != context.Canceled.Error() {
+		t.Fatalf("unexpected cancellation: %+v, %v", failed, err)
+	}
+	if _, err := checker.Check(ctx); !errors.Is(err, context.Canceled) || requests != 1 {
+		t.Fatalf("already canceled request reached HTTP: %v, requests=%d", err, requests)
+	}
+	info, err := checker.Check(context.Background())
+	if err != nil || !info.Available || info.Error != "" || requests != 2 {
+		t.Fatalf("cancellation polluted update cache: %+v, %v, requests=%d", info, err, requests)
 	}
 }

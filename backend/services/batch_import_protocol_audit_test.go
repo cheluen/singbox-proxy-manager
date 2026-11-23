@@ -389,7 +389,7 @@ proxies:
 
 	if realBinary := os.Getenv("SINGBOX_TEST_BINARY"); realBinary != "" {
 		t.Setenv("SINGBOX_BINARY", realBinary)
-		configJSON, buildErr := service.BuildGlobalConfig([]models.ProxyNode{
+		configJSON, buildErr := service.BuildGlobalConfigContext(context.Background(), []models.ProxyNode{
 			nativeTestNode(t, 310, items[0].Name, items[0].Type, items[0].Config),
 		})
 		if buildErr != nil {
@@ -518,7 +518,7 @@ proxies:
 		for index, item := range items {
 			nodes = append(nodes, nativeTestNode(t, 320+index, item.Name, item.Type, item.Config))
 		}
-		configJSON, buildErr := service.BuildGlobalConfig(nodes)
+		configJSON, buildErr := service.BuildGlobalConfigContext(context.Background(), nodes)
 		if buildErr != nil {
 			t.Fatalf("BuildGlobalConfig: %v", buildErr)
 		}
@@ -748,7 +748,7 @@ proxies:
 	service := NewSingBoxService(t.TempDir())
 	for index, item := range items {
 		node := nativeTestNode(t, index+1, item.Name, item.Type, item.Config)
-		configJSON, err := service.BuildGlobalConfig([]models.ProxyNode{node})
+		configJSON, err := service.BuildGlobalConfigContext(context.Background(), []models.ProxyNode{node})
 		if err != nil {
 			t.Fatalf("BuildGlobalConfig %s: %v", item.Name, err)
 		}

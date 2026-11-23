@@ -37,7 +37,7 @@ func endpointsFromConfig(t *testing.T, config map[string]interface{}) []interfac
 	return endpoints
 }
 
-func TestGenerateGlobalConfigWireGuardUsesEndpointFormat(t *testing.T) {
+func TestBuildGlobalConfigWireGuardUsesEndpointFormat(t *testing.T) {
 	configDir := t.TempDir()
 	service := NewSingBoxService(configDir)
 
@@ -52,11 +52,11 @@ func TestGenerateGlobalConfigWireGuardUsesEndpointFormat(t *testing.T) {
 		},
 	}
 
-	if err := service.GenerateGlobalConfig(nodes); err != nil {
-		t.Fatalf("GenerateGlobalConfig failed: %v", err)
+	configJSON, err := service.BuildGlobalConfigContext(context.Background(), nodes)
+	if err != nil {
+		t.Fatalf("build config: %v", err)
 	}
-
-	config := loadGeneratedConfigMap(t, configDir)
+	config := decodeGeneratedConfig(t, configJSON)
 
 	// WireGuard must not appear in outbounds (legacy format is rejected by
 	// sing-box 1.12+ and removed in 1.13).
@@ -312,7 +312,7 @@ func TestApplyConfigRollsBackToLastGood(t *testing.T) {
 		t.Fatalf("error must mention rollback, got: %v", err)
 	}
 
-	restored, err := os.ReadFile(service.configPath())
+	restored, err := os.ReadFile(service.ConfigPath())
 	if err != nil || string(restored) != string(goodConfig) {
 		t.Fatalf("config.json must be restored to last-good, got %q err %v", restored, err)
 	}
@@ -347,7 +347,7 @@ func TestApplyConfigRollsBackWhenLastGoodSnapshotFails(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "snapshot") || !strings.Contains(err.Error(), "rolled back") {
 		t.Fatalf("snapshot failure was not propagated with rollback status: %v", err)
 	}
-	liveConfig, readErr := os.ReadFile(service.configPath())
+	liveConfig, readErr := os.ReadFile(service.ConfigPath())
 	if readErr != nil || string(liveConfig) != string(goodConfig) {
 		t.Fatalf("live config was not rolled back: config=%q err=%v", liveConfig, readErr)
 	}
@@ -395,7 +395,7 @@ func TestRealSingBoxAcceptsGeneratedWireGuardConfig(t *testing.T) {
 		},
 	}
 
-	configJSON, err := service.BuildGlobalConfig(nodes)
+	configJSON, err := service.BuildGlobalConfigContext(context.Background(), nodes)
 	if err != nil {
 		t.Fatalf("BuildGlobalConfig failed: %v", err)
 	}
@@ -432,7 +432,7 @@ func TestRealSingBoxAcceptsEditedWireGuardDomainResolver(t *testing.T) {
 			"disable_cache": true,
 		},
 	})
-	configJSON, err := service.BuildGlobalConfig([]models.ProxyNode{node})
+	configJSON, err := service.BuildGlobalConfigContext(context.Background(), []models.ProxyNode{node})
 	if err != nil {
 		t.Fatalf("BuildGlobalConfig with edited resolver: %v", err)
 	}

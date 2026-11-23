@@ -7,30 +7,26 @@ import (
 	"sync"
 )
 
-const maxSingBoxDiagnosticBytes = 16 << 10
+const maxSingBoxDiagnosticBytes = 4 << 10
 
 type boundedCommandOutput struct {
-	mu    sync.Mutex
-	limit int
-	data  []byte
+	mu   sync.Mutex
+	data []byte
 }
 
-func newBoundedCommandOutput(limit int) *boundedCommandOutput {
-	if limit < 1 {
-		limit = maxSingBoxDiagnosticBytes
-	}
-	return &boundedCommandOutput{limit: limit, data: make([]byte, 0, limit)}
+func newBoundedCommandOutput() *boundedCommandOutput {
+	return &boundedCommandOutput{data: make([]byte, 0, maxSingBoxDiagnosticBytes)}
 }
 
 func (output *boundedCommandOutput) Write(data []byte) (int, error) {
 	written := len(data)
 	output.mu.Lock()
 	defer output.mu.Unlock()
-	if len(data) >= output.limit {
-		output.data = append(output.data[:0], data[len(data)-output.limit:]...)
+	if len(data) >= maxSingBoxDiagnosticBytes {
+		output.data = append(output.data[:0], data[len(data)-maxSingBoxDiagnosticBytes:]...)
 		return written, nil
 	}
-	if overflow := len(output.data) + len(data) - output.limit; overflow > 0 {
+	if overflow := len(output.data) + len(data) - maxSingBoxDiagnosticBytes; overflow > 0 {
 		copy(output.data, output.data[overflow:])
 		output.data = output.data[:len(output.data)-overflow]
 	}
@@ -38,17 +34,10 @@ func (output *boundedCommandOutput) Write(data []byte) (int, error) {
 	return written, nil
 }
 
-func (output *boundedCommandOutput) String(limit int) string {
-	if output == nil {
-		return ""
-	}
+func (output *boundedCommandOutput) String() string {
 	output.mu.Lock()
 	defer output.mu.Unlock()
-	data := output.data
-	if limit > 0 && len(data) > limit {
-		data = data[len(data)-limit:]
-	}
-	return strings.ToValidUTF8(string(data), "?")
+	return strings.ToValidUTF8(string(output.data), "?")
 }
 
 func acquireExecutionSlot(
@@ -56,12 +45,6 @@ func acquireExecutionSlot(
 	slots chan struct{},
 	operation string,
 ) (func(), error) {
-	if ctx == nil {
-		ctx = context.Background()
-	}
-	if slots == nil {
-		return func() {}, nil
-	}
 	select {
 	case slots <- struct{}{}:
 		return func() { <-slots }, nil

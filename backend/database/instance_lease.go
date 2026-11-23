@@ -23,7 +23,6 @@ type InstanceLease struct {
 	stop           chan struct{}
 	done           chan struct{}
 	monitorOnce    sync.Once
-	stopOnce       sync.Once
 	releaseOnce    sync.Once
 	releaseErr     error
 	stateMu        sync.Mutex
@@ -225,7 +224,7 @@ func (lease *InstanceLease) Release(ctx context.Context) error {
 		return nil
 	}
 	lease.releaseOnce.Do(func() {
-		lease.stopOnce.Do(func() { close(lease.stop) })
+		close(lease.stop)
 		lease.stateMu.Lock()
 		monitorStarted := lease.monitorStarted
 		lease.stateMu.Unlock()

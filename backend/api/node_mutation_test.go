@@ -24,9 +24,7 @@ func TestNodeMutationLateFailureRestoresRuntimeWithoutOverwritingDatabase(t *tes
 			if err != nil {
 				t.Fatal(err)
 			}
-			if err := handler.singBoxService.GenerateGlobalConfig(nodes); err != nil {
-				t.Fatal(err)
-			}
+			writeTestRuntimeConfig(t, handler.singBoxService, nodes)
 			if err := handler.singBoxService.Start(); err != nil {
 				t.Fatal(err)
 			}
@@ -44,7 +42,9 @@ func TestNodeMutationLateFailureRestoresRuntimeWithoutOverwritingDatabase(t *tes
 			defer cancel()
 			done := make(chan error, 1)
 			go func() {
-				_, err := handler.nodeMutations.Execute(ctx, NodeMutationOperation{
+				handler.nodeWriteMu.Lock()
+				defer handler.nodeWriteMu.Unlock()
+				_, err := handler.nodeMutations.execute(ctx, nodeMutationOperation{
 					ApplyRuntime: true,
 					Mutate: func(ctx context.Context, tx *sql.Tx) error {
 						_, err := tx.ExecContext(ctx, "UPDATE proxy_nodes SET config = ? WHERE id = ?", `{"server":"candidate.example.com","server_port":443,"method":"aes-128-gcm","password":"p"}`, nodeID)
@@ -124,7 +124,9 @@ func TestNodeMutationDoesNotHoldSQLiteDuringRuntimeWork(t *testing.T) {
 			}
 			done := make(chan error, 1)
 			go func() {
-				_, err := handler.nodeMutations.Execute(ctx, NodeMutationOperation{
+				handler.nodeWriteMu.Lock()
+				defer handler.nodeWriteMu.Unlock()
+				_, err := handler.nodeMutations.execute(ctx, nodeMutationOperation{
 					ApplyRuntime: true,
 					Mutate: func(ctx context.Context, tx *sql.Tx) error {
 						_, err := tx.ExecContext(ctx, "UPDATE proxy_nodes SET name = ? WHERE id = ?", "changed", nodeID)

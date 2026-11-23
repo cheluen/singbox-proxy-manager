@@ -1,10 +1,9 @@
 import { Button, Dropdown } from 'antd'
 import { ChevronDown, Ellipsis, FileStack, Link2, Plus } from 'lucide-react'
 import { useTranslation } from 'react-i18next'
+import { MenuIcon } from './icons'
 import { IconButton } from './primitives'
 import { useNodeMenu } from './useNodeMenu'
-
-const icon = (Component) => <Component size={15} strokeWidth={1.75} aria-hidden="true" />
 
 export function NodeMenuButton({ node, act, canReorder, size = 'md' }) {
   const { t } = useTranslation()
@@ -17,12 +16,12 @@ export function NodeMenuButton({ node, act, canReorder, size = 'md' }) {
 }
 
 // 「添加节点」主按钮 + 下拉：手动添加 / 粘贴分享链接 / 批量导入。
-export function AddMenu({ act, size = 'middle', compact = false }) {
+export function AddMenu({ act, compact = false }) {
   const { t } = useTranslation()
   const items = [
-    { key: 'manual', icon: icon(Plus), label: t('add_manual') },
-    { key: 'link', icon: icon(Link2), label: t('add_from_link') },
-    { key: 'batch', icon: icon(FileStack), label: t('batch_import') },
+    { key: 'manual', icon: <MenuIcon icon={Plus} />, label: t('add_manual') },
+    { key: 'link', icon: <MenuIcon icon={Link2} />, label: t('add_from_link') },
+    { key: 'batch', icon: <MenuIcon icon={FileStack} />, label: t('batch_import') },
   ]
   const onClick = ({ key }) => {
     if (key === 'batch') act.open({ kind: 'import' })
@@ -30,11 +29,11 @@ export function AddMenu({ act, size = 'middle', compact = false }) {
   }
   return (
     <span className="sb-split-btn">
-      <Button type="primary" size={size} icon={icon(Plus)} aria-label={t('add_node')} onClick={() => act.open({ kind: 'node', node: null })} data-testid="nodes-add-node">
+      <Button type="primary" icon={<MenuIcon icon={Plus} />} aria-label={t('add_node')} onClick={() => act.open({ kind: 'node', node: null })} data-testid="nodes-add-node">
         {compact ? null : t('add_node')}
       </Button>
       <Dropdown menu={{ items, onClick }} trigger={['click']} placement="bottomRight">
-        <Button type="primary" size={size} icon={icon(ChevronDown)} aria-label={t('more_add_options')} data-testid="nodes-add-menu" />
+        <Button type="primary" icon={<MenuIcon icon={ChevronDown} />} aria-label={t('more_add_options')} data-testid="nodes-add-menu" />
       </Dropdown>
     </span>
   )

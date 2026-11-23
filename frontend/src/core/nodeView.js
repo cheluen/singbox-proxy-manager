@@ -1,11 +1,7 @@
 import { getNodeStatusCode } from './nodeModel.js'
+import { protocolLabel } from './protocolSchema.js'
 
-export const PROTOCOL_SHORT = {
-  direct: 'Direct', ss: 'SS', vless: 'VLESS', vmess: 'VMess', hy2: 'HY2', tuic: 'TUIC', trojan: 'Trojan',
-  anytls: 'AnyTLS', socks5: 'SOCKS5', socks5h: 'SOCKS5H', http: 'HTTP', wireguard: 'WireGuard',
-}
-
-export const protocolLabel = (type) => PROTOCOL_SHORT[type] || String(type || '-').toUpperCase()
+export { protocolLabel }
 
 // 面板里的三态：已禁用 / 可用 / 未检测或失效。三者互斥且相加等于总数。
 export const nodeHealth = (node) => {
@@ -33,7 +29,7 @@ export const summarizeNodes = (nodes) => {
 const configCache = new WeakMap()
 
 // 节点对象在未变化时引用稳定，因此可以用 WeakMap 缓存解析结果，避免每次渲染都 JSON.parse。
-export const parsedConfig = (node) => {
+const parsedConfig = (node) => {
   if (!node || typeof node !== 'object') return {}
   if (configCache.has(node)) return configCache.get(node)
   let parsed = {}
@@ -49,19 +45,17 @@ export const parsedConfig = (node) => {
 
 const formatEndpoint = (server, port) => (server ? `${server}${port ? `:${port}` : ''}` : '')
 
-export const serverAddress = (node) => {
-  if (node?.type === 'direct') return ''
-  const config = parsedConfig(node)
+const configEndpoint = (config) => {
   const peer = Array.isArray(config.peers) ? config.peers[0] : null
   return formatEndpoint(config.server || peer?.server, config.server_port || peer?.server_port)
 }
 
+export const serverAddress = (node) => node?.type === 'direct' ? '' : configEndpoint(parsedConfig(node))
+
 export const upstreamAddress = (node) => {
   if (node?.upstream_mode !== 'custom' || !node.upstream_config) return ''
   try {
-    const config = JSON.parse(node.upstream_config)
-    const peer = Array.isArray(config.peers) ? config.peers[0] : null
-    return formatEndpoint(config.server || peer?.server, config.server_port || peer?.server_port)
+    return configEndpoint(JSON.parse(node.upstream_config))
   } catch {
     return ''
   }
@@ -105,11 +99,19 @@ const nodeHaystack = (node) => {
 }
 
 // 空格分隔多个关键词，全部命中才算匹配。
-export const matchesSearch = (node, search) => {
-  const tokens = String(search || '').toLowerCase().split(/\s+/).filter(Boolean)
+const searchTokens = (search) => String(search || '').toLowerCase().split(/\s+/).filter(Boolean)
+
+const matchesSearchTokens = (node, tokens) => {
   if (tokens.length === 0) return true
   const haystack = nodeHaystack(node)
   return tokens.every((token) => haystack.includes(token))
+}
+
+export const matchesSearch = (node, search) => matchesSearchTokens(node, searchTokens(search))
+
+export const compileSearch = (search) => {
+  const tokens = searchTokens(search)
+  return (node) => matchesSearchTokens(node, tokens)
 }
 
 export const formatDateTime = (value, locale) => {

@@ -16,13 +16,7 @@ import (
 )
 
 func newTestLoginLimiter(maxAttempts, maxConcurrent int) *loginRateLimiter {
-	return &loginRateLimiter{
-		attempts:    make(map[string]*loginAttempt),
-		window:      time.Minute,
-		maxAttempts: maxAttempts,
-		block:       10 * time.Minute,
-		checkSlots:  make(chan struct{}, maxConcurrent),
-	}
+	return newLoginRateLimiter(time.Minute, maxAttempts, 10*time.Minute, maxConcurrent)
 }
 
 func TestLoginRateLimiterReservesConcurrentAttemptsBeforePasswordCheck(t *testing.T) {
@@ -37,13 +31,13 @@ func TestLoginRateLimiterReservesConcurrentAttemptsBeforePasswordCheck(t *testin
 	if err != nil {
 		t.Fatalf("reserve second attempt: %v", err)
 	}
-	if _, _, err := limiter.Begin(context.Background(), "192.0.2.10", now); !errors.Is(err, ErrLoginRateLimited) {
+	if _, _, err := limiter.Begin(context.Background(), "192.0.2.10", now); !errors.Is(err, errLoginRateLimited) {
 		t.Fatalf("third concurrent attempt bypassed the per-client limit: %v", err)
 	}
 
 	first.Failure(now)
 	second.Failure(now)
-	if _, retryAfter, err := limiter.Begin(context.Background(), "192.0.2.10", now); !errors.Is(err, ErrLoginRateLimited) || retryAfter <= 0 {
+	if _, retryAfter, err := limiter.Begin(context.Background(), "192.0.2.10", now); !errors.Is(err, errLoginRateLimited) || retryAfter <= 0 {
 		t.Fatalf("failed attempts did not activate the block: retry=%v err=%v", retryAfter, err)
 	}
 }
@@ -60,7 +54,7 @@ func TestLoginRateLimiterBoundsPasswordChecksAcrossClientAddresses(t *testing.T)
 	if err != nil {
 		t.Fatalf("reserve second global slot: %v", err)
 	}
-	if _, retryAfter, err := limiter.Begin(context.Background(), "192.0.2.3", now); !errors.Is(err, ErrLoginCheckCapacity) || retryAfter <= 0 {
+	if _, retryAfter, err := limiter.Begin(context.Background(), "192.0.2.3", now); !errors.Is(err, errLoginCheckCapacity) || retryAfter <= 0 {
 		t.Fatalf("global password-check capacity was not enforced: retry=%v err=%v", retryAfter, err)
 	}
 
@@ -81,7 +75,7 @@ func TestLoginRateLimiterDoesNotBypassEmptyClientKey(t *testing.T) {
 	if err != nil {
 		t.Fatalf("reserve unknown client attempt: %v", err)
 	}
-	if _, _, err := limiter.Begin(context.Background(), "  ", now); !errors.Is(err, ErrLoginRateLimited) {
+	if _, _, err := limiter.Begin(context.Background(), "  ", now); !errors.Is(err, errLoginRateLimited) {
 		t.Fatalf("empty client key bypassed the per-client limit: %v", err)
 	}
 	permit.Cancel()

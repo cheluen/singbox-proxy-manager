@@ -1,11 +1,11 @@
 // 节点 / 前置代理编辑表单。字段由 core/protocolSchema.js 声明，保存逻辑由 core/protocolForm.js 提供
 import { useMemo, useState } from 'react'
 import { App, Button, Collapse, Form, Input, InputNumber, Select, Switch } from 'antd'
-import { Braces, Dices, ShieldCheck, ShieldOff } from 'lucide-react'
+import { Braces } from 'lucide-react'
 import { useTranslation } from 'react-i18next'
-import { randomCredentials } from '../core/credentials'
 import { createProtocolFormModel, normalizeClearedSelect, proxyTypes } from '../core/protocolForm'
 import { groupFields } from '../core/protocolSchema'
+import { InboundAuthBox } from './NodeParts'
 
 const GROUP_TITLE = { main: 'form_group_protocol', transport: 'form_group_transport', tls: 'form_group_tls', advanced: 'form_group_advanced' }
 
@@ -176,7 +176,7 @@ export default function NodeEditor({ node, variant = 'node', formName, preserveP
 
       {!isUpstream && (
         <section className="sb-form-section">
-          <h3 className="sb-form-section__title">{t('form_group_inbound')}</h3>
+          <h3 className="sb-form-section__title">{t('section_inbound')}</h3>
           <div className="sb-form-grid">
             <Form.Item
               name="inbound_port"
@@ -190,60 +190,7 @@ export default function NodeEditor({ node, variant = 'node', formName, preserveP
             </Form.Item>
           </div>
 
-          <div className={`sb-auth-box${authEnabled ? '' : ' is-open'}`}>
-            <div className="sb-auth-box__head">
-              <span className="sb-auth-box__icon">{authEnabled ? <ShieldCheck size={18} strokeWidth={1.75} /> : <ShieldOff size={18} strokeWidth={1.75} />}</span>
-              <div className="sb-auth-box__text">
-                <strong>{t('inbound_authentication')}</strong>
-                <span>{authEnabled ? t('auth_on_hint') : t('auth_off_hint')}</span>
-              </div>
-              {authEnabled ? (
-                <Button size="small" type="link" icon={<Dices size={14} strokeWidth={1.75} />} data-testid="auth-generate" onClick={() => {
-                  const next = randomCredentials()
-                  form.setFieldsValue({ username: next.username, password: next.secret })
-                  form.validateFields(['username', 'password']).catch(() => {})
-                }}>
-                  {t('auth_generate')}
-                </Button>
-              ) : null}
-              <Form.Item name="auth_enabled" valuePropName="checked" noStyle>
-                <Switch
-                  aria-label={t('inbound_authentication')}
-                  onChange={(enabled) => {
-                    if (!enabled) form.setFieldsValue({ username: '', password: '' })
-                  }}
-                />
-              </Form.Item>
-            </div>
-            {authEnabled ? (
-              <div className="sb-form-grid sb-auth-box__fields">
-                <Form.Item
-                  name="username"
-                  label={t('username')}
-                  required
-                  dependencies={['auth_enabled']}
-                  rules={[{
-                    validator: (_, value) => {
-                      if (!form.getFieldValue('auth_enabled')) return Promise.resolve()
-                      if (!value) return Promise.reject(new Error(t('enter_username')))
-                      return String(value).includes('+') ? Promise.reject(new Error(t('username_plus_not_allowed'))) : Promise.resolve()
-                    },
-                  }]}
-                >
-                  <Input autoComplete="off" spellCheck={false} />
-                </Form.Item>
-                <Form.Item
-                  name="password"
-                  label={t('password_auth')}
-                  required
-                  dependencies={['auth_enabled']}
-                  rules={[{ validator: (_, value) => (!form.getFieldValue('auth_enabled') || value ? Promise.resolve() : Promise.reject(new Error(t('enter_password')))) }]}
-                >
-                  <Input.Password autoComplete="new-password" />
-                </Form.Item>
-              </div>
-            ) : null}
-          </div>
+          <InboundAuthBox form={form} authEnabled={authEnabled} onHint={t('auth_on_hint')} offHint={t('auth_off_hint')} />
         </section>
       )}
 

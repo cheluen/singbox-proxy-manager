@@ -8,16 +8,25 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"errors"
+	"fmt"
 	"strings"
 	"time"
 
-	"github.com/gin-gonic/gin"
+	"github.com/go-sql-driver/mysql"
+
+	appdb "sb-proxy/backend/database"
 )
 
 const (
 	adminSessionTTLHoursEnvKey     = "ADMIN_SESSION_TTL_HOURS"
 	defaultAdminSessionTTLHours    = 168
 	maxAdminSessionTTLHoursAllowed = 24 * 365
+	adminSessionHashKey            = "adminSessionHash"
+)
+
+var (
+	errAuthGenerationChanged = errors.New("authentication generation changed during login")
+	errSessionTokenCollision = errors.New("admin session token collision")
 )
 
 func adminSessionDuration() time.Duration {
@@ -44,9 +53,9 @@ func hashSessionToken(token string) string {
 	return hex.EncodeToString(sum[:])
 }
 
-func (h *Handler) isValidAdminSessionContext(ctx context.Context, token string) (bool, error) {
+func (h *Handler) verifiedAdminSessionHash(ctx context.Context, token string) (string, error) {
 	if token == "" {
-		return false, nil
+		return "", nil
 	}
 
 	tokenHash := hashSessionToken(token)
@@ -62,67 +71,91 @@ func (h *Handler) isValidAdminSessionContext(ctx context.Context, token string) 
 	`, tokenHash).Scan(&expiresAt)
 	switch err {
 	case nil:
-		if time.Now().Unix() >= expiresAt {
-			_, _ = h.db.Exec("DELETE FROM admin_sessions WHERE token_hash = ?", tokenHash)
-			return false, nil
+		if now := time.Now().Unix(); now >= expiresAt {
+			_, _ = h.db.ExecContext(ctx, "DELETE FROM admin_sessions WHERE token_hash = ? AND expires_at <= ?", tokenHash, now)
+			return "", nil
 		}
-		return true, nil
+		return tokenHash, nil
 	case sql.ErrNoRows:
-		return false, nil
+		return "", nil
 	default:
-		return false, err
+		return "", err
 	}
-}
-
-type adminSessionExecer interface {
-	ExecContext(ctx context.Context, query string, args ...interface{}) (sql.Result, error)
 }
 
 func createAdminSessionWithGeneration(
 	ctx context.Context,
-	c *gin.Context,
-	execer adminSessionExecer,
+	db *sql.DB,
 	generation int64,
+	userAgent, ip string,
 ) (string, time.Time, error) {
+	dialect := appdb.DialectFor(db)
+	query := `
+		INSERT INTO admin_sessions (token_hash, auth_generation, expires_at, user_agent, ip)
+		SELECT ?, auth_generation, ?, ?, ?
+		FROM settings WHERE singleton_key = 1 AND auth_generation = ?`
+	if dialect == appdb.DialectPostgres || dialect == appdb.DialectMySQL {
+		query += " FOR UPDATE"
+	}
+	if dialect != appdb.DialectMySQL {
+		query += " ON CONFLICT (token_hash) DO NOTHING"
+	}
+
 	now := time.Now()
-	if _, err := execer.ExecContext(
-		ctx,
-		"DELETE FROM admin_sessions WHERE expires_at <= ? OR auth_generation <> ?",
-		now.Unix(),
-		generation,
-	); err != nil {
+	expiry := now.Add(adminSessionDuration())
+	tx, err := db.BeginTx(ctx, nil)
+	if err != nil {
 		return "", time.Time{}, err
 	}
+	defer tx.Rollback()
 
-	expiry := now.Add(adminSessionDuration())
-	userAgent := ""
-	ip := ""
-	if c != nil && c.Request != nil {
-		userAgent = c.Request.UserAgent()
-		ip = c.ClientIP()
-	}
-
-	for i := 0; i < 3; i++ {
-		tokenBytes := make([]byte, 32)
-		if _, err := rand.Read(tokenBytes); err != nil {
+	var collisionErr error
+	for range 2 {
+		var tokenBytes [32]byte
+		if _, err := rand.Read(tokenBytes[:]); err != nil {
 			return "", time.Time{}, err
 		}
-		token := base64.URLEncoding.EncodeToString(tokenBytes)
-		tokenHash := hashSessionToken(token)
-
-		if _, err := execer.ExecContext(
-			ctx,
-			"INSERT INTO admin_sessions (token_hash, auth_generation, expires_at, user_agent, ip) VALUES (?, ?, ?, ?, ?)",
-			tokenHash,
-			generation,
-			expiry.Unix(),
-			userAgent,
-			ip,
-		); err != nil {
+		token := base64.URLEncoding.EncodeToString(tokenBytes[:])
+		result, err := tx.ExecContext(ctx, query, hashSessionToken(token), expiry.Unix(), userAgent, ip, generation)
+		if err != nil {
+			var duplicate *mysql.MySQLError
+			if errors.As(err, &duplicate) && duplicate.Number == 1062 && strings.Contains(duplicate.Message, "idx_admin_sessions_token_hash") {
+				collisionErr = err
+				continue
+			}
+			return "", time.Time{}, fmt.Errorf("insert admin session: %w", err)
+		}
+		inserted, err := result.RowsAffected()
+		if err != nil {
+			return "", time.Time{}, err
+		}
+		if inserted == 0 {
+			if dialect == appdb.DialectMySQL {
+				return "", time.Time{}, errAuthGenerationChanged
+			}
+			var currentGeneration int64
+			err := tx.QueryRowContext(ctx, "SELECT auth_generation FROM settings WHERE singleton_key = 1").Scan(&currentGeneration)
+			if errors.Is(err, sql.ErrNoRows) || (err == nil && currentGeneration != generation) {
+				return "", time.Time{}, errAuthGenerationChanged
+			}
+			if err != nil {
+				return "", time.Time{}, err
+			}
+			collisionErr = errSessionTokenCollision
 			continue
+		}
+		if _, err := tx.ExecContext(ctx, `
+			DELETE FROM admin_sessions
+			WHERE expires_at <= ?
+			   OR auth_generation <> (SELECT auth_generation FROM settings WHERE singleton_key = 1)
+		`, now.Unix()); err != nil {
+			return "", time.Time{}, fmt.Errorf("clean admin sessions: %w", err)
+		}
+		if err := tx.Commit(); err != nil {
+			return "", time.Time{}, err
 		}
 		return token, expiry, nil
 	}
 
-	return "", time.Time{}, errors.New("failed to create session token")
+	return "", time.Time{}, fmt.Errorf("generate unique admin session token: %w", collisionErr)
 }

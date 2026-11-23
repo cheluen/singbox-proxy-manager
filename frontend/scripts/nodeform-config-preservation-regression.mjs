@@ -7,6 +7,7 @@ import process from 'node:process'
 import { isDeepStrictEqual } from 'node:util'
 import { fileURLToPath } from 'node:url'
 import puppeteer from 'puppeteer-core'
+import { findBrowserExecutable, stopProcess } from './test-harness.mjs'
 
 const API_PORT = Number(process.env.E2E_API_PORT || 30023)
 const FRONTEND_PORT = Number(process.env.E2E_FRONTEND_PORT || 5186)
@@ -137,26 +138,6 @@ const createMockAPI = () => {
   return { server, createdPayloads, updatedPayloads }
 }
 
-const getBrowserExecutablePath = () => {
-  if (process.env.PUPPETEER_EXECUTABLE_PATH) {
-    return process.env.PUPPETEER_EXECUTABLE_PATH
-  }
-  for (const candidate of [
-    '/usr/bin/google-chrome',
-    '/usr/bin/google-chrome-stable',
-    '/usr/bin/chromium-browser',
-    '/usr/bin/chromium',
-  ]) {
-    try {
-      fs.accessSync(candidate, fs.constants.X_OK)
-      return candidate
-    } catch {
-      // Continue looking for a browser.
-    }
-  }
-  return undefined
-}
-
 const waitForHTTP = async (url, timeoutMs) => {
   const deadline = Date.now() + timeoutMs
   while (Date.now() < deadline) {
@@ -191,16 +172,6 @@ const startVite = () => {
   child.stderr.on('data', (chunk) => logs.push(chunk.toString()))
   return { child, getLogs: () => logs.join('') }
 }
-
-const stopProcess = async (child) => {
-  if (!child || child.exitCode !== null) return
-  child.kill('SIGTERM')
-  await Promise.race([
-    new Promise((resolve) => child.once('exit', resolve)),
-    sleep(5000).then(() => child.kill('SIGKILL')),
-  ])
-}
-
 
 const selectFormOption = async (page, fieldID, optionText, timeoutMs = 10000) => {
   const opened = await page.evaluate((id) => {
@@ -401,7 +372,7 @@ const run = async () => {
     await waitForHTTP(FRONTEND_URL, 60000)
     browser = await puppeteer.launch({
       headless: true,
-      executablePath: getBrowserExecutablePath(),
+      executablePath: findBrowserExecutable(),
       args: ['--no-sandbox', '--disable-setuid-sandbox'],
     })
     page = await browser.newPage()
@@ -618,7 +589,7 @@ const run = async () => {
     } catch {
       // Ignore browser cleanup failures.
     }
-    await stopProcess(vite.child)
+    await stopProcess(vite.child, { graceMs: 5000 })
     await new Promise((resolve) => mockAPI.server.close(resolve))
   }
 }

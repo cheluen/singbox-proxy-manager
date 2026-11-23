@@ -10,6 +10,7 @@ import { spawn } from 'node:child_process'
 import { fileURLToPath } from 'node:url'
 import puppeteer from 'puppeteer-core'
 import { findTestPortRange } from './test-ports.mjs'
+import { findBrowserExecutable, stopProcess } from './test-harness.mjs'
 import { isExpectedSystemBrowserError } from './system-browser-errors.mjs'
 import { PROJECT_MARK_FILE, PROJECT_NAME } from '../src/core/project.js'
 import { assertProjectBrand, clickControl, clickText, confirmDialog, editNode, openBatchImport, openNodeMenu, saveNodeForm, selectOption, setInput, sleep, toggle, waitOverlaysClosed } from './ui-driver.mjs'
@@ -42,16 +43,7 @@ const wait = async (predicate, description, timeout = 40000) => {
   }
   throw new Error(description)
 }
-const stop = async (child) => {
-  if (!child || child.exitCode !== null) return
-  child.kill('SIGTERM')
-  await Promise.race([new Promise((resolve) => child.once('exit', resolve)), sleep(15000)])
-  if (child.exitCode === null) {
-    child.kill('SIGKILL')
-    await new Promise((resolve) => child.once('exit', resolve))
-    throw new Error('后端未正常停止')
-  }
-}
+const stop = (child) => stopProcess(child, { graceMs: 15000, requireGraceful: true })
 const curl = (args) => new Promise((resolve, reject) => {
   const child = spawn('curl', ['--silent', '--show-error', '--fail', '--max-time', '12', '--noproxy', '', ...args], { stdio: ['ignore', 'pipe', 'pipe'] })
   let stdout = ''
@@ -145,7 +137,7 @@ try {
   assert.equal((await api('GET', '/version')).version, VERSION)
   steps.push('version-assets-auth')
 
-  browser = await puppeteer.launch({ headless: true, executablePath: process.env.PUPPETEER_EXECUTABLE_PATH || '/usr/bin/chromium', userDataDir: path.join(scratch, 'browser'), args: ['--no-sandbox', '--disable-setuid-sandbox'] })
+  browser = await puppeteer.launch({ headless: true, executablePath: findBrowserExecutable(), userDataDir: path.join(scratch, 'browser'), args: ['--no-sandbox', '--disable-setuid-sandbox'] })
   page = await browser.newPage()
   page.setDefaultTimeout(30000)
   await page.setViewport({ width: 1440, height: 1000 })

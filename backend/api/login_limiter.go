@@ -11,8 +11,8 @@ import (
 )
 
 var (
-	ErrLoginRateLimited   = errors.New("login rate limit exceeded")
-	ErrLoginCheckCapacity = errors.New("login password-check capacity exhausted")
+	errLoginRateLimited   = errors.New("login rate limit exceeded")
+	errLoginCheckCapacity = errors.New("login password-check capacity exhausted")
 )
 
 type loginAttempt struct {
@@ -36,7 +36,6 @@ type loginAttemptPermit struct {
 	limiter *loginRateLimiter
 	key     string
 	attempt *loginAttempt
-	hasSlot bool
 	once    sync.Once
 }
 
@@ -60,19 +59,20 @@ func newLoginRateLimiterFromEnv() *loginRateLimiter {
 		maxConcurrentChecks = 2
 	}
 
+	return newLoginRateLimiter(time.Duration(windowSeconds)*time.Second, maxAttempts, time.Duration(blockSeconds)*time.Second, maxConcurrentChecks)
+}
+
+func newLoginRateLimiter(window time.Duration, maxAttempts int, block time.Duration, maxConcurrentChecks int) *loginRateLimiter {
 	return &loginRateLimiter{
 		attempts:    make(map[string]*loginAttempt),
-		window:      time.Duration(windowSeconds) * time.Second,
+		window:      window,
 		maxAttempts: maxAttempts,
-		block:       time.Duration(blockSeconds) * time.Second,
+		block:       block,
 		checkSlots:  make(chan struct{}, maxConcurrentChecks),
 	}
 }
 
 func (l *loginRateLimiter) Begin(ctx context.Context, key string, now time.Time) (*loginAttemptPermit, time.Duration, error) {
-	if l == nil {
-		return &loginAttemptPermit{}, 0, nil
-	}
 	if err := ctx.Err(); err != nil {
 		return nil, 0, err
 	}
@@ -81,17 +81,16 @@ func (l *loginRateLimiter) Begin(ctx context.Context, key string, now time.Time)
 		key = "unknown"
 	}
 	l.mu.Lock()
+	defer l.mu.Unlock()
 	l.cleanupLocked(now)
 
 	a := l.attempts[key]
 	if a == nil {
 		a = &loginAttempt{}
-		l.attempts[key] = a
 	}
 	if !a.blockedUntil.IsZero() && now.Before(a.blockedUntil) {
 		retryAfter := a.blockedUntil.Sub(now)
-		l.mu.Unlock()
-		return nil, retryAfter, ErrLoginRateLimited
+		return nil, retryAfter, errLoginRateLimited
 	}
 	if !a.first.IsZero() && now.Sub(a.first) > l.window {
 		a.first = time.Time{}
@@ -99,31 +98,23 @@ func (l *loginRateLimiter) Begin(ctx context.Context, key string, now time.Time)
 		a.blockedUntil = time.Time{}
 	}
 	if a.failures+a.inFlight >= l.maxAttempts {
-		l.mu.Unlock()
-		return nil, time.Second, ErrLoginRateLimited
+		return nil, time.Second, errLoginRateLimited
 	}
-	a.inFlight++
-	a.last = now
-	l.mu.Unlock()
 
-	permit := &loginAttemptPermit{limiter: l, key: key, attempt: a}
-	if l.checkSlots == nil {
-		return permit, 0, nil
-	}
 	select {
 	case l.checkSlots <- struct{}{}:
-		permit.hasSlot = true
 		if err := ctx.Err(); err != nil {
-			permit.Cancel()
+			<-l.checkSlots
 			return nil, 0, err
 		}
-		return permit, 0, nil
+		a.inFlight++
+		a.last = now
+		l.attempts[key] = a
+		return &loginAttemptPermit{limiter: l, key: key, attempt: a}, 0, nil
 	case <-ctx.Done():
-		permit.Cancel()
 		return nil, 0, ctx.Err()
 	default:
-		permit.Cancel()
-		return nil, time.Second, ErrLoginCheckCapacity
+		return nil, time.Second, errLoginCheckCapacity
 	}
 }
 
@@ -140,27 +131,16 @@ func (p *loginAttemptPermit) Cancel() {
 }
 
 func (p *loginAttemptPermit) finish(now time.Time, success, failure bool) {
-	if p == nil {
-		return
-	}
 	p.once.Do(func() {
 		l := p.limiter
-		if l == nil {
-			return
-		}
-		if p.hasSlot && l.checkSlots != nil {
-			<-l.checkSlots
-		}
-
 		l.mu.Lock()
 		defer l.mu.Unlock()
+		<-l.checkSlots
 		a, exists := l.attempts[p.key]
 		if !exists || a != p.attempt {
 			return
 		}
-		if a.inFlight > 0 {
-			a.inFlight--
-		}
+		a.inFlight--
 		if success {
 			delete(l.attempts, p.key)
 			return
@@ -189,15 +169,7 @@ func (p *loginAttemptPermit) finish(now time.Time, success, failure bool) {
 func (l *loginRateLimiter) cleanupLocked(now time.Time) {
 	ttl := l.window + l.block + (30 * time.Second)
 	for k, a := range l.attempts {
-		if a == nil {
-			delete(l.attempts, k)
-			continue
-		}
-		last := a.last
-		if last.IsZero() {
-			last = a.first
-		}
-		if a.inFlight == 0 && (last.IsZero() || now.Sub(last) > ttl) {
+		if a.inFlight == 0 && now.Sub(a.last) > ttl {
 			delete(l.attempts, k)
 		}
 	}

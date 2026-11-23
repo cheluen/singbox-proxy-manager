@@ -6,7 +6,6 @@ COPY frontend/ ./
 RUN npm run build
 
 FROM golang:1.26.11 AS backend-builder
-ARG SINGBOX_VERSION=1.12.12
 ENV GOTOOLCHAIN=local
 ARG GOPROXY=https://proxy.golang.org,direct
 ARG GOSUMDB=sum.golang.org
@@ -24,7 +23,7 @@ RUN ./scripts/build-release.sh /app/singbox-proxy-manager
 
 FROM debian:bookworm-slim
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    ca-certificates curl jq \
+    ca-certificates \
     && apt-get clean \
     && rm -rf /var/lib/apt/lists/*
 

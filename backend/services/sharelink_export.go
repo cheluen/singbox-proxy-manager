@@ -78,8 +78,8 @@ func buildSSShareLink(name string, cfg *models.SSConfig) (string, error) {
 	if len(cfg.Network) > 0 {
 		params.Set("network", strings.Join([]string(cfg.Network), ","))
 	}
-	mergeDialerShareParams(params, cfg.DialerOptions)
-	if err := setMapShareParam(params, "multiplex", cfg.MultiplexConfig); err != nil {
+	_ = mergeDialerShareParams(params, cfg.DialerOptions)
+	if err := setNativeOptionsShareParam(params, "multiplex", cfg.MultiplexConfig); err != nil {
 		return "", err
 	}
 
@@ -104,8 +104,8 @@ func buildVLESSShareLink(name string, cfg *models.VLESSConfig) (string, error) {
 	if cfg.Encryption != "" {
 		params.Set("encryption", cfg.Encryption)
 	}
-	if cfg.Network != "" {
-		params.Set("type", cfg.Network)
+	if network := models.NormalizeTransportType(cfg.Network); network != "" {
+		params.Set("type", network)
 	}
 	security := cfg.Security
 	if security == "" {
@@ -182,14 +182,14 @@ func buildVLESSShareLink(name string, cfg *models.VLESSConfig) (string, error) {
 	}
 	mergeNativeTLSShareParams(params, cfg.TLSOptions)
 	mergeNativeTransportShareParams(params, cfg.TransportOptions)
-	mergeDialerShareParams(params, cfg.DialerOptions)
+	_ = mergeDialerShareParams(params, cfg.DialerOptions)
 	if err := setNativeOptionsShareParam(params, "tls_options", cfg.TLSOptions); err != nil {
 		return "", err
 	}
 	if err := setNativeOptionsShareParam(params, "transport_options", cfg.TransportOptions); err != nil {
 		return "", err
 	}
-	if err := setMapShareParam(params, "multiplex", cfg.MultiplexConfig); err != nil {
+	if err := setNativeOptionsShareParam(params, "multiplex", cfg.MultiplexConfig); err != nil {
 		return "", err
 	}
 
@@ -283,8 +283,8 @@ func buildVMESSURLShareLink(name string, cfg *models.VMESSConfig) (string, error
 	if cfg.Security != "" {
 		params.Set("encryption", cfg.Security)
 	}
-	if cfg.Network != "" {
-		params.Set("type", cfg.Network)
+	if network := models.NormalizeTransportType(cfg.Network); network != "" {
+		params.Set("type", network)
 	}
 	tlsMode := cfg.TLS
 	if tlsMode == "" {
@@ -341,14 +341,14 @@ func buildVMESSURLShareLink(name string, cfg *models.VMESSConfig) (string, error
 	}
 	mergeNativeTLSShareParams(params, cfg.TLSOptions)
 	mergeNativeTransportShareParams(params, cfg.TransportOptions)
-	mergeDialerShareParams(params, cfg.DialerOptions)
+	_ = mergeDialerShareParams(params, cfg.DialerOptions)
 	if err := setNativeOptionsShareParam(params, "tls_options", cfg.TLSOptions); err != nil {
 		return "", err
 	}
 	if err := setNativeOptionsShareParam(params, "transport_options", cfg.TransportOptions); err != nil {
 		return "", err
 	}
-	if err := setMapShareParam(params, "multiplex", cfg.MultiplexConfig); err != nil {
+	if err := setNativeOptionsShareParam(params, "multiplex", cfg.MultiplexConfig); err != nil {
 		return "", err
 	}
 	if encoded := params.Encode(); encoded != "" {
@@ -431,6 +431,7 @@ func effectiveVMessLegacyTransport(cfg *models.VMESSConfig) (network, headerType
 	if network == "" {
 		network = nativeString(options["type"])
 	}
+	network = models.NormalizeTransportType(network)
 	if path == "" {
 		path = nativeString(options["path"])
 	}
@@ -513,7 +514,7 @@ func vmessTransportOptionsNeedURL(options models.NativeOptions) bool {
 	if len(options) == 0 {
 		return false
 	}
-	transportType := strings.ToLower(nativeString(options["type"]))
+	transportType := models.NormalizeTransportType(nativeString(options["type"]))
 	allowed := map[string]struct{}{"type": {}}
 	switch transportType {
 	case "ws":
@@ -530,7 +531,7 @@ func vmessTransportOptionsNeedURL(options models.NativeOptions) bool {
 				return true
 			}
 		}
-	case "http", "h2":
+	case "http":
 		allowed["path"] = struct{}{}
 		allowed["host"] = struct{}{}
 		allowed["method"] = struct{}{}
@@ -560,19 +561,7 @@ func vmessFlatTransportNeedsURL(cfg *models.VMESSConfig) bool {
 	return len(cfg.HTTPPath) > 1
 }
 
-func setNativeOptionsShareParam(params url.Values, key string, options models.NativeOptions) error {
-	if len(options) == 0 {
-		return nil
-	}
-	raw, err := json.Marshal(options)
-	if err != nil {
-		return fmt.Errorf("marshal %s: %w", key, err)
-	}
-	params.Set(key, string(raw))
-	return nil
-}
-
-func setMapShareParam(params url.Values, key string, options map[string]interface{}) error {
+func setNativeOptionsShareParam(params url.Values, key string, options map[string]interface{}) error {
 	if len(options) == 0 {
 		return nil
 	}
@@ -592,8 +581,8 @@ func buildTrojanShareLink(name string, cfg *models.TrojanConfig) (string, error)
 	if cfg.Security != "" {
 		params.Set("security", cfg.Security)
 	}
-	if cfg.Network != "" {
-		params.Set("type", cfg.Network)
+	if network := models.NormalizeTransportType(cfg.Network); network != "" {
+		params.Set("type", network)
 	}
 	if cfg.Host != "" {
 		params.Set("host", cfg.Host)
@@ -624,14 +613,14 @@ func buildTrojanShareLink(name string, cfg *models.TrojanConfig) (string, error)
 	}
 	mergeNativeTLSShareParams(params, cfg.TLSOptions)
 	mergeNativeTransportShareParams(params, cfg.TransportOptions)
-	mergeDialerShareParams(params, cfg.DialerOptions)
+	_ = mergeDialerShareParams(params, cfg.DialerOptions)
 	if err := setNativeOptionsShareParam(params, "tls_options", cfg.TLSOptions); err != nil {
 		return "", err
 	}
 	if err := setNativeOptionsShareParam(params, "transport_options", cfg.TransportOptions); err != nil {
 		return "", err
 	}
-	if err := setMapShareParam(params, "multiplex", cfg.MultiplexConfig); err != nil {
+	if err := setNativeOptionsShareParam(params, "multiplex", cfg.MultiplexConfig); err != nil {
 		return "", err
 	}
 
@@ -666,11 +655,13 @@ func buildHysteria2ShareLink(name string, cfg *models.Hysteria2Config) (string, 
 	if cfg.BrutalDownMbps > 0 {
 		params.Set("brutal_down_mbps", strconv.Itoa(cfg.BrutalDownMbps))
 	}
-	if obfsType, obfsPassword := exportHysteria2Obfs(cfg.Obfs, cfg.ObfsPassword, cfg.SalamanderPassword); obfsType != "" {
-		params.Set("obfs", obfsType)
-		if obfsPassword != "" {
-			params.Set("obfs-password", obfsPassword)
-		}
+	obfs, err := effectiveHysteria2Obfs(cfg)
+	if err != nil {
+		return "", err
+	}
+	if obfs != nil {
+		params.Set("obfs", "salamander")
+		params.Set("obfs-password", obfs["password"].(string))
 	}
 	if cfg.SNI != "" {
 		params.Set("sni", cfg.SNI)
@@ -694,7 +685,7 @@ func buildHysteria2ShareLink(name string, cfg *models.Hysteria2Config) (string, 
 		params.Set("brutal_debug", "1")
 	}
 	mergeNativeTLSShareParams(params, cfg.TLSOptions)
-	mergeDialerShareParams(params, cfg.DialerOptions)
+	_ = mergeDialerShareParams(params, cfg.DialerOptions)
 	if err := setNativeOptionsShareParam(params, "tls_options", cfg.TLSOptions); err != nil {
 		return "", err
 	}
@@ -728,7 +719,7 @@ func buildTUICShareLink(name string, cfg *models.TUICConfig) (string, error) {
 	if cfg.InsecureSkipVerify {
 		params.Set("insecure", "1")
 	}
-	if cfg.ZeroRTTHandshake {
+	if cfg.ZeroRTTEnabled() {
 		params.Set("zero_rtt_handshake", "1")
 	}
 	if cfg.UDPOverStream {
@@ -744,7 +735,7 @@ func buildTUICShareLink(name string, cfg *models.TUICConfig) (string, error) {
 		params.Set("network", strings.Join([]string(cfg.Network), ","))
 	}
 	mergeNativeTLSShareParams(params, cfg.TLSOptions)
-	mergeDialerShareParams(params, cfg.DialerOptions)
+	_ = mergeDialerShareParams(params, cfg.DialerOptions)
 	if err := setNativeOptionsShareParam(params, "tls_options", cfg.TLSOptions); err != nil {
 		return "", err
 	}
@@ -782,7 +773,7 @@ func buildAnyTLSShareLink(name string, cfg *models.AnyTLSConfig) (string, error)
 		params.Set("min_idle_session", strconv.Itoa(cfg.MinIdleSession))
 	}
 	mergeNativeTLSShareParams(params, cfg.TLSOptions)
-	mergeDialerShareParams(params, cfg.DialerOptions)
+	_ = mergeDialerShareParams(params, cfg.DialerOptions)
 	if err := setNativeOptionsShareParam(params, "tls_options", cfg.TLSOptions); err != nil {
 		return "", err
 	}
@@ -816,7 +807,7 @@ func buildSOCKS5ShareLink(proxyType string, name string, cfg *models.SOCKS5Confi
 			params.Set("udp_over_tcp_version", strconv.Itoa(version))
 		}
 	}
-	mergeDialerShareParams(params, cfg.DialerOptions)
+	_ = mergeDialerShareParams(params, cfg.DialerOptions)
 	u.RawQuery = params.Encode()
 
 	u.Fragment = strings.TrimSpace(name)
@@ -854,7 +845,7 @@ func buildHTTPProxyShareLink(name string, cfg *models.HTTPProxyConfig) (string, 
 		}
 	}
 	mergeNativeTLSShareParams(q, cfg.TLSOptions)
-	mergeDialerShareParams(q, cfg.DialerOptions)
+	_ = mergeDialerShareParams(q, cfg.DialerOptions)
 	if err := setNativeOptionsShareParam(q, "tls_options", cfg.TLSOptions); err != nil {
 		return "", err
 	}
@@ -948,73 +939,12 @@ func buildWireGuardShareLink(name string, cfg *models.WireGuardConfig) (string, 
 	if cfg.InterfaceName != "" {
 		params.Set("interface_name", cfg.InterfaceName)
 	}
-	if cfg.Detour != "" {
-		params.Set("detour", cfg.Detour)
-	}
-	resolver, err := wireGuardDomainResolverValue(cfg)
+	dialer, err := wireGuardDialerOptions(cfg)
 	if err != nil {
 		return "", fmt.Errorf("invalid wireguard domain resolver: %w", err)
 	}
-	if resolverMap, ok := generatorOptionMap(resolver); ok && len(resolverMap) > 0 {
-		raw, marshalErr := json.Marshal(resolverMap)
-		if marshalErr != nil {
-			return "", fmt.Errorf("encode wireguard domain resolver: %w", marshalErr)
-		}
-		params.Set("domain_resolver_options", string(raw))
-	} else if resolverValue := nativeQueryValue(resolver); resolverValue != "" {
-		params.Set("domain_resolver", resolverValue)
-	}
-	if routingMark := nativeQueryValue(cfg.RoutingMark); routingMark != "" {
-		params.Set("routing_mark", routingMark)
-	}
-	if cfg.UDPFragment != nil {
-		if *cfg.UDPFragment {
-			params.Set("udp_fragment", "1")
-		} else {
-			params.Set("udp_fragment", "0")
-		}
-	}
-	if cfg.ConnectTimeout != "" {
-		params.Set("connect_timeout", cfg.ConnectTimeout)
-	}
-	if cfg.BindInterface != "" {
-		params.Set("bind_interface", cfg.BindInterface)
-	}
-	if cfg.Inet4BindAddress != "" {
-		params.Set("inet4_bind_address", cfg.Inet4BindAddress)
-	}
-	if cfg.Inet6BindAddress != "" {
-		params.Set("inet6_bind_address", cfg.Inet6BindAddress)
-	}
-	if cfg.ProtectPath != "" {
-		params.Set("protect_path", cfg.ProtectPath)
-	}
-	if cfg.ReuseAddr {
-		params.Set("reuse_addr", "1")
-	}
-	if cfg.NetNS != "" {
-		params.Set("netns", cfg.NetNS)
-	}
-	if cfg.TCPFastOpen {
-		params.Set("tcp_fast_open", "1")
-	}
-	if cfg.TCPMultiPath {
-		params.Set("tcp_multi_path", "1")
-	}
-	if cfg.NetworkStrategy != "" {
-		params.Set("network_strategy", cfg.NetworkStrategy)
-	}
-	if len(cfg.NetworkType) > 0 {
-		params.Set("network_type", strings.Join([]string(cfg.NetworkType), ","))
-	}
-	if len(cfg.FallbackNetworkType) > 0 {
-		params.Set("fallback_network_type", strings.Join([]string(cfg.FallbackNetworkType), ","))
-	}
-	if cfg.FallbackDelay != "" {
-		params.Set("fallback_delay", cfg.FallbackDelay)
-	}
-	if cfg.DomainStrategy != "" {
-		params.Set("domain_strategy", cfg.DomainStrategy)
+	if err := mergeDialerShareParams(params, dialer); err != nil {
+		return "", fmt.Errorf("encode wireguard domain resolver: %w", err)
 	}
 
 	u.RawQuery = params.Encode()
@@ -1058,37 +988,6 @@ func exportUDPOverTCP(raw any, compatibility models.NativeOptions) (bool, int) {
 	return enabled, version
 }
 
-func exportHysteria2Obfs(raw any, compatibilityPassword string, salamanderPassword string) (string, string) {
-	password := firstNonEmpty(compatibilityPassword, salamanderPassword)
-	switch typed := raw.(type) {
-	case string:
-		typeName := strings.ToLower(strings.TrimSpace(typed))
-		if typeName == "" || typeName == "none" {
-			return "", ""
-		}
-		// String form is form-managed; do not resurrect the historical
-		// salamander_password alias after an explicit password clear.
-		return typeName, compatibilityPassword
-	case map[string]any:
-		typeName := strings.ToLower(nativeString(typed["type"]))
-		if typeName == "" || typeName == "none" {
-			return "", ""
-		}
-		return typeName, firstNonEmpty(password, nativeString(typed["password"]))
-	case models.NativeOptions:
-		typeName := strings.ToLower(strings.TrimSpace(nativeString(typed["type"])))
-		if typeName == "" || typeName == "none" {
-			return "", ""
-		}
-		return typeName, firstNonEmpty(password, nativeString(typed["password"]))
-	default:
-		if password != "" {
-			return "salamander", password
-		}
-		return "", ""
-	}
-}
-
 func mergeNativeTLSShareParams(params url.Values, options models.NativeOptions) {
 	if len(options) == 0 {
 		return
@@ -1122,7 +1021,7 @@ func mergeNativeTransportShareParams(params url.Values, options models.NativeOpt
 	if len(options) == 0 {
 		return
 	}
-	setQueryIfEmpty(params, "type", nativeString(options["type"]))
+	setQueryIfEmpty(params, "type", models.NormalizeTransportType(nativeString(options["type"])))
 	setQueryIfEmpty(params, "path", nativeString(options["path"]))
 	if hosts := nativeStringSlice(options["host"]); len(hosts) > 0 {
 		setQueryIfEmpty(params, "host", strings.Join(hosts, ","))
@@ -1145,7 +1044,7 @@ func mergeNativeTransportShareParams(params url.Values, options models.NativeOpt
 	}
 }
 
-func mergeDialerShareParams(params url.Values, options models.DialerOptions) {
+func mergeDialerShareParams(params url.Values, options models.DialerOptions) error {
 	setQueryIfEmpty(params, "detour", options.Detour)
 	setQueryIfEmpty(params, "bind_interface", options.BindInterface)
 	setQueryIfEmpty(params, "inet4_bind_address", options.Inet4BindAddress)
@@ -1170,13 +1069,6 @@ func mergeDialerShareParams(params url.Values, options models.DialerOptions) {
 			setQueryIfEmpty(params, "udp_fragment", "0")
 		}
 	}
-	if resolver := nativeMap(options.DomainResolver); len(resolver) > 0 {
-		if raw, err := json.Marshal(resolver); err == nil {
-			setQueryIfEmpty(params, "domain_resolver_options", string(raw))
-		}
-	} else {
-		setQueryIfEmpty(params, "domain_resolver", nativeQueryValue(options.DomainResolver))
-	}
 	setQueryIfEmpty(params, "network_strategy", options.NetworkStrategy)
 	if len(options.NetworkType) > 0 {
 		setQueryIfEmpty(params, "network_type", strings.Join([]string(options.NetworkType), ","))
@@ -1186,6 +1078,14 @@ func mergeDialerShareParams(params url.Values, options models.DialerOptions) {
 	}
 	setQueryIfEmpty(params, "fallback_delay", options.FallbackDelay)
 	setQueryIfEmpty(params, "domain_strategy", options.DomainStrategy)
+	if resolver := nativeMap(options.DomainResolver); len(resolver) > 0 {
+		if params.Get("domain_resolver_options") == "" {
+			return setNativeOptionsShareParam(params, "domain_resolver_options", resolver)
+		}
+	} else {
+		setQueryIfEmpty(params, "domain_resolver", nativeQueryValue(options.DomainResolver))
+	}
+	return nil
 }
 
 func hasDialerShareOptions(options models.DialerOptions) bool {

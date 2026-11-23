@@ -2,9 +2,12 @@ package api
 
 import (
 	"context"
+	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -12,6 +15,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"golang.org/x/crypto/bcrypt"
+	"modernc.org/sqlite"
 )
 
 func createTestAdminSession(t *testing.T, handler *Handler) (string, time.Time, error) {
@@ -21,7 +25,7 @@ func createTestAdminSession(t *testing.T, handler *Handler) (string, time.Time, 
 	if err := handler.db.QueryRowContext(ctx, "SELECT auth_generation FROM settings WHERE singleton_key = 1").Scan(&generation); err != nil {
 		t.Fatalf("query auth generation: %v", err)
 	}
-	return createAdminSessionWithGeneration(ctx, nil, handler.db, generation)
+	return createAdminSessionWithGeneration(ctx, handler.db, generation, "", "")
 }
 
 func TestLoginAndPanelPasswordChangeUseDatabaseWhenEnvironmentPasswordExists(t *testing.T) {
@@ -161,23 +165,24 @@ func TestLogoutRevokesCurrentSession(t *testing.T) {
 		t.Fatalf("create session: %v", err)
 	}
 
+	router := gin.New()
+	router.POST("/api/logout", h.AuthMiddleware(), func(ctx *gin.Context) {
+		ctx.Request.Header.Del("Authorization")
+	}, h.Logout)
 	rec := httptest.NewRecorder()
-	ctx, _ := gin.CreateTestContext(rec)
 	req := httptest.NewRequest(http.MethodPost, "/api/logout", nil)
-	req.Header.Set("Authorization", token)
-	ctx.Request = req
-
-	h.Logout(ctx)
+	req.Header.Set("Authorization", "Bearer "+token)
+	router.ServeHTTP(rec, req)
 
 	if rec.Code != http.StatusOK {
 		t.Fatalf("unexpected status: %d", rec.Code)
 	}
 
-	ok, err := h.isValidAdminSessionContext(context.Background(), token)
+	hash, err := h.verifiedAdminSessionHash(context.Background(), token)
 	if err != nil {
 		t.Fatalf("validate session: %v", err)
 	}
-	if ok {
+	if hash != "" {
 		t.Fatalf("expected session to be revoked")
 	}
 }
@@ -238,11 +243,94 @@ func TestAdminSessionExpiresAtBoundary(t *testing.T) {
 	); err != nil {
 		t.Fatalf("seed boundary session: %v", err)
 	}
-	valid, err := h.isValidAdminSessionContext(context.Background(), token)
+	hash, err := h.verifiedAdminSessionHash(context.Background(), token)
 	if err != nil {
 		t.Fatalf("validate boundary session: %v", err)
 	}
-	if valid {
+	if hash != "" {
 		t.Fatalf("session remained valid at its expiration timestamp")
+	}
+}
+
+func TestConcurrentPasswordChangeRejectsStaleLoginAndKeepsNewSession(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	handler := newTestHandler(t, nil)
+	handler.db.SetMaxOpenConns(1)
+	handler.loginLimiter = newLoginRateLimiter(time.Minute, 10, time.Minute, 2)
+	const oldPassword = "old-admin-fixture"
+	const newPassword = "new-admin-fixture"
+	oldHash, err := bcrypt.GenerateFromPassword([]byte(oldPassword), bcrypt.MinCost)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := handler.db.Exec(`
+		UPDATE settings SET admin_password = ?, auth_generation = 7 WHERE singleton_key = 1
+	`, string(oldHash)); err != nil {
+		t.Fatal(err)
+	}
+
+	oldComparisonStarted := make(chan struct{})
+	releaseOldComparison := make(chan struct{})
+	var releaseOnce sync.Once
+	defer releaseOnce.Do(func() { close(releaseOldComparison) })
+	handler.comparePassword = func(hash, candidate []byte) error {
+		if string(candidate) == oldPassword {
+			close(oldComparisonStarted)
+			<-releaseOldComparison
+		}
+		return bcrypt.CompareHashAndPassword(hash, candidate)
+	}
+	oldResult := make(chan *httptest.ResponseRecorder, 1)
+	go func() {
+		oldResult <- postJSON(t, handler.Login, http.MethodPost, "/api/login", map[string]string{"password": oldPassword}, nil)
+	}()
+	select {
+	case <-oldComparisonStarted:
+	case <-time.After(5 * time.Second):
+		t.Fatal("old login did not reach password comparison")
+	}
+
+	update := postJSON(t, handler.UpdateSettings, http.MethodPut, "/api/settings", map[string]string{"admin_password": newPassword}, nil)
+	if update.Code != http.StatusOK {
+		t.Fatalf("password update failed: %d %s", update.Code, update.Body.String())
+	}
+	newResult := postJSON(t, handler.Login, http.MethodPost, "/api/login", map[string]string{"password": newPassword}, nil)
+	if newResult.Code != http.StatusOK {
+		t.Fatalf("new login failed: %d %s", newResult.Code, newResult.Body.String())
+	}
+	var session struct {
+		Token string `json:"token"`
+	}
+	if err := json.Unmarshal(newResult.Body.Bytes(), &session); err != nil || session.Token == "" {
+		t.Fatalf("new login did not issue a session: %v", err)
+	}
+
+	releaseOnce.Do(func() { close(releaseOldComparison) })
+	select {
+	case response := <-oldResult:
+		if response.Code != http.StatusUnauthorized {
+			t.Fatalf("stale login returned %d, want 401", response.Code)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("stale login did not finish")
+	}
+	if hash, err := handler.verifiedAdminSessionHash(context.Background(), session.Token); err != nil || hash == "" {
+		t.Fatalf("stale login invalidated the new session: %v", err)
+	}
+	var count int
+	if err := handler.db.QueryRow("SELECT COUNT(*) FROM admin_sessions").Scan(&count); err != nil || count != 1 {
+		t.Fatalf("expected only the new session, got %d: %v", count, err)
+	}
+}
+
+func TestCreateAdminSessionPreservesDatabaseError(t *testing.T) {
+	handler := newTestHandler(t, nil)
+	if _, err := handler.db.Exec("DROP TABLE admin_sessions"); err != nil {
+		t.Fatal(err)
+	}
+	_, _, err := createTestAdminSession(t, handler)
+	var sqliteErr *sqlite.Error
+	if !errors.As(err, &sqliteErr) {
+		t.Fatalf("expected original SQLite error, got %v", err)
 	}
 }

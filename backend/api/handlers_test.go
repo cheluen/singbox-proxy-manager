@@ -67,10 +67,10 @@ func newTestHandler(t *testing.T, checker func(string, string, string) (*service
 		t.Fatalf("write fake sing-box binary: %v", err)
 	}
 	t.Setenv("SINGBOX_BINARY", fakeBinary)
-	t.Setenv("SBPM_SKIP_PORT_AVAILABILITY_CHECK", "1")
 	t.Setenv("SBPM_SINGBOX_STARTUP_GRACE", "10ms")
 	svc := services.NewSingBoxService(t.TempDir())
 	h := NewHandler(db, svc)
+	h.skipPortAvailabilityCheck = true
 	if checker != nil {
 		h.checkProxyIP = func(_ context.Context, proxyAddr, username, password string) (*services.IPInfo, error) {
 			return checker(proxyAddr, username, password)
@@ -81,6 +81,17 @@ func newTestHandler(t *testing.T, checker func(string, string, string) (*service
 		_ = db.Close()
 	})
 	return h
+}
+
+func writeTestRuntimeConfig(t *testing.T, service *services.SingBoxService, nodes []models.ProxyNode) {
+	t.Helper()
+	data, err := service.BuildGlobalConfigContext(context.Background(), nodes)
+	if err != nil {
+		t.Fatalf("build initial config: %v", err)
+	}
+	if err := os.WriteFile(service.ConfigPath(), data, 0o600); err != nil {
+		t.Fatalf("write initial config: %v", err)
+	}
 }
 
 func insertTestNode(t *testing.T, db *sql.DB) int {
@@ -387,7 +398,7 @@ func TestRestartRuntimeReappliesDatabaseState(t *testing.T) {
 	if err != nil {
 		t.Fatalf("load expected database state: %v", err)
 	}
-	expectedConfig, err := handler.singBoxService.BuildGlobalConfig(nodes)
+	expectedConfig, err := handler.singBoxService.BuildGlobalConfigContext(context.Background(), nodes)
 	if err != nil {
 		t.Fatalf("build expected runtime config: %v", err)
 	}
@@ -414,13 +425,13 @@ func TestRestartRuntimeFailurePreservesPreviousRuntime(t *testing.T) {
 			}))
 			t.Cleanup(func() { _ = service.Stop() })
 			handler.singBoxService = service
-			handler.nodeMutations = NewNodeMutationCoordinator(handler.db, service)
+			handler.nodeMutations = newNodeMutationCoordinator(handler.db, service)
 			response := postJSON(t, handler.RestartRuntime, http.MethodPost, "/api/runtime/restart", nil, nil)
 			if response.Code != http.StatusOK {
 				t.Fatalf("初次启动失败：%s", response.Body.String())
 			}
 			before := service.RuntimeStatus()
-			configPath := filepath.Join(configDir, "config.json")
+			configPath := service.ConfigPath()
 			previous, err := os.ReadFile(configPath)
 			if err != nil {
 				t.Fatal(err)
@@ -843,23 +854,23 @@ func TestBatchImportReturnsEveryFailureWhenAllSourcesAreRejected(t *testing.T) {
 }
 
 func TestNextBindableInboundPortExhaustion(t *testing.T) {
-	t.Setenv("SBPM_SKIP_PORT_AVAILABILITY_CHECK", "0")
+	handler := NewHandler(nil, nil)
 	listener, err := net.Listen("tcp", ":65535")
 	if err != nil {
 		t.Skipf("cannot reserve final port: %v", err)
 	}
 	t.Cleanup(func() { _ = listener.Close() })
-	if port, err := nextBindableInboundPort(65535, nil); err == nil || port != 0 {
+	if port, err := handler.nextBindableInboundPort(65535, nil); err == nil || port != 0 {
 		t.Fatalf("occupied final port was allocated: port=%d err=%v", port, err)
 	}
-	if port, err := nextBindableInboundPort(65535, map[int]struct{}{65535: {}}); err == nil || port != 0 {
+	if port, err := handler.nextBindableInboundPort(65535, map[int]struct{}{65535: {}}); err == nil || port != 0 {
 		t.Fatalf("used final port was allocated: port=%d err=%v", port, err)
 	}
 }
 
 func TestCreateNodeAutoAssignSkipsSystemOccupiedPort(t *testing.T) {
 	handler := newTestHandler(t, nil)
-	t.Setenv("SBPM_SKIP_PORT_AVAILABILITY_CHECK", "0")
+	handler.skipPortAvailabilityCheck = false
 	listener, err := net.Listen("tcp", ":0")
 	if err != nil {
 		t.Fatal(err)
@@ -890,7 +901,7 @@ func TestCreateNodeAutoAssignSkipsSystemOccupiedPort(t *testing.T) {
 
 func TestBatchImportNodesAutoAssignSkipsSystemOccupiedPorts(t *testing.T) {
 	handler := newTestHandler(t, nil)
-	t.Setenv("SBPM_SKIP_PORT_AVAILABILITY_CHECK", "0")
+	handler.skipPortAvailabilityCheck = false
 	listener, err := net.Listen("tcp", ":0")
 	if err != nil {
 		t.Fatal(err)
@@ -1482,6 +1493,75 @@ func TestBatchDeleteNodesPreserveInboundPortsKeepsRemainingPorts(t *testing.T) {
 	}
 }
 
+func TestBatchDeleteRejectsInvalidOrMissingIDsWithoutDeleting(t *testing.T) {
+	handler := newTestHandler(t, nil)
+	existingID := insertTestNode(t, handler.db)
+	for _, testCase := range []struct {
+		ids  []int
+		code int
+	}{
+		{ids: []int{existingID, existingID}, code: http.StatusBadRequest},
+		{ids: []int{existingID, 0}, code: http.StatusBadRequest},
+		{ids: []int{existingID, existingID + 100}, code: http.StatusNotFound},
+	} {
+		response := postJSON(t, handler.BatchDeleteNodes, http.MethodPost, "/api/nodes/batch-delete", map[string][]int{"ids": testCase.ids}, nil)
+		if response.Code != testCase.code {
+			t.Fatalf("delete IDs %v returned %d, want %d", testCase.ids, response.Code, testCase.code)
+		}
+		if _, err := models.LoadProxyNode(context.Background(), handler.db, existingID); err != nil {
+			t.Fatalf("rejected batch changed existing node: %v", err)
+		}
+	}
+}
+
+func TestBatchExportKeepsOrderAndPartialResultsAcrossChunks(t *testing.T) {
+	handler := newTestHandler(t, nil)
+	firstID := insertTestNodeWithPortAndOrder(t, handler.db, "first", 30001, 0)
+	secondID := insertTestNodeWithPortAndOrder(t, handler.db, "second", 30002, 1)
+	missingID := secondID + 100
+	ids := make([]int, nodeIDsPerQuery)
+	for index := range ids {
+		ids[index] = secondID
+	}
+	ids = append(ids, missingID, firstID, secondID)
+	response := postJSON(t, handler.BatchExportNodes, http.MethodPost, "/api/nodes/batch-export", map[string][]int{"ids": ids}, nil)
+	var result struct {
+		Success int `json:"success"`
+		Failed  int `json:"failed"`
+		Results []struct {
+			ID      int    `json:"id"`
+			Success bool   `json:"success"`
+			Name    string `json:"name"`
+			Error   string `json:"error"`
+		}
+	}
+	if err := json.Unmarshal(response.Body.Bytes(), &result); err != nil {
+		t.Fatal(err)
+	}
+	if response.Code != http.StatusOK || result.Success != len(ids)-1 || result.Failed != 1 || len(result.Results) != len(ids) {
+		t.Fatalf("unexpected export summary: status=%d success=%d failed=%d results=%d", response.Code, result.Success, result.Failed, len(result.Results))
+	}
+	for index, item := range result.Results {
+		if item.ID != ids[index] || item.Success != (item.ID != missingID) {
+			t.Fatalf("export result %d was not preserved: %+v", index, item)
+		}
+		switch item.ID {
+		case firstID:
+			if item.Name != "first" {
+				t.Fatalf("unexpected first node: %+v", item)
+			}
+		case secondID:
+			if item.Name != "second" {
+				t.Fatalf("unexpected second node: %+v", item)
+			}
+		case missingID:
+			if item.Error != "node not found" {
+				t.Fatalf("unexpected missing node error: %+v", item)
+			}
+		}
+	}
+}
+
 func TestCreateNodeRejectsUsernameWithPlus(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	handler := newTestHandler(t, func(proxyAddr, username, password string) (*services.IPInfo, error) {
@@ -1579,10 +1659,10 @@ func newTestHandlerWithKernelScript(t *testing.T, script string) *Handler {
 		t.Fatalf("write fake sing-box binary: %v", err)
 	}
 	t.Setenv("SINGBOX_BINARY", fakeBinary)
-	t.Setenv("SBPM_SKIP_PORT_AVAILABILITY_CHECK", "1")
 	t.Setenv("SBPM_SINGBOX_STARTUP_GRACE", "10ms")
 	svc := services.NewSingBoxService(t.TempDir())
 	h := NewHandler(db, svc)
+	h.skipPortAvailabilityCheck = true
 	t.Cleanup(func() {
 		_ = svc.Stop()
 		_ = db.Close()

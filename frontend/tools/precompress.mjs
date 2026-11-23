@@ -1,11 +1,11 @@
-// 构建后预压缩：为文本类静态资源生成 .gz / .br，静态服务器可直接按 Accept-Encoding 返回。
+// 构建后预压缩静态资源。HTML 入口由 Go 写入运行配置后压缩。
 import { readdirSync, readFileSync, statSync, writeFileSync } from 'node:fs'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { brotliCompressSync, constants, gzipSync } from 'node:zlib'
 
 const DIST = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', 'dist')
-const COMPRESSIBLE = new Set(['.js', '.css', '.html', '.svg', '.json', '.txt', '.map'])
+const COMPRESSIBLE = new Set(['.js', '.css', '.svg', '.json', '.txt', '.map'])
 const MIN_BYTES = 1024
 
 const walk = (dir) =>

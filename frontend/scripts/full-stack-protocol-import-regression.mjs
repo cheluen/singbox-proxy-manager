@@ -1,5 +1,6 @@
 import { legacyClick as clickVisibleButton, editNode as openNodeEditor, waitOverlaysClosed, toggle, clickControl, setInput as setControlInput } from './ui-driver.mjs'
 import { findTestPortRange } from './test-ports.mjs'
+import { findBrowserExecutable, stopProcess } from './test-harness.mjs'
 import fs from 'node:fs'
 import http from 'node:http'
 import net from 'node:net'
@@ -78,26 +79,6 @@ const setInput = async (page, selector, value) => {
   }, value)
 }
 
-const getBrowserExecutablePath = () => {
-  if (process.env.PUPPETEER_EXECUTABLE_PATH) {
-    return process.env.PUPPETEER_EXECUTABLE_PATH
-  }
-  for (const candidate of [
-    '/usr/bin/google-chrome',
-    '/usr/bin/google-chrome-stable',
-    '/usr/bin/chromium-browser',
-    '/usr/bin/chromium',
-  ]) {
-    try {
-      fs.accessSync(candidate, fs.constants.X_OK)
-      return candidate
-    } catch {
-      // Continue looking for an installed browser.
-    }
-  }
-  return undefined
-}
-
 const waitForHTTP = async (url, timeoutMs) => {
   const deadline = Date.now() + timeoutMs
   while (Date.now() < deadline) {
@@ -111,18 +92,6 @@ const waitForHTTP = async (url, timeoutMs) => {
   }
   throw new Error(`Timed out waiting for ${url}`)
 }
-
-const stopProcess = async (child) => {
-  if (!child || child.exitCode !== null) return
-  child.kill('SIGTERM')
-  await Promise.race([
-    new Promise((resolve) => child.once('exit', resolve)),
-    sleep(8000).then(() => {
-      if (child.exitCode === null) child.kill('SIGKILL')
-    }),
-  ])
-}
-
 
 if (!BACKEND_BINARY || !SINGBOX_BINARY) {
   throw new Error('SBPM_E2E_BACKEND_BINARY and SINGBOX_TEST_BINARY are required')
@@ -167,7 +136,7 @@ try {
   }
   browser = await puppeteer.launch({
     headless: true,
-    executablePath: getBrowserExecutablePath(),
+    executablePath: findBrowserExecutable(),
     args: ['--no-sandbox', '--disable-setuid-sandbox'],
   })
   const page = await browser.newPage()

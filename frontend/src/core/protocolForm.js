@@ -1,19 +1,6 @@
-// 仅把组件闭包改造成与 UI 无关的工厂函数，便于任意表单外观复用。
-export const proxyTypes = [
-  { value: 'direct', label: 'Direct (Local)' },
-  { value: 'ss', label: 'Shadowsocks' },
-  { value: 'vless', label: 'VLESS' },
-  { value: 'vmess', label: 'VMess' },
-  { value: 'hy2', label: 'Hysteria2' },
-  { value: 'tuic', label: 'TUIC' },
-  { value: 'trojan', label: 'Trojan' },
-  { value: 'anytls', label: 'AnyTLS' },
-  { value: 'socks5', label: 'SOCKS5' },
-  { value: 'socks5h', label: 'SOCKS5H' },
-  { value: 'http', label: 'HTTP Proxy' },
-  { value: 'wireguard', label: 'Cloudflare WireGuard' },
-]
-export const splitMultilineList = (rawValue) => {
+export { proxyTypes } from './protocolSchema.js'
+
+const splitMultilineList = (rawValue) => {
   if (typeof rawValue !== 'string') {
     return []
   }
@@ -23,10 +10,10 @@ export const splitMultilineList = (rawValue) => {
     .filter(Boolean)
 }
 
-export const formatMultilineList = (items) =>
+const formatMultilineList = (items) =>
   Array.isArray(items) && items.length > 0 ? items.join('\n') : ''
 
-export const parseReservedByte = (value) => {
+const parseReservedByte = (value) => {
   const normalized = String(value).trim()
   if (!/^\d+$/.test(normalized)) {
     throw new Error('Reserved bytes must be integers between 0 and 255')
@@ -38,7 +25,7 @@ export const parseReservedByte = (value) => {
   return numeric
 }
 
-export const decodeReservedBase64 = (rawValue) => {
+const decodeReservedBase64 = (rawValue) => {
   const normalized = rawValue
     .trim()
     .replace(/-/g, '+')
@@ -89,7 +76,7 @@ export const parseReservedInput = (rawValue) => {
   throw new Error('Reserved bytes must be a numeric array, list, or base64 string')
 }
 
-export const formatReservedInput = (items) => {
+const formatReservedInput = (items) => {
   if (items == null || items === '') {
     return ''
   }
@@ -123,15 +110,15 @@ export const parsePeersJSON = (rawValue) => {
   })
 }
 
-export const isPlainObject = (value) =>
+const isPlainObject = (value) =>
   Boolean(value) && typeof value === 'object' && !Array.isArray(value)
 
-export const hasOwn = (value, key) =>
+const hasOwn = (value, key) =>
   Boolean(value) && Object.prototype.hasOwnProperty.call(value, key)
 
 export const normalizeClearedSelect = (value) => value ?? ''
 
-export const nativeStringList = (value) => {
+const nativeStringList = (value) => {
   if (Array.isArray(value)) {
     return value.filter((item) => typeof item === 'string')
   }
@@ -141,13 +128,13 @@ export const nativeStringList = (value) => {
   return []
 }
 
-export const nativeHeaderHost = (headers) => {
+const nativeHeaderHost = (headers) => {
   if (!isPlainObject(headers)) return ''
   const key = Object.keys(headers).find((name) => name.toLowerCase() === 'host')
   return key && typeof headers[key] === 'string' ? headers[key] : ''
 }
 
-export const hydrateNativeCompatibilityForForm = (type, config) => {
+const hydrateNativeCompatibilityForForm = (type, config) => {
   const normalized = { ...config }
   const tls = isPlainObject(config.tls_options) ? config.tls_options : null
   if (tls) {
@@ -170,10 +157,6 @@ export const hydrateNativeCompatibilityForForm = (type, config) => {
     if (!hasOwn(config, insecureKey) && typeof tls.insecure === 'boolean') {
       normalized[insecureKey] = tls.insecure
     }
-    if (type === 'tuic' && !hasOwn(config, 'disable_sni') && typeof tls.disable_sni === 'boolean') {
-      normalized.disable_sni = tls.disable_sni
-    }
-
     const reality = isPlainObject(tls.reality) ? tls.reality : null
     const realityEnabled = reality?.enabled === true
     if (type === 'vless') {
@@ -224,15 +207,6 @@ export const hydrateNativeCompatibilityForForm = (type, config) => {
           const host = nativeHeaderHost(transport.headers)
           if (host) normalized.host = host
         }
-        if (!hasOwn(config, 'headers') && isPlainObject(transport.headers)) {
-          normalized.headers = { ...transport.headers }
-        }
-        if (!hasOwn(config, 'max_early_data') && Number.isFinite(Number(transport.max_early_data))) {
-          normalized.max_early_data = Number(transport.max_early_data)
-        }
-        if (!hasOwn(config, 'early_data_header') && typeof transport.early_data_header_name === 'string') {
-          normalized.early_data_header = transport.early_data_header_name
-        }
       } else if (network === 'grpc' && !hasOwn(config, 'service_name') && typeof transport.service_name === 'string') {
         normalized.service_name = transport.service_name
       } else if (network === 'http') {
@@ -247,12 +221,6 @@ export const hydrateNativeCompatibilityForForm = (type, config) => {
           normalized.method = transport.method
         }
       } else if (network === 'httpupgrade') {
-        if (!hasOwn(config, 'http_upgrade_path') && typeof transport.path === 'string') {
-          normalized.http_upgrade_path = transport.path
-        }
-        if (!hasOwn(config, 'http_upgrade_host') && typeof transport.host === 'string') {
-          normalized.http_upgrade_host = transport.host
-        }
         if (!hasOwn(config, 'path') && typeof transport.path === 'string') {
           normalized.path = transport.path
         }
@@ -377,6 +345,13 @@ export function createProtocolFormModel(node, { isUpstreamEditor = false, isFiel
     delete normalizedConfig.insecure
   }
 
+  if (node?.type === 'tuic') {
+    normalizedConfig.zero_rtt_handshake = Boolean(
+      normalizedConfig.zero_rtt_handshake ?? normalizedConfig.reduce_rtt
+    )
+    delete normalizedConfig.reduce_rtt
+  }
+
   const initialValues = {
     name: node?.name || '',
     remark: node?.remark || '',
@@ -443,6 +418,11 @@ export function createProtocolFormModel(node, { isUpstreamEditor = false, isFiel
       const finalized = { ...config }
       delete finalized.brutal_up_mbps
       delete finalized.brutal_down_mbps
+      return finalized
+    }
+    if (type === 'tuic' && !config.zero_rtt_handshake) {
+      const finalized = { ...config }
+      delete finalized.reduce_rtt
       return finalized
     }
     if (type !== 'vless' || config.security === 'reality') {
@@ -594,9 +574,8 @@ export function createProtocolFormModel(node, { isUpstreamEditor = false, isFiel
 
       case 'wireguard': {
         const peers = parsePeersJSON(values.wireguard_peers_json)
-        const reserved = parseReservedInput(values.wireguard_reserved)
         const usesPeerArray = peers.length > 0
-		const hadPeerArray = Array.isArray(initialConfig.peers)
+        const hadPeerArray = Array.isArray(initialConfig.peers)
         return {
           ...config,
           // Endpoint-format peer arrays take precedence over the legacy flat
@@ -612,7 +591,7 @@ export function createProtocolFormModel(node, { isUpstreamEditor = false, isFiel
           allowed_ips: usesPeerArray
             ? undefined
             : splitMultilineList(values.wireguard_allowed_ips),
-          reserved: usesPeerArray ? undefined : reserved,
+          reserved: usesPeerArray ? undefined : parseReservedInput(values.wireguard_reserved),
           system_interface: values.wireguard_system_interface || false,
           interface_name: values.wireguard_interface_name || '',
           mtu: values.wireguard_mtu || 0,

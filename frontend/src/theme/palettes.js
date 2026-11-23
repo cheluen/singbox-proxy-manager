@@ -1,13 +1,11 @@
-// 暮色单一主题令牌：CSS 与组件库共用。
+// 暮色单一暗色主题令牌：CSS 变量与 Ant Design 共用。
 const FONT_CJK = '"PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", "Noto Sans SC", "Source Han Sans SC", sans-serif'
 const FONT_MONO = '"JetBrains Mono Variable", "SFMono-Regular", Menlo, Consolas, monospace'
 
 export const THEMES = {
   dusk: {
     id: 'dusk',
-    dark: true,
     fontUI: `"Inter Variable", ${FONT_CJK}`,
-    fontDisplay: `"Inter Variable", ${FONT_CJK}`,
     radius: 8,
     colors: {
       bg: '#1E2125',
@@ -39,20 +37,6 @@ export const THEMES = {
   },
 }
 
-const luminance = (hex) => {
-  const value = Number.parseInt(hex.slice(1), 16)
-  const channel = (shift) => {
-    const c = ((value >> shift) & 255) / 255
-    return c <= 0.04045 ? c / 12.92 : ((c + 0.055) / 1.055) ** 2.4
-  }
-  return 0.2126 * channel(16) + 0.7152 * channel(8) + 0.0722 * channel(0)
-}
-const ratio = (a, b) => (Math.max(a, b) + 0.05) / (Math.min(a, b) + 0.05)
-export const readableOn = (hex) => {
-  const l = luminance(hex)
-  return ratio(l, 1) >= ratio(l, luminance('#0B0B0B')) ? '#FFFFFF' : '#0B0B0B'
-}
-
 const kebab = (key) => key.replace(/[A-Z0-9]/g, (ch) => `-${ch.toLowerCase()}`)
 
 // 生成写到 :root 上的 CSS 变量（--bg、--accent-soft、--ink-2 …）。
@@ -61,17 +45,12 @@ export const themeToCssVars = (theme) => {
   for (const [key, value] of Object.entries(theme.colors)) {
     vars[`--${kebab(key)}`] = value
   }
-  // 状态色块上的文字颜色：白或近黑，取对比度更高的一个。
-  for (const key of ['ok', 'warn', 'bad', 'muted']) {
-    vars[`--${key}-on`] = readableOn(theme.colors[key])
-  }
   vars['--radius'] = `${theme.radius}px`
   vars['--radius-sm'] = `${Math.max(4, theme.radius - 4)}px`
   vars['--radius-lg'] = `${theme.radius + 6}px`
   vars['--shadow-1'] = theme.shadow1
   vars['--shadow-2'] = theme.shadow2
   vars['--font-ui'] = theme.fontUI
-  vars['--font-display'] = theme.fontDisplay
   vars['--font-mono'] = FONT_MONO
   return vars
 }
@@ -96,7 +75,7 @@ export const themeToAntdTokens = (theme) => {
       colorBgBase: c.surface,
       colorBgLayout: c.bg,
       colorBgContainer: c.surface,
-      colorBgElevated: theme.dark ? c.surface2 : c.surface,
+      colorBgElevated: c.surface2,
       colorBorder: c.lineStrong,
       colorBorderSecondary: c.line,
       colorSplit: c.line,
@@ -125,20 +104,20 @@ export const themeToAntdTokens = (theme) => {
         primaryShadow: 'none',
         defaultShadow: 'none',
         dangerShadow: 'none',
-        dangerColor: theme.dark ? c.bg : '#FFFFFF',
-        colorError: theme.dark ? c.bad : c.badInk,
-        colorErrorHover: theme.dark ? c.badInk : c.bad,
+        dangerColor: c.bg,
+        colorError: c.bad,
+        colorErrorHover: c.badInk,
         defaultBg: c.surface,
         defaultBorderColor: c.lineStrong,
         defaultColor: c.ink,
       },
-      Switch: { colorPrimary: c.accent, colorPrimaryHover: c.accentStrong, handleBg: theme.dark ? c.bg : '#FFFFFF', colorTextQuaternary: c.muted, colorTextTertiary: c.ink3 },
+      Switch: { colorPrimary: c.accent, colorPrimaryHover: c.accentStrong, handleBg: c.bg, colorTextQuaternary: c.muted, colorTextTertiary: c.ink3 },
       Modal: { contentBg: c.surface, headerBg: c.surface, footerBg: c.surface, titleFontSize: 17 },
-      Input: { activeShadow: `0 0 0 3px ${c.accentSoft}`, colorBgContainer: theme.dark ? c.bg2 : '#FFFFFF' },
-      InputNumber: { activeShadow: `0 0 0 3px ${c.accentSoft}`, colorBgContainer: theme.dark ? c.bg2 : '#FFFFFF' },
-      Select: { colorBgContainer: theme.dark ? c.bg2 : '#FFFFFF', optionSelectedBg: c.accentSoft },
+      Input: { activeShadow: `0 0 0 3px ${c.accentSoft}`, colorBgContainer: c.bg2 },
+      InputNumber: { activeShadow: `0 0 0 3px ${c.accentSoft}`, colorBgContainer: c.bg2 },
+      Select: { colorBgContainer: c.bg2, optionSelectedBg: c.accentSoft },
       Segmented: { trackBg: c.bg2, itemSelectedBg: c.surface, itemSelectedColor: c.ink },
-      Tooltip: { colorBgSpotlight: theme.dark ? '#0F1113' : c.ink, colorTextLightSolid: theme.dark ? c.ink : '#FFFFFF' },
+      Tooltip: { colorBgSpotlight: '#0F1113', colorTextLightSolid: c.ink },
       Dropdown: { controlItemBgHover: c.surface2 },
       Checkbox: { colorPrimary: c.accent, colorPrimaryHover: c.accentStrong },
       Tabs: { itemSelectedColor: c.ink, itemColor: c.ink3, inkBarColor: c.accent, itemHoverColor: c.ink },
