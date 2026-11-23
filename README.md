@@ -10,13 +10,24 @@
     <img src="https://img.shields.io/badge/sing--box-1.12.12-orange.svg" alt="sing-box 1.12.12" />
     <img src="https://img.shields.io/badge/Go-1.26.11-00ADD8.svg" alt="Go 1.26.11" />
   </p>
+
+  <p>
+    <a href="#免责声明">免责声明</a> ·
+    <a href="#产品简介与功能展示">功能展示</a> ·
+    <a href="#真实操作演示">操作演示</a> ·
+    <a href="#支持的协议一览">支持协议</a> ·
+    <a href="#部署指南">部署指南</a> ·
+    <a href="#三步快速上手">快速上手</a> ·
+    <a href="#进阶技术文档">技术文档</a> ·
+    <a href="#开源许可证">许可证</a>
+  </p>
 </div>
 
 ---
 
+## 免责声明
+
 > [!WARNING]
-> **免责声明**
->
 > 本项目仅用于网络协议技术学习、跨地域网络测试与合法合规的自建代理运维管理。
 > - 本项目**不提供**任何代理节点、订阅服务或穿透工具；项目源码与文档中的所有地址与配置均为演示占位数据。
 > - 请严格遵守您所在国家或地区的法律法规，**严禁**将本项目用于任何违法违规或未获授权的网络活动。
@@ -24,7 +35,7 @@
 
 ---
 
-## 一、产品简介与功能展示
+## 产品简介与功能展示
 
 **SingBox Proxy Manager** 是一个自带 Web 管理面板的 `sing-box` 代理转发管理系统。
 
@@ -93,16 +104,16 @@
 
 ---
 
-## 二、部署指南（新手友好）
+## 部署指南
 
 根据你的服务器环境任选一种方式即可，**两分钟内即可跑起来**：
 
 | 部署方式 | 适合人群 | 系统/架构要求 |
 | --- | --- | --- |
-| **方式一：Docker Compose（推荐）** | 已安装 Docker，希望自动拉取镜像、最省心升级 | Linux（`amd64` / `arm64`） |
-| **方式二：单文件二进制直跑** | 未安装 Docker，或运行在 macOS / FreeBSD / 轻量 VPS | Linux / macOS / FreeBSD（`amd64` / `arm64`） |
+| **[方式一：Docker Compose（推荐）](#方式一docker-compose-一键部署)** | 已安装 Docker，希望自动拉取镜像、最省心升级 | Linux（`amd64` / `arm64`） |
+| **[方式二：单文件二进制直跑](#方式二单文件二进制直接运行)** | 未安装 Docker，或运行在 macOS / FreeBSD / 轻量 VPS | Linux / macOS / FreeBSD（`amd64` / `arm64`） |
 
-### 方式一：Docker Compose 一键部署（推荐）
+### 方式一：Docker Compose 一键部署
 
 > 前置准备：一台已安装 [Docker Engine](https://docs.docker.com/engine/install/) 与 Docker Compose 插件的 Linux 服务器。
 
@@ -166,7 +177,7 @@ docker compose --profile ghcr logs --tail=50
 
 ---
 
-### 方式二：单文件二进制直接运行（免 Docker）
+### 方式二：单文件二进制直接运行
 
 如果你不想装 Docker，可以直接从 [GitHub Releases](https://github.com/cheluen/singbox-proxy-manager/releases) 下载对应系统的单个可执行文件——**前端页面和 `sing-box 1.12.12` 内核已经全部内置在文件里**，直接运行即可。
 
@@ -233,7 +244,7 @@ chmod 600 .env
 
 ---
 
-## 三、三步快速上手
+## 三步快速上手
 
 1. **登录与改密**：用 `.env` 中的 `ADMIN_PASSWORD` 登录面板；后续可点击右上角齿轮进入「系统设置」直接修改管理员密码（至少 8 位，修改后旧会话立即失效）。
 2. **导入节点并测速**：点击右上角「添加 → 批量导入」，粘贴分享链接、Base64 或订阅内容并点击「导入」；系统会自动分配本地端口（默认 `30001` 起）与入站账密，并并发检测出口 IP 与延迟。
@@ -253,7 +264,7 @@ chmod 600 .env
 
 ---
 
-## 四、进阶技术文档
+## 进阶技术文档
 
 所有架构原理、完整环境变量、远程数据库配置、协议规范、HTTP API 与开发测试指南均整理在 [`docs/`](docs/README.md) 目录中：
 
@@ -267,6 +278,6 @@ chmod 600 .env
 
 ---
 
-## 五、开源许可证
+## 开源许可证
 
 本项目采用 [MIT License](LICENSE) 开源许可协议。
