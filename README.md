@@ -6,7 +6,7 @@
 
 <img src="./logo.svg" alt="SingBox Proxy Manager Logo" width="96" />
 
-![Version](https://img.shields.io/badge/version-1.7.21-blue.svg)
+![Version](https://img.shields.io/badge/version-1.7.22-blue.svg)
 ![License](https://img.shields.io/badge/license-MIT-green.svg)
 ![SingBox](https://img.shields.io/badge/sing--box-1.12.12-orange.svg)
 
@@ -100,7 +100,7 @@ docker compose logs -f
 # 下载适合平台的单文件（示例：Linux amd64）
 mkdir -p /opt/singbox-proxy-manager
 cd /opt/singbox-proxy-manager
-APP_VERSION=1.7.21
+APP_VERSION=1.7.22
 curl -fL -o /opt/singbox-proxy-manager/singbox-proxy-manager "https://github.com/cheluen/singbox-proxy-manager/releases/download/v${APP_VERSION}/singbox-proxy-manager-linux-amd64"
 chmod +x /opt/singbox-proxy-manager/singbox-proxy-manager
 # 首次启动设置自己的管理员密码；之后可在管理面板修改
@@ -130,7 +130,7 @@ export ADMIN_PASSWORD
 - sing-box 保留 1.12.12 版本，源码提交为 `54ed58499d7063136ed52dabf87d179d252425d0`，模块归档校验和固定在 `scripts/build-sing-box.sh`。
 - 源码构建使用该脚本并保留原官方内核的八项功能标签，支持通过 `GOOS`、`GOARCH` 交叉编译；脚本参数必须为输出文件的绝对路径。
 - 普通 Docker 构建通过 `scripts/build-release.sh` 生成统一发行文件；Release 镜像直接复用本次发布的单文件，不再下载上游旧的预编译包。
-- CI 保留后台完整可达漏洞扫描，并对内核执行二进制扫描、保存完整报告和阻断本次 CVE 回归。保留旧版内核的历史第三方依赖告警不等于已修复，本次没有升级其功能版本或依赖。
+- CI 保留后台完整可达漏洞扫描，并对内核执行二进制扫描和阻断本次 CVE 回归。GitHub Actions 不再上传内核扫描报告，扫描失败或命中门禁时在作业日志输出错误摘要。保留旧版内核的历史第三方依赖告警不等于已修复，本次没有升级其功能版本或依赖。
 
 ---
 
@@ -366,7 +366,7 @@ docker compose up -d
 CI 会自动发布以下镜像标签到 GHCR，并提供 `linux/amd64` + `linux/arm64` 多架构清单：
 
 - `ghcr.io/cheluen/singbox-proxy-manager:latest`
-- 版本标签：`v` 加项目版本，例如 `ghcr.io/cheluen/singbox-proxy-manager:v1.7.21`
+- 版本标签：`v` 加项目版本，例如 `ghcr.io/cheluen/singbox-proxy-manager:v1.7.22`
 - 提交标签：完整 Git 提交 SHA；用于固定某次发布构建
 
 镜像构建会复用对应版本 Release 中的 Linux 二进制，确保二进制发布与容器发布支持的架构一致。
