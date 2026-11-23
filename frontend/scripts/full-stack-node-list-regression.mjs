@@ -5,9 +5,8 @@ import path from 'node:path'
 import process from 'node:process'
 import { randomBytes } from 'node:crypto'
 import { spawn } from 'node:child_process'
-import puppeteer from 'puppeteer-core'
 import { findTestPortRange } from './test-ports.mjs'
-import { findBrowserExecutable, stopProcess } from './test-harness.mjs'
+import { launchBrowser, stopProcess } from './test-harness.mjs'
 import { clickControl, setInput, sleep } from './ui-driver.mjs'
 
 const binary = process.env.SBPM_E2E_BACKEND_BINARY
@@ -63,10 +62,7 @@ try {
   const expectedNodes = await api('GET', '/nodes')
   assert.equal(expectedNodes.length, 202)
   await stopBackend()
-  browser = await puppeteer.launch({
-    headless: true, executablePath: findBrowserExecutable(),
-    userDataDir: path.join(scratch, 'browser'), args: ['--no-sandbox', '--disable-setuid-sandbox'],
-  })
+  browser = await launchBrowser({ userDataDir: path.join(scratch, 'browser') })
 
   for (const [threshold, expected] of [[undefined, 120], [0, 0], [1, 1], [32, 32], [9999, 9999], ['invalid', 120]]) {
     await startBackend(threshold)

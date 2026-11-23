@@ -8,8 +8,7 @@ import os from 'node:os'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { brotliDecompressSync, gunzipSync } from 'node:zlib'
-import puppeteer from 'puppeteer-core'
-import { findBrowserExecutable, stopProcess } from './test-harness.mjs'
+import { launchBrowser, stopProcess } from './test-harness.mjs'
 
 const frontend = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
 const binary = path.resolve(process.env.SBPM_TEST_BINARY || path.join(frontend, '..', 'sb-proxy'))
@@ -45,7 +44,7 @@ function startProcess(command, environment) {
 async function checkBrowser(origin) {
   let browser, devtoolsEnvironment
   try {
-    browser = await puppeteer.launch({ executablePath: findBrowserExecutable(), headless: true, userDataDir: path.join(temporary, 'chromium'), env: { ...process.env, TMPDIR: temporary }, args: ['--no-sandbox', '--disable-dev-shm-usage', '--no-proxy-server'] })
+    browser = await launchBrowser({ userDataDir: path.join(temporary, 'chromium'), env: { ...process.env, TMPDIR: temporary }, args: ['--no-proxy-server'] })
     const page = (await browser.pages())[0]
     const errors = [], responses = []
     page.on('console', (message) => { if (message.type() === 'error') errors.push(message.text()) })

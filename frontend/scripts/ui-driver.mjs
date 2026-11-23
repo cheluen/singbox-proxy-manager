@@ -172,9 +172,7 @@ export async function saveNodeForm(page, { confirmOpenAuth = false } = {}) {
 }
 
 export async function closeOverlay(page) {
-  const selector = '.sb-overlay .ant-modal-close'
-  const handle = await page.waitForSelector(selector, { visible: true })
-  await handle.asLocator().click()
+  await clickControl(page, '.sb-overlay .ant-modal-close')
   await waitOverlaysClosed(page)
 }
 

@@ -7,8 +7,7 @@ import path from 'node:path'
 import process from 'node:process'
 import { spawn } from 'node:child_process'
 import { fileURLToPath } from 'node:url'
-import puppeteer from 'puppeteer-core'
-import { findBrowserExecutable, stopProcess } from './test-harness.mjs'
+import { launchBrowser, stopProcess } from './test-harness.mjs'
 import { assertProjectBrand, clickControl, clickText, closeOverlay, confirmDialog, editNode, openBatchImport, openNodeMenu, saveNodeForm, selectOption, setInput, sleep, toggle, waitOverlaysClosed } from './ui-driver.mjs'
 
 const FRONTEND = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
@@ -746,7 +745,7 @@ async function runRegression(name) {
       assert.equal(vite.exitCode, null, `Vite 提前退出：${logs.join('')}`)
       try { return (await fetch(url)).status === 200 } catch { return false }
     }, 'Vite 未启动', 60000)
-    browser = await puppeteer.launch({ headless: true, executablePath: findBrowserExecutable(), userDataDir: scratch, args: ['--no-sandbox', '--disable-setuid-sandbox'] })
+    browser = await launchBrowser({ userDataDir: scratch })
     page = await browser.newPage()
     await page.setViewport({ width: 1440, height: 1000 })
     page.setDefaultTimeout(15000)

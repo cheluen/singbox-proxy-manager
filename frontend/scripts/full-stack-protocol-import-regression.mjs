@@ -1,6 +1,6 @@
 import { legacyClick as clickVisibleButton, editNode as openNodeEditor, waitOverlaysClosed, toggle, clickControl, setInput as setControlInput } from './ui-driver.mjs'
 import { findTestPortRange } from './test-ports.mjs'
-import { findBrowserExecutable, stopProcess } from './test-harness.mjs'
+import { launchBrowser, stopProcess } from './test-harness.mjs'
 import fs from 'node:fs'
 import http from 'node:http'
 import net from 'node:net'
@@ -9,7 +9,6 @@ import path from 'node:path'
 import process from 'node:process'
 import { spawn } from 'node:child_process'
 import { fileURLToPath } from 'node:url'
-import puppeteer from 'puppeteer-core'
 
 const SCRIPT_PATH = fileURLToPath(import.meta.url)
 const FRONTEND_ROOT = path.resolve(path.dirname(SCRIPT_PATH), '..')
@@ -134,11 +133,7 @@ try {
     const response = await fetch(`${BASE_URL}${legacyRoute.path}`, { method: legacyRoute.method })
     assert(response.status === 404, `${legacyRoute.method} ${legacyRoute.path} status=${response.status}`)
   }
-  browser = await puppeteer.launch({
-    headless: true,
-    executablePath: findBrowserExecutable(),
-    args: ['--no-sandbox', '--disable-setuid-sandbox'],
-  })
+  browser = await launchBrowser()
   const page = await browser.newPage()
   await page.setViewport({ width: 1440, height: 1000 })
   await page.evaluateOnNewDocument(() => {

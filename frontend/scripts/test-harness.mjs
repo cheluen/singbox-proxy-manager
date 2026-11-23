@@ -1,5 +1,16 @@
-import { accessSync, constants } from 'node:fs'
+import { accessSync, constants, rmSync } from 'node:fs'
+import path from 'node:path'
 import process from 'node:process'
+import puppeteer from 'puppeteer-core'
+
+const DEFAULT_BROWSER_ARGS = [
+  '--no-sandbox',
+  '--disable-setuid-sandbox',
+  '--disable-dev-shm-usage',
+  '--disable-gpu',
+  '--no-first-run',
+  '--no-default-browser-check',
+]
 
 export function findBrowserExecutable() {
   const configured = process.env.PUPPETEER_EXECUTABLE_PATH || process.env.CHROME_BIN
@@ -18,6 +29,34 @@ export function findBrowserExecutable() {
     }
   }
   throw new Error('找不到 Chrome 或 Chromium，请设置 PUPPETEER_EXECUTABLE_PATH')
+}
+
+const isLaunchTimeout = (error) =>
+  error?.name === 'TimeoutError' || /WS endpoint/i.test(error?.message || '')
+
+const clearProfileLocks = (userDataDir) => {
+  if (!userDataDir) return
+  for (const name of ['SingletonLock', 'SingletonSocket', 'SingletonCookie']) {
+    rmSync(path.join(userDataDir, name), { force: true })
+  }
+}
+
+export async function launchBrowser({ args = [], timeout = 60000, retries = 1, ...options } = {}) {
+  const launchOptions = {
+    headless: true,
+    executablePath: findBrowserExecutable(),
+    timeout,
+    ...options,
+    args: Array.from(new Set([...DEFAULT_BROWSER_ARGS, ...args])),
+  }
+  for (let attempt = 0; ; attempt += 1) {
+    try {
+      return await puppeteer.launch(launchOptions)
+    } catch (error) {
+      if (attempt >= retries || !isLaunchTimeout(error)) throw error
+      clearProfileLocks(launchOptions.userDataDir)
+    }
+  }
 }
 
 export async function stopProcess(child, { graceMs = 8000, requireGraceful = false } = {}) {

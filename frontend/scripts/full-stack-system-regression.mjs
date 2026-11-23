@@ -8,9 +8,8 @@ import process from 'node:process'
 import { randomBytes } from 'node:crypto'
 import { spawn } from 'node:child_process'
 import { fileURLToPath } from 'node:url'
-import puppeteer from 'puppeteer-core'
 import { findTestPortRange } from './test-ports.mjs'
-import { findBrowserExecutable, stopProcess } from './test-harness.mjs'
+import { launchBrowser, stopProcess } from './test-harness.mjs'
 import { isExpectedSystemBrowserError } from './system-browser-errors.mjs'
 import { PROJECT_MARK_FILE, PROJECT_NAME } from '../src/core/project.js'
 import { assertProjectBrand, clickControl, clickText, confirmDialog, editNode, openBatchImport, openNodeMenu, saveNodeForm, selectOption, setInput, sleep, toggle, waitOverlaysClosed } from './ui-driver.mjs'
@@ -137,7 +136,7 @@ try {
   assert.equal((await api('GET', '/version')).version, VERSION)
   steps.push('version-assets-auth')
 
-  browser = await puppeteer.launch({ headless: true, executablePath: findBrowserExecutable(), userDataDir: path.join(scratch, 'browser'), args: ['--no-sandbox', '--disable-setuid-sandbox'] })
+  browser = await launchBrowser({ userDataDir: path.join(scratch, 'browser') })
   page = await browser.newPage()
   page.setDefaultTimeout(30000)
   await page.setViewport({ width: 1440, height: 1000 })

@@ -778,25 +778,35 @@ jobs:
             exit 0
           fi
 
-          all_ok_or_skipped() {
+          all_succeeded() {
             for status in "$@"; do
-              case "$status" in
-                success|skipped) ;;
-                *) return 1 ;;
-              esac
+              test "$status" = "success" || return 1
             done
           }
+
+          is_main_push=false
+          if [ "${GITHUB_EVENT_NAME}" = "push" ] && [ "${GITHUB_REF}" = "refs/heads/main" ]; then
+            is_main_push=true
+          fi
 
           while IFS=$'\t' read -r artifact_id artifact_name; do
             case "$artifact_name" in
               sing-box-test-kernel)
-                all_ok_or_skipped "$VULN_RESULT" "$TEST_BACKEND_RESULT" "$UPSTREAM_RESULT" "$SYSTEM_RESULT" "$RELEASE_IMAGE_RESULT" || continue
+                all_succeeded "$VULN_RESULT" "$TEST_BACKEND_RESULT" "$UPSTREAM_RESULT" "$SYSTEM_RESULT" "$RELEASE_IMAGE_RESULT" || continue
                 ;;
               frontend-dist)
-                all_ok_or_skipped "$UPSTREAM_RESULT" "$RELEASE_IMAGE_RESULT" "$BUILD_BINARIES_RESULT" || continue
+                all_succeeded "$UPSTREAM_RESULT" "$RELEASE_IMAGE_RESULT" || continue
+                if [ "$is_main_push" = "true" ]; then
+                  test "$BUILD_BINARIES_RESULT" = "success" || continue
+                else
+                  case "$BUILD_BINARIES_RESULT" in
+                    success|skipped) ;;
+                    *) continue ;;
+                  esac
+                fi
                 ;;
               singbox-proxy-manager-*)
-                all_ok_or_skipped "$CREATE_RELEASE_RESULT" || continue
+                test "$CREATE_RELEASE_RESULT" = "success" || continue
                 ;;
               *) continue ;;
             esac

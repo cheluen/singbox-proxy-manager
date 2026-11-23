@@ -6,8 +6,7 @@ import path from 'node:path'
 import process from 'node:process'
 import { isDeepStrictEqual } from 'node:util'
 import { fileURLToPath } from 'node:url'
-import puppeteer from 'puppeteer-core'
-import { findBrowserExecutable, stopProcess } from './test-harness.mjs'
+import { launchBrowser, stopProcess } from './test-harness.mjs'
 
 const API_PORT = Number(process.env.E2E_API_PORT || 30023)
 const FRONTEND_PORT = Number(process.env.E2E_FRONTEND_PORT || 5186)
@@ -370,11 +369,7 @@ const run = async () => {
 
   try {
     await waitForHTTP(FRONTEND_URL, 60000)
-    browser = await puppeteer.launch({
-      headless: true,
-      executablePath: findBrowserExecutable(),
-      args: ['--no-sandbox', '--disable-setuid-sandbox'],
-    })
+    browser = await launchBrowser()
     page = await browser.newPage()
     page.setDefaultNavigationTimeout(120000)
     await page.setViewport({ width: 1440, height: 1100 })
