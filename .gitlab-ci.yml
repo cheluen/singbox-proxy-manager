@@ -63,6 +63,7 @@ build-test-kernel:
       - backend/**/*
       - internal/**/*
       - scripts/**/*
+      - USER_AGREEMENT.md
       - go.mod
       - go.sum
       - .gitlab-ci.yml
@@ -98,6 +99,7 @@ test-backend:
   dependencies: [build-test-kernel]
   before_script: *verify-test-kernel
   script:
+    - cmp USER_AGREEMENT.md internal/agreement/user_agreement.md
     - go mod download
     - CGO_ENABLED=0 go build -o /dev/null ./backend
     - export SINGBOX_TEST_BINARY="$CI_PROJECT_DIR/.ci-bin/sing-box"
@@ -106,16 +108,7 @@ test-backend:
     key: go-modules
     paths:
       - /go/pkg/mod/
-  only:
-    changes:
-      - backend/**/*
-      - internal/**/*
-      - scripts/**/*
-      - go.mod
-      - go.sum
-    refs:
-      - main
-      - merge_requests
+  only: *test-kernel-changes
 
 # 前端构建测试
 test-frontend:
@@ -203,12 +196,14 @@ build-freebsd:
     - job: build-frontend-dist
       artifacts: true
   script:
+    - cmp USER_AGREEMENT.md internal/agreement/user_agreement.md
     - go mod download
     - GOOS=freebsd GOARCH=amd64 ./scripts/build-release.sh "$CI_PROJECT_DIR/singbox-proxy-manager-freebsd-amd64"
   artifacts:
     name: "singbox-proxy-manager-freebsd-$CI_COMMIT_SHORT_SHA"
     paths:
       - singbox-proxy-manager-freebsd-amd64
+      - USER_AGREEMENT.md
     expire_in: 30 days
   only:
     - main
@@ -222,12 +217,14 @@ build-linux:
     - job: build-frontend-dist
       artifacts: true
   script:
+    - cmp USER_AGREEMENT.md internal/agreement/user_agreement.md
     - go mod download
     - GOOS=linux GOARCH=amd64 ./scripts/build-release.sh "$CI_PROJECT_DIR/singbox-proxy-manager-linux-amd64"
   artifacts:
     name: "singbox-proxy-manager-linux-$CI_COMMIT_SHORT_SHA"
     paths:
       - singbox-proxy-manager-linux-amd64
+      - USER_AGREEMENT.md
     expire_in: 30 days
   only:
     - main
@@ -259,6 +256,7 @@ auto-release:
   script:
     - test -s LICENSE
     - test -s THIRD_PARTY_NOTICES.md
+    - cmp USER_AGREEMENT.md internal/agreement/user_agreement.md
     - test -s licenses/SING-BOX-GPL-3.0.txt
     - echo "Auto-creating release ${AUTO_TAG} for commit ${CI_COMMIT_SHORT_SHA}"
   release:
@@ -280,6 +278,8 @@ auto-release:
       | Docker | `docker pull ${CI_REGISTRY_IMAGE}:latest` |
       
       ### 使用方法
+      首次运行请先阅读 [USER_AGREEMENT.md](${CI_PROJECT_URL}/-/blob/${CI_COMMIT_SHA}/USER_AGREEMENT.md)，并在终端提示处输入 `y`。Docker 或非交互式部署请在同意后设置 `ACCEPT_USER_AGREEMENT=true`。
+
       ```bash
       chmod +x singbox-proxy-manager-linux-amd64
       ADMIN_PASSWORD=your_password ./singbox-proxy-manager-linux-amd64
@@ -304,6 +304,9 @@ auto-release:
           link_type: other
         - name: "THIRD_PARTY_NOTICES.md"
           url: "${CI_PROJECT_URL}/-/raw/${CI_COMMIT_SHA}/THIRD_PARTY_NOTICES.md"
+          link_type: other
+        - name: "USER_AGREEMENT.md"
+          url: "${CI_PROJECT_URL}/-/raw/${CI_COMMIT_SHA}/USER_AGREEMENT.md"
           link_type: other
         - name: "SING-BOX-GPL-3.0.txt"
           url: "${CI_PROJECT_URL}/-/raw/${CI_COMMIT_SHA}/licenses/SING-BOX-GPL-3.0.txt"

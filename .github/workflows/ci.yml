@@ -3,11 +3,16 @@ name: CI/CD
 on:
   push:
     branches: [main]
+    tags: ['v*']
   pull_request:
     branches: [main]
 
 permissions:
   contents: read
+
+concurrency:
+  group: ${{ github.event_name == 'pull_request' && format('ci-pr-{0}', github.event.pull_request.number) || 'sbpm-publish' }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 env:
   GO_VERSION: "1.26.11"
@@ -17,6 +22,105 @@ env:
   DOCKER_BUILD_RECORD_UPLOAD: "false"
 
 jobs:
+  release-plan:
+    runs-on: ubuntu-latest
+    outputs:
+      should_release: ${{ steps.plan.outputs.should_release }}
+      release_tag: ${{ steps.plan.outputs.release_tag }}
+      app_version: ${{ steps.plan.outputs.app_version }}
+      is_prerelease: ${{ steps.plan.outputs.is_prerelease }}
+      make_latest: ${{ steps.plan.outputs.make_latest }}
+      image_tags: ${{ steps.plan.outputs.image_tags }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          fetch-tags: true
+
+      - name: Plan release and image tags
+        id: plan
+        shell: bash
+        run: |
+          python3 - <<'PY' >> "$GITHUB_OUTPUT"
+          import importlib.util
+          import os
+          from pathlib import Path
+          import subprocess
+          import sys
+
+          spec = importlib.util.spec_from_file_location("gen", Path("scripts/generate-release-notes.py"))
+          gen = importlib.util.module_from_spec(spec)
+          spec.loader.exec_module(gen)
+
+          ref = os.environ["GITHUB_REF"]
+          ref_name = os.environ["GITHUB_REF_NAME"]
+          event = os.environ["GITHUB_EVENT_NAME"]
+          repo = os.environ["GITHUB_REPOSITORY"].lower()
+
+          existing_tags = set(
+              subprocess.run(["git", "tag", "--list", "v*"], check=True, capture_output=True, text=True).stdout.splitlines()
+          )
+          should_release = False
+          if ref.startswith("refs/tags/v"):
+              release_tag = ref_name
+              app_version = release_tag[1:]
+              should_release = True
+          else:
+              app_version = Path("internal/version/version.txt").read_text(encoding="utf-8").strip()
+              release_tag = f"v{app_version}"
+              if event == "push" and ref == "refs/heads/main" and release_tag not in existing_tags:
+                  should_release = True
+
+          try:
+              major, minor, patch, is_stable, _ = gen.version_key(app_version)
+          except ValueError as err:
+              print(f"::error::{err}", file=sys.stderr)
+              sys.exit(1)
+
+          is_prerelease = not is_stable
+          stable_existing = []
+          for tag in existing_tags:
+              if tag == release_tag:
+                  continue
+              try:
+                  key = gen.version_key(tag[1:])
+              except ValueError:
+                  continue
+              if key[3]:
+                  stable_existing.append(key)
+
+          current_key = (major, minor, patch, is_stable, ())
+          highest_overall = is_stable and all(current_key >= item for item in stable_existing)
+          highest_major = is_stable and all(current_key >= item for item in stable_existing if item[0] == major)
+          highest_minor = is_stable and all(
+              current_key >= item for item in stable_existing if item[0] == major and item[1] == minor
+          )
+
+          image = f"ghcr.io/{repo}"
+          if not should_release:
+              tags = ["edge"]
+          elif is_prerelease:
+              tags = [app_version]
+          else:
+              tags = [app_version]
+              if highest_minor:
+                  tags.append(f"{major}.{minor}")
+              if highest_major:
+                  tags.append(str(major))
+              if highest_overall:
+                  tags.append("latest")
+
+          print(f"app_version={app_version}")
+          print(f"release_tag={release_tag}")
+          print(f"should_release={'true' if should_release else 'false'}")
+          print(f"is_prerelease={'true' if is_prerelease else 'false'}")
+          print(f"make_latest={'true' if (should_release and highest_overall) else 'false'}")
+          print("image_tags<<TAGS")
+          for tag in tags:
+              print(f"{image}:{tag}")
+          print("TAGS")
+          PY
+
   build-test-kernel:
     runs-on: ubuntu-latest
     steps:
@@ -162,8 +266,12 @@ jobs:
       - name: Run backend tests
         run: go test -race -count=1 ./backend/... ./internal/... -v
 
+      - name: Test release notes and GHCR cleanup scripts
+        run: python3 -m unittest scripts/test_generate_release_notes.py scripts/test_cleanup_ghcr_packages.py
+
   test-frontend-build:
     runs-on: ubuntu-latest
+    needs: [release-plan]
     steps:
       - uses: actions/checkout@v4
 
@@ -189,6 +297,8 @@ jobs:
       - name: Build frontend
         run: npm run build
         working-directory: frontend
+        env:
+          APP_VERSION: ${{ needs.release-plan.outputs.app_version }}
 
       - name: Upload frontend dist artifact
         uses: actions/upload-artifact@v4
@@ -218,6 +328,7 @@ jobs:
           - test:e2e:filter
           - test:e2e:tcp-reuse-ui
           - test:e2e:nodes-viewport
+          - test:e2e:column-resize
           - test:e2e:runtime-restart
           - test:e2e:version-refresh
           - test:e2e:wireguard-ui
@@ -261,9 +372,11 @@ jobs:
         working-directory: frontend
 
   test-upstream-full-stack:
-    needs: [build-test-kernel, test-frontend-build]
+    needs: [release-plan, build-test-kernel, test-frontend-build]
     runs-on: ubuntu-latest
     timeout-minutes: 15
+    env:
+      APP_VERSION: ${{ needs.release-plan.outputs.app_version }}
     steps:
       - uses: actions/checkout@v4
 
@@ -302,7 +415,7 @@ jobs:
           echo "SINGBOX_TEST_BINARY=${binary}" >> "${GITHUB_ENV}"
 
       - name: Build backend for full-stack test
-        run: CGO_ENABLED=0 go build -tags frontend_dist -o "${RUNNER_TEMP}/sbpm-upstream-e2e-backend" ./backend
+        run: CGO_ENABLED=0 go build -tags frontend_dist -ldflags="-X sb-proxy/internal/version.rawVersion=${APP_VERSION}" -o "${RUNNER_TEMP}/sbpm-upstream-e2e-backend" ./backend
 
       - name: Resolve browser path
         run: |
@@ -356,32 +469,53 @@ jobs:
           cat <<'EOT' >> .env
           COMPOSE_PROFILES=local
           PORT=38080
+          ACCEPT_USER_AGREEMENT=true
           ADMIN_PASSWORD=system-test-password
           CONFIG_VOLUME_HOST=./config-ci
-          TZ=UTC+8
+          TZ=UTC
           EOT
           mkdir -p config-ci
 
-      - name: Start stack with local build
-        run: docker compose --profile local up -d --build
+      - name: Build local image
+        run: docker compose --profile local build sb-proxy-local
 
-      - name: 验证源码构建镜像内的许可证
+      - name: 验证容器拒绝未同意用户协议的启动
+        run: |
+          exit_code=0
+          output=$(timeout 20s docker compose --profile local run --rm --no-deps -T \
+            -e ACCEPT_USER_AGREEMENT=false sb-proxy-local </dev/null 2>&1) || exit_code=$?
+          printf '%s\n' "$output"
+          test "$exit_code" -eq 1
+          for guidance in 'User agreement not accepted' 'ACCEPT_USER_AGREEMENT=true' 'ADMIN_PASSWORD' 'USER_AGREEMENT.md'; do
+            grep -Fq "$guidance" <<<"$output"
+          done
+          test ! -e config-ci/proxy.db
+          test ! -e config-ci/kernels
+
+      - name: Start stack with the verified local build
+        run: docker compose --profile local up -d --no-build
+
+      - name: 验证源码构建镜像内的许可证与用户协议
         shell: bash
         run: |
           set -euo pipefail
-          sha256sum LICENSE THIRD_PARTY_NOTICES.md licenses/SING-BOX-GPL-3.0.txt |
+          sha256sum LICENSE THIRD_PARTY_NOTICES.md USER_AGREEMENT.md licenses/SING-BOX-GPL-3.0.txt |
             docker compose --profile local exec -T sb-proxy-local sh -ec '
               cd /app
               test -s LICENSE
               test -s THIRD_PARTY_NOTICES.md
+              test -s USER_AGREEMENT.md
               test -s licenses/SING-BOX-GPL-3.0.txt
               sha256sum -c -
             '
 
-      - name: Wait for API readiness
+      - name: Wait for public health endpoint and Docker health status
         run: |
+          container=$(docker compose --profile local ps -q sb-proxy-local)
+          test -n "$container"
           for _ in $(seq 1 60); do
-            if curl -fsS http://127.0.0.1:38080/api/version >/dev/null; then
+            if status=$(curl --noproxy '*' --silent --max-time 2 --output /dev/null --write-out '%{http_code}' http://127.0.0.1:38080/api/health) &&
+               [ "$status" = 200 ] && [ "$(docker inspect --format '{{.State.Health.Status}}' "$container")" = healthy ]; then
               exit 0
             fi
             sleep 2
@@ -499,7 +633,9 @@ jobs:
 
   test-release-image-build:
     runs-on: ubuntu-latest
-    needs: [test-system-local-deploy, test-frontend-build, build-test-kernel]
+    needs: [release-plan, test-system-local-deploy, test-frontend-build, build-test-kernel]
+    env:
+      APP_VERSION: ${{ needs.release-plan.outputs.app_version }}
     steps:
       - uses: actions/checkout@v4
 
@@ -584,7 +720,7 @@ jobs:
           push: false
           platforms: linux/amd64,linux/arm64
 
-      - name: 加载发行镜像用于许可证校验
+      - name: 加载发行镜像用于验收
         uses: docker/build-push-action@v6
         with:
           context: .
@@ -593,21 +729,24 @@ jobs:
           load: true
           tags: sbpm-release-license-test:ci
 
-      - name: 验证发行镜像内的许可证
+      - name: 验证发行镜像内的许可证、用户协议与健康探针
         shell: bash
         run: |
           set -euo pipefail
-          sha256sum LICENSE THIRD_PARTY_NOTICES.md licenses/SING-BOX-GPL-3.0.txt |
+          sha256sum LICENSE THIRD_PARTY_NOTICES.md USER_AGREEMENT.md licenses/SING-BOX-GPL-3.0.txt |
             docker run --rm -i --entrypoint sh sbpm-release-license-test:ci -ec '
               cd /app
               test -s LICENSE
               test -s THIRD_PARTY_NOTICES.md
+              test -s USER_AGREEMENT.md
               test -s licenses/SING-BOX-GPL-3.0.txt
               sha256sum -c -
             '
+          test "$(docker image inspect --format '{{json .Config.Healthcheck.Test}}' sbpm-release-license-test:ci)" = \
+            '["CMD","/app/singbox-proxy-manager","--healthcheck"]'
 
       - name: Upload verified Linux amd64 binary
-        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        if: github.event_name == 'push'
         uses: actions/upload-artifact@v4
         with:
           name: singbox-proxy-manager-linux-amd64
@@ -617,7 +756,7 @@ jobs:
           overwrite: true
 
       - name: Upload verified Linux arm64 binary
-        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        if: github.event_name == 'push'
         uses: actions/upload-artifact@v4
         with:
           name: singbox-proxy-manager-linux-arm64
@@ -628,8 +767,10 @@ jobs:
 
   build-binaries:
     runs-on: ubuntu-latest
-    needs: [test-frontend-build, test-release-image-build]
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    needs: [release-plan, test-frontend-build, test-release-image-build]
+    if: needs.release-plan.outputs.should_release == 'true'
+    env:
+      APP_VERSION: ${{ needs.release-plan.outputs.app_version }}
     strategy:
       fail-fast: false
       matrix:
@@ -675,91 +816,28 @@ jobs:
           retention-days: 1
           overwrite: true
 
-  create-release:
-    runs-on: ubuntu-latest
-    needs: [test-release-image-build, build-binaries]
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
-    permissions:
-      contents: write
-    outputs:
-      app_version: ${{ steps.app_version.outputs.version }}
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Read app version
-        id: app_version
-        run: echo "version=$(cat internal/version/version.txt)" >> "$GITHUB_OUTPUT"
-
-      - name: Download all binary artifacts
-        uses: actions/download-artifact@v4
-        with:
-          pattern: singbox-proxy-manager-*
-          path: release-binaries
-          merge-multiple: true
-
-      - name: Prepare checksums
-        run: |
-          for os in linux freebsd darwin; do
-            for arch in amd64 arm64; do
-              test -s "release-binaries/singbox-proxy-manager-${os}-${arch}"
-            done
-          done
-          chmod +x release-binaries/singbox-proxy-manager-*
-          (cd release-binaries && sha256sum singbox-proxy-manager-* > checksums.txt)
-
-      - name: Create or update release
-        uses: softprops/action-gh-release@v2
-        with:
-          tag_name: v${{ steps.app_version.outputs.version }}
-          name: v${{ steps.app_version.outputs.version }}
-          body: |
-            ## 自动构建产物
-
-            ### 二进制
-            - Linux: amd64 / arm64
-            - FreeBSD: amd64 / arm64
-            - macOS: amd64 / arm64
-            - 管理后台和 sing-box 1.12.12 均使用 Go 1.26.11 重新编译，修复 CVE-2026-111943 和 CVE-2026-97054。
-            - 每个平台只需下载一个管理程序，已内置前端与 sing-box；启动时自动校验、释放并运行匹配内核。
-            - 升级只替换管理程序并重启，保留原工作目录、CONFIG_DIR 和数据库配置。
-
-            ### 镜像
-            GHCR 多架构镜像在后续作业自动发布（linux/amd64 + linux/arm64），并复用本次 Release 的 Linux 二进制。
-
-            ### 第三方许可证与对应源码
-            内置的独立内核 sing-box v1.12.12 由 nekohasekai 持有版权（Copyright (C) 2022 by nekohasekai <contact-sagernet@sekai.icu>），按 GPL-3.0-or-later 分发。SingBox Proxy Manager 与 sing-box、SagerNet 和 nekohasekai 没有官方隶属、赞助或背书关系。
-
-            [官方源码与固定提交](https://github.com/SagerNet/sing-box/tree/54ed58499d7063136ed52dabf87d179d252425d0) · [对应源码 tar.gz](https://github.com/SagerNet/sing-box/archive/54ed58499d7063136ed52dabf87d179d252425d0.tar.gz) · [第三方声明与重编译说明](${{ github.server_url }}/${{ github.repository }}/blob/${{ github.sha }}/THIRD_PARTY_NOTICES.md) · [GPL v3 正文](${{ github.server_url }}/${{ github.repository }}/blob/${{ github.sha }}/licenses/SING-BOX-GPL-3.0.txt)
-          files: |
-            release-binaries/singbox-proxy-manager-*
-            release-binaries/checksums.txt
-            LICENSE
-            THIRD_PARTY_NOTICES.md
-            licenses/SING-BOX-GPL-3.0.txt
-          fail_on_unmatched_files: true
-          draft: false
-          prerelease: false
-
   build-ghcr:
     runs-on: ubuntu-latest
-    needs: [create-release]
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    needs: [release-plan, test-release-image-build]
+    if: github.event_name == 'push'
     permissions:
       contents: read
       packages: write
     steps:
       - uses: actions/checkout@v4
 
-      - name: Download linux binaries from release
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          APP_VERSION: ${{ needs.create-release.outputs.app_version }}
+      - name: Download verified Linux binaries
+        uses: actions/download-artifact@v4
+        with:
+          pattern: singbox-proxy-manager-linux-*
+          path: release-binaries
+          merge-multiple: true
+
+      - name: Verify required Linux artifacts
         run: |
-          mkdir -p release-binaries
-          gh release download "v${APP_VERSION}" \
-            --repo "${GITHUB_REPOSITORY}" \
-            --pattern "singbox-proxy-manager-linux-*" \
-            --dir release-binaries
+          for arch in amd64 arm64; do
+            test -s "release-binaries/singbox-proxy-manager-linux-${arch}"
+          done
           chmod +x release-binaries/singbox-proxy-manager-linux-*
 
       - name: Set up QEMU
@@ -782,22 +860,91 @@ jobs:
           file: Dockerfile.release
           push: true
           platforms: linux/amd64,linux/arm64
-          tags: |
-            ghcr.io/${{ github.repository }}:${{ github.sha }}
-            ghcr.io/${{ github.repository }}:v${{ needs.create-release.outputs.app_version }}
-            ghcr.io/${{ github.repository }}:v${{ needs.create-release.outputs.app_version }}-linux-amd64-arm64
-            ghcr.io/${{ github.repository }}:latest
+          tags: ${{ needs.release-plan.outputs.image_tags }}
+          provenance: mode=max
+          sbom: true
           labels: |
             org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
-            org.opencontainers.image.version=v${{ needs.create-release.outputs.app_version }}
+            org.opencontainers.image.version=${{ needs.release-plan.outputs.app_version }}
             org.opencontainers.image.revision=${{ github.sha }}
             org.opencontainers.image.description=SingBox Proxy Manager multi-arch image (linux/amd64, linux/arm64)
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
+      - name: Cleanup legacy SHA and unreferenced untagged GHCR versions
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          owner_type="users"
+          if [ "${GITHUB_REPOSITORY_OWNER_ID:-}" != "" ] && gh api "/orgs/${GITHUB_REPOSITORY_OWNER}" >/dev/null 2>&1; then
+            owner_type="orgs"
+          fi
+          python3 scripts/cleanup-ghcr-packages.py \
+            --repository "${GITHUB_REPOSITORY}" \
+            --package "${GITHUB_REPOSITORY#*/}" \
+            --owner-type "${owner_type}" \
+            --min-age-seconds 3600
+
+  create-release:
+    runs-on: ubuntu-latest
+    needs: [release-plan, test-release-image-build, build-binaries, build-ghcr]
+    if: needs.release-plan.outputs.should_release == 'true'
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          fetch-tags: true
+
+      - name: Download all binary artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: singbox-proxy-manager-*
+          path: release-binaries
+          merge-multiple: true
+
+      - name: Prepare checksums
+        run: |
+          for os in linux freebsd darwin; do
+            for arch in amd64 arm64; do
+              test -s "release-binaries/singbox-proxy-manager-${os}-${arch}"
+            done
+          done
+          chmod +x release-binaries/singbox-proxy-manager-*
+          (cd release-binaries && sha256sum singbox-proxy-manager-* > checksums.txt)
+
+      - name: Generate release notes
+        env:
+          APP_VERSION: ${{ needs.release-plan.outputs.app_version }}
+        run: |
+          python3 scripts/generate-release-notes.py --version "$APP_VERSION" \
+            --repository "$GITHUB_REPOSITORY" --server-url "$GITHUB_SERVER_URL" \
+            --sha "$GITHUB_SHA" --output "$RUNNER_TEMP/release-notes.md"
+
+      - name: Create or update release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ needs.release-plan.outputs.release_tag }}
+          name: ${{ needs.release-plan.outputs.release_tag }}
+          target_commitish: ${{ github.sha }}
+          body_path: ${{ runner.temp }}/release-notes.md
+          files: |
+            release-binaries/singbox-proxy-manager-*
+            release-binaries/checksums.txt
+            LICENSE
+            THIRD_PARTY_NOTICES.md
+            USER_AGREEMENT.md
+            licenses/SING-BOX-GPL-3.0.txt
+          fail_on_unmatched_files: true
+          draft: false
+          prerelease: ${{ needs.release-plan.outputs.is_prerelease == 'true' }}
+          make_latest: ${{ needs.release-plan.outputs.make_latest }}
+
   cleanup-artifacts:
     runs-on: ubuntu-latest
-    needs: [vulnerability-backend, test-backend, test-upstream-full-stack, test-system-local-deploy, test-release-image-build, build-binaries, create-release, build-ghcr]
+    needs: [release-plan, vulnerability-backend, test-backend, test-upstream-full-stack, test-system-local-deploy, test-release-image-build, build-binaries, create-release, build-ghcr]
     if: always() && (github.event_name == 'push' || github.event.pull_request.head.repo.full_name == github.repository)
     permissions:
       actions: write
@@ -811,8 +958,11 @@ jobs:
           UPSTREAM_RESULT: ${{ needs.test-upstream-full-stack.result }}
           SYSTEM_RESULT: ${{ needs.test-system-local-deploy.result }}
           RELEASE_IMAGE_RESULT: ${{ needs.test-release-image-build.result }}
+          PLAN_RESULT: ${{ needs.release-plan.result }}
+          SHOULD_RELEASE: ${{ needs.release-plan.outputs.should_release }}
           BUILD_BINARIES_RESULT: ${{ needs.build-binaries.result }}
           CREATE_RELEASE_RESULT: ${{ needs.create-release.result }}
+          GHCR_RESULT: ${{ needs.build-ghcr.result }}
         run: |
           artifact_list="${RUNNER_TEMP}/sbpm-run-artifacts.tsv"
           api_error="${RUNNER_TEMP}/sbpm-artifact-api-error.log"
@@ -832,29 +982,24 @@ jobs:
             done
           }
 
-          is_main_push=false
-          if [ "${GITHUB_EVENT_NAME}" = "push" ] && [ "${GITHUB_REF}" = "refs/heads/main" ]; then
-            is_main_push=true
-          fi
-
           while IFS=$'\t' read -r artifact_id artifact_name; do
             case "$artifact_name" in
               sing-box-test-kernel)
                 all_succeeded "$VULN_RESULT" "$TEST_BACKEND_RESULT" "$UPSTREAM_RESULT" "$SYSTEM_RESULT" "$RELEASE_IMAGE_RESULT" || continue
                 ;;
               frontend-dist)
-                all_succeeded "$UPSTREAM_RESULT" "$RELEASE_IMAGE_RESULT" || continue
-                if [ "$is_main_push" = "true" ]; then
+                all_succeeded "$PLAN_RESULT" "$UPSTREAM_RESULT" "$RELEASE_IMAGE_RESULT" || continue
+                if [ "$SHOULD_RELEASE" = "true" ]; then
                   test "$BUILD_BINARIES_RESULT" = "success" || continue
                 else
-                  case "$BUILD_BINARIES_RESULT" in
-                    success|skipped) ;;
-                    *) continue ;;
-                  esac
+                  test "$BUILD_BINARIES_RESULT" = "skipped" || continue
                 fi
                 ;;
               singbox-proxy-manager-*)
-                test "$CREATE_RELEASE_RESULT" = "success" || continue
+                all_succeeded "$PLAN_RESULT" "$GHCR_RESULT" || continue
+                if [ "$SHOULD_RELEASE" = "true" ]; then
+                  test "$CREATE_RELEASE_RESULT" = "success" || continue
+                fi
                 ;;
               *) continue ;;
             esac
