@@ -1,6 +1,6 @@
 # HTTP API 参考
 
-本文档基于 `1.7.28` 后端路由注册（`backend/main.go`、`backend/api/`）整理全部 **27 个业务接口**（3 个公开接口 + 24 个鉴权接口）。
+本文档基于 `1.7.29` 后端路由注册（`backend/main.go`、`backend/api/`）整理全部 **27 个业务接口**（3 个公开接口 + 24 个鉴权接口）。
 
 ---
 
@@ -19,7 +19,7 @@
 | 方法与路径 | 请求体 | 响应与行为说明 |
 | --- | --- | --- |
 | `GET /api/health` | 无 | 轻量健康探针（供 Docker `HEALTHCHECK` 与监控系统调用，不请求外部 GitHub API）。以 `2s` 超时校验数据库连接池存活并返回 `{ "status": "ok", "runtime_running": true, "runtime_degraded": false }`；数据库不可用时返回 `503 Service Unavailable` 及 `{ "status": "unhealthy" }`。 |
-| `GET /api/version` | 无 | 返回 `{ "version": "1.7.28", "update": { ... } }`。按需检查 GitHub 最新 Release 并缓存 `SBPM_UPDATE_CHECK_TTL`；即使上游查询失败仍返回 HTTP `200`，且首次失败与缓存命中均统一在 `update` 中携带错误信息与 `checked_at`。 |
+| `GET /api/version` | 无 | 返回 `{ "version": "1.7.29", "update": { ... } }`。按需检查 GitHub 最新 Release 并缓存 `SBPM_UPDATE_CHECK_TTL`；即使上游查询失败仍返回 HTTP `200`，且首次失败与缓存命中均统一在 `update` 中携带错误信息与 `checked_at`。 |
 | `POST /api/login` | `{ "password": "..." }` | 验证管理员密码，成功返回 `200` 及 `{ "token": "...", "expiry": 1700000000 }`（`expiry` 为整数 Unix 秒时间戳）；密码错误返回 `401`；触发 IP 限流或全局并发校验上限返回 `429`（附 `Retry-After` 头）。 |
 
 ---

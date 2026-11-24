@@ -874,6 +874,34 @@ const scenarios = {
     await page.setViewport({ width: 1440, height: 1000 })
     assert.equal(await page.$('[data-testid="reset-column-widths"]'), null, '默认列宽时不应显示重置按钮')
 
+    // 验证所有可见列的静息态列宽分割线均为完整竖条且清晰可辨（不塌陷成点、与表头底色有明显区分）
+    const idleDividers = await page.$$eval('.dusk-head .dusk-col-resizer', (els) => {
+      const headBg = getComputedStyle(document.querySelector('.dusk-head')).backgroundColor
+      return els
+        .filter((el) => el.offsetParent !== null)
+        .map((el) => {
+          const rect = el.getBoundingClientRect()
+          const style = getComputedStyle(el, '::after')
+          return {
+            testId: el.dataset.testid,
+            handleHeight: Math.round(rect.height),
+            barHeight: parseFloat(style.height),
+            width: parseFloat(style.width),
+            opacity: parseFloat(style.opacity),
+            bg: style.backgroundColor,
+            headBg,
+          }
+        })
+    })
+    assert.equal(idleDividers.length, 9, `1440px 下可见列宽手柄数量异常：${idleDividers.length}`)
+    for (const item of idleDividers) {
+      assert.ok(item.handleHeight >= 26, `${item.testId} 高度未撑满表头：${item.handleHeight}px`)
+      assert.ok(item.barHeight >= 12, `${item.testId} 分割线高度塌陷：${item.barHeight}px`)
+      assert.ok(item.width >= 2, `${item.testId} 分割线过细：${item.width}px`)
+      assert.ok(item.opacity >= 0.58, `${item.testId} 静息透明度过低：${item.opacity}`)
+      assert.notEqual(item.bg, item.headBg, `${item.testId} 分割线与表头背景色不可相同`)
+    }
+
     const measureCol = (key) => page.$eval(`.dusk-head [data-col-key="${key}"]`, (el) => Math.round(el.getBoundingClientRect().width))
     const dragCol = async (key, deltaX) => {
       const handle = await page.$(`[data-testid="col-resizer-${key}"]`)

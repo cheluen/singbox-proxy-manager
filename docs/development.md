@@ -1,6 +1,6 @@
 # 本地开发、构建发布与测试指南
 
-本文档以 `1.7.28` 为基线，说明工具链、本地联调、单文件发行、许可证分发和 CI 测试矩阵。
+本文档以 `1.7.29` 为基线，说明工具链、本地联调、单文件发行、许可证分发和 CI 测试矩阵。
 
 ---
 
@@ -166,7 +166,7 @@ rm -f /tmp/sbpm-upstream-e2e-backend
 3. **自动发布与规范化 GHCR 打标（含 SBOM）**：
    - 流水线通过工作流级 `concurrency` 串行化发布分支/Tag，避免并发竞态；镜像推送（`build-ghcr`）先于 Release 打标执行，防止出现仅有 Git Tag/二进制而缺失 GHCR 镜像的半发布状态。
    - **GHCR 多架构镜像（`linux/amd64`, `linux/arm64`）**：`build-ghcr` 启用 `provenance: mode=max` 与 `sbom: true` 同时附带构建来源证明与 SBOM：
-     - 正式稳定版（如 `v1.7.28`）：推送精确标签 `1.7.28`，并仅在版本号不低于同主/次/全局既有稳定版时同步推进 `1.7`、`1`、`latest` 滚动标签（旧维护分支补丁不会倒退 `latest`）；
+     - 正式稳定版（如 `v1.7.29`）：推送精确标签 `1.7.29`，并仅在版本号不低于同主/次/全局既有稳定版时同步推进 `1.7`、`1`、`latest` 滚动标签（旧维护分支补丁不会倒退 `latest`）；
      - 预发布版（如 `v1.8.0-beta.1`）：仅推送精确预发布标签 `1.8.0-beta.1`（不覆盖滚动标签与 `latest`）；
      - 日常 `main` 非发版提交：跳过 `create-release`，仅覆盖更新 `edge` 标签。
    - **正式/预发布发版时**：`build-binaries` 补齐 FreeBSD / macOS 4 平台单文件并汇总 **6 平台统一单文件**与 `checksums.txt`；待 `build-ghcr` 成功后，`create-release` 调用 `scripts/generate-release-notes.py` 基于上一版本 tag 到当前提交的 commit 历史自动生成分类 Changelog 发布至 GitHub Releases，并附带 `LICENSE`、`THIRD_PARTY_NOTICES.md`、`USER_AGREEMENT.md`、`SING-BOX-GPL-3.0.txt`。
