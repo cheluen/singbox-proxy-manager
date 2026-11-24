@@ -137,8 +137,12 @@
 .sb-connect__head { display: flex; align-items: center; justify-content: space-between; gap: 8px; min-height: 28px; font-size: 12.5px; }
 .sb-connect__reuse { margin-top: 4px; padding-top: 10px; border-top: 1px dashed var(--line-strong); display: flex; flex-direction: column; gap: 6px; font-size: 12.5px; }
 .sb-url { display: flex; align-items: center; gap: 8px; height: 36px; padding: 0 4px 0 10px; border-radius: var(--radius-sm); background: var(--surface-2); border: 1px solid var(--line); min-width: 0; }
-.sb-url__label { flex: none; width: 52px; font-size: 11px; font-weight: 650; letter-spacing: 0.04em; color: var(--ink-3); text-transform: uppercase; }
+.sb-url__label { flex: none; min-width: 60px; font-size: 11px; font-weight: 650; letter-spacing: 0.04em; color: var(--ink-3); text-transform: uppercase; white-space: nowrap; }
 .sb-url__value { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12.5px; color: var(--ink); background: none; }
+
+.sb-detail-note-group { display: flex; flex-direction: column; gap: 16px; min-width: 0; }
+.sb-full-name { display: flex; align-items: flex-start; justify-content: space-between; gap: 8px; padding: 7px 6px 7px 10px; border-radius: var(--radius-sm); border: 1px solid var(--line); background: var(--surface); min-width: 0; }
+.sb-full-name__text { flex: 1; min-width: 0; padding-top: 3px; font-size: 13px; font-weight: 550; line-height: 1.5; color: var(--ink); overflow-wrap: anywhere; word-break: break-word; user-select: text; }
 
 .sb-remark__actions { display: flex; align-items: center; justify-content: flex-end; gap: 8px; margin-top: 8px; font-size: 12.5px; }
 .sb-remark__actions .sb-dim { margin-right: auto; }

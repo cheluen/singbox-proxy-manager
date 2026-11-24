@@ -1,6 +1,6 @@
 # HTTP API 参考
 
-本文档基于 `1.7.25` 后端路由注册（`backend/main.go`、`backend/api/`）整理全部 **26 个业务接口**（2 个公开接口 + 24 个鉴权接口）。
+本文档基于 `1.7.26` 后端路由注册（`backend/main.go`、`backend/api/`）整理全部 **26 个业务接口**（2 个公开接口 + 24 个鉴权接口）。
 
 ---
 
@@ -18,7 +18,7 @@
 
 | 方法与路径 | 请求体 | 响应与行为说明 |
 | --- | --- | --- |
-| `GET /api/version` | 无 | 返回 `{ "version": "1.7.25", "update": { ... } }`。按需检查 GitHub 最新 Release 并缓存 `SBPM_UPDATE_CHECK_TTL`；即使上游查询失败仍返回 HTTP `200`，且首次失败与缓存命中均统一在 `update` 中携带错误信息与 `checked_at`。 |
+| `GET /api/version` | 无 | 返回 `{ "version": "1.7.26", "update": { ... } }`。按需检查 GitHub 最新 Release 并缓存 `SBPM_UPDATE_CHECK_TTL`；即使上游查询失败仍返回 HTTP `200`，且首次失败与缓存命中均统一在 `update` 中携带错误信息与 `checked_at`。 |
 | `POST /api/login` | `{ "password": "..." }` | 验证管理员密码，成功返回 `200` 及 `{ "token": "...", "expiry": 1700000000 }`（`expiry` 为整数 Unix 秒时间戳）；密码错误返回 `401`；触发 IP 限流或全局并发校验上限返回 `429`（附 `Retry-After` 头）。 |
 
 ---
@@ -63,7 +63,7 @@
 
 | 方法与路径 | 请求体 | 响应与行为说明 |
 | --- | --- | --- |
-| `GET /api/nodes` | 无 | 按 `sort_order` 升序返回全部节点数组（**无服务端分页**）。 |
+| `GET /api/nodes` | 无 | 按 `sort_order` 升序返回全部节点数组（**无服务端分页**）。面板使用 `username` 和 `password` 显示入站账密，密码遮蔽在浏览器渲染层完成。 |
 | `GET /api/nodes/:id` | 无 | 返回单个节点完整记录；不存在返回 `404`。 |
 | `POST /api/nodes` | 节点 Upsert 字段 | 创建节点、校验并应用至 `sing-box`，成功返回 `201`。自动端口模式下忽略请求中的 `inbound_port`；保留端口模式下填 `0` 表示自动分配。 |
 | `PUT /api/nodes/:id` | 节点 Upsert 字段 | 全量更新节点并原子应用；保留原 `sort_order` 与 `inbound_port_pinned` 状态；未传入 `tcp_reuse_enabled` 或前置代理字段时保留原值。 |

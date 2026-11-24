@@ -20,6 +20,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 WORKDIR /app
 COPY --from=selector /tmp/singbox-proxy-manager /app/singbox-proxy-manager
+COPY LICENSE THIRD_PARTY_NOTICES.md /app/
+COPY licenses/SING-BOX-GPL-3.0.txt /app/licenses/SING-BOX-GPL-3.0.txt
 RUN mkdir -p /app/config
 
 ENV PORT=30000

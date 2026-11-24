@@ -12,7 +12,8 @@ import { findTestPortRange } from './test-ports.mjs'
 import { launchBrowser, stopProcess } from './test-harness.mjs'
 import { isExpectedSystemBrowserError } from './system-browser-errors.mjs'
 import { PROJECT_MARK_FILE, PROJECT_NAME } from '../src/core/project.js'
-import { assertProjectBrand, clickControl, clickText, confirmDialog, editNode, openBatchImport, openNodeMenu, saveNodeForm, selectOption, setInput, sleep, toggle, waitOverlaysClosed } from './ui-driver.mjs'
+import { assertProjectBrand, clickControl, clickText, confirmDialog, openBatchImport, openNodeMenu, saveNodeForm, selectOption, setInput, sleep, toggle, waitOverlaysClosed } from './ui-driver.mjs'
+import { assertFullNodeName, assertInboundUsername, assertMaskedInboundPassword, assertRevealedInboundPassword, assertRouteId } from './node-display-assertions.mjs'
 
 const FRONTEND = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
 const VERSION = JSON.parse(fs.readFileSync(path.join(FRONTEND, 'package.json'), 'utf8')).version
@@ -58,6 +59,8 @@ const configDir = path.join(scratch, 'config')
 const SECRET = `System-${randomBytes(18).toString('hex')}`
 const NEXT_SECRET = `Rotated-${randomBytes(18).toString('hex')}`
 const INBOUND_SECRET = 'e2e-inbound-secret'
+const ROTATED_INBOUND_SECRET = `Rotated-${'regression-'.repeat(8)}`
+const RENAMED_NODE = `System direct renamed ${'FullNodeName_'.repeat(10)}`
 const logs = []
 const browserErrors = []
 const steps = []
@@ -187,6 +190,13 @@ try {
   await waitOverlaysClosed(page)
   assert.equal(direct.type, 'direct')
   assert.equal(direct.username, 'system-user')
+  const openDirect = `[data-testid="node-open-${direct.id}"]`
+  const revealDirect = `[data-testid="node-password-toggle-${direct.id}"]`
+  await assertInboundUsername(page, direct.id, 'system-user')
+  const originalMaskWidth = await assertMaskedInboundPassword(page, direct.id, INBOUND_SECRET)
+  await clickControl(page, revealDirect)
+  await assertRevealedInboundPassword(page, direct.id, INBOUND_SECRET)
+  assert.equal(await page.$('[data-testid="node-inspector"]'), null)
   const forward = async (node, username, password) => {
     for (const protocol of ['http', 'socks5']) {
       const transport = protocol === 'http' ? ['--proxy', `http://127.0.0.1:${node.inbound_port}`] : ['--socks5-hostname', `127.0.0.1:${node.inbound_port}`]
@@ -198,26 +208,30 @@ try {
   await forward(direct, 'system-user', INBOUND_SECRET)
   assert.ok(targetHits >= 2)
   const checked = await submit('POST', `/nodes/${direct.id}/check-ip`, async () => {
-    await clickControl(page, `[data-testid="node-open-${direct.id}"]`)
+    await clickControl(page, openDirect)
     await clickControl(page, `[data-testid="node-check-${direct.id}"]`)
   })
   assert.equal(checked.ip, '203.0.113.20')
   assert.equal(checked.transport, 'http')
+  await assertFullNodeName(page, direct.id, 'System direct')
+  await assertRouteId(page, direct.id, `system-user+${direct.inbound_port}`)
   steps.push('ui-create-http-socks-ipcheck')
 
   const remark = 'system first line\nsecond line  with spaces'
   await setInput(page, '.sb-remark textarea', remark)
   await submit('PUT', `/nodes/${direct.id}/remark`, () => clickText(page, 'Save', { root: '.sb-remark' }))
-  await editNode(page, direct.id)
-  await setInput(page, '#name', 'System direct renamed')
+  await clickControl(page, `[data-testid="node-edit-${direct.id}"]`)
+  await setInput(page, '#name', RENAMED_NODE)
   await submit('PUT', `/nodes/${direct.id}`, () => saveNodeForm(page))
   await waitOverlaysClosed(page)
   const stored = await api('GET', `/nodes/${direct.id}`)
   assert.equal(stored.remark, remark)
-  assert.equal(stored.name, 'System direct renamed')
+  assert.equal(stored.name, RENAMED_NODE)
   assert.equal(stored.username, 'system-user')
+  await assertFullNodeName(page, direct.id, RENAMED_NODE)
   const flag = await submit('PATCH', `/nodes/${direct.id}`, () => clickControl(page, `[data-testid="node-tcp-reuse-${direct.id}"]`))
   assert.equal(flag.tcp_reuse_enabled, false)
+  await assertRouteId(page, direct.id, '')
   await forward(stored, 'system-user', INBOUND_SECRET)
   steps.push('ui-edit-remark-flags')
 
@@ -237,6 +251,8 @@ try {
   await waitOverlaysClosed(page)
   const imported = (await api('GET', '/nodes')).find((node) => node.name === 'System imported')
   assert.ok(imported)
+  await assertInboundUsername(page, imported.id, imported.username)
+  await assertMaskedInboundPassword(page, imported.id, imported.password)
   await openNodeMenu(page, imported.id, 'Export share link')
   await page.waitForSelector('.sb-overlay textarea', { visible: true })
   assert.ok((await page.$eval('.sb-overlay textarea', (element) => element.value)).startsWith('socks5://'))
@@ -263,6 +279,7 @@ try {
   expectRestart = false
   assert.equal(await page.evaluate(() => localStorage.getItem('token')), token)
   assert.equal((await api('GET', `/nodes/${direct.id}`)).remark, remark)
+  await assertMaskedInboundPassword(page, direct.id, INBOUND_SECRET)
   await forward(await api('GET', `/nodes/${direct.id}`), 'system-user', INBOUND_SECRET)
   steps.push('restart-database-session-persistence')
 
@@ -271,17 +288,24 @@ try {
     const rows = Array.from(document.querySelectorAll('[data-row-id]'))
     return rows.length === 1 && Number(rows[0].dataset.rowId) === id
   }, {}, direct.id)
+  await clickControl(page, revealDirect)
+  await assertRevealedInboundPassword(page, direct.id, INBOUND_SECRET)
   await clickControl(page, `[data-testid="node-select-${direct.id}"]`)
   await clickControl(page, '[data-testid="nodes-batch-auth"]')
   await setInput(page, '[data-testid="batch-auth-username"]', 'rotated-user')
-  await setInput(page, '[data-testid="batch-auth-secret"]', 'rotated-inbound-secret')
+  await setInput(page, '[data-testid="batch-auth-secret"]', ROTATED_INBOUND_SECRET)
   const auth = await submit('POST', '/nodes/batch-auth', () => clickControl(page, '[data-testid="batch-auth-form"] button[type="submit"]'))
   assert.ok(auth)
   await waitOverlaysClosed(page)
   const rotated = await api('GET', `/nodes/${direct.id}`)
   assert.equal(rotated.username, 'rotated-user')
   assert.notEqual((await api('GET', `/nodes/${imported.id}`)).username, 'rotated-user')
-  await forward(rotated, 'rotated-user', 'rotated-inbound-secret')
+  await assertInboundUsername(page, direct.id, 'rotated-user')
+  const rotatedMaskWidth = await assertMaskedInboundPassword(page, direct.id, ROTATED_INBOUND_SECRET)
+  assert.ok(Math.abs(originalMaskWidth - rotatedMaskWidth) <= 1, '真实密码长度变化改变了遮蔽宽度')
+  await clickControl(page, revealDirect)
+  await assertRevealedInboundPassword(page, direct.id, ROTATED_INBOUND_SECRET)
+  await forward(rotated, 'rotated-user', ROTATED_INBOUND_SECRET)
   steps.push('filtered-auth-live-forwarding')
 
   await setInput(page, '[data-testid="nodes-search"]', '')

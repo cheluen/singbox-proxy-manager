@@ -1,6 +1,6 @@
 # 系统架构与核心机制
 
-本文档基于 `1.7.25` 源码梳理 SingBox Proxy Manager 的核心架构、运行时生命周期与安全边界。
+本文档基于 `1.7.26` 源码梳理 SingBox Proxy Manager 的核心架构、运行时生命周期与安全边界。
 
 ## 1. 总体定位与架构
 
@@ -40,7 +40,7 @@ flowchart LR
 
 | 组件 | 固定基线 | 源码依据 |
 | --- | --- | --- |
-| 应用版本 | `1.7.25`（后端嵌入 `version.txt`） | `internal/version/version.txt` |
+| 应用版本 | `1.7.26`（后端嵌入 `version.txt`） | `internal/version/version.txt` |
 | Go 工具链 | **精确 `1.26.11`**（发行与内核构建强校验） | `go.mod`、`scripts/verify-go-build.sh` |
 | sing-box 内核 | **固定 `1.12.12`**（Go 1.26.11 重编译） | `scripts/build-sing-box.sh` |
 | 前端技术栈 | React 18、Ant Design 5、Axios、i18next、dnd-kit、Lucide、Vite 6（Node `>=22.12.0`） | `frontend/package.json` |
@@ -83,6 +83,7 @@ flowchart LR
   4. `<CONFIG_DIR>/sing-box`
   5. 管理程序同目录的 `sing-box`
 - 注意：版本升级后历史哈希命名的旧内核文件不会自动清理，可按需手动删除旧文件。
+- 内置内核按 `GPL-3.0-or-later` 分发，管理器自身代码采用 MIT。GitHub Release 随裸二进制附带版权与许可证文件，源码构建与 GHCR 发行镜像均将这些文件置于 `/app/`。[第三方声明与对应源码](../THIRD_PARTY_NOTICES.md)
 
 ### 2.2 预压缩静态资源与内容协商（`backend/static_assets.go`）
 
@@ -146,7 +147,7 @@ flowchart LR
 
 本项目中的「TCP 复用」并非传输层多路复用（smux/yamux），而是基于 `sing-box` 入站认证用户名的**路由分发能力**：
 
-- 对每一个已启用、配置完整入站账密且开启 `tcp_reuse_enabled` 的节点，系统自动派生复用用户名：`<原用户名>+<该节点入站端口>`（因此入站用户名禁止包含 `+`）。
+- 对每一个已启用、配置完整入站账密且开启 `tcp_reuse_enabled` 的节点，系统派生路由用户名 `<原用户名>+<该节点入站端口>`。面板连接区将该值显示为可复制的「路由号」。入站用户名禁止包含 `+`。
 - 这些复用账号会被同步注册到**所有已启用且有认证的节点入站**上。
 - 路由规则中，`auth_user` 匹配优先级高于默认「入站 → 本节点出站」规则。因此客户端只需连接任意一个带认证的节点端口，更换不同的 `<用户名>+<目标端口>` 认证凭据即可路由至对应目标出站节点。
 - 关闭某节点的「TCP 复用」开关，意味着将它从可被其他端口路由的目标池中移除，而不影响它作为入站转发其他复用目标。

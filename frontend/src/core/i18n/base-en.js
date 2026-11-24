@@ -45,7 +45,7 @@ export default {
   status: 'Status',
   status_healthy: 'Healthy',
   tcp_reuse: 'TCP Reuse',
-  tcp_reuse_short: 'Reuse',
+  tcp_reuse_short: 'Route ID',
   export: 'Export',
   copy: 'Copy',
   copied: 'Copied',

@@ -257,6 +257,9 @@ auto-release:
     - job: build-linux
       artifacts: false
   script:
+    - test -s LICENSE
+    - test -s THIRD_PARTY_NOTICES.md
+    - test -s licenses/SING-BOX-GPL-3.0.txt
     - echo "Auto-creating release ${AUTO_TAG} for commit ${CI_COMMIT_SHORT_SHA}"
   release:
     tag_name: $AUTO_TAG
@@ -282,6 +285,12 @@ auto-release:
       ADMIN_PASSWORD=your_password ./singbox-proxy-manager-linux-amd64
       # 访问 http://localhost:30000
       ```
+
+      ### 第三方许可证与对应源码
+
+      内置的独立内核 sing-box v1.12.12 由 nekohasekai 持有版权（Copyright (C) 2022 by nekohasekai <contact-sagernet@sekai.icu>），按 GPL-3.0-or-later 分发。SingBox Proxy Manager 与 sing-box、SagerNet 和 nekohasekai 没有官方隶属、赞助或背书关系。
+
+      [官方源码与固定提交](https://github.com/SagerNet/sing-box/tree/54ed58499d7063136ed52dabf87d179d252425d0) · [对应源码 tar.gz](https://github.com/SagerNet/sing-box/archive/54ed58499d7063136ed52dabf87d179d252425d0.tar.gz) · [第三方声明与重编译说明](${CI_PROJECT_URL}/-/blob/${CI_COMMIT_SHA}/THIRD_PARTY_NOTICES.md) · [GPL v3 正文](${CI_PROJECT_URL}/-/blob/${CI_COMMIT_SHA}/licenses/SING-BOX-GPL-3.0.txt)
     assets:
       links:
         - name: "singbox-proxy-manager-linux-amd64"
@@ -290,4 +299,13 @@ auto-release:
         - name: "singbox-proxy-manager-freebsd-amd64"
           url: "${CI_PROJECT_URL}/-/jobs/artifacts/${CI_COMMIT_SHA}/raw/singbox-proxy-manager-freebsd-amd64?job=build-freebsd"
           link_type: package
+        - name: "LICENSE"
+          url: "${CI_PROJECT_URL}/-/raw/${CI_COMMIT_SHA}/LICENSE"
+          link_type: other
+        - name: "THIRD_PARTY_NOTICES.md"
+          url: "${CI_PROJECT_URL}/-/raw/${CI_COMMIT_SHA}/THIRD_PARTY_NOTICES.md"
+          link_type: other
+        - name: "SING-BOX-GPL-3.0.txt"
+          url: "${CI_PROJECT_URL}/-/raw/${CI_COMMIT_SHA}/licenses/SING-BOX-GPL-3.0.txt"
+          link_type: other
   rules: *main-push

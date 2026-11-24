@@ -120,9 +120,17 @@ function UpstreamSection({ node, act }) {
 function RemarkSection({ node, act }) {
   const { t } = useTranslation()
   return (
-    <Section title={t('remark')}>
-      <RemarkEditor node={node} act={act} />
-    </Section>
+    <div className="sb-section sb-detail-note-group">
+      <Section title={t('full_node_name')} className="sb-full-name-section">
+        <div className="sb-full-name">
+          <span className="sb-full-name__text" data-testid={`node-full-name-${node.id}`}>{node.name}</span>
+          <CopyButton text={node.name} label={`${t('copy')} ${t('node_name')}`} />
+        </div>
+      </Section>
+      <Section title={t('remark')}>
+        <RemarkEditor node={node} act={act} />
+      </Section>
+    </div>
   )
 }
 

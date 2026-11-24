@@ -9,6 +9,7 @@ import { spawn } from 'node:child_process'
 import { fileURLToPath } from 'node:url'
 import { launchBrowser, stopProcess } from './test-harness.mjs'
 import { assertProjectBrand, clickControl, clickText, closeOverlay, confirmDialog, editNode, openBatchImport, openNodeMenu, saveNodeForm, selectOption, setInput, sleep, toggle, waitOverlaysClosed } from './ui-driver.mjs'
+import { assertColumnOrder, assertCopiedText, assertEmptyInboundPassword, assertFullNodeName, assertInboundUsername, assertMaskedInboundPassword, assertRevealedInboundPassword, assertRouteId, assertUnclippedTableHeaders } from './node-display-assertions.mjs'
 
 const FRONTEND = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
 const VERSION = JSON.parse(fs.readFileSync(path.join(FRONTEND, 'package.json'), 'utf8')).version
@@ -351,20 +352,56 @@ const scenarios = {
     assert.equal(Object.hasOwn(state.imports[1], 'links'), false)
   },
 
-  async 'batch-auth'({ page, state }) {
+  async 'batch-auth'({ page, state, refresh }) {
+    const shortSecret = 'E2e!short'
+    const longSecret = `E2e!${'long-secret_'.repeat(18)}`
+    const sharedSecret = 'shared-secret'
+    Object.assign(state.nodes[0], { username: 'first-user', password: shortSecret })
+    Object.assign(state.nodes[1], { username: 'second-user', password: longSecret })
+    Object.assign(state.nodes[3], { username: '', password: '' })
+    await refresh()
+    await assertInboundUsername(page, 1, 'first-user')
+    await assertInboundUsername(page, 2, 'second-user')
+    await assertInboundUsername(page, 4, '')
+    await assertEmptyInboundPassword(page, 4)
+    const shortMask = await assertMaskedInboundPassword(page, 1, shortSecret)
+    const longMask = await assertMaskedInboundPassword(page, 2, longSecret)
+    assert.ok(Math.abs(shortMask - longMask) <= 1, '不同长度密码的遮蔽宽度必须一致')
+    const firstToggle = '[data-testid="node-password-toggle-1"]'
+    const secondToggle = '[data-testid="node-password-toggle-2"]'
+    await clickControl(page, firstToggle)
+    await assertRevealedInboundPassword(page, 1, shortSecret)
+    await assertMaskedInboundPassword(page, 2, longSecret)
+    await page.focus(secondToggle)
+    await page.keyboard.press('Enter')
+    await assertRevealedInboundPassword(page, 2, longSecret)
+    await assertRevealedInboundPassword(page, 1, shortSecret)
+    assert.equal(await page.$('[data-testid="node-inspector"]'), null, '眼睛按钮误打开了详情')
+    await page.keyboard.press('Space')
+    await assertMaskedInboundPassword(page, 2, longSecret)
+    await clickControl(page, firstToggle)
+    await assertMaskedInboundPassword(page, 1, shortSecret)
+    await clickControl(page, firstToggle)
+
     await selectNodes(page, [1, 2])
     await clickControl(page, '[data-testid="nodes-batch-auth"]')
     await page.locator('[data-testid="batch-auth-form"] button[type="submit"]').click()
     assert.equal(state.auth.length, 0)
     await setInput(page, '[data-testid="batch-auth-username"]', 'a+b')
-    await setInput(page, '[data-testid="batch-auth-secret"]', 'shared-secret')
+    await setInput(page, '[data-testid="batch-auth-secret"]', sharedSecret)
     await page.locator('[data-testid="batch-auth-form"] button[type="submit"]').click()
     assert.equal(state.auth.length, 0)
     await setInput(page, '[data-testid="batch-auth-username"]', 'team-user')
     await page.locator('[data-testid="batch-auth-form"] button[type="submit"]').click()
     await eventually(() => state.auth.length === 1, '批量认证未保存')
-    assert.deepEqual(state.auth[0], { node_ids: [1, 2], auth_enabled: true, username: 'team-user', password: 'shared-secret' })
+    assert.deepEqual(state.auth[0], { node_ids: [1, 2], auth_enabled: true, username: 'team-user', password: sharedSecret })
     await waitOverlaysClosed(page)
+    for (const id of [1, 2]) {
+      await assertInboundUsername(page, id, 'team-user')
+      await assertMaskedInboundPassword(page, id, sharedSecret)
+    }
+    await clickControl(page, firstToggle)
+    await assertRevealedInboundPassword(page, 1, sharedSecret)
     await clickControl(page, '[data-testid="nodes-batch-auth"]')
     await toggle(page, '[data-testid="batch-auth-form"] [role="switch"]', false)
     await page.locator('[data-testid="batch-auth-form"] button[type="submit"]').click()
@@ -375,12 +412,22 @@ const scenarios = {
     await eventually(() => state.auth.length === 2, '关闭批量认证未提交')
     assert.deepEqual(state.auth[1], { node_ids: [1, 2], auth_enabled: false, username: '', password: '' })
     await waitOverlaysClosed(page)
+    for (const id of [1, 2]) {
+      await assertInboundUsername(page, id, '')
+      await assertEmptyInboundPassword(page, id)
+    }
     assert.equal(state.nodes[2].username, 'alice')
     await clickControl(page, '[data-testid="nodes-batch-auth"]')
     await toggle(page, '[data-testid="batch-auth-form"] [role="switch"]', true)
     await clickControl(page, '[data-testid="auth-generate"]')
     assert.equal((await page.$eval('[data-testid="batch-auth-secret"]', (input) => input.value)).length, 16)
-    await closeOverlay(page)
+    await setInput(page, '[data-testid="batch-auth-username"]', 'restored-user')
+    await setInput(page, '[data-testid="batch-auth-secret"]', sharedSecret)
+    await clickControl(page, '[data-testid="batch-auth-form"] button[type="submit"]')
+    await eventually(() => state.auth.length === 3, '恢复批量认证未提交')
+    await waitOverlaysClosed(page)
+    await assertMaskedInboundPassword(page, 1, sharedSecret)
+    await assertMaskedInboundPassword(page, 2, sharedSecret)
   },
 
   async 'batch-check-ip-live'({ page, state, refresh }) {
@@ -432,8 +479,14 @@ const scenarios = {
     await closeOverlay(page)
   },
 
-  async remark({ page, state }) {
+  async remark({ page, state, refresh }) {
+    const name = `Original-${'LongNodeName'.repeat(16)}`
+    state.nodes[0].name = name
+    await refresh()
     await clickControl(page, '[data-testid="node-open-1"]')
+    await assertFullNodeName(page, 1, name)
+    await page.browserContext().overridePermissions(new URL(page.url()).origin, ['clipboard-read', 'clipboard-write'])
+    await assertCopiedText(page, '.sb-full-name button', name)
     const text = 'first line\nsecond line with  spaces\n'+ '长备注'.repeat(200)
     await setInput(page, '.sb-remark textarea', text)
     assert.equal(state.nodes[0].remark, '')
@@ -447,6 +500,7 @@ const scenarios = {
     await saveNodeForm(page)
     await page.waitForSelector('[data-testid="node-form"]', { hidden: true })
     assert.equal(state.nodes[0].remark, text)
+    await assertFullNodeName(page, 1, 'Renamed node')
     await setInput(page, '[data-testid="nodes-search"]', 'second line')
     await expectRows(page, [1])
   },
@@ -484,16 +538,22 @@ const scenarios = {
 
   async 'tcp-reuse-ui'({ page, state }) {
     await clickControl(page, '[data-testid="node-open-1"]')
+    await assertRouteId(page, 1, 'alice+30001')
     await toggle(page, '[data-testid="node-tcp-reuse-1"]', false)
     await eventually(() => state.flags.length === 1, 'TCP 复用未提交')
     assert.deepEqual(state.flags[0], { tcp_reuse_enabled: false })
+    await assertRouteId(page, 1, '')
     const config = state.nodes[0].config
     state.flagFailure = true
     await clickControl(page, '[data-testid="node-tcp-reuse-1"]')
     await eventually(() => state.flags.length === 2, 'TCP 复用失败回滚未覆盖')
     await page.waitForFunction(() => document.querySelector('[data-testid="node-tcp-reuse-1"]')?.getAttribute('aria-checked') === 'false')
+    await assertRouteId(page, 1, '')
     assert.equal(state.nodes[0].config, config)
     assert.equal(state.nodes[0].enabled, true)
+    state.flagFailure = false
+    await toggle(page, '[data-testid="node-tcp-reuse-1"]', true)
+    await assertRouteId(page, 1, 'alice+30001')
     await editNode(page, 1)
     assert.equal(await page.$('[data-testid="node-form"] [data-testid^="node-tcp-reuse"]'), null)
     await closeOverlay(page)
@@ -518,13 +578,41 @@ const scenarios = {
 
   async 'nodes-viewport'({ page, state, refresh }) {
     state.nodes[0].name = '长名称'.repeat(80)
+    state.nodes[0].type = 'wireguard'
+    const longSecret = `  Viewport  ${'abc123'.repeat(27)}  `
+    state.nodes[0].password = longSecret
     state.nodes = [state.nodes[0]]
     await refresh()
     const dragLabel = await page.$eval('[data-testid="node-drag-handle-1"]', (button) => button.getAttribute('aria-label'))
     assert.equal(dragLabel.toLowerCase().includes('filter'), false, '单节点排序提示不应误报为筛选限制')
-    for (const width of [320, 390, 768, 900, 1440]) {
+    const nameSelector = '[data-testid="node-open-1"]'
+    const secretToggle = '[data-testid="node-password-toggle-1"]'
+    for (const width of [320, 390, 768, 900, 1024, 1280, 1440]) {
       await page.setViewport({ width, height: 900 })
-      assert.equal(await page.evaluate(() => document.documentElement.scrollWidth > window.innerWidth), false, `${width}px 页面横向溢出`)
+      const layout = await page.$eval(nameSelector, (button) => {
+        const name = button.querySelector('.truncate')
+        const row = button.closest('[data-row-id]')
+        const meta = row.querySelector('.dusk-row__meta')
+        return {
+          nameWidth: button.getBoundingClientRect().width,
+          truncated: name.scrollWidth > name.clientWidth && getComputedStyle(name).overflowX === 'hidden',
+          overflow: document.documentElement.scrollWidth > innerWidth || row.scrollWidth > row.clientWidth || meta.scrollWidth > meta.clientWidth,
+        }
+      })
+      assert.equal(layout.overflow, false, `${width}px 列表横向溢出`)
+      if (width >= 900) {
+        assert.ok(layout.nameWidth > 0 && layout.nameWidth <= 156, `${width}px 桌面节点名列宽为 ${layout.nameWidth}px`)
+        assert.equal(layout.truncated, true, `${width}px 桌面长节点名未截断`)
+        await assertUnclippedTableHeaders(page)
+        await assertColumnOrder(page)
+      }
+      await clickControl(page, secretToggle)
+      await assertRevealedInboundPassword(page, 1, longSecret)
+      await clickControl(page, nameSelector)
+      await assertFullNodeName(page, 1, state.nodes[0].name)
+      assert.equal(await page.$eval('[data-row-id="1"]', (row) => row.scrollWidth > row.clientWidth || document.documentElement.scrollWidth > innerWidth), false, `${width}px 展开详情后横向溢出`)
+      await clickControl(page, nameSelector)
+      await clickControl(page, secretToggle)
       await clickControl(page, '[data-testid="nodes-add-node"]')
       await page.waitForSelector('[data-testid="node-form"]', { visible: true })
       assert.equal(await page.evaluate(() => document.documentElement.scrollWidth > window.innerWidth), false)
@@ -703,6 +791,9 @@ const scenarios = {
     state.nodes[0].username = 'a@b'
     state.nodes[0].password = 'p:# + value'
     await refresh()
+    assert.equal(await page.$eval('.dusk-head .dusk-col--user', (header) => header.textContent), 'Inbound User')
+    assert.equal(await page.$eval('.dusk-head .dusk-col--pass', (header) => header.textContent), 'Inbound Pass')
+    await assertUnclippedTableHeaders(page)
     await page.browserContext().overridePermissions(new URL(page.url()).origin, ['clipboard-read', 'clipboard-write'])
     await openNodeMenu(page, 1, 'Copy HTTP proxy URL')
     const copied = await page.evaluate(() => navigator.clipboard.readText())
@@ -710,10 +801,22 @@ const scenarios = {
     assert.equal(decodeURIComponent(new URL(copied).password), 'p:# + value')
     assert.equal(new URL(copied).port, '30001')
     await selectNodes(page, [1])
+    await clickControl(page, '[data-testid="node-open-1"]')
+    await assertRouteId(page, 1, 'a@b+30001')
+    await assertCopiedText(page, '[data-testid="node-route-id-section-1"] button', 'a@b+30001')
     await clickControl(page, 'button[title="中文"]')
     await page.waitForFunction(() => document.documentElement.lang === 'zh-CN')
     assert.equal(await page.evaluate(() => localStorage.getItem('language')), 'zh')
+    assert.equal(await page.$eval('.dusk-head .dusk-col--user', (header) => header.textContent), '入站用户名')
+    assert.equal(await page.$eval('.dusk-head .dusk-col--pass', (header) => header.textContent), '入站密码')
+    await assertUnclippedTableHeaders(page)
     assert.equal(await page.$eval('[data-testid="node-select-1"]', (input) => input.checked), true)
+    await assertRouteId(page, 1, 'a@b+30001', '路由号')
+    await assertFullNodeName(page, 1, state.nodes[0].name, '完整节点名称')
+    await assertMaskedInboundPassword(page, 1, state.nodes[0].password, '显示入站密码')
+    await clickControl(page, '[data-testid="node-password-toggle-1"]')
+    await assertRevealedInboundPassword(page, 1, state.nodes[0].password, '隐藏入站密码')
+    await clickControl(page, '[data-testid="node-password-toggle-1"]')
     await page.reload({ waitUntil: 'networkidle2' })
     await page.waitForSelector('[data-testid="nodes-list"]', { visible: true })
     assert.equal(await page.evaluate(() => document.documentElement.lang), 'zh-CN')

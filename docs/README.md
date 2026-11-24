@@ -1,6 +1,6 @@
 # SingBox Proxy Manager 技术文档
 
-本目录收录 **SingBox Proxy Manager**（当前代码版本 `1.7.25`）的架构、配置、协议、API 与开发验证文档，所有内容均以仓库当前源码为准。
+本目录收录 **SingBox Proxy Manager**（当前代码版本 `1.7.26`）的架构、配置、协议、API 与开发验证文档，所有内容均以仓库当前源码为准。
 
 > 如果你是首次使用并希望快速部署与上手，请优先阅读根目录的 [README.md](../README.md)。
 
@@ -12,7 +12,8 @@
 | [configuration.md](configuration.md) | 全部环境变量参考、多数据库（SQLite / PostgreSQL / MySQL / Turso）接入与单实例租约、数据目录结构、安全加固、升级与故障排查 | 运维人员、生产环境部署者 |
 | [protocols.md](protocols.md) | 12 种出站协议字段规范、sing-box 1.12.12 映射规则、15 种 URI Scheme 与 Clash 结构化导入边界、导出限制及手动出站去重说明 | 高级用户、协议集成与排障人员 |
 | [api.md](api.md) | HTTP 鉴权机制、全部 26 个 API 路由的请求参数、返回结构、状态码与边界说明 | 自动化脚本作者、API 调用方 |
-| [development.md](development.md) | 本地前后端开发、固定版本安全重编译（Go 1.26.11 + sing-box 1.12.12）、统一单文件构建、全套测试矩阵与 CI/CD 流水线 | 贡献者、项目维护者 |
+| [development.md](development.md) | 固定版本重编译（Go 1.26.11 + sing-box 1.12.12）、单文件构建、分发文件与 CI 回归 | 贡献者、项目维护者 |
+| [第三方声明](../THIRD_PARTY_NOTICES.md) | 内置 sing-box 的许可证、对应源码和重编译参数 | 发行维护者、使用者 |
 
 ## 文档维护约定
 

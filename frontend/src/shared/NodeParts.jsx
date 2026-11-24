@@ -206,10 +206,10 @@ export function ConnectInfo({ node }) {
       <UrlRow label="SOCKS5" url={socksUrl} masked={maskSecret(socksUrl, node, visible)} />
       <UrlRow label="curl" url={curl} masked={maskSecret(curl, node, visible)} />
       {reuse ? (
-        <div className="sb-connect__reuse">
+        <div className="sb-connect__reuse" data-testid={`node-route-id-section-${node.id}`}>
           <div className="sb-url">
-            <span className="sb-url__label">{t('tcp_reuse_short')}</span>
-            <code className="sb-url__value mono">{reuse}</code>
+            <span className="sb-url__label" data-testid={`node-route-id-label-${node.id}`}>{t('tcp_reuse_short')}</span>
+            <code className="sb-url__value mono" data-testid={`node-route-id-value-${node.id}`}>{reuse}</code>
             <CopyButton text={reuse} label={`${t('copy')} ${reuse}`} />
           </div>
           <p className="sb-dim">{t('tcp_reuse_explain')}</p>

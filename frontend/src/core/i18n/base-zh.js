@@ -45,7 +45,7 @@ export default {
   status: '状态',
   status_healthy: '可用',
   tcp_reuse: 'TCP复用',
-  tcp_reuse_short: '复用',
+  tcp_reuse_short: '路由号',
   export: '导出',
   copy: '复制',
   copied: '已复制',

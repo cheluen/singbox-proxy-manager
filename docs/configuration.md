@@ -1,6 +1,6 @@
 # 配置、数据库与运维指南
 
-本文档提供 SingBox Proxy Manager（`1.7.25`）完整的环境变量参考、多数据库配置、数据持久化、安全加固与故障排查指南。
+本文档提供 SingBox Proxy Manager（`1.7.26`）完整的环境变量参考、多数据库配置、数据持久化、安全加固与故障排查指南。
 
 ---
 
@@ -193,6 +193,8 @@ config/
   1. 停止当前管理进程（如 `systemctl stop sb-proxy` 或 `kill -TERM <pid>`）。
   2. 下载新版本二进制并校验 `checksums.txt`，替换原可执行文件。
   3. 保持原工作目录、`.env`、`CONFIG_DIR` 与数据库配置不变，重新启动即可自动释放新版内嵌内核与前端。
+
+GitHub Release 提供 `LICENSE`、`THIRD_PARTY_NOTICES.md` 和 `SING-BOX-GPL-3.0.txt` 附件。容器内可从 `/app/LICENSE`、`/app/THIRD_PARTY_NOTICES.md` 和 `/app/licenses/SING-BOX-GPL-3.0.txt` 读取相同内容。[第三方声明](../THIRD_PARTY_NOTICES.md)
 
 ### 5.2 常见故障排查
 

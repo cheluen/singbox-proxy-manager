@@ -5,7 +5,7 @@
   <p>将各类主流协议节点集中管理，一键转为独立的本地 HTTP / SOCKS5 混合代理端口</p>
 
   <p>
-    <a href="https://github.com/cheluen/singbox-proxy-manager/releases"><img src="https://img.shields.io/badge/version-1.7.25-blue.svg" alt="Version" /></a>
+    <a href="https://github.com/cheluen/singbox-proxy-manager/releases"><img src="https://img.shields.io/badge/version-1.7.26-blue.svg" alt="Version" /></a>
     <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-green.svg" alt="MIT License" /></a>
     <img src="https://img.shields.io/badge/sing--box-1.12.12-orange.svg" alt="sing-box 1.12.12" />
     <img src="https://img.shields.io/badge/Go-1.26.11-00ADD8.svg" alt="Go 1.26.11" />
@@ -51,11 +51,11 @@
 
 - **开箱即用，零外部依赖**：官方发行版将前端面板与固定版本 `sing-box 1.12.12` 内核打包为**单个可执行文件**，下载后无需再单独安装 Node.js 或手动配置 `sing-box`。
 - **12 种主流协议统一接入**：支持 Direct、Shadowsocks、VLESS（含 Reality / XTLS-Vision）、VMess、Trojan、Hysteria2、TUIC、AnyTLS、SOCKS5 / SOCKS5H、HTTP / HTTPS 与 WireGuard（含 Cloudflare WARP 保留字节与多 Peer JSON）。
-- **「暮色」暗色指挥台面板**：低饱和暗色高密度列表，点击节点即可在**行内原位展开**连接地址、出口 IP/地区/延迟、端口固定、前置代理与备注；支持 `Ctrl/⌘ + K` 命令面板、全键盘快捷键（`j/k`、`Enter`、`x`、`e`、`t`）及中英文一键切换。
+- **「暮色」暗色指挥台面板**：紧凑列表截断超长节点名称，直接显示入站用户名，并以固定宽度的毛玻璃掩码遮蔽入站密码，点击眼睛图标即可查看完整密码。行内详情在备注上方显示完整名称并支持复制，也提供连接地址、出口信息、端口固定与前置代理。支持 `Ctrl/⌘ + K` 命令面板、全键盘快捷键（`j/k`、`Enter`、`x`、`e`、`t`）及中英文切换。
 - **批量导入与一键出口检测**：支持一次性粘贴多行分享链接、Base64 订阅、远程订阅 URL 及 Clash YAML 节点列表；导入后自动分配端口与随机账密，并可一键并发检测出口 IP、国家/城市与延迟。
 - **进阶转发与灵活管理**：
   - **链式前置代理**：支持配置「全局前置代理」或「单节点自定义前置代理」，内置防环路保护与前置独立测 IP。
-  - **TCP 复用单端口路由**：通过 `<用户名>+<目标端口>` 认证规则，连接任意带认证入站端口即可动态路由到其他已开启复用的出站节点。
+  - **TCP 复用单端口路由**：详情连接区可复制「路由号」`<用户名>+<目标端口>`。使用路由号和目标节点密码登录任意带认证的入站端口，即可转发至对应的已启用复用节点。
   - **端口固定与保留模式**：支持自动顺延分配 + 单节点固定端口，也可开启「保留入站端口」确保拖拽排序与删除不影响客户端已有端口配置。
   - **批量高效维护**：支持批量测 IP、批量设置或随机生成入站账密、批量导出分享链接、手动出站去重及批量删除。
 - **稳定可靠与安全底盘**：配置变更先经 `sing-box check` 校验再原子切换，异常退出支持指数退避自动恢复与 `last-good` 降级保护；默认开启登录防爆破与无默认密码强制初始化；除开箱即用的本地 SQLite 外，还支持 PostgreSQL、MySQL/TiDB 与 Turso/libSQL 远程存储。
@@ -186,7 +186,7 @@ docker compose --profile ghcr logs --tail=50
 ```bash
 mkdir -p singbox-proxy-manager && cd singbox-proxy-manager
 
-APP_VERSION=1.7.25
+APP_VERSION=1.7.26
 OS=linux      # 可选：linux / darwin / freebsd
 ARCH=amd64    # 可选：amd64 / arm64
 
@@ -280,4 +280,6 @@ chmod 600 .env
 
 ## 开源许可证
 
-本项目采用 [MIT License](LICENSE) 开源许可协议。
+本项目自身代码采用 MIT 许可证。发行版内置的独立内核 `sing-box v1.12.12` 使用官方源码重编译，并按 `GPL-3.0-or-later` 分发。本项目与 `sing-box`、`SagerNet` 和 `nekohasekai` 没有官方隶属、赞助或背书关系。
+
+[MIT 许可证](LICENSE) · [第三方声明与对应源码](THIRD_PARTY_NOTICES.md) · [GNU GPL v3 正文](licenses/SING-BOX-GPL-3.0.txt)

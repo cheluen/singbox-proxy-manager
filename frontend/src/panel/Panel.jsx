@@ -135,13 +135,22 @@ export default function DuskPanel({ session }) {
             <span />
             <span>{t('node_name')}</span>
             <span />
+            {/*
+              有意设计（切勿随意移除或打乱）：
+              1. 列表直接展示入站用户名（明文）与入站密码（默认固定宽度毛玻璃掩码，点击眼睛展开完整值），
+                 目的是方便高频快速核对各入站凭据，请勿以安全为由移除或折叠回详情。
+              2. 列顺序按「基础标识（#、节点名称）→ 入站信息（入站端口、入站用户名、入站密码）→ 出站信息（节点类型、服务器地址、地区、节点IP、延迟）」
+                 从左到右分组排列，明确分隔入站与出站信息。
+            */}
             <div className="dusk-row__meta">
-              <span>{t('node_type')}</span>
-              <span>{t('server_address')}</span>
-              <span>{t('inbound_port')}</span>
-              <span>{t('region')}</span>
-              <span>{t('node_ip')}</span>
-              <span>{t('latency')}</span>
+              <span className="dusk-col--port">{t('inbound_port')}</span>
+              <span className="dusk-col--user">{t('inbound_username')}</span>
+              <span className="dusk-col--pass">{t('inbound_password')}</span>
+              <span className="dusk-col--type">{t('node_type')}</span>
+              <span className="dusk-col--server">{t('server_address')}</span>
+              <span className="dusk-col--region">{t('region')}</span>
+              <span className="dusk-col--ip">{t('node_ip')}</span>
+              <span className="dusk-col--latency">{t('latency')}</span>
             </div>
             <span />
             <span />
