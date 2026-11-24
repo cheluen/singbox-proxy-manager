@@ -367,21 +367,53 @@ const scenarios = {
     const shortMask = await assertMaskedInboundPassword(page, 1, shortSecret)
     const longMask = await assertMaskedInboundPassword(page, 2, longSecret)
     assert.ok(Math.abs(shortMask - longMask) <= 1, '不同长度密码的遮蔽宽度必须一致')
-    const firstToggle = '[data-testid="node-password-toggle-1"]'
-    const secondToggle = '[data-testid="node-password-toggle-2"]'
-    await clickControl(page, firstToggle)
+    const firstMask = '[data-testid="node-password-mask-1"]'
+    const firstValue = '[data-testid="node-password-value-1"]'
+    const secondMask = '[data-testid="node-password-mask-2"]'
+    // 先用键盘快捷键定位节点 1，再验证鼠标点击密码掩码后焦点留在密码控件，不因回落 body 导致按 Enter 误展开行详情。
+    await page.keyboard.press('j')
+    await clickControl(page, firstMask)
     await assertRevealedInboundPassword(page, 1, shortSecret)
     await assertMaskedInboundPassword(page, 2, longSecret)
-    await page.focus(secondToggle)
+    assert.equal(await page.$('[data-testid="node-inspector"]'), null, '点击密码掩码区域误打开了节点详情')
+    assert.equal(await page.evaluate(() => document.activeElement?.getAttribute('data-testid')), 'node-password-value-1', '鼠标展开密码后焦点不应回落到 body')
+    await page.keyboard.press('Enter')
+    await assertMaskedInboundPassword(page, 1, shortSecret)
+    assert.equal(await page.$('[data-testid="node-inspector"]'), null, '展开密码后按 Enter 误打开了节点详情')
+    await clickControl(page, firstMask)
+    await assertRevealedInboundPassword(page, 1, shortSecret)
+    // 点击密码单元格留白区域也不应展开节点详情。
+    const cellBox = await page.$eval('[data-testid="node-password-1"]', (el) => {
+      const r = el.getBoundingClientRect()
+      return { left: r.left, top: r.top, right: r.right, height: r.height }
+    })
+    await page.mouse.click(cellBox.right - 2, cellBox.top + cellBox.height / 2)
+    assert.equal(await page.$('[data-testid="node-inspector"]'), null, '点击密码单元格留白误打开了节点详情')
+    // 真实跨格拖选明文密码：既不能误切回掩码，也不能因 click 派发到共同祖先而误展开节点详情。
+    const valueBox = await page.$eval(firstValue, (el) => {
+      const r = el.getBoundingClientRect()
+      return { left: r.left, top: r.top, right: r.right, height: r.height }
+    })
+    await page.mouse.move(valueBox.left + 2, valueBox.top + valueBox.height / 2)
+    await page.mouse.down()
+    await page.mouse.move(cellBox.right + 16, valueBox.top + valueBox.height / 2, { steps: 6 })
+    await page.mouse.up()
+    assert.ok((await page.evaluate(() => window.getSelection()?.toString() || '')).includes(shortSecret), '拖选未选中密码明文')
+    await assertRevealedInboundPassword(page, 1, shortSecret)
+    assert.equal(await page.$('[data-testid="node-inspector"]'), null, '跨格拖选明文密码误打开了节点详情')
+    await page.evaluate(() => window.getSelection()?.removeAllRanges())
+    await page.focus(secondMask)
     await page.keyboard.press('Enter')
     await assertRevealedInboundPassword(page, 2, longSecret)
     await assertRevealedInboundPassword(page, 1, shortSecret)
-    assert.equal(await page.$('[data-testid="node-inspector"]'), null, '眼睛按钮误打开了详情')
+    assert.equal(await page.$('[data-testid="node-inspector"]'), null, '键盘展开密码误打开了节点详情')
     await page.keyboard.press('Space')
     await assertMaskedInboundPassword(page, 2, longSecret)
-    await clickControl(page, firstToggle)
+    assert.equal(await page.$('[data-testid="node-inspector"]'), null, '键盘收起密码误打开了节点详情')
+    await clickControl(page, firstValue)
     await assertMaskedInboundPassword(page, 1, shortSecret)
-    await clickControl(page, firstToggle)
+    assert.equal(await page.$('[data-testid="node-inspector"]'), null, '点击明文隐藏密码误打开了节点详情')
+    await clickControl(page, firstMask)
 
     await selectNodes(page, [1, 2])
     await clickControl(page, '[data-testid="nodes-batch-auth"]')
@@ -400,7 +432,7 @@ const scenarios = {
       await assertInboundUsername(page, id, 'team-user')
       await assertMaskedInboundPassword(page, id, sharedSecret)
     }
-    await clickControl(page, firstToggle)
+    await clickControl(page, firstMask)
     await assertRevealedInboundPassword(page, 1, sharedSecret)
     await clickControl(page, '[data-testid="nodes-batch-auth"]')
     await toggle(page, '[data-testid="batch-auth-form"] [role="switch"]', false)
@@ -586,7 +618,8 @@ const scenarios = {
     const dragLabel = await page.$eval('[data-testid="node-drag-handle-1"]', (button) => button.getAttribute('aria-label'))
     assert.equal(dragLabel.toLowerCase().includes('filter'), false, '单节点排序提示不应误报为筛选限制')
     const nameSelector = '[data-testid="node-open-1"]'
-    const secretToggle = '[data-testid="node-password-toggle-1"]'
+    const secretMask = '[data-testid="node-password-mask-1"]'
+    const secretValue = '[data-testid="node-password-value-1"]'
     for (const width of [320, 390, 768, 900, 1024, 1280, 1440]) {
       await page.setViewport({ width, height: 900 })
       const layout = await page.$eval(nameSelector, (button) => {
@@ -606,13 +639,14 @@ const scenarios = {
         await assertUnclippedTableHeaders(page)
         await assertColumnOrder(page)
       }
-      await clickControl(page, secretToggle)
+      await clickControl(page, secretMask)
       await assertRevealedInboundPassword(page, 1, longSecret)
+      assert.equal(await page.$('[data-testid="node-inspector"]'), null, `${width}px 点击密码掩码误展开详情`)
       await clickControl(page, nameSelector)
       await assertFullNodeName(page, 1, state.nodes[0].name)
       assert.equal(await page.$eval('[data-row-id="1"]', (row) => row.scrollWidth > row.clientWidth || document.documentElement.scrollWidth > innerWidth), false, `${width}px 展开详情后横向溢出`)
       await clickControl(page, nameSelector)
-      await clickControl(page, secretToggle)
+      await clickControl(page, secretValue)
       await clickControl(page, '[data-testid="nodes-add-node"]')
       await page.waitForSelector('[data-testid="node-form"]', { visible: true })
       assert.equal(await page.evaluate(() => document.documentElement.scrollWidth > window.innerWidth), false)
@@ -813,10 +847,10 @@ const scenarios = {
     assert.equal(await page.$eval('[data-testid="node-select-1"]', (input) => input.checked), true)
     await assertRouteId(page, 1, 'a@b+30001', '路由号')
     await assertFullNodeName(page, 1, state.nodes[0].name, '完整节点名称')
-    await assertMaskedInboundPassword(page, 1, state.nodes[0].password, '显示入站密码')
-    await clickControl(page, '[data-testid="node-password-toggle-1"]')
-    await assertRevealedInboundPassword(page, 1, state.nodes[0].password, '隐藏入站密码')
-    await clickControl(page, '[data-testid="node-password-toggle-1"]')
+    await assertMaskedInboundPassword(page, 1, state.nodes[0].password, '点击显示入站密码')
+    await clickControl(page, '[data-testid="node-password-mask-1"]')
+    await assertRevealedInboundPassword(page, 1, state.nodes[0].password, '点击隐藏入站密码')
+    await clickControl(page, '[data-testid="node-password-value-1"]')
     await page.reload({ waitUntil: 'networkidle2' })
     await page.waitForSelector('[data-testid="nodes-list"]', { visible: true })
     assert.equal(await page.evaluate(() => document.documentElement.lang), 'zh-CN')

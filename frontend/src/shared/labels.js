@@ -14,4 +14,4 @@ export const statusOptions = (summary, t) => [
 
 // 行点击时忽略来自按钮、开关、菜单等交互元素的点击（菜单渲染在 portal 里，但事件仍会沿 React 树冒泡）。
 export const isInteractive = (event) =>
-  Boolean(event.target instanceof Element && event.target.closest('button, a, input, textarea, select, label, [role="menuitem"], [role="switch"]'))
+  Boolean(event.target instanceof Element && event.target.closest('button, a, input, textarea, select, label, [role="menuitem"], [role="switch"], [role="button"]'))

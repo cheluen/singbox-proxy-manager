@@ -8,34 +8,39 @@ export async function assertInboundUsername(page, id, username) {
   await page.waitForFunction((target, expected) => document.querySelector(target)?.textContent.trim() === expected, {}, selector, username || '—')
 }
 
-export async function assertMaskedInboundPassword(page, id, secret, toggleLabel = 'Show inbound password') {
+export async function assertMaskedInboundPassword(page, id, secret, toggleLabel = 'Click to show inbound password') {
   const selector = `${byTestId(`node-password-${id}`)}[data-masked="true"]`
   await page.waitForSelector(selector, { visible: true })
   const result = await page.$eval(selector, (element, expected, maskSelector) => {
     const row = element.closest('[data-row-id]')
     const mask = element.querySelector(maskSelector)
-    const toggle = element.querySelector('button')
+    const veil = mask?.querySelector('.sb-pass-mask__veil')
+    const glyphs = mask?.querySelector('.sb-pass-mask__glyphs')
     return {
       leaks: row.textContent.includes(expected) || [row, ...row.querySelectorAll('*')].some((child) =>
         Array.from(child.attributes).some((attribute) => attribute.value.includes(expected))),
-      width: mask.getBoundingClientRect().width,
-      glyphLength: mask.firstElementChild?.textContent?.length ?? 0,
-      backdrop: getComputedStyle(mask).backdropFilter,
-      glyphFilter: getComputedStyle(mask.firstElementChild).filter,
-      maskRole: mask.getAttribute('role'),
-      maskLabel: mask.getAttribute('aria-label'),
-      hasAriaPressed: toggle.hasAttribute('aria-pressed'),
-      toggleLabel: toggle.getAttribute('aria-label'),
+      buttonCount: element.querySelectorAll('button').length,
+      maskIsButton: mask?.tagName === 'BUTTON',
+      width: mask?.getBoundingClientRect().width ?? 0,
+      borderWidth: mask ? getComputedStyle(mask).borderTopWidth : '',
+      glyphLength: glyphs?.textContent?.length ?? 0,
+      backdrop: veil ? getComputedStyle(veil).backdropFilter : '',
+      maskImage: veil ? getComputedStyle(veil).maskImage : '',
+      glyphFilter: glyphs ? getComputedStyle(glyphs).filter : '',
+      hasAriaPressed: mask?.hasAttribute('aria-pressed') ?? false,
+      toggleLabel: mask?.getAttribute('aria-label'),
     }
   }, secret, byTestId(`node-password-mask-${id}`))
   assert.equal(result.leaks, false, `节点 ${id} 遮蔽时的 DOM 含密码明文`)
+  assert.equal(result.buttonCount, 1, `节点 ${id} 密码列只应有掩码触发区，不应再渲染额外眼睛按钮`)
+  assert.equal(result.maskIsButton, true, `节点 ${id} 掩码区域应为原生按钮`)
   assert.ok(Math.abs(result.width - 72) <= 1, `节点 ${id} 掩码宽度为 ${result.width}px`)
+  assert.equal(result.borderWidth, '0px', `节点 ${id} 掩码不应有生硬边框`)
   assert.equal(result.glyphLength, 8, `节点 ${id} 掩码占位字符数不固定：${result.glyphLength}`)
-  assert.equal(result.backdrop, 'blur(8px)')
-  assert.equal(result.glyphFilter, 'blur(4.5px)')
-  assert.equal(result.maskRole, 'img')
-  assert.ok(result.maskLabel)
-  assert.equal(result.hasAriaPressed, false, '动态切换 aria-label 的眼睛按钮不应同时设置 aria-pressed')
+  assert.equal(result.backdrop, 'blur(6px)')
+  assert.ok(result.maskImage.includes('radial-gradient') && result.maskImage.includes('closest-side'), `节点 ${id} 掩码未启用 closest-side 柔边羽化：${result.maskImage}`)
+  assert.match(result.glyphFilter, /^blur\((3\.8|3\.1)px\)$/, `节点 ${id} 掩码模糊滤镜异常：${result.glyphFilter}`)
+  assert.equal(result.hasAriaPressed, false, '动态切换 aria-label 的控件不应同时设置 aria-pressed')
   assert.equal(result.toggleLabel, toggleLabel)
   assert.equal(await page.$(byTestId(`node-password-value-${id}`)), null)
   return result.width
@@ -59,14 +64,23 @@ async function assertUnclippedText(page, selector, expected, label) {
   }), `${label}被截断`)
 }
 
-export async function assertRevealedInboundPassword(page, id, secret, toggleLabel = 'Hide inbound password') {
+export async function assertRevealedInboundPassword(page, id, secret, toggleLabel = 'Click to hide inbound password') {
   const selector = byTestId(`node-password-${id}`)
   const valueSelector = `${selector}[data-masked="false"] ${byTestId(`node-password-value-${id}`)}`
   await assertUnclippedText(page, valueSelector, secret, `节点 ${id} 的密码明文`)
   assert.equal(await page.$eval(valueSelector, (element) => getComputedStyle(element).whiteSpace), 'pre-wrap', '展开密码必须保留首尾及连续空格')
   assert.equal(await page.$(byTestId(`node-password-mask-${id}`)), null)
-  const toggle = byTestId(`node-password-toggle-${id}`)
-  assert.deepEqual(await page.$eval(toggle, (button) => [button.hasAttribute('aria-pressed'), button.getAttribute('aria-label')]), [false, toggleLabel])
+  assert.equal(await page.$(`${selector} button`), null, '展开密码后不应渲染额外眼睛按钮')
+  assert.deepEqual(
+    await page.$eval(valueSelector, (el) => [
+      el.getAttribute('role'),
+      el.hasAttribute('aria-pressed'),
+      el.hasAttribute('aria-label'),
+      el.getAttribute('aria-description'),
+      el.getAttribute('data-tip'),
+    ]),
+    ['button', false, false, toggleLabel, toggleLabel],
+  )
 }
 
 export async function assertFullNodeName(page, id, name, title = 'Full node name') {

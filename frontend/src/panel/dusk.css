@@ -27,10 +27,10 @@
 
 /* ---------- 列表 ---------- */
 /* 有意设计：.dusk-row__meta 列轨道按「入站信息（入站端口、入站用户名、入站密码）→ 出站信息（节点类型、服务器地址、地区、节点IP、延迟）」
-   顺序排列，且列表直接呈现入站用户名与默认固定宽度毛玻璃密码列（点击眼睛显示完整值），请勿因“安全习惯”移除或打乱分组顺序。 */
+   顺序排列，且列表直接呈现入站用户名与默认固定宽度柔边毛玻璃密码列（直接点击掩码区域显示完整值），请勿因“安全习惯”移除或打乱分组顺序。 */
 .dusk-table { overflow: clip; border: 1px solid var(--line); border-radius: var(--radius); background: var(--surface); }
 .dusk-head, .dusk-row { display: grid; grid-template-columns: 22px 28px 26px 20px minmax(108px, 156px) 52px minmax(0, 1fr) 34px 28px; align-items: center; column-gap: 8px; padding: 0 8px 0 4px; }
-.dusk-row__meta { display: grid; grid-template-columns: 98px minmax(88px, 0.95fr) minmax(116px, 1.25fr) 78px minmax(90px, 1.2fr) 54px minmax(88px, 0.95fr) 68px; align-items: center; column-gap: 10px; min-width: 0; }
+.dusk-row__meta { display: grid; grid-template-columns: 98px minmax(88px, 0.95fr) minmax(108px, 1.25fr) 78px minmax(90px, 1.2fr) 54px minmax(88px, 0.95fr) 68px; align-items: center; column-gap: 10px; min-width: 0; }
 .dusk-head { position: sticky; top: 0; z-index: 3; height: 30px; border-bottom: 1px solid var(--line); background: var(--surface-2); font-size: 11px; font-weight: 650; letter-spacing: 0.05em; text-transform: uppercase; color: var(--ink-3); }
 .dusk-head span { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .dusk-head > :nth-child(3) { text-align: right; }
@@ -51,11 +51,15 @@
 .dusk-col--type, .dusk-col--port, .dusk-col--region, .dusk-col--latency { display: inline-flex; align-items: center; min-width: 0; }
 .dusk-row__server, .dusk-row__user, .dusk-row__ip { font-size: 12px; color: var(--ink-2); }
 .dusk-row__user { user-select: text; cursor: text; }
-.dusk-row__pass { display: inline-flex; align-items: center; gap: 4px; min-width: 0; max-width: 100%; font-size: 12px; }
-.dusk-row__pass-value { min-width: 0; color: var(--ink-2); line-height: 1.35; padding: 3px 0; white-space: pre-wrap; overflow-wrap: anywhere; word-break: break-all; user-select: text; cursor: text; }
-.dusk-row__pass-toggle { flex: none; width: 24px; height: 24px; }
-.sb-pass-mask { position: relative; display: inline-flex; align-items: center; justify-content: center; flex: none; width: 72px; min-width: 72px; max-width: 72px; height: 22px; padding: 0 6px; overflow: hidden; border-radius: 6px; border: 1px solid color-mix(in srgb, var(--line-strong) 82%, transparent); background: linear-gradient(135deg, color-mix(in srgb, var(--surface-2) 72%, var(--accent-soft) 28%), color-mix(in srgb, var(--bg-2) 78%, var(--accent-soft) 22%)); backdrop-filter: blur(8px); -webkit-backdrop-filter: blur(8px); box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.06); user-select: none; pointer-events: none; }
-.sb-pass-mask__glyphs { font-size: 11.5px; letter-spacing: 0.06em; color: var(--ink-2); opacity: 0.72; filter: blur(4.5px); transform: translateZ(0); }
+.dusk-row__pass { display: inline-flex; align-items: center; min-width: 0; max-width: 100%; font-size: 12px; }
+.dusk-row__pass-value { min-width: 0; color: var(--ink-2); line-height: 1.35; padding: 3px 0; white-space: pre-wrap; overflow-wrap: anywhere; word-break: break-all; user-select: text; cursor: pointer; border-radius: 4px; transition: color 0.15s ease; }
+.dusk-row__pass-value:hover { color: var(--ink); }
+.sb-pass-mask { position: relative; display: inline-flex; align-items: center; justify-content: center; flex: none; width: 72px; min-width: 72px; max-width: 72px; height: 24px; padding: 0; border: 0; border-radius: 999px; background: transparent; cursor: pointer; user-select: none; }
+.sb-pass-mask__veil { position: relative; display: inline-flex; align-items: center; justify-content: center; width: 100%; height: 100%; border-radius: 999px; background: radial-gradient(closest-side at 50% 50%, color-mix(in srgb, var(--ink-3) 18%, transparent) 0%, color-mix(in srgb, var(--ink-3) 7%, transparent) 58%, transparent 100%); backdrop-filter: blur(6px); -webkit-backdrop-filter: blur(6px); -webkit-mask-image: radial-gradient(closest-side at 50% 50%, #000 42%, rgba(0, 0, 0, 0.55) 72%, transparent 100%); mask-image: radial-gradient(closest-side at 50% 50%, #000 42%, rgba(0, 0, 0, 0.55) 72%, transparent 100%); }
+.sb-pass-mask__veil::before { content: ''; position: absolute; inset: 0; border-radius: inherit; background: radial-gradient(closest-side at 50% 50%, color-mix(in srgb, var(--accent) 24%, transparent) 0%, color-mix(in srgb, var(--accent) 8%, transparent) 60%, transparent 100%); opacity: 0; transition: opacity 0.18s ease; pointer-events: none; }
+.sb-pass-mask__glyphs { position: relative; font-size: 12px; letter-spacing: 0.08em; color: var(--ink-2); opacity: 0.74; filter: blur(3.8px); transform: translateZ(0); transition: filter 0.18s ease, opacity 0.18s ease; }
+.sb-pass-mask:hover .sb-pass-mask__veil::before { opacity: 1; }
+.sb-pass-mask:hover .sb-pass-mask__glyphs { opacity: 0.9; filter: blur(3.1px); }
 .dusk-row .sb-tag { justify-self: start; height: 20px; font-size: 11px; }
 .dusk-row .sb-port { height: 24px; border-color: transparent; background: transparent; padding-left: 0; }
 .dusk-row .sb-port.is-pinned { padding-left: 6px; background: var(--accent-soft); }

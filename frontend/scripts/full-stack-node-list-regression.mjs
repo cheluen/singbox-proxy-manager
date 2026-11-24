@@ -137,7 +137,7 @@ try {
       await setInput(page, '[data-testid="nodes-search"]', 'ThresholdCase_202')
       await page.waitForFunction(() => document.querySelectorAll('[data-row-id]').length === 1)
       if (threshold === undefined) {
-        await clickControl(page, `[data-testid="node-password-toggle-${last.id}"]`)
+        await clickControl(page, `[data-testid="node-password-mask-${last.id}"]`)
         await assertRevealedInboundPassword(page, last.id, listCredentials[1].password)
         assert.equal(await page.$('[data-testid="node-inspector"]'), null)
         await page.reload({ waitUntil: 'networkidle0' })

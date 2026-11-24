@@ -5,7 +5,7 @@
   <p>将各类主流协议节点集中管理，一键转为独立的本地 HTTP / SOCKS5 混合代理端口</p>
 
   <p>
-    <a href="https://github.com/cheluen/singbox-proxy-manager/releases"><img src="https://img.shields.io/badge/version-1.7.26-blue.svg" alt="Version" /></a>
+    <a href="https://github.com/cheluen/singbox-proxy-manager/releases"><img src="https://img.shields.io/badge/version-1.7.27-blue.svg" alt="Version" /></a>
     <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-green.svg" alt="MIT License" /></a>
     <img src="https://img.shields.io/badge/sing--box-1.12.12-orange.svg" alt="sing-box 1.12.12" />
     <img src="https://img.shields.io/badge/Go-1.26.11-00ADD8.svg" alt="Go 1.26.11" />
@@ -51,7 +51,7 @@
 
 - **开箱即用，零外部依赖**：官方发行版将前端面板与固定版本 `sing-box 1.12.12` 内核打包为**单个可执行文件**，下载后无需再单独安装 Node.js 或手动配置 `sing-box`。
 - **12 种主流协议统一接入**：支持 Direct、Shadowsocks、VLESS（含 Reality / XTLS-Vision）、VMess、Trojan、Hysteria2、TUIC、AnyTLS、SOCKS5 / SOCKS5H、HTTP / HTTPS 与 WireGuard（含 Cloudflare WARP 保留字节与多 Peer JSON）。
-- **「暮色」暗色指挥台面板**：紧凑列表截断超长节点名称，直接显示入站用户名，并以固定宽度的毛玻璃掩码遮蔽入站密码，点击眼睛图标即可查看完整密码。行内详情在备注上方显示完整名称并支持复制，也提供连接地址、出口信息、端口固定与前置代理。支持 `Ctrl/⌘ + K` 命令面板、全键盘快捷键（`j/k`、`Enter`、`x`、`e`、`t`）及中英文切换。
+- **「暮色」暗色指挥台面板**：紧凑列表截断超长节点名称，直接显示入站用户名，并以固定宽度的柔边毛玻璃掩码遮蔽入站密码，点击掩码区域即可查看完整密码。行内详情在备注上方显示完整名称并支持复制，也提供连接地址、出口信息、端口固定与前置代理。支持 `Ctrl/⌘ + K` 命令面板、全键盘快捷键（`j/k`、`Enter`、`x`、`e`、`t`）及中英文切换。
 - **批量导入与一键出口检测**：支持一次性粘贴多行分享链接、Base64 订阅、远程订阅 URL 及 Clash YAML 节点列表；导入后自动分配端口与随机账密，并可一键并发检测出口 IP、国家/城市与延迟。
 - **进阶转发与灵活管理**：
   - **链式前置代理**：支持配置「全局前置代理」或「单节点自定义前置代理」，内置防环路保护与前置独立测 IP。
@@ -186,7 +186,7 @@ docker compose --profile ghcr logs --tail=50
 ```bash
 mkdir -p singbox-proxy-manager && cd singbox-proxy-manager
 
-APP_VERSION=1.7.26
+APP_VERSION=1.7.27
 OS=linux      # 可选：linux / darwin / freebsd
 ARCH=amd64    # 可选：amd64 / arm64
 

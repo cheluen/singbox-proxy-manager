@@ -1,6 +1,6 @@
 # SingBox Proxy Manager 技术文档
 
-本目录收录 **SingBox Proxy Manager**（当前代码版本 `1.7.26`）的架构、配置、协议、API 与开发验证文档，所有内容均以仓库当前源码为准。
+本目录收录 **SingBox Proxy Manager**（当前代码版本 `1.7.27`）的架构、配置、协议、API 与开发验证文档，所有内容均以仓库当前源码为准。
 
 > 如果你是首次使用并希望快速部署与上手，请优先阅读根目录的 [README.md](../README.md)。
 

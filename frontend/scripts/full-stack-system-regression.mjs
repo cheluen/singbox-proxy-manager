@@ -191,7 +191,7 @@ try {
   assert.equal(direct.type, 'direct')
   assert.equal(direct.username, 'system-user')
   const openDirect = `[data-testid="node-open-${direct.id}"]`
-  const revealDirect = `[data-testid="node-password-toggle-${direct.id}"]`
+  const revealDirect = `[data-testid="node-password-mask-${direct.id}"]`
   await assertInboundUsername(page, direct.id, 'system-user')
   const originalMaskWidth = await assertMaskedInboundPassword(page, direct.id, INBOUND_SECRET)
   await clickControl(page, revealDirect)
