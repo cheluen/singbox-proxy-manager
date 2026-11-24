@@ -280,6 +280,7 @@ const startBackend = (overrides = {}) => {
     cwd: PROJECT_ROOT,
     env: {
       ...process.env,
+      ACCEPT_USER_AGREEMENT: 'true',
       ADMIN_PASSWORD,
       BIND_ADDRESS: '127.0.0.1',
       CONFIG_DIR: configDir,

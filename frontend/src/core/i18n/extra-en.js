@@ -37,6 +37,8 @@ export default {
   inbound_password: 'Inbound Pass',
   show_inbound_password: 'Click to show inbound password',
   hide_inbound_password: 'Click to hide inbound password',
+  resize_column_hint: 'Drag to resize {{column}} column, double-click to reset',
+  reset_column_widths: 'Reset column widths',
   node_enabled_label: 'Enable node',
   select_node: 'Select {{name}}',
   selected_suffix: 'selected',

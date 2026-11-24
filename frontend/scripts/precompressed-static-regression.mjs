@@ -87,7 +87,7 @@ async function checkBrowser(origin) {
 
 async function verifyMode(threshold) {
   const origin = `http://127.0.0.1:${await freePort()}`
-  const environment = { ...process.env, CONFIG_DIR: path.join(temporary, `config-${threshold}`), PORT: new URL(origin).port, BIND_ADDRESS: '127.0.0.1', ADMIN_PASSWORD: password, SBPM_UPDATE_CHECK_DISABLED: 'true', GOMAXPROCS: '2' }
+  const environment = { ...process.env, CONFIG_DIR: path.join(temporary, `config-${threshold}`), PORT: new URL(origin).port, BIND_ADDRESS: '127.0.0.1', ACCEPT_USER_AGREEMENT: 'true', ADMIN_PASSWORD: password, SBPM_UPDATE_CHECK_DISABLED: 'true', GOMAXPROCS: '2' }
   for (const name of ['DATABASE_URL', 'POSTGRES_DATABASE_URL', 'POSTGRES_URL', 'PGSQL_DATABASE_URL', 'PGSQL', 'MYSQL_DATABASE_URL', 'MYSQL', 'TURSO_DATABASE_URL', 'TURSO_AUTH_TOKEN', 'MYSQL_DATABASE_NAME', 'SBPM_NODES_VIRTUAL_THRESHOLD', 'SBPM_BATCH_CHECK_IP_CONCURRENCY']) environment[name] = ''
   if (threshold === 42) environment.SBPM_NODES_VIRTUAL_THRESHOLD = '42'
   let server

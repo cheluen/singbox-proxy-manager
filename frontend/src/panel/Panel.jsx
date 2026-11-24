@@ -1,7 +1,8 @@
 // 设计 4「暮色 · 暗色指挥台」：暗色莫兰迪 + 高密度列表 + 行内展开 + 命令面板，偏键盘操作。
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { Button } from 'antd'
-import { Command, LogOut, Settings, SquareTerminal, Zap } from 'lucide-react'
+import { Command, LogOut, RotateCcw, Settings, SquareTerminal, Zap } from 'lucide-react'
+import { buildColumnWidthStyle, calculateTableMinWidth, clampColumnWidth, NODE_LIST_COLUMN_LIMITS } from '../core/columnWidths'
 import { EMPTY_CRITERIA } from '../core/nodeFilters'
 import { ActiveFilters, FilterButton, SearchBox, StatusFilter } from '../shared/filters'
 import { BulkBar, CheckProgress, NodesEmpty, RefreshButton, RepoLink, RuntimeBanner, RuntimePill, SelectAll, VersionBadge } from '../shared/chrome'
@@ -23,19 +24,163 @@ const typingInField = () => {
 }
 const overlayOpen = () => Boolean(document.querySelector('.ant-modal-wrap:not([style*="display: none"]), .ant-dropdown:not(.ant-dropdown-hidden), .ant-popover:not(.ant-popover-hidden)'))
 
+function ResizableHeaderCell({ colKey, label, t, className = '', active, currentWidth, onResizeStart, onReset, onStep }) {
+  const limits = NODE_LIST_COLUMN_LIMITS[colKey]
+  const hint = t('resize_column_hint', { column: label })
+  return (
+    <div className={`dusk-head__cell ${className}${active ? ' is-resizing' : ''}`} data-col-key={colKey}>
+      <span className="dusk-head__label">{label}</span>
+      <button
+        type="button"
+        role="separator"
+        aria-orientation="vertical"
+        aria-label={hint}
+        aria-valuemin={limits?.min}
+        aria-valuemax={limits?.max}
+        aria-valuenow={currentWidth ?? undefined}
+        data-tip={hint}
+        data-testid={`col-resizer-${colKey}`}
+        className={`dusk-col-resizer${active ? ' is-active' : ''}`}
+        onPointerDown={(event) => onResizeStart(colKey, event)}
+        onDoubleClick={(event) => {
+          event.preventDefault()
+          event.stopPropagation()
+          onReset(colKey)
+        }}
+        onKeyDown={(event) => {
+          if (event.key === 'ArrowLeft' || event.key === 'ArrowRight') {
+            event.preventDefault()
+            event.stopPropagation()
+            const delta = (event.key === 'ArrowRight' ? 1 : -1) * (event.shiftKey ? 24 : 12)
+            onStep(colKey, delta, event.currentTarget.parentElement)
+          } else if (event.key === 'Enter' || event.key === 'Backspace' || event.key === 'Delete') {
+            event.preventDefault()
+            event.stopPropagation()
+            onReset(colKey)
+          }
+        }}
+      />
+    </div>
+  )
+}
+
 export default function DuskPanel({ session }) {
   const { ctl, act, t } = usePanel(session)
   const [expandedId, setExpandedId] = useState(null)
   const [focusedId, setFocusedId] = useState(null)
   const [paletteOpen, setPaletteOpen] = useState(false)
+  const [draftWidths, setDraftWidths] = useState(null)
+  const [resizingCol, setResizingCol] = useState(null)
+  const [viewportWidth, setViewportWidth] = useState(() => (typeof window === 'undefined' ? 1440 : window.innerWidth))
+  const [tableClientWidth, setTableClientWidth] = useState(0)
+  const tableRef = useRef(null)
+  const dragCleanupRef = useRef(null)
   const desktop = useMediaQuery('(min-width: 900px)')
   const { shown, hasMore, sentinelRef, reveal } = useIncrementalList(ctl.visibleNodes)
   const ids = useMemo(() => shown.map((node) => node.id), [shown])
+  const effectiveWidths = draftWidths ?? ctl.columnWidths
+  const hasCustomWidths = Object.keys(effectiveWidths).length > 0
+  const tableMinWidth = desktop ? calculateTableMinWidth(effectiveWidths, viewportWidth) : 0
+  const tableScrollable = desktop && hasCustomWidths && tableMinWidth > 0 && (tableClientWidth === 0 || tableMinWidth > tableClientWidth + 1)
+  const tableStyle = useMemo(
+    () => buildColumnWidthStyle(effectiveWidths, desktop, viewportWidth),
+    [desktop, effectiveWidths, viewportWidth]
+  )
   // 键盘监听只注册一次，通过 ref 读取最新状态。
   const stateRef = useRef({ ctl, shown, focusedId })
   useEffect(() => {
     stateRef.current = { ctl, shown, focusedId }
   })
+
+  useEffect(() => {
+    const onResize = () => setViewportWidth(window.innerWidth)
+    window.addEventListener('resize', onResize)
+    return () => window.removeEventListener('resize', onResize)
+  }, [])
+
+  useEffect(() => {
+    const node = tableRef.current
+    if (!node) return undefined
+    const update = () => setTableClientWidth(node.clientWidth)
+    update()
+    if (typeof ResizeObserver === 'undefined') return undefined
+    const observer = new ResizeObserver(update)
+    observer.observe(node)
+    return () => observer.disconnect()
+  }, [])
+
+  useEffect(() => () => {
+    dragCleanupRef.current?.()
+  }, [])
+
+  const startColumnResize = useCallback((colKey, event) => {
+    if (event.button !== 0) return
+    event.preventDefault()
+    event.stopPropagation()
+    const cell = event.currentTarget.parentElement
+    if (!cell) return
+    dragCleanupRef.current?.()
+
+    const startX = event.clientX
+    const startWidth = Math.round(cell.getBoundingClientRect().width)
+    const baseWidths = { ...stateRef.current.ctl.columnWidths }
+    let latestWidths = baseWidths
+    let moved = false
+
+    const handle = event.currentTarget
+    try { handle.setPointerCapture?.(event.pointerId) } catch { /* 兼容非指针捕获环境 */ }
+    setResizingCol(colKey)
+    document.body.classList.add('is-resizing-cols')
+
+    const onMove = (moveEvent) => {
+      const next = clampColumnWidth(colKey, startWidth + (moveEvent.clientX - startX))
+      if (next === null) return
+      if (latestWidths[colKey] === next) return
+      moved = true
+      latestWidths = { ...latestWidths, [colKey]: next }
+      setDraftWidths(latestWidths)
+    }
+
+    const finish = (commit) => {
+      window.removeEventListener('pointermove', onMove)
+      window.removeEventListener('pointerup', onUp)
+      window.removeEventListener('pointercancel', onCancel)
+      document.body.classList.remove('is-resizing-cols')
+      try { handle.releasePointerCapture?.(event.pointerId) } catch { /* 忽略 */ }
+      dragCleanupRef.current = null
+      setResizingCol(null)
+      setDraftWidths(null)
+      if (commit && moved) void stateRef.current.ctl.saveColumnWidths(latestWidths)
+    }
+    const onUp = () => finish(true)
+    const onCancel = () => finish(false)
+
+    dragCleanupRef.current = () => finish(false)
+    window.addEventListener('pointermove', onMove)
+    window.addEventListener('pointerup', onUp)
+    window.addEventListener('pointercancel', onCancel)
+  }, [])
+
+  const resetColumnWidth = useCallback((colKey) => {
+    const current = stateRef.current.ctl.columnWidths
+    if (!Object.hasOwn(current, colKey)) return
+    const next = { ...current }
+    delete next[colKey]
+    void stateRef.current.ctl.saveColumnWidths(next)
+  }, [])
+
+  const stepColumnWidth = useCallback((colKey, delta, cell) => {
+    const current = stateRef.current.ctl.columnWidths
+    const measured = current[colKey] ?? Math.round(cell?.getBoundingClientRect().width || NODE_LIST_COLUMN_LIMITS[colKey]?.fallbackMin || 100)
+    const clamped = clampColumnWidth(colKey, measured + delta)
+    if (clamped === null || current[colKey] === clamped) return
+    void stateRef.current.ctl.saveColumnWidths({ ...current, [colKey]: clamped })
+  }, [])
+
+  const resetAllColumnWidths = useCallback(() => {
+    if (Object.keys(stateRef.current.ctl.columnWidths).length === 0) return
+    void stateRef.current.ctl.saveColumnWidths({})
+  }, [])
 
   const toggleExpand = useCallback((id) => setExpandedId((prev) => (prev === id ? null : id)), [])
   const jumpTo = useCallback((id) => {
@@ -51,8 +196,8 @@ export default function DuskPanel({ session }) {
   // 键盘操作：Ctrl/⌘K 命令面板；j/k 或方向键移动；Enter 展开；x 选择；e 编辑；t 测 IP。
   useEffect(() => {
     const onKey = (event) => {
-      // 拖拽手柄和抓起状态下的方向键、回车、空格、Esc 由 dnd-kit 独占。
-      if (event.target?.closest?.('.sb-drag') || document.querySelector('.is-dragging')) return
+      // 拖拽手柄、列宽调节手柄和抓起状态下的方向键、回车、空格、Esc 由对应控件独占。
+      if (event.target?.closest?.('.sb-drag, .dusk-col-resizer') || document.querySelector('.is-dragging')) return
       if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === 'k') {
         event.preventDefault()
         setPaletteOpen((prev) => !prev)
@@ -127,13 +272,29 @@ export default function DuskPanel({ session }) {
         <CheckProgress ctl={ctl} />
         <ActiveFilters ctl={ctl} />
 
-        <section className="dusk-table" aria-label={t('node_list')}>
+        <section
+          ref={tableRef}
+          className={`dusk-table${hasCustomWidths ? ' has-custom-widths' : ''}${tableScrollable ? ' is-scrollable' : ''}`}
+          style={tableStyle}
+          aria-label={t('node_list')}
+        >
+          <div className="dusk-table__canvas">
           <div className="dusk-head">
             <span />
             <SelectAll ctl={ctl} />
             <span>#</span>
             <span />
-            <span>{t('node_name')}</span>
+            <ResizableHeaderCell
+              colKey="name"
+              label={t('node_name')}
+              t={t}
+              className="dusk-col--name"
+              active={resizingCol === 'name'}
+              currentWidth={effectiveWidths.name}
+              onResizeStart={startColumnResize}
+              onReset={resetColumnWidth}
+              onStep={stepColumnWidth}
+            />
             <span />
             {/*
               有意设计（切勿随意移除或打乱）：
@@ -143,17 +304,30 @@ export default function DuskPanel({ session }) {
                  从左到右分组排列，明确分隔入站与出站信息。
             */}
             <div className="dusk-row__meta">
-              <span className="dusk-col--port">{t('inbound_port')}</span>
-              <span className="dusk-col--user">{t('inbound_username')}</span>
-              <span className="dusk-col--pass">{t('inbound_password')}</span>
-              <span className="dusk-col--type">{t('node_type')}</span>
-              <span className="dusk-col--server">{t('server_address')}</span>
-              <span className="dusk-col--region">{t('region')}</span>
-              <span className="dusk-col--ip">{t('node_ip')}</span>
-              <span className="dusk-col--latency">{t('latency')}</span>
+              <ResizableHeaderCell colKey="port" label={t('inbound_port')} t={t} className="dusk-col--port" active={resizingCol === 'port'} currentWidth={effectiveWidths.port} onResizeStart={startColumnResize} onReset={resetColumnWidth} onStep={stepColumnWidth} />
+              <ResizableHeaderCell colKey="user" label={t('inbound_username')} t={t} className="dusk-col--user" active={resizingCol === 'user'} currentWidth={effectiveWidths.user} onResizeStart={startColumnResize} onReset={resetColumnWidth} onStep={stepColumnWidth} />
+              <ResizableHeaderCell colKey="pass" label={t('inbound_password')} t={t} className="dusk-col--pass" active={resizingCol === 'pass'} currentWidth={effectiveWidths.pass} onResizeStart={startColumnResize} onReset={resetColumnWidth} onStep={stepColumnWidth} />
+              <ResizableHeaderCell colKey="type" label={t('node_type')} t={t} className="dusk-col--type" active={resizingCol === 'type'} currentWidth={effectiveWidths.type} onResizeStart={startColumnResize} onReset={resetColumnWidth} onStep={stepColumnWidth} />
+              <ResizableHeaderCell colKey="server" label={t('server_address')} t={t} className="dusk-col--server" active={resizingCol === 'server'} currentWidth={effectiveWidths.server} onResizeStart={startColumnResize} onReset={resetColumnWidth} onStep={stepColumnWidth} />
+              <ResizableHeaderCell colKey="region" label={t('region')} t={t} className="dusk-col--region" active={resizingCol === 'region'} currentWidth={effectiveWidths.region} onResizeStart={startColumnResize} onReset={resetColumnWidth} onStep={stepColumnWidth} />
+              <ResizableHeaderCell colKey="ip" label={t('node_ip')} t={t} className="dusk-col--ip" active={resizingCol === 'ip'} currentWidth={effectiveWidths.ip} onResizeStart={startColumnResize} onReset={resetColumnWidth} onStep={stepColumnWidth} />
+              <ResizableHeaderCell colKey="latency" label={t('latency')} t={t} className="dusk-col--latency" active={resizingCol === 'latency'} currentWidth={effectiveWidths.latency} onResizeStart={startColumnResize} onReset={resetColumnWidth} onStep={stepColumnWidth} />
             </div>
             <span />
-            <span />
+            <span className="dusk-head__actions">
+              {hasCustomWidths ? (
+                <button
+                  type="button"
+                  className="dusk-head__reset"
+                  aria-label={t('reset_column_widths')}
+                  data-tip={t('reset_column_widths')}
+                  data-testid="reset-column-widths"
+                  onClick={resetAllColumnWidths}
+                >
+                  <RotateCcw size={12} strokeWidth={1.9} aria-hidden="true" />
+                </button>
+              ) : null}
+            </span>
           </div>
           {!ctl.loaded ? (
             <SkeletonRows rows={12} height={32} />
@@ -196,6 +370,7 @@ export default function DuskPanel({ session }) {
             </SortableList>
           )}
           {hasMore ? <div ref={sentinelRef} className="dusk-more">{t('loading_more', { shown: shown.length, total: ctl.visibleNodes.length })}</div> : null}
+          </div>
         </section>
       </div>
 

@@ -13,9 +13,9 @@ import { fileURLToPath } from 'node:url'
 const SCRIPT_PATH = fileURLToPath(import.meta.url)
 const FRONTEND_ROOT = path.resolve(path.dirname(SCRIPT_PATH), '..')
 const PROJECT_ROOT = path.resolve(FRONTEND_ROOT, '..')
-const FRONTEND_PACKAGE = JSON.parse(
+const VERSION = process.env.APP_VERSION || JSON.parse(
   fs.readFileSync(path.join(FRONTEND_ROOT, 'package.json'), 'utf8')
-)
+).version
 const BACKEND_BINARY = process.env.SBPM_E2E_BACKEND_BINARY
 const SINGBOX_BINARY = process.env.SINGBOX_TEST_BINARY
 const HTTP_PORT = Number(process.env.E2E_FULL_STACK_PORT || 30126)
@@ -112,6 +112,7 @@ try {
     cwd: PROJECT_ROOT,
     env: {
       ...process.env,
+      ACCEPT_USER_AGREEMENT: 'true',
       ADMIN_PASSWORD,
       CONFIG_DIR: configDir,
       PORT: String(HTTP_PORT),
@@ -273,7 +274,7 @@ try {
     ),
     `real nodes are missing expected protocols: ${JSON.stringify(state.nodes)}`
   )
-  assert(state.version === FRONTEND_PACKAGE.version, `frontend/backend version skew: ${JSON.stringify(state)}`)
+  assert(state.version === VERSION, `frontend/backend version skew: ${JSON.stringify(state)}`)
 
   const apiRequest = async (method, endpoint, body) => {
     const result = await page.evaluate(async (method, endpoint, body) => {

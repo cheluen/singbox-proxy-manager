@@ -3,6 +3,9 @@ package models
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
+	"fmt"
+	"strings"
 )
 
 const ProxyNodeSelectColumns = `
@@ -17,7 +20,7 @@ const runtimeSettingsSelectColumns = `
 	start_port, preserve_inbound_ports, global_upstream_enabled,
 	global_upstream_type, global_upstream_config, global_upstream_ip,
 	global_upstream_location, global_upstream_country_code, global_upstream_latency,
-	global_upstream_error
+	global_upstream_error, node_list_column_widths
 `
 
 const SettingsSnapshotColumns = `
@@ -108,6 +111,7 @@ func LoadProxyNode(ctx context.Context, queryer queryRower, id int) (ProxyNode, 
 
 func LoadRuntimeSettings(ctx context.Context, queryer queryRower) (Settings, error) {
 	var settings Settings
+	var columnWidths sql.NullString
 	err := queryer.QueryRowContext(ctx, `
 		SELECT `+runtimeSettingsSelectColumns+`
 		FROM settings
@@ -123,6 +127,18 @@ func LoadRuntimeSettings(ctx context.Context, queryer queryRower) (Settings, err
 		&settings.GlobalUpstreamCountryCode,
 		&settings.GlobalUpstreamLatency,
 		&settings.GlobalUpstreamError,
+		&columnWidths,
 	)
-	return settings, err
+	if err != nil {
+		return settings, err
+	}
+	if columnWidths.Valid && strings.TrimSpace(columnWidths.String) != "" {
+		if err := json.Unmarshal([]byte(columnWidths.String), &settings.NodeListColumnWidths); err != nil {
+			return settings, fmt.Errorf("decode node_list_column_widths: %w", err)
+		}
+	}
+	if settings.NodeListColumnWidths == nil {
+		settings.NodeListColumnWidths = map[string]int{}
+	}
+	return settings, nil
 }

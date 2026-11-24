@@ -6,6 +6,7 @@ import { createProtocolFormModel, parsePeersJSON, parseReservedInput } from '../
 import { EMPTY_CRITERIA, collectFacets, filterNodes } from '../src/core/nodeFilters.js'
 import { stableConfigSignature } from '../src/core/nodeModel.js'
 import { parseNodesVirtualThreshold, readNodesVirtualThreshold } from '../src/core/nodeList.js'
+import { buildColumnWidthStyle, calculateTableMinWidth, clampColumnWidth, columnWidthsEqual, normalizeColumnWidths } from '../src/core/columnWidths.js'
 import { buildProxyUrl, summarizeNodes } from '../src/core/nodeView.js'
 import { randomCredentials } from '../src/core/credentials.js'
 import { ensureLatestFrontendBuild, frontendBuildVersion } from '../src/core/version.js'
@@ -181,6 +182,30 @@ test('WireGuard 多 Peer 只校验实际提交的保留字节', () => {
   assert.throws(() => model.buildConfig('wireguard', {
     ...values, wireguard_peers_json: JSON.stringify([{ ...peers[0], reserved: [256] }]),
   }), /Reserved bytes/)
+})
+
+test('节点列表列宽清洗、范围约束与 CSS 变量映射准确', () => {
+  assert.deepEqual(normalizeColumnWidths(null), {})
+  assert.deepEqual(normalizeColumnWidths([]), {})
+  assert.deepEqual(normalizeColumnWidths({ name: 260.4, port: 12, server: 9999, unknown: 200, ip: 'bad' }), {
+    name: 260,
+    port: 72,
+    server: 560,
+  })
+  assert.equal(clampColumnWidth('latency', 30), 52)
+  assert.equal(clampColumnWidth('latency', 120), 120)
+  assert.equal(clampColumnWidth('unknown', 100), null)
+  assert.equal(columnWidthsEqual({ name: 200, user: 150 }, { user: 150, name: 200 }), true)
+  assert.equal(columnWidthsEqual({ name: 200 }, { name: 201 }), false)
+  assert.equal(buildColumnWidthStyle({}, true, 1440), undefined)
+  assert.equal(buildColumnWidthStyle({ name: 260 }, false, 390), undefined)
+  const style = buildColumnWidthStyle({ name: 260, server: 320 }, true, 1440)
+  assert.equal(style['--dusk-col-name'], '260px')
+  assert.equal(style['--dusk-col-server'], '320px')
+  assert.equal(calculateTableMinWidth({ name: 260, server: 320 }, 1440), 1518)
+  assert.equal(calculateTableMinWidth({ name: 280 }, 1080), 1170)
+  assert.equal(calculateTableMinWidth({ name: 280 }, 1000), 1014)
+  assert.equal(style['--dusk-table-min-width'], '1518px')
 })
 
 const nodes = [

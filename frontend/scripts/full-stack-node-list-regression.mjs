@@ -39,7 +39,7 @@ const api = async (method, endpoint, body) => {
 }
 const startBackend = async (threshold) => {
   const env = {
-    ...environment, ADMIN_PASSWORD: secret, CONFIG_DIR: path.join(scratch, 'config'), BIND_ADDRESS: '127.0.0.1',
+    ...environment, ACCEPT_USER_AGREEMENT: 'true', ADMIN_PASSWORD: secret, CONFIG_DIR: path.join(scratch, 'config'), BIND_ADDRESS: '127.0.0.1',
     PORT: new URL(base).port, SBPM_UPDATE_CHECK_DISABLED: '1', SBPM_BATCH_IMPORT_VALIDATION_TIMEOUT: '2m', TZ: 'UTC',
   }
   if (threshold !== undefined) env.SBPM_NODES_VIRTUAL_THRESHOLD = String(threshold)

@@ -9,7 +9,7 @@ import { spawn } from 'node:child_process'
 import { fileURLToPath } from 'node:url'
 import { launchBrowser, stopProcess } from './test-harness.mjs'
 import { assertProjectBrand, clickControl, clickText, closeOverlay, confirmDialog, editNode, openBatchImport, openNodeMenu, saveNodeForm, selectOption, setInput, sleep, toggle, waitOverlaysClosed } from './ui-driver.mjs'
-import { assertColumnOrder, assertCopiedText, assertEmptyInboundPassword, assertFullNodeName, assertInboundUsername, assertMaskedInboundPassword, assertRevealedInboundPassword, assertRouteId, assertUnclippedTableHeaders } from './node-display-assertions.mjs'
+import { assertColumnOrder, assertCopiedText, assertDetailLayoutOrderAndBalance, assertEmptyInboundPassword, assertFullNodeName, assertInboundUsername, assertMaskedInboundPassword, assertRevealedInboundPassword, assertRouteId, assertUnclippedTableHeaders } from './node-display-assertions.mjs'
 
 const FRONTEND = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
 const VERSION = JSON.parse(fs.readFileSync(path.join(FRONTEND, 'package.json'), 'utf8')).version
@@ -56,7 +56,7 @@ const readBody = async (request) => {
 function createFixture() {
   const state = {
     nodes: [makeNode(1), makeNode(2, { type: 'vless', country_code: '', location: '', node_ip: '', latency: 0, tcp_reuse_enabled: false }), makeNode(3, { type: 'vmess', enabled: false, country_code: 'US', location: 'Boston, United States' }), makeNode(4)],
-    settings: { start_port: 30001, preserve_inbound_ports: false, global_upstream_enabled: false, global_upstream_type: '', global_upstream_config: '' },
+    settings: { start_port: 30001, preserve_inbound_ports: false, global_upstream_enabled: false, global_upstream_type: '', global_upstream_config: '', node_list_column_widths: {} },
     runtime: { running: true, degraded: false, pid: 1234 }, version: VERSION, update: { available: false },
     requests: [], loads: [], flags: [], orders: [], deletes: [], auth: [], imports: [], saves: [], upstreams: [], settingsSaves: [], checks: [],
     expectedFailures: new Set(), activeChecks: 0, peakChecks: 0, checkDelay: 20, checkStatuses: {}, importDelay: 0,
@@ -115,13 +115,14 @@ function createFixture() {
     if (route === '/api/settings' && method === 'PUT') {
       state.settingsSaves.push(body)
       Object.assign(state.settings, body)
-      reorderPorts()
+      const runtimeFields = ['start_port', 'preserve_inbound_ports', 'global_upstream_enabled', 'global_upstream_type', 'global_upstream_config']
+      if (runtimeFields.some((key) => Object.hasOwn(body || {}, key))) reorderPorts()
       if (body.admin_password) {
         state.loginSecret = body.admin_password
         state.revoked = true
         return send(200, { password_changed: true })
       }
-      return send(200, {})
+      return send(200, { node_list_column_widths: state.settings.node_list_column_widths || {} })
     }
     if (route === '/api/nodes/reorder') {
       state.orders.push(body)
@@ -644,6 +645,7 @@ const scenarios = {
       assert.equal(await page.$('[data-testid="node-inspector"]'), null, `${width}px 点击密码掩码误展开详情`)
       await clickControl(page, nameSelector)
       await assertFullNodeName(page, 1, state.nodes[0].name)
+      await assertDetailLayoutOrderAndBalance(page, 1, width)
       assert.equal(await page.$eval('[data-row-id="1"]', (row) => row.scrollWidth > row.clientWidth || document.documentElement.scrollWidth > innerWidth), false, `${width}px 展开详情后横向溢出`)
       await clickControl(page, nameSelector)
       await clickControl(page, secretValue)
@@ -857,6 +859,78 @@ const scenarios = {
     await clickControl(page, 'button[title="English"]')
     await page.waitForFunction(() => document.documentElement.lang === 'en')
     assert.equal(await page.evaluate(() => localStorage.getItem('language')), 'en')
+  },
+
+  async 'column-resize'({ page, state, refresh }) {
+    state.nodes[1].upstream_mode = 'custom'
+    state.nodes[1].upstream_type = 'socks5'
+    state.nodes[1].upstream_config = JSON.stringify({ server: 'relay.example.com', server_port: 1080 })
+    state.nodes[1].upstream_ip = '198.51.100.20'
+    state.nodes[1].upstream_location = 'Singapore'
+    state.nodes[1].upstream_country_code = 'SG'
+    state.nodes[1].upstream_latency = 28
+    await refresh()
+
+    await page.setViewport({ width: 1440, height: 1000 })
+    assert.equal(await page.$('[data-testid="reset-column-widths"]'), null, '默认列宽时不应显示重置按钮')
+
+    const measureCol = (key) => page.$eval(`.dusk-head [data-col-key="${key}"]`, (el) => Math.round(el.getBoundingClientRect().width))
+    const dragCol = async (key, deltaX) => {
+      const handle = await page.$(`[data-testid="col-resizer-${key}"]`)
+      assert.ok(handle, `缺少列宽手柄 ${key}`)
+      const box = await handle.boundingBox()
+      const startX = box.x + box.width / 2
+      const y = box.y + box.height / 2
+      await page.mouse.move(startX, y)
+      await page.mouse.down()
+      await page.mouse.move(startX + deltaX, y, { steps: 10 })
+      await page.mouse.up()
+    }
+
+    const initialNameWidth = await measureCol('name')
+    await dragCol('name', 90)
+    await eventually(() => state.settingsSaves.length === 1, '拖动名称列宽未持久化')
+    const savedNameWidth = state.settings.node_list_column_widths.name
+    assert.ok(Math.abs(savedNameWidth - (initialNameWidth + 90)) <= 4, `名称列宽保存值异常：${savedNameWidth}`)
+    assert.ok(Math.abs((await measureCol('name')) - savedNameWidth) <= 2, '名称列宽渲染与保存值不一致')
+    await page.waitForSelector('[data-testid="reset-column-widths"]', { visible: true })
+
+    const beforeUserWidth = await measureCol('user')
+    await dragCol('user', 60)
+    await eventually(() => state.settingsSaves.length === 2, '拖动入站用户名列宽未持久化')
+    const savedUserWidth = state.settings.node_list_column_widths.user
+    assert.ok(Math.abs(savedUserWidth - (beforeUserWidth + 60)) <= 4, `入站用户名列宽保存值异常：${savedUserWidth}（拖动前 ${beforeUserWidth}）`)
+
+    // 刷新页面验证从后端持久化的列宽完整恢复
+    await page.reload({ waitUntil: 'networkidle2' })
+    await page.waitForSelector('[data-testid="nodes-list"]', { visible: true })
+    assert.ok(Math.abs((await measureCol('name')) - savedNameWidth) <= 2, '刷新后名称列宽未恢复')
+    assert.ok(Math.abs((await measureCol('user')) - savedUserWidth) <= 2, '刷新后入站用户名列宽未恢复')
+    await assertColumnOrder(page)
+
+    // 双击单列手柄恢复该列默认值
+    const userHandle = await page.$('[data-testid="col-resizer-user"]')
+    const userBox = await userHandle.boundingBox()
+    await page.mouse.click(userBox.x + userBox.width / 2, userBox.y + userBox.height / 2, { clickCount: 2 })
+    await eventually(() => state.settingsSaves.length === 3, '双击重置单列宽未持久化')
+    assert.deepEqual(state.settings.node_list_column_widths, { name: savedNameWidth })
+
+    // 一键恢复全部默认列宽
+    await clickControl(page, '[data-testid="reset-column-widths"]')
+    await eventually(() => state.settingsSaves.length === 4, '一键恢复默认列宽未持久化')
+    assert.deepEqual(state.settings.node_list_column_widths, {})
+    await page.waitForSelector('[data-testid="reset-column-widths"]', { hidden: true })
+
+    // 验证直连与自定义前置代理节点在三种视口下的展开布局对称性与入站优先顺序
+    for (const width of [1440, 1080, 390]) {
+      await page.setViewport({ width, height: 1000 })
+      for (const nodeId of [1, 2]) {
+        await clickControl(page, `[data-testid="node-open-${nodeId}"]`)
+        await page.waitForSelector(`[data-testid="node-inspector"][data-node-id="${nodeId}"]`, { visible: true })
+        await assertDetailLayoutOrderAndBalance(page, nodeId, width)
+        await clickControl(page, `[data-testid="node-open-${nodeId}"]`)
+      }
+    }
   },
 }
 

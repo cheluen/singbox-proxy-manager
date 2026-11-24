@@ -1,9 +1,11 @@
 package models
 
 import (
+	"context"
 	"database/sql"
 	"encoding/json"
 	"errors"
+	"maps"
 	"strings"
 	"testing"
 	"time"
@@ -11,6 +13,67 @@ import (
 	"golang.org/x/crypto/bcrypt"
 	_ "modernc.org/sqlite"
 )
+
+func TestValidateNodeListColumnWidths(t *testing.T) {
+	if err := ValidateNodeListColumnWidths(map[string]int{
+		"name": 40, "port": 1200, "user": 100, "pass": 110, "type": 80,
+		"server": 200, "region": 160, "ip": 180, "latency": 90,
+	}); err != nil {
+		t.Fatalf("known columns and inclusive bounds were rejected: %v", err)
+	}
+	if err := ValidateNodeListColumnWidths(map[string]int{}); err != nil {
+		t.Fatalf("empty widths should be valid: %v", err)
+	}
+	for _, widths := range []map[string]int{
+		{"unknown": 80}, {"Name": 80}, {"name": -20}, {"name": 0}, {"name": 39}, {"name": 1201},
+	} {
+		if err := ValidateNodeListColumnWidths(widths); err == nil || !strings.Contains(err.Error(), "node_list_column_widths") {
+			t.Fatalf("expected a column width validation error for %v, got %v", widths, err)
+		}
+	}
+}
+
+func TestNodeListColumnWidthsLegacySQLiteMigration(t *testing.T) {
+	db, err := sql.Open("sqlite", ":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	if _, err := db.Exec(`CREATE TABLE settings (
+		id INTEGER PRIMARY KEY AUTOINCREMENT,
+		admin_password TEXT NOT NULL,
+		start_port INTEGER DEFAULT 10000
+	)`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`INSERT INTO settings (admin_password, start_port) VALUES ('', 32047)`); err != nil {
+		t.Fatal(err)
+	}
+	if err := InitDB(db); err != nil {
+		t.Fatal(err)
+	}
+	assertWidths := func(expected map[string]int) {
+		t.Helper()
+		settings, err := LoadRuntimeSettings(context.Background(), db)
+		if err != nil || settings.StartPort != 32047 || settings.NodeListColumnWidths == nil || !maps.Equal(settings.NodeListColumnWidths, expected) {
+			t.Fatalf("migrated settings = %+v, %v, want widths %v", settings, err, expected)
+		}
+	}
+	assertWidths(map[string]int{})
+	if _, err := db.Exec(`UPDATE settings SET node_list_column_widths = '{"name":170}' WHERE singleton_key = 1`); err != nil {
+		t.Fatal(err)
+	}
+	if err := InitDB(db); err != nil {
+		t.Fatalf("repeat width migration: %v", err)
+	}
+	assertWidths(map[string]int{"name": 170})
+	for _, empty := range []string{"", "{}", "null", " \n "} {
+		if _, err := db.Exec(`UPDATE settings SET node_list_column_widths = ? WHERE singleton_key = 1`, empty); err != nil {
+			t.Fatal(err)
+		}
+		assertWidths(map[string]int{})
+	}
+}
 
 func TestReconcileAdminPasswordChangedEnvironmentOverridesDatabaseAndRevokesSessions(t *testing.T) {
 	db, err := sql.Open("sqlite", ":memory:")

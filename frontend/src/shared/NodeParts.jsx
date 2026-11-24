@@ -145,7 +145,7 @@ export function RemarkEditor({ node, act }) {
     <div className="sb-remark">
       <Input.TextArea
         value={draft}
-        autoSize={{ minRows: 3, maxRows: 10 }}
+        autoSize={{ minRows: 4, maxRows: 16 }}
         placeholder={t('remark_empty_hint')}
         aria-label={t('remark')}
         onChange={(event) => setDraft(event.target.value)}

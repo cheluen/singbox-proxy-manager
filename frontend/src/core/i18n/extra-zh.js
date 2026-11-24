@@ -37,6 +37,8 @@ export default {
   inbound_password: '入站密码',
   show_inbound_password: '点击显示入站密码',
   hide_inbound_password: '点击隐藏入站密码',
+  resize_column_hint: '拖动调整「{{column}}」列宽，双击恢复默认',
+  reset_column_widths: '恢复默认列宽',
   node_enabled_label: '启用节点',
   select_node: '选择 {{name}}',
   selected_suffix: '项已选',

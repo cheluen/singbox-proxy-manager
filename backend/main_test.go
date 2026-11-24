@@ -1,8 +1,10 @@
 package main
 
 import (
+	"database/sql"
 	"encoding/json"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -12,6 +14,8 @@ import (
 	"time"
 
 	"sb-proxy/backend/api"
+	"sb-proxy/backend/models"
+	"sb-proxy/backend/services"
 	frontendassets "sb-proxy/frontend"
 
 	"github.com/gin-gonic/gin"
@@ -50,6 +54,124 @@ func TestConfiguredBindAddressDefaultsToExternalWildcard(t *testing.T) {
 	if got := configuredBindAddress(); got != defaultBindAddress {
 		t.Fatalf("configuredBindAddress()=%q want=%q", got, defaultBindAddress)
 	}
+}
+
+func TestPublicHealthEndpoint(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	db, err := sql.Open("sqlite", ":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	service := services.NewSingBoxService(t.TempDir())
+	router := gin.New()
+	registerPublicRoutes(router.Group("/api"), api.NewHandler(db, service), nil)
+
+	assertHealth := func(code int, body string) {
+		t.Helper()
+		response := httptest.NewRecorder()
+		router.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/api/health", nil))
+		if response.Code != code || response.Body.String() != body {
+			t.Fatalf("health response = %d %s, want %d %s", response.Code, response.Body.String(), code, body)
+		}
+	}
+	// Uninitialized schema must report unhealthy so broken DB connections are surfaced.
+	assertHealth(http.StatusServiceUnavailable, `{"status":"unhealthy"}`)
+	if err := models.InitDB(db); err != nil {
+		t.Fatalf("init db: %v", err)
+	}
+	assertHealth(http.StatusOK, `{"runtime_degraded":false,"runtime_running":false,"status":"ok"}`)
+	service.MarkDegraded(io.ErrUnexpectedEOF)
+	assertHealth(http.StatusOK, `{"runtime_degraded":true,"runtime_running":false,"status":"ok"}`)
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	assertHealth(http.StatusServiceUnavailable, `{"status":"unhealthy"}`)
+}
+
+func TestHealthcheckArgumentsAndAddress(t *testing.T) {
+	t.Setenv("PORT", "")
+	for _, args := range [][]string{{"--healthcheck"}, {"-healthcheck"}} {
+		if !isHealthcheck(args) {
+			t.Fatalf("did not recognize healthcheck arguments %v", args)
+		}
+	}
+	if isHealthcheck(nil) || isHealthcheck([]string{"--unknown"}) {
+		t.Fatal("normal startup was mistaken for a healthcheck")
+	}
+	for host, expected := range map[string]string{
+		"":              "127.0.0.1",
+		"0.0.0.0":       "127.0.0.1",
+		"::":            "127.0.0.1",
+		"*":             "127.0.0.1",
+		"192.0.2.1":     "192.0.2.1",
+		"::1":           "[::1]",
+		"[2001:db8::1]": "[2001:db8::1]",
+	} {
+		t.Setenv("BIND_ADDRESS", host)
+		if got, want := healthcheckURL(configuredBindAddress(), configuredPort()), "http://"+expected+":30000/api/health"; got != want {
+			t.Errorf("healthcheck for bind %q = %q, want %q", host, got, want)
+		}
+	}
+	gotDualStack := healthcheckURLs("::", "30000")
+	wantDualStack := []string{"http://127.0.0.1:30000/api/health", "http://[::1]:30000/api/health"}
+	if len(gotDualStack) != len(wantDualStack) || gotDualStack[0] != wantDualStack[0] || gotDualStack[1] != wantDualStack[1] {
+		t.Fatalf("healthcheckURLs(::, 30000) = %v, want %v", gotDualStack, wantDualStack)
+	}
+	t.Setenv("PORT", "38080")
+	if got := healthcheckURL("::1", configuredPort()); got != "http://[::1]:38080/api/health" {
+		t.Fatalf("custom healthcheck port not used: %s", got)
+	}
+}
+
+func TestProbeHealthRequiresDirectHTTP200(t *testing.T) {
+	for _, status := range []int{http.StatusOK, http.StatusFound, http.StatusServiceUnavailable} {
+		t.Run(http.StatusText(status), func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+				if req.Method != http.MethodGet || req.URL.Path != "/api/health" {
+					t.Errorf("unexpected probe %s %s", req.Method, req.URL.Path)
+					w.WriteHeader(http.StatusOK)
+					return
+				}
+				if status == http.StatusFound {
+					w.Header().Set("Location", "/redirected")
+				}
+				w.WriteHeader(status)
+			}))
+			defer server.Close()
+			_, port, err := net.SplitHostPort(server.Listener.Addr().String())
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := probeHealth("0.0.0.0", port); (err == nil) != (status == http.StatusOK) {
+				t.Fatalf("probe for HTTP %d returned %v", status, err)
+			}
+		})
+	}
+
+	t.Run("ipv6_only_wildcard_fallback", func(t *testing.T) {
+		ln, err := net.Listen("tcp6", "[::1]:0")
+		if err != nil {
+			t.Skipf("IPv6 loopback unavailable: %v", err)
+		}
+		server := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+			if req.Method != http.MethodGet || req.URL.Path != "/api/health" {
+				w.WriteHeader(http.StatusNotFound)
+				return
+			}
+			w.WriteHeader(http.StatusOK)
+		}))
+		server.Listener = ln
+		server.Start()
+		defer server.Close()
+		_, port, err := net.SplitHostPort(ln.Addr().String())
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := probeHealth("::", port); err != nil {
+			t.Fatalf("probeHealth(::, %s) failed against IPv6-only listener: %v", port, err)
+		}
+	})
 }
 
 func TestNodeIPCheckRouteUsesPostOnly(t *testing.T) {

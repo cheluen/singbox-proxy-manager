@@ -26,6 +26,7 @@ import (
 	"sb-proxy/backend/models"
 	"sb-proxy/backend/services"
 	frontendassets "sb-proxy/frontend"
+	"sb-proxy/internal/agreement"
 	"sb-proxy/internal/kernel"
 	"sb-proxy/internal/version"
 
@@ -41,7 +42,7 @@ const (
 	defaultTimezoneLocationName = "Asia/Shanghai"
 )
 
-func loadRuntimeEnvironment() {
+func loadDotEnv() {
 	if paths := discoverDotEnvPaths(); len(paths) > 0 {
 		if err := godotenv.Load(paths...); err != nil {
 			log.Printf("Failed to load .env files: %v", err)
@@ -49,7 +50,10 @@ func loadRuntimeEnvironment() {
 			log.Printf("Loaded environment from: %s", strings.Join(paths, ", "))
 		}
 	}
+}
 
+func loadRuntimeEnvironment() {
+	loadDotEnv()
 	locationName := applyTimezoneFromEnv()
 	log.Printf("Using service timezone: %s", locationName)
 }
@@ -191,6 +195,14 @@ func parseUTCOffsetLocation(raw string) (*time.Location, string, bool) {
 }
 
 func main() {
+	if isHealthcheck(os.Args[1:]) {
+		loadDotEnv()
+		if err := probeHealth(configuredBindAddress(), configuredPort()); err != nil {
+			log.Printf("Health check failed: %v", err)
+			os.Exit(1)
+		}
+		return
+	}
 	loadRuntimeEnvironment()
 
 	bindAddress := configuredBindAddress()
@@ -199,6 +211,15 @@ func main() {
 	configDir := os.Getenv("CONFIG_DIR")
 	if configDir == "" {
 		configDir = defaultConfigDir
+	}
+	terminal := agreement.Terminal{
+		In: os.Stdin, Out: os.Stdout, ErrOut: os.Stderr, IsTTY: agreement.IsTTY(os.Stdin),
+	}
+	if err := agreement.Require(configDir, os.Getenv(agreement.EnvKey), terminal, ensureSecureConfigDir); err != nil {
+		if !errors.Is(err, agreement.ErrNotAccepted) {
+			log.Printf("User agreement error: %v", err)
+		}
+		os.Exit(1)
 	}
 
 	// Create config directory if not exists
@@ -253,14 +274,9 @@ func main() {
 	handler := api.NewHandler(db, singBoxService)
 
 	apiGroup := r.Group("/api")
-	updateChecker := version.NewUpdateCheckerFromEnv()
 
 	// Public routes
-	apiGroup.GET("/version", func(c *gin.Context) {
-		updateInfo, _ := updateChecker.Check(c.Request.Context())
-		c.JSON(http.StatusOK, gin.H{"version": updateInfo.CurrentVersion, "update": updateInfo})
-	})
-	apiGroup.POST("/login", handler.Login)
+	registerPublicRoutes(apiGroup, handler, version.NewUpdateCheckerFromEnv())
 
 	// Protected routes
 	authorized := apiGroup.Group("")
@@ -305,13 +321,7 @@ func main() {
 	// Start sing-box only after the web stack is fully prepared.
 	startSingBoxFromDatabase(db, singBoxService, configDir)
 
-	// Get port from environment or use default
-	port := os.Getenv("PORT")
-	if port == "" {
-		port = defaultPort
-	}
-
-	listenAddress := net.JoinHostPort(bindAddress, port)
+	listenAddress := net.JoinHostPort(bindAddress, configuredPort())
 	log.Printf("Server starting on %s", listenAddress)
 	srv := &http.Server{
 		Addr:              listenAddress,
@@ -383,6 +393,15 @@ func registerNodeIPCheckRoute(routes *gin.RouterGroup, handler *api.Handler) {
 	routes.POST("/nodes/:id/check-ip", handler.CheckNodeIP)
 }
 
+func registerPublicRoutes(routes *gin.RouterGroup, handler *api.Handler, updateChecker *version.UpdateChecker) {
+	routes.GET("/health", handler.GetHealth)
+	routes.GET("/version", func(c *gin.Context) {
+		updateInfo, _ := updateChecker.Check(c.Request.Context())
+		c.JSON(http.StatusOK, gin.H{"version": updateInfo.CurrentVersion, "update": updateInfo})
+	})
+	routes.POST("/login", handler.Login)
+}
+
 func fatalWithInstanceLease(
 	lease *appdb.InstanceLease,
 	cancelMonitor context.CancelFunc,
@@ -410,6 +429,13 @@ func configuredBindAddress() string {
 		return defaultBindAddress
 	}
 	return strings.Trim(address, "[]")
+}
+
+func configuredPort() string {
+	if port := os.Getenv("PORT"); port != "" {
+		return port
+	}
+	return defaultPort
 }
 
 // startSingBoxFromDatabase generates the unified config from the current

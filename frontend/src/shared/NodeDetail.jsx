@@ -120,14 +120,14 @@ function UpstreamSection({ node, act }) {
 function RemarkSection({ node, act }) {
   const { t } = useTranslation()
   return (
-    <div className="sb-section sb-detail-note-group">
+    <div className="sb-detail-card sb-detail-note-group" data-detail-group="meta">
       <Section title={t('full_node_name')} className="sb-full-name-section">
         <div className="sb-full-name">
           <span className="sb-full-name__text" data-testid={`node-full-name-${node.id}`}>{node.name}</span>
           <CopyButton text={node.name} label={`${t('copy')} ${t('node_name')}`} />
         </div>
       </Section>
-      <Section title={t('remark')}>
+      <Section title={t('remark')} className="sb-remark-section">
         <RemarkEditor node={node} act={act} />
       </Section>
     </div>
@@ -146,16 +146,21 @@ export function DetailActions({ node, act, checking, canReorder }) {
   )
 }
 
-// 完整的详情分区集合。layout 由外层容器的样式决定（单列 / 多列）。
+// 完整的详情分区集合：按「入站与连接 → 出站与链路 → 名称与备注」三组等高卡片排列，
+// 与列表「入站 → 出站」从左到右（窄屏从上到下）的顺序保持一致，消除旧布局的不对称空洞。
 export function DetailSections({ node, ctl, act }) {
   const checking = ctl.checks.checkingIds.has(node.id)
   return (
     <>
-      <ConnectSection node={node} />
-      <ExitSection node={node} checking={checking} />
-      <InboundSection node={node} act={act} pinBusy={Boolean(ctl.pinBusy[node.id])} flagBusy={Boolean(ctl.flagBusy[node.id])} preservePorts={ctl.preservePorts} />
-      <OutboundSection node={node} />
-      <UpstreamSection node={node} act={act} />
+      <div className="sb-detail-card" data-detail-group="inbound">
+        <InboundSection node={node} act={act} pinBusy={Boolean(ctl.pinBusy[node.id])} flagBusy={Boolean(ctl.flagBusy[node.id])} preservePorts={ctl.preservePorts} />
+        <ConnectSection node={node} />
+      </div>
+      <div className="sb-detail-card" data-detail-group="outbound">
+        <OutboundSection node={node} />
+        <ExitSection node={node} checking={checking} />
+        <UpstreamSection node={node} act={act} />
+      </div>
       <RemarkSection node={node} act={act} />
     </>
   )

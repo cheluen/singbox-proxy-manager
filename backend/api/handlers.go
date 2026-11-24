@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"maps"
 	"net"
 	"net/http"
 	"os"
@@ -1906,6 +1907,7 @@ func (h *Handler) GetSettings(c *gin.Context) {
 		"global_upstream_country_code": settings.GlobalUpstreamCountryCode,
 		"global_upstream_latency":      settings.GlobalUpstreamLatency,
 		"global_upstream_error":        settings.GlobalUpstreamError,
+		"node_list_column_widths":      settings.NodeListColumnWidths,
 	})
 }
 
@@ -1979,6 +1981,22 @@ func (h *Handler) CheckGlobalUpstreamIP(c *gin.Context) {
 	c.JSON(http.StatusOK, info)
 }
 
+func (h *Handler) GetHealth(c *gin.Context) {
+	ctx, cancel := context.WithTimeout(c.Request.Context(), 2*time.Second)
+	defer cancel()
+	var singleton int
+	if err := h.db.QueryRowContext(ctx, "SELECT singleton_key FROM settings WHERE singleton_key = 1").Scan(&singleton); err != nil {
+		c.JSON(http.StatusServiceUnavailable, gin.H{"status": "unhealthy"})
+		return
+	}
+	status := h.singBoxService.RuntimeStatus()
+	c.JSON(http.StatusOK, gin.H{
+		"status":           "ok",
+		"runtime_running":  status.Running,
+		"runtime_degraded": status.Degraded,
+	})
+}
+
 func (h *Handler) GetRuntimeStatus(c *gin.Context) {
 	c.JSON(http.StatusOK, h.singBoxService.RuntimeStatus())
 }
@@ -2009,15 +2027,35 @@ func (h *Handler) RestartRuntime(c *gin.Context) {
 // UpdateSettings updates settings
 func (h *Handler) UpdateSettings(c *gin.Context) {
 	var req struct {
-		StartPort             *int    `json:"start_port,omitempty"`
-		AdminPassword         *string `json:"admin_password,omitempty"`
-		PreserveInboundPorts  *bool   `json:"preserve_inbound_ports,omitempty"`
-		GlobalUpstreamEnabled *bool   `json:"global_upstream_enabled,omitempty"`
-		GlobalUpstreamType    *string `json:"global_upstream_type,omitempty"`
-		GlobalUpstreamConfig  *string `json:"global_upstream_config,omitempty"`
+		StartPort             *int            `json:"start_port,omitempty"`
+		AdminPassword         *string         `json:"admin_password,omitempty"`
+		PreserveInboundPorts  *bool           `json:"preserve_inbound_ports,omitempty"`
+		GlobalUpstreamEnabled *bool           `json:"global_upstream_enabled,omitempty"`
+		GlobalUpstreamType    *string         `json:"global_upstream_type,omitempty"`
+		GlobalUpstreamConfig  *string         `json:"global_upstream_config,omitempty"`
+		NodeListColumnWidths  *map[string]int `json:"node_list_column_widths"`
 	}
 
-	if !bindRequestJSON(c, &req) {
+	const invalidColumnWidths = "node_list_column_widths must be an object with integer widths"
+	var decodedColumnWidths map[string]int
+	req.NodeListColumnWidths = &decodedColumnWidths
+	if err := c.ShouldBindJSON(&req); err != nil {
+		message := "invalid request"
+		var typeError *json.UnmarshalTypeError
+		if errors.As(err, &typeError) && typeError.Field == "node_list_column_widths" {
+			message = invalidColumnWidths
+		}
+		c.AbortWithStatusJSON(http.StatusBadRequest, gin.H{"error": message})
+		return
+	}
+	if req.NodeListColumnWidths == nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": invalidColumnWidths})
+		return
+	}
+	if decodedColumnWidths == nil {
+		req.NodeListColumnWidths = nil
+	} else if err := models.ValidateNodeListColumnWidths(decodedColumnWidths); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
 
@@ -2080,28 +2118,32 @@ func (h *Handler) UpdateSettings(c *gin.Context) {
 	if req.GlobalUpstreamConfig != nil {
 		nextGlobalUpstreamConfig = strings.TrimSpace(*req.GlobalUpstreamConfig)
 	}
-	if err := validateCharacterLimit("global_upstream_type", nextGlobalUpstreamType, maxUpstreamTypeCharacters); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
-		return
-	}
 	globalDefinitionRequested := req.GlobalUpstreamType != nil || req.GlobalUpstreamConfig != nil
-	if nextGlobalUpstreamEnabled || globalDefinitionRequested {
-		hasType := nextGlobalUpstreamType != ""
-		hasConfig := nextGlobalUpstreamConfig != ""
-		if hasType != hasConfig {
-			c.JSON(http.StatusBadRequest, gin.H{"error": "global upstream type and config must be provided together"})
+	onlyColumnWidths := req.NodeListColumnWidths != nil && req.StartPort == nil && req.PreserveInboundPorts == nil &&
+		req.GlobalUpstreamEnabled == nil && !globalDefinitionRequested && req.AdminPassword == nil
+	if !onlyColumnWidths {
+		if err := validateCharacterLimit("global_upstream_type", nextGlobalUpstreamType, maxUpstreamTypeCharacters); err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 			return
 		}
-		if nextGlobalUpstreamEnabled && !hasType {
-			c.JSON(http.StatusBadRequest, gin.H{"error": "global upstream proxy is required when enabled"})
-			return
-		}
-		if hasType {
-			if err := h.singBoxService.ValidateUpstreamDefinition(models.ProxyDefinition{
-				Type: nextGlobalUpstreamType, Config: nextGlobalUpstreamConfig,
-			}); err != nil {
-				c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		if nextGlobalUpstreamEnabled || globalDefinitionRequested {
+			hasType := nextGlobalUpstreamType != ""
+			hasConfig := nextGlobalUpstreamConfig != ""
+			if hasType != hasConfig {
+				c.JSON(http.StatusBadRequest, gin.H{"error": "global upstream type and config must be provided together"})
 				return
+			}
+			if nextGlobalUpstreamEnabled && !hasType {
+				c.JSON(http.StatusBadRequest, gin.H{"error": "global upstream proxy is required when enabled"})
+				return
+			}
+			if hasType {
+				if err := h.singBoxService.ValidateUpstreamDefinition(models.ProxyDefinition{
+					Type: nextGlobalUpstreamType, Config: nextGlobalUpstreamConfig,
+				}); err != nil {
+					c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+					return
+				}
 			}
 		}
 	}
@@ -2112,8 +2154,21 @@ func (h *Handler) UpdateSettings(c *gin.Context) {
 	globalEnabledChanged := nextGlobalUpstreamEnabled != previous.GlobalUpstreamEnabled
 	globalSettingsChanged := globalEnabledChanged || globalDefinitionChanged
 	passwordChanged := req.AdminPassword != nil
-	if !portSettingsChanged && !globalSettingsChanged && !passwordChanged {
-		c.JSON(http.StatusOK, gin.H{"message": "settings unchanged", "changed": false})
+	nextColumnWidths := previous.NodeListColumnWidths
+	columnWidthsChanged := req.NodeListColumnWidths != nil && !maps.Equal(decodedColumnWidths, nextColumnWidths)
+	var columnWidthsJSON []byte
+	if columnWidthsChanged {
+		nextColumnWidths = decodedColumnWidths
+		columnWidthsJSON, err = json.Marshal(nextColumnWidths)
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to encode node_list_column_widths"})
+			return
+		}
+	}
+	if !portSettingsChanged && !globalSettingsChanged && !passwordChanged && !columnWidthsChanged {
+		c.JSON(http.StatusOK, gin.H{
+			"message": "settings unchanged", "changed": false, "node_list_column_widths": nextColumnWidths,
+		})
 		return
 	}
 	shouldReassignInboundPorts := !nextPreserveInboundPorts && portSettingsChanged
@@ -2129,6 +2184,10 @@ func (h *Handler) UpdateSettings(c *gin.Context) {
 				    global_upstream_config = ?, updated_at = CURRENT_TIMESTAMP`
 			args := []any{nextStartPort, nextPreserveInboundPorts, nextGlobalUpstreamEnabled,
 				nextGlobalUpstreamType, nextGlobalUpstreamConfig}
+			if columnWidthsChanged {
+				query += ", node_list_column_widths = ?"
+				args = append(args, string(columnWidthsJSON))
+			}
 			if passwordChanged {
 				query += ", admin_password = ?, auth_generation = auth_generation + 1"
 				args = append(args, hashedPassword)
@@ -2167,9 +2226,10 @@ func (h *Handler) UpdateSettings(c *gin.Context) {
 	}
 
 	c.JSON(http.StatusOK, gin.H{
-		"message":          "settings updated",
-		"changed":          true,
-		"password_changed": passwordChanged,
+		"message":                 "settings updated",
+		"changed":                 true,
+		"password_changed":        passwordChanged,
+		"node_list_column_widths": nextColumnWidths,
 	})
 }
 

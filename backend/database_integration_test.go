@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
+	"maps"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -20,6 +21,7 @@ import (
 	"sb-proxy/backend/api"
 	appdb "sb-proxy/backend/database"
 	"sb-proxy/backend/models"
+	"sb-proxy/backend/services"
 )
 
 func TestLocalSQLiteDatabaseIntegration(t *testing.T) {
@@ -111,6 +113,7 @@ func runDatabaseIntegrationContract(t *testing.T, db *sql.DB) {
 	}
 	verifyLegacyPasswordSetupStateAbsent(t, db)
 	verifyInstanceLeaseContract(t, db)
+	verifyNodeListColumnWidthsContract(t, db)
 
 	// Keep the payload above MySQL TEXT's 64 KiB limit. Protocol configs can
 	// legitimately grow this large (for example, a WireGuard endpoint with
@@ -245,6 +248,49 @@ func verifyAdminSessionContract(t *testing.T, db *sql.DB) {
 	if err := db.QueryRow("SELECT COUNT(*) FROM admin_sessions").Scan(&count); err != nil || count != 0 {
 		t.Fatalf("注销后会话仍存在：count=%d err=%v", count, err)
 	}
+}
+
+func verifyNodeListColumnWidthsContract(t *testing.T, db *sql.DB) {
+	t.Helper()
+	gin.SetMode(gin.TestMode)
+	dialect := appdb.DialectFor(db)
+	handler := api.NewHandler(db, services.NewSingBoxService(t.TempDir()))
+	router := gin.New()
+	router.GET("/api/settings", handler.GetSettings)
+	router.PUT("/api/settings", handler.UpdateSettings)
+	request := func(method, body string, expected map[string]int, changed bool) {
+		t.Helper()
+		req := httptest.NewRequest(method, "/api/settings", strings.NewReader(body))
+		req.Header.Set("Content-Type", "application/json")
+		response := httptest.NewRecorder()
+		router.ServeHTTP(response, req)
+		var got struct {
+			Widths  map[string]int `json:"node_list_column_widths"`
+			Changed bool           `json:"changed"`
+		}
+		if err := json.Unmarshal(response.Body.Bytes(), &got); err != nil || response.Code != http.StatusOK ||
+			got.Widths == nil || !maps.Equal(got.Widths, expected) || got.Changed != changed {
+			t.Fatalf("%s settings (%s) = %d %s, parse error %v", method, dialect, response.Code, response.Body.String(), err)
+		}
+	}
+	empty := map[string]int{}
+	request(http.MethodGet, "", empty, false)
+	if _, err := db.Exec("ALTER TABLE settings DROP COLUMN node_list_column_widths"); err != nil {
+		t.Fatalf("prepare pre-width settings schema (%s): %v", dialect, err)
+	}
+	if err := models.InitDB(db); err != nil {
+		t.Fatalf("migrate pre-width settings schema (%s): %v", dialect, err)
+	}
+	request(http.MethodGet, "", empty, false)
+	widths := map[string]int{"port": 40, "server": 1200}
+	request(http.MethodPut, `{"node_list_column_widths":{"port":40,"server":1200}}`, widths, true)
+	if err := models.InitDB(db); err != nil {
+		t.Fatalf("re-run width migration (%s): %v", dialect, err)
+	}
+	request(http.MethodGet, "", widths, false)
+	request(http.MethodPut, `{}`, widths, false)
+	request(http.MethodPut, `{"node_list_column_widths":{}}`, empty, true)
+	request(http.MethodGet, "", empty, false)
 }
 
 func verifySharedReadContract(t *testing.T, db *sql.DB, expected models.ProxyNode) {

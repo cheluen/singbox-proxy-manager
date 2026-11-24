@@ -13,10 +13,10 @@ import { launchBrowser, stopProcess } from './test-harness.mjs'
 import { isExpectedSystemBrowserError } from './system-browser-errors.mjs'
 import { PROJECT_MARK_FILE, PROJECT_NAME } from '../src/core/project.js'
 import { assertProjectBrand, clickControl, clickText, confirmDialog, openBatchImport, openNodeMenu, saveNodeForm, selectOption, setInput, sleep, toggle, waitOverlaysClosed } from './ui-driver.mjs'
-import { assertFullNodeName, assertInboundUsername, assertMaskedInboundPassword, assertRevealedInboundPassword, assertRouteId } from './node-display-assertions.mjs'
+import { assertDetailLayoutOrderAndBalance, assertFullNodeName, assertInboundUsername, assertMaskedInboundPassword, assertRevealedInboundPassword, assertRouteId } from './node-display-assertions.mjs'
 
 const FRONTEND = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
-const VERSION = JSON.parse(fs.readFileSync(path.join(FRONTEND, 'package.json'), 'utf8')).version
+const VERSION = process.env.APP_VERSION || JSON.parse(fs.readFileSync(path.join(FRONTEND, 'package.json'), 'utf8')).version
 const BINARY = process.env.SBPM_E2E_BACKEND_BINARY
 const MODE = process.env.SBPM_E2E_DATABASE_MODE || 'sqlite'
 const DATABASE_KEYS = ['DATABASE_URL', 'POSTGRES_DATABASE_URL', 'POSTGRES_URL', 'PGSQL_DATABASE_URL', 'PGSQL', 'MYSQL_DATABASE_URL', 'MYSQL', 'TURSO_DATABASE_URL', 'TURSO_AUTH_TOKEN']
@@ -93,7 +93,7 @@ try {
   const start = async () => {
     backend = spawn(BINARY, [], {
       cwd: scratch,
-      env: { ...environment, ADMIN_PASSWORD: secret, CONFIG_DIR: configDir, BIND_ADDRESS: '127.0.0.1', PORT: String(port), SBPM_UPDATE_CHECK_DISABLED: '1', SBPM_IPCHECK_URLS: `http://127.0.0.1:${targetPort}/ip`, TZ: 'UTC' },
+      env: { ...environment, ACCEPT_USER_AGREEMENT: 'true', ADMIN_PASSWORD: secret, CONFIG_DIR: configDir, BIND_ADDRESS: '127.0.0.1', PORT: String(port), SBPM_UPDATE_CHECK_DISABLED: '1', SBPM_IPCHECK_URLS: `http://127.0.0.1:${targetPort}/ip`, TZ: 'UTC' },
       stdio: ['ignore', 'pipe', 'pipe'],
     })
     backend.stdout.on('data', (chunk) => logs.push(chunk.toString()))
@@ -137,7 +137,9 @@ try {
   assert.ok((await markResponse.text()).includes(`>${PROJECT_NAME}</title>`))
   assert.equal(htmlResponse.headers.get('cache-control'), 'no-cache, max-age=0, must-revalidate')
   assert.equal((await api('GET', '/version')).version, VERSION)
-  steps.push('version-assets-auth')
+  const health = await api('GET', '/health')
+  assert.equal(health.status, 'ok')
+  steps.push('version-health-assets-auth')
 
   browser = await launchBrowser({ userDataDir: path.join(scratch, 'browser') })
   page = await browser.newPage()
@@ -215,6 +217,7 @@ try {
   assert.equal(checked.transport, 'http')
   await assertFullNodeName(page, direct.id, 'System direct')
   await assertRouteId(page, direct.id, `system-user+${direct.inbound_port}`)
+  await assertDetailLayoutOrderAndBalance(page, direct.id, 1440)
   steps.push('ui-create-http-socks-ipcheck')
 
   const remark = 'system first line\nsecond line  with spaces'
@@ -270,6 +273,25 @@ try {
   for (const node of await api('GET', '/nodes')) assert.equal(node.inbound_port, ports.get(node.id))
   steps.push('settings-sort-preserve-ports')
 
+  // 真实前后端 + 数据库列宽持久化验收：拖拽列宽落库、不重启 sing-box、跨进程重启恢复并可一键复位。
+  await page.setViewport({ width: 1440, height: 1000 })
+  const runtimeBeforeResize = await api('GET', '/runtime/status')
+  const nameColBefore = await page.$eval('.dusk-head [data-col-key="name"]', (el) => Math.round(el.getBoundingClientRect().width))
+  const nameHandle = await page.$('[data-testid="col-resizer-name"]')
+  assert.ok(nameHandle, '缺少名称列宽调节手柄')
+  const nameHandleBox = await nameHandle.boundingBox()
+  await submit('PUT', '/settings', async () => {
+    const startX = nameHandleBox.x + nameHandleBox.width / 2
+    const y = nameHandleBox.y + nameHandleBox.height / 2
+    await page.mouse.move(startX, y)
+    await page.mouse.down()
+    await page.mouse.move(startX + 80, y, { steps: 10 })
+    await page.mouse.up()
+  })
+  const savedColumnWidths = (await api('GET', '/settings')).node_list_column_widths
+  assert.ok(Math.abs(savedColumnWidths.name - (nameColBefore + 80)) <= 4, `持久化列宽异常：${JSON.stringify(savedColumnWidths)}`)
+  assert.equal((await api('GET', '/runtime/status')).pid, runtimeBeforeResize.pid, '仅调整列表列宽不应重启 sing-box 内核')
+
   await page.waitForNetworkIdle({ idleTime: 500 })
   expectRestart = true
   await stop(backend)
@@ -278,10 +300,14 @@ try {
   await page.waitForSelector('[data-testid="nodes-list"]', { visible: true })
   expectRestart = false
   assert.equal(await page.evaluate(() => localStorage.getItem('token')), token)
+  const nameColAfterRestart = await page.$eval('.dusk-head [data-col-key="name"]', (el) => Math.round(el.getBoundingClientRect().width))
+  assert.ok(Math.abs(nameColAfterRestart - savedColumnWidths.name) <= 2, `重启后端后列宽未从数据库恢复：${nameColAfterRestart} vs ${savedColumnWidths.name}`)
+  await submit('PUT', '/settings', () => clickControl(page, '[data-testid="reset-column-widths"]'))
+  assert.deepEqual((await api('GET', '/settings')).node_list_column_widths, {})
   assert.equal((await api('GET', `/nodes/${direct.id}`)).remark, remark)
   await assertMaskedInboundPassword(page, direct.id, INBOUND_SECRET)
   await forward(await api('GET', `/nodes/${direct.id}`), 'system-user', INBOUND_SECRET)
-  steps.push('restart-database-session-persistence')
+  steps.push('restart-database-column-widths-session-persistence')
 
   await setInput(page, '[data-testid="nodes-search"]', 'System direct renamed')
   await page.waitForFunction((id) => {

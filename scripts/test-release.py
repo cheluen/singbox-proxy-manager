@@ -1,11 +1,13 @@
 #!/usr/bin/env python3
 """统一发行文件系统回归；可额外传入旧管理程序及其内核验证原地升级。"""
 
+from contextlib import contextmanager
 import hashlib
 import http.server
 import json
 import os
 from pathlib import Path
+import pty
 import shutil
 import signal
 import socket
@@ -37,11 +39,109 @@ class Target(http.server.BaseHTTPRequestHandler):
         pass
 
 
+@contextmanager
+def manager_process(binary, root, env, stdin, log):
+    with subprocess.Popen([str(binary)], cwd=root, env=env, stdin=stdin, stdout=log, stderr=log) as child:
+        try:
+            yield child
+        finally:
+            if child.poll() is None:
+                child.terminate()
+                try:
+                    child.wait(timeout=15)
+                except subprocess.TimeoutExpired:
+                    child.kill()
+                    child.wait()
+                    raise AssertionError("管理程序未能正常停止")
+
+
+@contextmanager
+def terminal_input(answer):
+    master, terminal = pty.openpty()
+    try:
+        os.write(master, answer + b"\n")
+        yield terminal
+    finally:
+        os.close(terminal)
+        os.close(master)
+
+
+def verify_agreement(binary, root, env):
+    root.mkdir()
+    installed = root / "manager"
+    shutil.copy2(binary, installed)
+    installed.chmod(0o700)
+    env = {key: value for key, value in env.items() if key != "ACCEPT_USER_AGREEMENT"}
+    env["PORT"] = str(free_port())
+    config = root / "config"
+    if "CONFIG_DIR" in env:
+        config = root / "persistent-data"
+        env["CONFIG_DIR"] = str(config)
+    endpoint = f"http://127.0.0.1:{env['PORT']}/api/health"
+    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+
+    def assert_refusal(code, message):
+        assert code == 1, message
+        for guidance in ("User agreement not accepted", "ACCEPT_USER_AGREEMENT=true", "ADMIN_PASSWORD", "USER_AGREEMENT.md"):
+            assert guidance in message, message
+        assert not (config / "proxy.db").exists(), "拒绝协议后创建了数据库"
+        assert not (config / "kernels").exists(), "拒绝协议后释放了内核"
+        assert not (config / "user-agreement.accepted").exists(), "拒绝协议后写入了同意状态"
+
+    def wait_until_healthy(child, log_path):
+        deadline = time.monotonic() + 30
+        while time.monotonic() < deadline:
+            assert child.poll() is None, log_path.read_text()
+            try:
+                with opener.open(endpoint, timeout=1) as response:
+                    assert json.load(response)["status"] == "ok"
+                    return
+            except (urllib.error.URLError, TimeoutError):
+                time.sleep(0.1)
+        raise AssertionError(log_path.read_text())
+
+    refusal = subprocess.run([str(installed)], cwd=root, env=env, stdin=subprocess.DEVNULL,
+                             capture_output=True, text=True, timeout=5)
+    assert_refusal(refusal.returncode, refusal.stderr)
+    assert "Enter y to accept." not in refusal.stdout, refusal.stdout
+
+    probe = subprocess.run([str(installed), "--healthcheck"], cwd=root, env=env, stdin=subprocess.DEVNULL,
+                           capture_output=True, text=True, timeout=5)
+    assert probe.returncode == 1 and "Health check failed" in probe.stderr, probe.stderr
+    assert "User agreement not accepted" not in probe.stderr and not config.exists(), probe.stderr
+
+    log_path = root / "agreement-start.log"
+    with log_path.open("w") as log, terminal_input(b"n") as terminal:
+        with manager_process(installed, root, env, terminal, log) as child:
+            assert_refusal(child.wait(timeout=5), log_path.read_text())
+    assert "Enter y to accept." in log_path.read_text()
+
+    with log_path.open("w") as log, terminal_input(b"y") as terminal:
+        with manager_process(installed, root, env, terminal, log) as child:
+            wait_until_healthy(child, log_path)
+            acceptance = config / "user-agreement.accepted"
+            stored = json.loads(acceptance.read_text())
+            source = Path(__file__).resolve().parent.parent / "USER_AGREEMENT.md"
+            assert stored["sha256"] == hashlib.sha256(source.read_bytes()).hexdigest(), stored
+            assert stored["accepted_at"] and stored["method"] == "interactive", stored
+            assert acceptance.stat().st_mode & 0o777 == 0o600
+            assert config.stat().st_mode & 0o777 == 0o700
+
+    with log_path.open("w") as log, manager_process(installed, root, env, subprocess.DEVNULL, log) as child:
+        wait_until_healthy(child, log_path)
+        assert "Enter y to accept." not in log_path.read_text()
+        (root / ".env").write_text(f"PORT={env['PORT']}\nBIND_ADDRESS=127.0.0.1\n")
+        probe_env = {key: value for key, value in env.items() if key not in ("PORT", "BIND_ADDRESS")}
+        subprocess.run([str(installed), "-healthcheck"], cwd=root, env=probe_env, stdin=subprocess.DEVNULL,
+                       check=True, timeout=5)
+
+
 def main():
     if len(sys.argv) not in (2, 4):
         raise SystemExit("用法: test-release.py /新发行文件 [/旧管理程序 /旧内核]")
     binary = Path(sys.argv[1]).resolve(strict=True)
-    expected_version = (Path(__file__).resolve().parent.parent / "internal" / "version" / "version.txt").read_text().strip()
+    expected_version = os.environ.get("APP_VERSION") or (
+        Path(__file__).resolve().parent.parent / "internal" / "version" / "version.txt").read_text().strip()
     curl = shutil.which("curl")
     assert curl, "需要 curl 验证 HTTP 和 SOCKS5 链路"
     with tempfile.TemporaryDirectory(prefix="sbpm-release-") as temp:
@@ -55,9 +155,11 @@ def main():
         env = {"PATH": str(root), "PORT": str(port), "BIND_ADDRESS": "127.0.0.1",
                "TZ": "UTC", "SBPM_UPDATE_CHECK_DISABLED": "1",
                "SBPM_SINGBOX_LOG_OUTPUT": "stdout",
+               "ACCEPT_USER_AGREEMENT": "true",
                "ADMIN_PASSWORD": "release-initial-password"}
         if custom_config:
             env["CONFIG_DIR"] = str(config)
+        verify_agreement(binary, root / "agreement-check", env)
         token = ""
         child = None
         log = (root / "manager.log").open("w+")
@@ -93,7 +195,7 @@ def main():
             if source:
                 shutil.copy2(source, installed)
                 installed.chmod(0o700)
-            child = subprocess.Popen([str(installed)], cwd=root, env=env, stdout=log, stderr=log)
+            child = subprocess.Popen([str(installed)], cwd=root, env=env, stdin=subprocess.DEVNULL, stdout=log, stderr=log)
             deadline = time.monotonic() + 30
             while time.monotonic() < deadline:
                 assert child.poll() is None, "管理程序提前退出"
@@ -149,6 +251,7 @@ def main():
             login("release-retained-password")
             before_nodes = request("/api/nodes")
             before_settings = request("/api/settings")
+            before_settings.setdefault("node_list_column_widths", {})
             dbpath = config / "proxy.db"
             assert dbpath.exists()
             inode = dbpath.stat().st_ino
@@ -219,7 +322,8 @@ def main():
                               "custom_config": custom_config,
                               "checks": ["single-file", "embedded-frontend", "sqlite-retention",
                                          "password-retention", "kernel-priority", "kernel-repair",
-                                         "http-proxy", "socks5-proxy", "crash-recovery", "CRUD"]}))
+                                         "http-proxy", "socks5-proxy", "crash-recovery", "CRUD",
+                                         "user-agreement", "healthcheck"]}))
         except Exception:
             log.flush()
             print((root / "manager.log").read_text()[-15000:], file=sys.stderr)

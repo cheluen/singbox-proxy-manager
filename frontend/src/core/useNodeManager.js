@@ -1,6 +1,7 @@
 // 节点管理控制器（无 UI）：数据加载、筛选、选择、排序与全部节点操作。
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import api, { EXTERNAL_CHANGE_EVENT } from './api'
+import { columnWidthsEqual, normalizeColumnWidths } from './columnWidths'
 import { isNodeExportable, stableConfigSignature, stableJSONStringify } from './nodeModel'
 import { EMPTY_CRITERIA, collectFacets, filterNodes, hasActiveCriteria } from './nodeFilters'
 import { summarizeNodes } from './nodeView'
@@ -59,6 +60,11 @@ export function useNodeManager({ t, notify, confirm, onPasswordChanged }) {
 
   const nodesRef = useRef(nodes)
   const runtimeRequest = useRef(null)
+  const columnWidthsRef = useRef({})
+  const persistedColumnWidthsRef = useRef({})
+  const columnWidthInFlightRef = useRef(false)
+  const columnWidthQueuedRef = useRef(null)
+  const columnWidthWaitersRef = useRef([])
   const [resources] = useState(createLatestRequestCoordinator)
   const invalidateRuntime = useCallback(() => {
     resources.invalidate('runtime')
@@ -70,6 +76,13 @@ export function useNodeManager({ t, notify, confirm, onPasswordChanged }) {
   }, [invalidateRuntime])
 
   const preservePorts = Boolean(settings?.preserve_inbound_ports)
+  const columnWidths = useMemo(
+    () => normalizeColumnWidths(settings?.node_list_column_widths),
+    [settings?.node_list_column_widths]
+  )
+  useEffect(() => {
+    columnWidthsRef.current = columnWidths
+  }, [columnWidths])
   const visibleNodes = useMemo(() => filterNodes(nodes, criteria), [nodes, criteria])
   const visibleIds = useMemo(() => new Set(visibleNodes.map((node) => node.id)), [visibleNodes])
   const summary = useMemo(() => summarizeNodes(nodes), [nodes])
@@ -125,9 +138,79 @@ export function useNodeManager({ t, notify, confirm, onPasswordChanged }) {
   const loadSettings = useCallback(() => resources.run(
     'settings',
     (signal) => api.get('/settings', { signal }),
-    (response) => setSettings(response.data || null),
+    (response) => {
+      const next = response.data || null
+      // 若有列宽保存请求在途或排队中，保留本地最新乐观列宽，防止旧的 GET 覆盖刚拖好的宽度。
+      if (columnWidthInFlightRef.current || columnWidthQueuedRef.current !== null) {
+        const activeWidths = columnWidthsRef.current
+        setSettings(next ? { ...next, node_list_column_widths: activeWidths } : null)
+        return
+      }
+      persistedColumnWidthsRef.current = normalizeColumnWidths(next?.node_list_column_widths)
+      setSettings(next)
+    },
     { onError: () => setSettings(null) }
   ), [resources])
+
+  const flushColumnWidths = useCallback(async () => {
+    if (columnWidthInFlightRef.current) return
+    columnWidthInFlightRef.current = true
+    let lastOk = true
+    try {
+      while (columnWidthQueuedRef.current !== null) {
+        const target = columnWidthQueuedRef.current
+        columnWidthQueuedRef.current = null
+        if (columnWidthsEqual(target, persistedColumnWidthsRef.current)) {
+          lastOk = true
+          continue
+        }
+        try {
+          const response = await api.put('/settings', { node_list_column_widths: target })
+          const confirmed = response.data?.node_list_column_widths !== undefined
+            ? normalizeColumnWidths(response.data.node_list_column_widths)
+            : target
+          persistedColumnWidthsRef.current = confirmed
+          lastOk = true
+          if (columnWidthQueuedRef.current === null) {
+            columnWidthsRef.current = confirmed
+            setSettings((prev) => (prev ? { ...prev, node_list_column_widths: confirmed } : { node_list_column_widths: confirmed }))
+          }
+        } catch (error) {
+          lastOk = false
+          if (columnWidthQueuedRef.current === null) {
+            const fallback = persistedColumnWidthsRef.current
+            columnWidthsRef.current = fallback
+            setSettings((prev) => (prev ? { ...prev, node_list_column_widths: fallback } : prev))
+            notify.error(errorText(error, t('settings_update_failed')))
+          }
+        }
+      }
+    } finally {
+      columnWidthInFlightRef.current = false
+      const waiters = columnWidthWaitersRef.current.splice(0)
+      for (const resolve of waiters) resolve(lastOk)
+    }
+  }, [notify, t])
+
+  const saveColumnWidths = useCallback((nextWidths) => {
+    const sanitized = normalizeColumnWidths(nextWidths)
+    if (
+      !columnWidthInFlightRef.current &&
+      columnWidthQueuedRef.current === null &&
+      columnWidthsEqual(sanitized, columnWidthsRef.current) &&
+      columnWidthsEqual(sanitized, persistedColumnWidthsRef.current)
+    ) {
+      return Promise.resolve(true)
+    }
+    columnWidthsRef.current = sanitized
+    columnWidthQueuedRef.current = sanitized
+    resources.invalidate('settings')
+    setSettings((prev) => (prev ? { ...prev, node_list_column_widths: sanitized } : { node_list_column_widths: sanitized }))
+    return new Promise((resolve) => {
+      columnWidthWaitersRef.current.push(resolve)
+      void flushColumnWidths()
+    })
+  }, [flushColumnWidths, resources])
 
   const loadRuntime = useCallback(() => {
     if (runtimeRequest.current) return runtimeRequest.current
@@ -382,7 +465,7 @@ export function useNodeManager({ t, notify, confirm, onPasswordChanged }) {
   return {
     nodes, loading, loaded, criteria, setCriteria, visibleNodes, summary, facets, filtersActive,
     selectedIds: scopedSelectedIds, selectedNodes, toggleSelect, selectAllVisible, clearSelection,
-    settings, preservePorts, loadSettings, runtime, setRuntime, runtimeRestarting, setRuntimeRestarting, version,
+    settings, preservePorts, columnWidths, saveColumnWidths, loadSettings, runtime, setRuntime, runtimeRestarting, setRuntimeRestarting, version,
     flagBusy, pinBusy, working, setWorking, overlay, setOverlay, canReorder,
     checks, checkNodes, loadNodes, refreshAll, patchNode, setNodes, nodesRef, visibleRef, selectedNodesRef,
     toggleEnabled: (node) => toggleFlag(node, 'enabled'),

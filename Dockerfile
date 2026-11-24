@@ -29,7 +29,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 WORKDIR /app
 COPY --from=backend-builder /app/singbox-proxy-manager ./singbox-proxy-manager
-COPY LICENSE THIRD_PARTY_NOTICES.md /app/
+COPY LICENSE THIRD_PARTY_NOTICES.md USER_AGREEMENT.md /app/
 COPY licenses/SING-BOX-GPL-3.0.txt /app/licenses/SING-BOX-GPL-3.0.txt
 RUN mkdir -p /app/config
 
@@ -37,6 +37,7 @@ ENV PORT=30000
 ENV BIND_ADDRESS=0.0.0.0
 ENV CONFIG_DIR=/app/config
 ENV TZ=UTC+8
+ENV ACCEPT_USER_AGREEMENT=false
 ENV ADMIN_PASSWORD=
 ENV SINGBOX_ENV_ALLOWLIST=
 ENV SBPM_SINGBOX_LOG_OUTPUT=stdout
@@ -57,4 +58,6 @@ ENV SBPM_UPDATE_CHECK_TIMEOUT=5s
 
 EXPOSE 30000
 VOLUME ["/app/config"]
+HEALTHCHECK --interval=30s --timeout=5s --start-period=15s --retries=3 \
+  CMD ["/app/singbox-proxy-manager", "--healthcheck"]
 CMD ["./singbox-proxy-manager"]

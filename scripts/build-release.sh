@@ -24,6 +24,10 @@ trap cleanup EXIT
 trap 'exit 1' HUP INT TERM
 "$root/scripts/build-sing-box.sh" "$root/internal/kernel/sing-box"
 mkdir -p "$(dirname "$output")"
+ldflags='-s -w'
+if [ -n "${APP_VERSION:-}" ]; then
+    ldflags="$ldflags -X sb-proxy/internal/version.rawVersion=$APP_VERSION"
+fi
 CGO_ENABLED=0 go build -C "$root" -mod=readonly -trimpath \
-    -tags frontend_dist,bundled_kernel -ldflags='-s -w' -o "$output" ./backend
+    -tags frontend_dist,bundled_kernel -ldflags="$ldflags" -o "$output" ./backend
 "$root/scripts/verify-go-build.sh" "$output"

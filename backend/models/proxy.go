@@ -446,16 +446,36 @@ type WireGuardConfig struct {
 
 // Settings contains the settings used by the runtime and the admin panel.
 type Settings struct {
-	StartPort                 int    `json:"start_port"`
-	PreserveInboundPorts      bool   `json:"preserve_inbound_ports"`
-	GlobalUpstreamEnabled     bool   `json:"global_upstream_enabled"`
-	GlobalUpstreamType        string `json:"global_upstream_type"`
-	GlobalUpstreamConfig      string `json:"global_upstream_config"`
-	GlobalUpstreamIP          string `json:"global_upstream_ip"`
-	GlobalUpstreamLocation    string `json:"global_upstream_location"`
-	GlobalUpstreamCountryCode string `json:"global_upstream_country_code"`
-	GlobalUpstreamLatency     int    `json:"global_upstream_latency"`
-	GlobalUpstreamError       string `json:"global_upstream_error"`
+	StartPort                 int            `json:"start_port"`
+	PreserveInboundPorts      bool           `json:"preserve_inbound_ports"`
+	GlobalUpstreamEnabled     bool           `json:"global_upstream_enabled"`
+	GlobalUpstreamType        string         `json:"global_upstream_type"`
+	GlobalUpstreamConfig      string         `json:"global_upstream_config"`
+	GlobalUpstreamIP          string         `json:"global_upstream_ip"`
+	GlobalUpstreamLocation    string         `json:"global_upstream_location"`
+	GlobalUpstreamCountryCode string         `json:"global_upstream_country_code"`
+	GlobalUpstreamLatency     int            `json:"global_upstream_latency"`
+	GlobalUpstreamError       string         `json:"global_upstream_error"`
+	NodeListColumnWidths      map[string]int `json:"node_list_column_widths"`
+}
+
+const (
+	minNodeListColumnWidth = 40
+	maxNodeListColumnWidth = 1200
+)
+
+func ValidateNodeListColumnWidths(widths map[string]int) error {
+	for column, width := range widths {
+		switch column {
+		case "name", "port", "user", "pass", "type", "server", "region", "ip", "latency":
+		default:
+			return fmt.Errorf("node_list_column_widths contains unknown column %q", column)
+		}
+		if width < minNodeListColumnWidth || width > maxNodeListColumnWidth {
+			return fmt.Errorf("node_list_column_widths[%q] must be between %d and %d", column, minNodeListColumnWidth, maxNodeListColumnWidth)
+		}
+	}
+	return nil
 }
 
 const BcryptMaxPasswordBytes = 72
@@ -798,6 +818,7 @@ func schemaStatements(dialect appdb.Dialect) []string {
 				global_upstream_country_code TEXT NOT NULL DEFAULT '',
 				global_upstream_latency INTEGER NOT NULL DEFAULT 0,
 				global_upstream_error TEXT NOT NULL DEFAULT '',
+				node_list_column_widths TEXT NOT NULL DEFAULT '{}',
 				created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
 				updated_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
 			)`,
@@ -857,6 +878,7 @@ func schemaStatements(dialect appdb.Dialect) []string {
 				global_upstream_country_code VARCHAR(32) NOT NULL DEFAULT '',
 				global_upstream_latency INTEGER NOT NULL DEFAULT 0,
 				global_upstream_error VARCHAR(2048) NOT NULL DEFAULT '',
+				node_list_column_widths TEXT NULL,
 				created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
 				updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
 			)`,
@@ -916,6 +938,7 @@ func schemaStatements(dialect appdb.Dialect) []string {
 				global_upstream_country_code TEXT NOT NULL DEFAULT '',
 				global_upstream_latency INTEGER NOT NULL DEFAULT 0,
 				global_upstream_error TEXT NOT NULL DEFAULT '',
+				node_list_column_widths TEXT NOT NULL DEFAULT '{}',
 				created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
 				updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
 			)`,
@@ -959,6 +982,7 @@ func migrationColumns(dialect appdb.Dialect) []migrationColumn {
 			{Table: "settings", Name: "global_upstream_country_code", AlterSQL: "ALTER TABLE settings ADD COLUMN global_upstream_country_code TEXT NOT NULL DEFAULT ''"},
 			{Table: "settings", Name: "global_upstream_latency", AlterSQL: "ALTER TABLE settings ADD COLUMN global_upstream_latency INTEGER NOT NULL DEFAULT 0"},
 			{Table: "settings", Name: "global_upstream_error", AlterSQL: "ALTER TABLE settings ADD COLUMN global_upstream_error TEXT NOT NULL DEFAULT ''"},
+			{Table: "settings", Name: "node_list_column_widths", AlterSQL: "ALTER TABLE settings ADD COLUMN node_list_column_widths TEXT NOT NULL DEFAULT '{}'"},
 			{Table: "admin_sessions", Name: "auth_generation", AlterSQL: "ALTER TABLE admin_sessions ADD COLUMN auth_generation BIGINT NOT NULL DEFAULT 0"},
 		}
 	case appdb.DialectMySQL:
@@ -986,6 +1010,7 @@ func migrationColumns(dialect appdb.Dialect) []migrationColumn {
 			{Table: "settings", Name: "global_upstream_country_code", AlterSQL: "ALTER TABLE settings ADD COLUMN global_upstream_country_code VARCHAR(32) NOT NULL DEFAULT ''"},
 			{Table: "settings", Name: "global_upstream_latency", AlterSQL: "ALTER TABLE settings ADD COLUMN global_upstream_latency INTEGER NOT NULL DEFAULT 0"},
 			{Table: "settings", Name: "global_upstream_error", AlterSQL: "ALTER TABLE settings ADD COLUMN global_upstream_error VARCHAR(2048) NOT NULL DEFAULT ''"},
+			{Table: "settings", Name: "node_list_column_widths", AlterSQL: "ALTER TABLE settings ADD COLUMN node_list_column_widths TEXT NULL"},
 			{Table: "admin_sessions", Name: "auth_generation", AlterSQL: "ALTER TABLE admin_sessions ADD COLUMN auth_generation BIGINT NOT NULL DEFAULT 0"},
 		}
 	default:
@@ -1013,6 +1038,7 @@ func migrationColumns(dialect appdb.Dialect) []migrationColumn {
 			{Table: "settings", Name: "global_upstream_country_code", AlterSQL: "ALTER TABLE settings ADD COLUMN global_upstream_country_code TEXT NOT NULL DEFAULT ''"},
 			{Table: "settings", Name: "global_upstream_latency", AlterSQL: "ALTER TABLE settings ADD COLUMN global_upstream_latency INTEGER NOT NULL DEFAULT 0"},
 			{Table: "settings", Name: "global_upstream_error", AlterSQL: "ALTER TABLE settings ADD COLUMN global_upstream_error TEXT NOT NULL DEFAULT ''"},
+			{Table: "settings", Name: "node_list_column_widths", AlterSQL: "ALTER TABLE settings ADD COLUMN node_list_column_widths TEXT NOT NULL DEFAULT '{}'"},
 			{Table: "admin_sessions", Name: "auth_generation", AlterSQL: "ALTER TABLE admin_sessions ADD COLUMN auth_generation INTEGER NOT NULL DEFAULT 0"},
 		}
 	}

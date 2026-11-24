@@ -8,6 +8,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"maps"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -1296,6 +1297,101 @@ func TestReorderNodesPreserveInboundPortsKeepsPorts(t *testing.T) {
 	}
 	if got[1].name != "node-a" || got[1].inboundPort != 30001 || got[1].sortOrder != 1 {
 		t.Fatalf("unexpected second row: %+v", got[1])
+	}
+}
+
+func TestNodeListColumnWidthsPreserveKernelAndSession(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	invocations := filepath.Join(t.TempDir(), "invocations")
+	t.Setenv("SBPM_TEST_KERNEL_INVOCATIONS", invocations)
+	t.Setenv("SINGBOX_ENV_ALLOWLIST", "SBPM_TEST_KERNEL_INVOCATIONS")
+	handler := newTestHandlerWithKernelScript(t, `#!/bin/sh
+printf '%s\n' "$1" >> "$SBPM_TEST_KERNEL_INVOCATIONS"
+if [ "$1" = "check" ]; then exit 0; fi
+exec sleep 300
+`)
+	insertTestNode(t, handler.db)
+	if _, err := handler.db.Exec("UPDATE settings SET auth_generation = 7 WHERE singleton_key = 1"); err != nil {
+		t.Fatal(err)
+	}
+	token, _, err := createTestAdminSession(t, handler)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if response := postJSON(t, handler.RestartRuntime, http.MethodPost, "/api/runtime/restart", nil, nil); response.Code != http.StatusOK {
+		t.Fatalf("start test runtime: %d %s", response.Code, response.Body.String())
+	}
+	before := handler.singBoxService.RuntimeStatus()
+	commands, err := os.ReadFile(invocations)
+	if err != nil || !before.Running || !strings.Contains(string(commands), "run\n") {
+		t.Fatalf("test runtime did not start: %+v, %q, %v", before, commands, err)
+	}
+	assertSettings := func(response *httptest.ResponseRecorder, expected map[string]int, changed *bool) {
+		t.Helper()
+		var output struct {
+			Widths  map[string]int `json:"node_list_column_widths"`
+			Changed *bool          `json:"changed"`
+		}
+		if err := json.Unmarshal(response.Body.Bytes(), &output); err != nil || response.Code != http.StatusOK ||
+			output.Widths == nil || !maps.Equal(output.Widths, expected) || (changed != nil && (output.Changed == nil || *output.Changed != *changed)) {
+			t.Fatalf("unexpected settings response: %d %s, parse error %v", response.Code, response.Body.String(), err)
+		}
+	}
+	get := func(expected map[string]int) {
+		t.Helper()
+		assertSettings(postJSON(t, handler.GetSettings, http.MethodGet, "/api/settings", nil, nil), expected, nil)
+	}
+	put := func(payload any, expected map[string]int, changed bool) {
+		t.Helper()
+		assertSettings(postJSON(t, handler.UpdateSettings, http.MethodPut, "/api/settings", payload, nil), expected, &changed)
+	}
+	empty := map[string]int{}
+	widths := map[string]int{"name": 40, "latency": 1200}
+	payload := map[string]any{"node_list_column_widths": widths}
+	get(empty)
+	put(payload, widths, true)
+	put(payload, widths, false)
+	put(map[string]any{}, widths, false)
+	get(widths)
+	put(map[string]any{"node_list_column_widths": empty}, empty, true)
+	get(empty)
+
+	after := handler.singBoxService.RuntimeStatus()
+	afterCommands, err := os.ReadFile(invocations)
+	if err != nil || !after.Running || after.PID != before.PID || after.ActiveConfigHash != before.ActiveConfigHash || !bytes.Equal(commands, afterCommands) {
+		t.Fatalf("column widths changed the sing-box runtime: before=%+v after=%+v commands=%q err=%v", before, after, afterCommands, err)
+	}
+	var generation int
+	if err := handler.db.QueryRow("SELECT auth_generation FROM settings WHERE singleton_key = 1").Scan(&generation); err != nil || generation != 7 {
+		t.Fatalf("column widths changed auth_generation: %d, %v", generation, err)
+	}
+	if hash, err := handler.verifiedAdminSessionHash(context.Background(), token); err != nil || hash == "" {
+		t.Fatalf("column widths invalidated the active session: %v", err)
+	}
+
+	put(map[string]any{"start_port": 32035, "node_list_column_widths": widths}, widths, true)
+	put(map[string]any{"start_port": 32036}, widths, true)
+	get(widths)
+}
+
+func TestUpdateSettingsRejectsInvalidNodeListColumnWidths(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	handler := newTestHandler(t, nil)
+	for _, payload := range []string{
+		`{"unknown":100}`, `{"name":1.5}`, `{"name":1e2}`, `{"name":"100"}`, `{"name":true}`, `{"name":null}`,
+		`{"name":-1}`, `{"name":0}`, `{"name":39}`, `{"name":1201}`, `null`, `[]`, `"100"`,
+	} {
+		t.Run(payload, func(t *testing.T) {
+			recorder := postJSON(t, handler.UpdateSettings, http.MethodPut, "/api/settings",
+				map[string]json.RawMessage{"node_list_column_widths": json.RawMessage(payload)}, nil)
+			if recorder.Code != http.StatusBadRequest || !strings.Contains(recorder.Body.String(), "node_list_column_widths") {
+				t.Fatalf("invalid widths = %d %s", recorder.Code, recorder.Body.String())
+			}
+		})
+	}
+	settings, err := models.LoadRuntimeSettings(context.Background(), handler.db)
+	if err != nil || len(settings.NodeListColumnWidths) != 0 {
+		t.Fatalf("invalid widths were written: %v, %v", settings.NodeListColumnWidths, err)
 	}
 }
 

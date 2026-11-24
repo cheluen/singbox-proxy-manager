@@ -161,3 +161,41 @@ export async function assertColumnOrder(page) {
   assert.equal(result.headNonOverlapping, true, '可见表头水平位置未递增或发生重叠')
   assert.equal(result.rowNonOverlapping, true, `节点行单元格内容越界重叠：${JSON.stringify(result.rowBoxes)}`)
 }
+
+export async function assertDetailLayoutOrderAndBalance(page, id, viewportWidth) {
+  const layout = await page.$eval(`[data-testid="node-inspector"][data-node-id="${id}"]`, (inspector) => {
+    const cards = ['inbound', 'outbound', 'meta'].map((group) => {
+      const el = inspector.querySelector(`[data-detail-group="${group}"]`)
+      const rect = el?.getBoundingClientRect()
+      return {
+        group,
+        exists: Boolean(el),
+        left: rect?.left ?? 0,
+        right: rect?.right ?? 0,
+        top: rect?.top ?? 0,
+        bottom: rect?.bottom ?? 0,
+        width: rect?.width ?? 0,
+        height: rect?.height ?? 0,
+      }
+    })
+    return {
+      inbound: cards[0],
+      outbound: cards[1],
+      meta: cards[2],
+    }
+  })
+  assert.equal(layout.inbound.exists && layout.outbound.exists && layout.meta.exists, true, '详情三大逻辑分组卡片缺失')
+  if (viewportWidth > 1200) {
+    assert.ok(layout.inbound.right <= layout.outbound.left + 1, '宽屏展开详情中入站卡片必须在出站卡片左侧')
+    assert.ok(layout.outbound.right <= layout.meta.left + 1, '宽屏展开详情中出站卡片必须在备注卡片左侧')
+    assert.ok(Math.abs(layout.inbound.top - layout.outbound.top) <= 2 && Math.abs(layout.outbound.top - layout.meta.top) <= 2, '宽屏三卡片顶边未对齐')
+    assert.ok(Math.abs(layout.inbound.bottom - layout.outbound.bottom) <= 2 && Math.abs(layout.outbound.bottom - layout.meta.bottom) <= 2, '宽屏三卡片底边未等高对齐，存在不对称留白')
+  } else if (viewportWidth >= 900) {
+    assert.ok(layout.inbound.right <= layout.outbound.left + 1, '中屏展开详情中入站卡片必须在出站卡片左侧')
+    assert.ok(Math.abs(layout.inbound.top - layout.outbound.top) <= 2 && Math.abs(layout.inbound.bottom - layout.outbound.bottom) <= 2, '中屏入站与出站卡片未等高对齐')
+    assert.ok(layout.meta.top >= layout.inbound.bottom - 1 && Math.abs(layout.meta.left - layout.inbound.left) <= 2 && Math.abs(layout.meta.right - layout.outbound.right) <= 2, '中屏名称与备注卡片应横跨底部整行保持对称')
+  } else {
+    assert.ok(layout.inbound.bottom <= layout.outbound.top + 1, '窄屏展开详情中入站卡片必须在出站卡片上方')
+    assert.ok(layout.outbound.bottom <= layout.meta.top + 1, '窄屏展开详情中出站卡片必须在备注卡片上方')
+  }
+}

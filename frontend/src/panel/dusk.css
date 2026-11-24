@@ -28,12 +28,26 @@
 /* ---------- 列表 ---------- */
 /* 有意设计：.dusk-row__meta 列轨道按「入站信息（入站端口、入站用户名、入站密码）→ 出站信息（节点类型、服务器地址、地区、节点IP、延迟）」
    顺序排列，且列表直接呈现入站用户名与默认固定宽度柔边毛玻璃密码列（直接点击掩码区域显示完整值），请勿因“安全习惯”移除或打乱分组顺序。 */
-.dusk-table { overflow: clip; border: 1px solid var(--line); border-radius: var(--radius); background: var(--surface); }
-.dusk-head, .dusk-row { display: grid; grid-template-columns: 22px 28px 26px 20px minmax(108px, 156px) 52px minmax(0, 1fr) 34px 28px; align-items: center; column-gap: 8px; padding: 0 8px 0 4px; }
-.dusk-row__meta { display: grid; grid-template-columns: 98px minmax(88px, 0.95fr) minmax(108px, 1.25fr) 78px minmax(90px, 1.2fr) 54px minmax(88px, 0.95fr) 68px; align-items: center; column-gap: 10px; min-width: 0; }
+body.is-resizing-cols, body.is-resizing-cols * { cursor: col-resize !important; user-select: none !important; }
+.dusk-table { flex: none; overflow: clip; border: 1px solid var(--line); border-radius: var(--radius); background: var(--surface); }
+.dusk-table.is-scrollable { overflow-x: auto; overflow-y: visible; }
+.dusk-table__canvas { min-width: 100%; }
+.dusk-table.is-scrollable .dusk-table__canvas { min-width: max(100%, var(--dusk-table-min-width, 100%)); }
+.dusk-head, .dusk-row { display: grid; grid-template-columns: 22px 28px 26px 20px var(--dusk-col-name, minmax(108px, 156px)) 52px minmax(0, 1fr) 34px 28px; align-items: center; column-gap: 8px; padding: 0 8px 0 4px; }
+.dusk-row__meta { display: grid; grid-template-columns: var(--dusk-col-port, 98px) var(--dusk-col-user, minmax(88px, 0.95fr)) var(--dusk-col-pass, minmax(108px, 1.25fr)) var(--dusk-col-type, 78px) var(--dusk-col-server, minmax(90px, 1.2fr)) var(--dusk-col-region, 54px) var(--dusk-col-ip, minmax(88px, 0.95fr)) var(--dusk-col-latency, 68px); align-items: center; column-gap: 10px; min-width: 0; }
 .dusk-head { position: sticky; top: 0; z-index: 3; height: 30px; border-bottom: 1px solid var(--line); background: var(--surface-2); font-size: 11px; font-weight: 650; letter-spacing: 0.05em; text-transform: uppercase; color: var(--ink-3); }
 .dusk-head span { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .dusk-head > :nth-child(3) { text-align: right; }
+.dusk-head__cell { position: relative; display: flex; align-items: center; min-width: 0; height: 100%; }
+.dusk-head__label { min-width: 0; flex: 1 1 auto; }
+.dusk-col-resizer { position: absolute; top: 0; bottom: 0; right: -2px; width: 10px; padding: 0; border: 0; background: transparent; cursor: col-resize; touch-action: none; }
+.dusk-col-resizer::after { content: ''; position: absolute; top: 7px; bottom: 7px; right: 2px; width: 1px; border-radius: 999px; background: var(--line-strong); opacity: 0.42; transition: opacity 0.14s ease, background-color 0.14s ease, width 0.14s ease; }
+.dusk-head__cell:hover .dusk-col-resizer::after { opacity: 0.85; }
+.dusk-col-resizer:hover::after, .dusk-col-resizer:focus-visible::after, .dusk-col-resizer.is-active::after { width: 2px; background: var(--accent); opacity: 1; }
+.dusk-col-resizer:focus-visible { outline: none; }
+.dusk-head__actions { display: inline-flex; align-items: center; justify-content: center; overflow: visible !important; }
+.dusk-head__reset { display: inline-flex; align-items: center; justify-content: center; width: 22px; height: 22px; padding: 0; border: 0; border-radius: var(--radius-sm); background: transparent; color: var(--ink-3); transition: background-color 0.14s ease, color 0.14s ease; }
+.dusk-head__reset:hover { background: var(--surface); color: var(--ink); }
 .dusk-row { min-height: 40px; border-bottom: 1px solid var(--line); background: var(--surface); cursor: pointer; }
 .dusk-row:last-child { border-bottom: 0; }
 .dusk-row:hover { background: var(--surface-2); }
@@ -65,13 +79,11 @@
 .dusk-row .sb-port.is-pinned { padding-left: 6px; background: var(--accent-soft); }
 .dusk-more { padding: 10px; text-align: center; font-size: 12px; color: var(--ink-3); }
 
-/* 行内展开的详情 */
-.dusk-expand { grid-column: 1 / -1; margin: 0 -8px 0 -4px; padding: 16px 18px 20px 52px; border-top: 1px solid var(--line); background: var(--bg-2); cursor: default; animation: sb-fade-up 0.16s ease-out; }
-.dusk-expand__actions { margin-bottom: 16px; }
-.dusk-expand__grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 20px 28px; align-items: start; }
-.dusk-expand__grid .sb-section + .sb-section { margin-top: 0; }
-.dusk-expand__grid > .sb-section:first-child { grid-row: span 2; }
-.dusk-expand .sb-url, .dusk-expand .sb-port { background: var(--surface); }
+/* 行内展开的详情：三张等高卡片按「入站与连接 → 出站与链路 → 名称与备注」对称排布 */
+.dusk-expand { grid-column: 1 / -1; margin: 0 -8px 0 -4px; padding: 14px 18px 18px 52px; border-top: 1px solid var(--line); background: var(--bg-2); cursor: default; animation: sb-fade-up 0.16s ease-out; }
+.dusk-expand__actions { margin-bottom: 12px; }
+.dusk-expand__grid { display: grid; grid-template-columns: minmax(0, 1.15fr) minmax(0, 1fr) minmax(0, 0.92fr); gap: 14px; align-items: stretch; }
+.dusk-expand .sb-url, .dusk-expand .sb-port { background: var(--bg-2); }
 
 /* ---------- 状态栏 ---------- */
 .dusk-foot { flex: none; display: flex; align-items: center; gap: 16px; height: 30px; padding: 0 14px; border-top: 1px solid var(--line); background: var(--bg-2); font-size: 12px; color: var(--ink-3); white-space: nowrap; overflow: hidden; }
@@ -106,15 +118,17 @@
   .dusk-cmd > span, .dusk-cmd .sb-kbd { display: none; }
 }
 @media (max-width: 1280px) {
-  .dusk-head, .dusk-row { grid-template-columns: 22px 28px 26px 20px minmax(96px, 124px) 46px minmax(0, 1fr) 34px 28px; column-gap: 6px; }
-  .dusk-row__meta { grid-template-columns: 96px minmax(88px, 0.95fr) minmax(112px, 1.25fr) 76px minmax(90px, 1.2fr) 52px 64px; column-gap: 8px; }
+  .dusk-head, .dusk-row { grid-template-columns: 22px 28px 26px 20px var(--dusk-col-name, minmax(96px, 124px)) 46px minmax(0, 1fr) 34px 28px; column-gap: 6px; }
+  .dusk-row__meta { grid-template-columns: var(--dusk-col-port, 96px) var(--dusk-col-user, minmax(88px, 0.95fr)) var(--dusk-col-pass, minmax(112px, 1.25fr)) var(--dusk-col-type, 76px) var(--dusk-col-server, minmax(90px, 1.2fr)) var(--dusk-col-region, 52px) var(--dusk-col-latency, 64px); column-gap: 8px; }
   .dusk-col--ip { display: none; }
+}
+@media (max-width: 1200px) {
   .dusk-expand__grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
-  .dusk-expand__grid > .sb-section:first-child { grid-row: auto; grid-column: 1 / -1; }
+  .dusk-expand__grid > .sb-detail-note-group { grid-column: 1 / -1; }
 }
 @media (max-width: 1060px) {
-  .dusk-head, .dusk-row { grid-template-columns: 20px 26px 22px 18px minmax(80px, 102px) 36px minmax(0, 1fr) 32px 26px; column-gap: 5px; }
-  .dusk-row__meta { grid-template-columns: 94px minmax(88px, 0.95fr) minmax(104px, 1.25fr) 76px 50px 60px; column-gap: 6px; }
+  .dusk-head, .dusk-row { grid-template-columns: 20px 26px 22px 18px var(--dusk-col-name, minmax(80px, 102px)) 36px minmax(0, 1fr) 32px 26px; column-gap: 5px; }
+  .dusk-row__meta { grid-template-columns: var(--dusk-col-port, 94px) var(--dusk-col-user, minmax(88px, 0.95fr)) var(--dusk-col-pass, minmax(104px, 1.25fr)) var(--dusk-col-type, 76px) var(--dusk-col-region, 50px) var(--dusk-col-latency, 60px); column-gap: 6px; }
   .dusk-col--server { display: none; }
 }
 @media (max-width: 899px) {
