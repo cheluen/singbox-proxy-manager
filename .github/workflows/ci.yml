@@ -37,6 +37,7 @@ jobs:
           name: sing-box-test-kernel
           path: ${{ runner.temp }}/sing-box
           retention-days: 1
+          overwrite: true
 
   lint-backend:
     runs-on: ubuntu-latest
@@ -196,6 +197,7 @@ jobs:
           path: frontend/dist
           if-no-files-found: error
           retention-days: 1
+          overwrite: true
 
   test-frontend-e2e:
     runs-on: ubuntu-latest
@@ -577,6 +579,7 @@ jobs:
           path: release-binaries/singbox-proxy-manager-linux-amd64
           if-no-files-found: error
           retention-days: 1
+          overwrite: true
 
       - name: Upload verified Linux arm64 binary
         if: github.event_name == 'push' && github.ref == 'refs/heads/main'
@@ -586,6 +589,7 @@ jobs:
           path: release-binaries/singbox-proxy-manager-linux-arm64
           if-no-files-found: error
           retention-days: 1
+          overwrite: true
 
   build-binaries:
     runs-on: ubuntu-latest
@@ -634,6 +638,7 @@ jobs:
             release-binaries/singbox-proxy-manager-${{ matrix.goos }}-${{ matrix.goarch }}
           if-no-files-found: error
           retention-days: 1
+          overwrite: true
 
   create-release:
     runs-on: ubuntu-latest

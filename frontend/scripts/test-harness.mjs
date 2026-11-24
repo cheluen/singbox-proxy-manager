@@ -1,4 +1,4 @@
-import { accessSync, constants, rmSync } from 'node:fs'
+import { accessSync, constants } from 'node:fs'
 import path from 'node:path'
 import process from 'node:process'
 import puppeteer from 'puppeteer-core'
@@ -34,27 +34,29 @@ export function findBrowserExecutable() {
 const isLaunchTimeout = (error) =>
   error?.name === 'TimeoutError' || /WS endpoint/i.test(error?.message || '')
 
-const clearProfileLocks = (userDataDir) => {
-  if (!userDataDir) return
-  for (const name of ['SingletonLock', 'SingletonSocket', 'SingletonCookie']) {
-    rmSync(path.join(userDataDir, name), { force: true })
-  }
-}
-
-export async function launchBrowser({ args = [], timeout = 60000, retries = 1, ...options } = {}) {
+export async function launchBrowser({
+  args = [],
+  executablePath = findBrowserExecutable(),
+  timeout = 60000,
+  retries = 1,
+  userDataDir,
+  ...options
+} = {}) {
   const launchOptions = {
     headless: true,
-    executablePath: findBrowserExecutable(),
+    executablePath,
     timeout,
     ...options,
     args: Array.from(new Set([...DEFAULT_BROWSER_ARGS, ...args])),
   }
   for (let attempt = 0; ; attempt += 1) {
     try {
-      return await puppeteer.launch(launchOptions)
+      return await puppeteer.launch({
+        ...launchOptions,
+        userDataDir: attempt > 0 && userDataDir ? path.join(userDataDir, `retry-${attempt}`) : userDataDir,
+      })
     } catch (error) {
       if (attempt >= retries || !isLaunchTimeout(error)) throw error
-      clearProfileLocks(launchOptions.userDataDir)
     }
   }
 }

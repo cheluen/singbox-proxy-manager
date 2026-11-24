@@ -12,8 +12,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/go-sql-driver/mysql"
-
 	appdb "sb-proxy/backend/database"
 )
 
@@ -24,10 +22,7 @@ const (
 	adminSessionHashKey            = "adminSessionHash"
 )
 
-var (
-	errAuthGenerationChanged = errors.New("authentication generation changed during login")
-	errSessionTokenCollision = errors.New("admin session token collision")
-)
+var errAuthGenerationChanged = errors.New("authentication generation changed during login")
 
 func adminSessionDuration() time.Duration {
 	hours := readEnvInt(adminSessionTTLHoursEnvKey, defaultAdminSessionTTLHours)
@@ -97,9 +92,6 @@ func createAdminSessionWithGeneration(
 	if dialect == appdb.DialectPostgres || dialect == appdb.DialectMySQL {
 		query += " FOR UPDATE"
 	}
-	if dialect != appdb.DialectMySQL {
-		query += " ON CONFLICT (token_hash) DO NOTHING"
-	}
 
 	now := time.Now()
 	expiry := now.Add(adminSessionDuration())
@@ -109,53 +101,32 @@ func createAdminSessionWithGeneration(
 	}
 	defer tx.Rollback()
 
-	var collisionErr error
-	for range 2 {
-		var tokenBytes [32]byte
-		if _, err := rand.Read(tokenBytes[:]); err != nil {
-			return "", time.Time{}, err
-		}
-		token := base64.URLEncoding.EncodeToString(tokenBytes[:])
-		result, err := tx.ExecContext(ctx, query, hashSessionToken(token), expiry.Unix(), userAgent, ip, generation)
-		if err != nil {
-			var duplicate *mysql.MySQLError
-			if errors.As(err, &duplicate) && duplicate.Number == 1062 && strings.Contains(duplicate.Message, "idx_admin_sessions_token_hash") {
-				collisionErr = err
-				continue
-			}
-			return "", time.Time{}, fmt.Errorf("insert admin session: %w", err)
-		}
-		inserted, err := result.RowsAffected()
-		if err != nil {
-			return "", time.Time{}, err
-		}
-		if inserted == 0 {
-			if dialect == appdb.DialectMySQL {
-				return "", time.Time{}, errAuthGenerationChanged
-			}
-			var currentGeneration int64
-			err := tx.QueryRowContext(ctx, "SELECT auth_generation FROM settings WHERE singleton_key = 1").Scan(&currentGeneration)
-			if errors.Is(err, sql.ErrNoRows) || (err == nil && currentGeneration != generation) {
-				return "", time.Time{}, errAuthGenerationChanged
-			}
-			if err != nil {
-				return "", time.Time{}, err
-			}
-			collisionErr = errSessionTokenCollision
-			continue
-		}
-		if _, err := tx.ExecContext(ctx, `
-			DELETE FROM admin_sessions
-			WHERE expires_at <= ?
-			   OR auth_generation <> (SELECT auth_generation FROM settings WHERE singleton_key = 1)
-		`, now.Unix()); err != nil {
-			return "", time.Time{}, fmt.Errorf("clean admin sessions: %w", err)
-		}
-		if err := tx.Commit(); err != nil {
-			return "", time.Time{}, err
-		}
-		return token, expiry, nil
+	var tokenBytes [32]byte
+	if _, err := rand.Read(tokenBytes[:]); err != nil {
+		return "", time.Time{}, err
+	}
+	token := base64.URLEncoding.EncodeToString(tokenBytes[:])
+	result, err := tx.ExecContext(ctx, query, hashSessionToken(token), expiry.Unix(), userAgent, ip, generation)
+	if err != nil {
+		return "", time.Time{}, fmt.Errorf("insert admin session: %w", err)
+	}
+	inserted, err := result.RowsAffected()
+	if err != nil {
+		return "", time.Time{}, err
+	}
+	if inserted == 0 {
+		return "", time.Time{}, errAuthGenerationChanged
 	}
 
-	return "", time.Time{}, fmt.Errorf("generate unique admin session token: %w", collisionErr)
+	if _, err := tx.ExecContext(ctx, `
+		DELETE FROM admin_sessions
+		WHERE expires_at <= ?
+		   OR auth_generation <> (SELECT auth_generation FROM settings WHERE singleton_key = 1)
+	`, now.Unix()); err != nil {
+		return "", time.Time{}, fmt.Errorf("clean admin sessions: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return "", time.Time{}, err
+	}
+	return token, expiry, nil
 }
