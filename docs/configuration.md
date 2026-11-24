@@ -1,6 +1,6 @@
 # 配置、数据库与运维指南
 
-本文档提供 SingBox Proxy Manager（`1.7.27`）完整的环境变量参考、多数据库配置、数据持久化、安全加固与故障排查指南。
+本文档提供 SingBox Proxy Manager（`1.7.28`）完整的环境变量参考、多数据库配置、数据持久化、健康检查、安全加固与故障排查指南。
 
 ---
 
@@ -24,6 +24,7 @@
 | `BIND_ADDRESS` | `0.0.0.0` | IPv4 / IPv6 地址（自动剥离 IPv6 方括号） | R | **仅控制管理后台 HTTP 监听地址**；节点入站始终写为 `::` |
 | `CONFIG_DIR` | 二进制 `./config`<br/>容器 `/app/config` | 目录路径 | R | 存放 SQLite 数据库、`config.json`、`last-good`、内置内核与日志文件 |
 | `TZ` | `UTC+8` | IANA 时区或 `UTC/GMT` 偏移 | R | 全局时区；解析失败时回退 `Asia/Shanghai` 或固定 `UTC+08` |
+| `ACCEPT_USER_AGREEMENT` | `false` | `true` / `yes` / `y` / `1`（不区分大小写） | R | 位于 `.env` 中 `ADMIN_PASSWORD` 上方。二进制首次在交互式终端运行时会打印 `USER_AGREEMENT.md` 并要求输入 `y` 同意（同意哈希保存至 `<CONFIG_DIR>/user-agreement.accepted`）；Docker 或非交互式运行须显式设为 `true`，否则在建库与释放内核前直接退出 |
 | `ADMIN_PASSWORD` | 无默认密码 | 非空，上限 `72` UTF-8 字节 | R | 新库首次启动必填；老库已有有效密码时可留空；老库已有有效密码但尚未记录环境指纹时，首次设置仅登记指纹、不会覆盖旧密码或吊销会话；此后更改为新非空值并重启才会覆盖密码并吊销全部会话 |
 | `TRUSTED_PROXIES` | 空（不信任任何代理） | 逗号分隔 IP / CIDR | R | 反向代理可信列表（如 `127.0.0.1,10.0.0.0/8`），供 Gin 获取真实客户端 IP 用于登录限流 |
 | `CORS_ALLOWED_ORIGINS` | 空（关闭跨域） | 逗号分隔精确 Origin | R | 跨域白名单（忽略 `*`）；允许方法为 `GET/POST/PUT/DELETE/OPTIONS`（不含 `PATCH`） |
@@ -132,7 +133,7 @@
 
 数据库启动后自动创建并增量补齐四张应用表（无独立 `schema_version` 表）：
 - `proxy_nodes`：节点出站配置、入站端口/认证/复用、前置代理定义、检测结果与排序。
-- `settings`：全局单例配置、管理员密码与环境指纹、`auth_generation`、端口策略与全局前置代理。
+- `settings`：全局单例配置、管理员密码与环境指纹、`auth_generation`、端口策略、全局前置代理及前端节点列表自定义列宽（`node_list_column_widths`）。
 - `admin_sessions`：登录会话 SHA-256 哈希、密码代次、有效期、登录 IP 与 User-Agent。
 - `manager_instance_lock`：单实例数据库租约锁。
 
@@ -152,6 +153,7 @@
 
 ```text
 config/
+├── user-agreement.accepted   # 交互式首次同意用户协议后的 SHA-256 校验记录（权限 0600）
 ├── proxy.db                  # 本地 SQLite 数据库（仅 SQLite 模式生成）
 ├── config.json               # 当前生效的 sing-box 运行配置（权限 0600）
 ├── config.json.last-good     # 最近一次成功启动的配置备份（权限 0600）
@@ -159,6 +161,8 @@ config/
 └── kernels/
     └── sing-box-<sha256>     # 统一发行版自动释放并校验的内核（权限 0700）
 ```
+
+> **容器健康检查（Docker `HEALTHCHECK`）**：`Dockerfile` 与 `Dockerfile.release` 均内置 `HEALTHCHECK --interval=30s --timeout=5s --start-period=15s --retries=3 CMD ["/app/singbox-proxy-manager", "--healthcheck"]`。探针绕过环境代理直接探测本机管理服务 `GET /api/health`（验证 HTTP 服务响应及数据库连接池存活），无需在容器内额外安装 `curl` / `wget`。
 
 > **数据敏感性提示**：除管理员密码、环境指纹（bcrypt）与会话 Token（SHA-256）外，数据库与 `config.json` 中的节点出站密钥、前置代理凭据及入站账密均以可读取形式存储。请务必妥善管控宿主机文件权限（`chmod 600 .env`、`chmod 700 config`）并避免将其提交到任何仓库或公开备份。
 
@@ -173,6 +177,8 @@ config/
 ## 5. 升级、模式切换与故障排查
 
 ### 5.1 版本升级与模式切换
+
+> **从 `1.7.27` 及更早版本升级必读**：自 `1.7.28` 起新增用户协议首次确认门禁。升级前请先阅读 [`USER_AGREEMENT.md`](../USER_AGREEMENT.md)，并在原有 `.env` 的 `ADMIN_PASSWORD` 上方补充 `ACCEPT_USER_AGREEMENT=true`（独立二进制也可在交互式终端首次启动时输入 `y` 同意），否则 Docker 或 `systemd` 等非交互无人值守启动会拒绝启动并退出。
 
 - **Docker Compose（GHCR 预构建镜像）**：
   ```bash
@@ -194,12 +200,13 @@ config/
   2. 下载新版本二进制并校验 `checksums.txt`，替换原可执行文件。
   3. 保持原工作目录、`.env`、`CONFIG_DIR` 与数据库配置不变，重新启动即可自动释放新版内嵌内核与前端。
 
-GitHub Release 提供 `LICENSE`、`THIRD_PARTY_NOTICES.md` 和 `SING-BOX-GPL-3.0.txt` 附件。容器内可从 `/app/LICENSE`、`/app/THIRD_PARTY_NOTICES.md` 和 `/app/licenses/SING-BOX-GPL-3.0.txt` 读取相同内容。[第三方声明](../THIRD_PARTY_NOTICES.md)
+GitHub Release 提供 `LICENSE`、`THIRD_PARTY_NOTICES.md`、`USER_AGREEMENT.md` 和 `SING-BOX-GPL-3.0.txt` 附件。容器内可从 `/app/LICENSE`、`/app/THIRD_PARTY_NOTICES.md`、`/app/USER_AGREEMENT.md` 和 `/app/licenses/SING-BOX-GPL-3.0.txt` 读取相同内容。[用户协议](../USER_AGREEMENT.md) · [第三方声明](../THIRD_PARTY_NOTICES.md)
 
 ### 5.2 常见故障排查
 
 | 现象 | 排查要点 |
 | --- | --- |
+| 启动报错：未同意用户协议（`User agreement not accepted`） | 先阅读 `USER_AGREEMENT.md`。独立二进制请在交互式终端首次运行并输入 `y`；Docker 或非交互式部署请在 `.env` 的 `ADMIN_PASSWORD` 上方或容器环境变量设置 `ACCEPT_USER_AGREEMENT=true`。 |
 | 启动报错：新库缺少管理员密码 | 检查 `.env` 中 `ADMIN_PASSWORD` 是否非空且不超过 `72` 字节；独立二进制确认 `.env` 位于可执行文件同目录或当前工作目录。 |
 | 启动报错：未能获取数据库实例租约 | 确认同一数据库没有另一个正在运行的管理实例；若前一个实例异常崩溃，等待 `30s`（`SBPM_INSTANCE_LEASE_DURATION`）租约过期后重试。 |
 | 顶部出现「sing-box 运行异常」降级横幅 | 查看容器日志（`docker compose --profile ghcr logs --tail=100`）或 `<CONFIG_DIR>/singbox.log`；核查端口冲突或节点参数异常，修正后点击横幅中的「重启内核」。 |

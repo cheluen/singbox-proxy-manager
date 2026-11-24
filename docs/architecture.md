@@ -1,6 +1,6 @@
 # 系统架构与核心机制
 
-本文档基于 `1.7.27` 源码梳理 SingBox Proxy Manager 的核心架构、运行时生命周期与安全边界。
+本文档基于 `1.7.28` 源码梳理 SingBox Proxy Manager 的核心架构、运行时生命周期与安全边界。
 
 ## 1. 总体定位与架构
 
@@ -40,7 +40,7 @@ flowchart LR
 
 | 组件 | 固定基线 | 源码依据 |
 | --- | --- | --- |
-| 应用版本 | `1.7.27`（后端嵌入 `version.txt`） | `internal/version/version.txt` |
+| 应用版本 | `1.7.28`（后端嵌入 `version.txt`） | `internal/version/version.txt` |
 | Go 工具链 | **精确 `1.26.11`**（发行与内核构建强校验） | `go.mod`、`scripts/verify-go-build.sh` |
 | sing-box 内核 | **固定 `1.12.12`**（Go 1.26.11 重编译） | `scripts/build-sing-box.sh` |
 | 前端技术栈 | React 18、Ant Design 5、Axios、i18next、dnd-kit、Lucide、Vite 6（Node `>=22.12.0`） | `frontend/package.json` |
@@ -50,11 +50,12 @@ flowchart LR
 
 | 路径 | 职责说明 |
 | --- | --- |
-| `backend/` | HTTP 服务入口（`main.go`）、静态预压缩分发（`static_assets.go`）及各业务子包 |
+| `backend/` | HTTP 服务入口（`main.go`）、自探针健康检查（`healthcheck.go`）、静态预压缩分发（`static_assets.go`）及各业务子包 |
 | `backend/api/` | 路由处理器、会话认证、登录防爆破限流、节点与设置的变更协调（`node_mutation*.go`） |
 | `backend/models/` | 节点与协议结构体、严格 JSON 校验、DDL 建表、自动迁移、查询与环境密码指纹同步 |
 | `backend/database/` | 多数据库驱动选择、连接池、MySQL DSN 规范化、PostgreSQL 占位符转换（`rebind.go`）、单实例数据库租约（`instance_lease.go`） |
 | `backend/services/` | `sing-box` 配置生成与进程生命周期、原子应用（`runtime_applier.go`）、日志轮转、资源/环境隔离、15 种协议链接编解码、批量导入与订阅 SSRF 防护、出口与前置 IP 检测、前置防环路 |
+| `internal/agreement/` | 嵌入 `USER_AGREEMENT.md` 正文，负责首次启动终端交互确认、同意哈希落盘与 `ACCEPT_USER_AGREEMENT` 环境变量门禁 |
 | `internal/kernel/` | 统一发行版内置内核嵌入、SHA-256 校验释放（`bundled_kernel` tag）；开发构建回退为空路径 |
 | `internal/version/` | 应用版本读取与 GitHub Release 按需更新查询（带互斥缓存） |
 | `internal/security/` | Go 标准库 X.509 与 HTTP 限制安全回归测试 |

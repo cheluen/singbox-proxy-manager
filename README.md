@@ -5,14 +5,14 @@
   <p>将各类主流协议节点集中管理，一键转为独立的本地 HTTP / SOCKS5 混合代理端口</p>
 
   <p>
-    <a href="https://github.com/cheluen/singbox-proxy-manager/releases"><img src="https://img.shields.io/badge/version-1.7.27-blue.svg" alt="Version" /></a>
+    <a href="https://github.com/cheluen/singbox-proxy-manager/releases"><img src="https://img.shields.io/badge/version-1.7.28-blue.svg" alt="Version" /></a>
     <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-green.svg" alt="MIT License" /></a>
     <img src="https://img.shields.io/badge/sing--box-1.12.12-orange.svg" alt="sing-box 1.12.12" />
     <img src="https://img.shields.io/badge/Go-1.26.11-00ADD8.svg" alt="Go 1.26.11" />
   </p>
 
   <p>
-    <a href="#免责声明">免责声明</a> ·
+    <a href="#免责声明与用户协议">用户协议</a> ·
     <a href="#产品简介与功能展示">功能展示</a> ·
     <a href="#真实操作演示">操作演示</a> ·
     <a href="#支持的协议一览">支持协议</a> ·
@@ -25,13 +25,16 @@
 
 ---
 
-## 免责声明
+## 免责声明与用户协议
 
 > [!WARNING]
-> 本项目仅用于网络协议技术学习、跨地域网络测试与合法合规的自建代理运维管理。
-> - 本项目**不提供**任何代理节点、订阅服务或穿透工具；项目源码与文档中的所有地址与配置均为演示占位数据。
-> - 请严格遵守您所在国家或地区的法律法规，**严禁**将本项目用于任何违法违规或未获授权的网络活动。
-> - 任何因使用、修改或分发本项目所产生的法律责任与风险均由使用者自行承担，项目作者与贡献者不承担任何直接或间接责任。
+> 本项目仅用于合法的网络协议技术学习、开发调试、内网运维管理与合规测试。
+> - 本项目**不提供**任何代理节点、服务器、订阅服务或穿透工具；项目源码与文档中的所有地址与配置均为演示占位数据。
+> - 请严格遵守您所在地、部署地、网络接入地及目标访问地等所有适用司法管辖区的法律法规，**严禁**将本项目用于任何违法违规或未获授权的网络活动。
+> - 任何因使用、修改或分发本项目所产生的法律责任与风险均由使用者独自承担；在适用法律允许的最大范围内，项目作者与贡献者不承担任何直接、间接或连带责任。
+> - **首次启动确认机制**：运行本程序前必须阅读并同意完整的 [用户协议（USER_AGREEMENT.md）](USER_AGREEMENT.md)（默认不同意，未同意时程序拒绝启动）：
+>   - **二进制直接运行**：首次在交互式终端启动时会自动打印协议正文，输入 `y` 确认同意后才会继续启动，并保存同意记录以免重复确认。
+>   - **Docker / 非交互式部署**：请在 `.env` 中 `ADMIN_PASSWORD` 上方（或容器环境变量）显式设置 `ACCEPT_USER_AGREEMENT=true` 后启动。
 
 ---
 
@@ -51,7 +54,7 @@
 
 - **开箱即用，零外部依赖**：官方发行版将前端面板与固定版本 `sing-box 1.12.12` 内核打包为**单个可执行文件**，下载后无需再单独安装 Node.js 或手动配置 `sing-box`。
 - **12 种主流协议统一接入**：支持 Direct、Shadowsocks、VLESS（含 Reality / XTLS-Vision）、VMess、Trojan、Hysteria2、TUIC、AnyTLS、SOCKS5 / SOCKS5H、HTTP / HTTPS 与 WireGuard（含 Cloudflare WARP 保留字节与多 Peer JSON）。
-- **「暮色」暗色指挥台面板**：紧凑列表截断超长节点名称，直接显示入站用户名，并以固定宽度的柔边毛玻璃掩码遮蔽入站密码，点击掩码区域即可查看完整密码。行内详情在备注上方显示完整名称并支持复制，也提供连接地址、出口信息、端口固定与前置代理。支持 `Ctrl/⌘ + K` 命令面板、全键盘快捷键（`j/k`、`Enter`、`x`、`e`、`t`）及中英文切换。
+- **「暮色」暗色指挥台面板**：紧凑列表截断超长节点名称，直接显示入站用户名，并以固定宽度的柔边毛玻璃掩码遮蔽入站密码，点击掩码区域即可查看完整密码；**每个数据列均支持拖拽自由调整宽度并持久化写入数据库**（双击手柄复位单列，表头一键恢复默认）。行内展开详情采用对称等高卡片布局，按「入站与连接 → 出站与链路 → 完整名称与备注」排布与列表顺序保持一致。支持 `Ctrl/⌘ + K` 命令面板、全键盘快捷键（`j/k`、`Enter`、`x`、`e`、`t`）及中英文切换。
 - **批量导入与一键出口检测**：支持一次性粘贴多行分享链接、Base64 订阅、远程订阅 URL 及 Clash YAML 节点列表；导入后自动分配端口与随机账密，并可一键并发检测出口 IP、国家/城市与延迟。
 - **进阶转发与灵活管理**：
   - **链式前置代理**：支持配置「全局前置代理」或「单节点自定义前置代理」，内置防环路保护与前置独立测 IP。
@@ -124,21 +127,27 @@ git clone https://github.com/cheluen/singbox-proxy-manager.git
 cd singbox-proxy-manager
 ```
 
-#### 第 2 步：创建 `.env` 并设置管理员密码
+#### 第 2 步：创建 `.env`、确认用户协议并设置管理员密码
 
 ```bash
 cp .env.example .env
 chmod 600 .env
 ```
 
-用任意编辑器打开 `.env`（例如 `nano .env` 或 `vim .env`），找到 `ADMIN_PASSWORD=` 这一行，填入你自己的强密码并保存：
+先阅读根目录的 [`USER_AGREEMENT.md`](USER_AGREEMENT.md)。用任意编辑器打开 `.env`（例如 `nano .env` 或 `vim .env`），在 `ADMIN_PASSWORD` 上方确认同意用户协议并填入你自己的强密码后保存：
 
 ```dotenv
+# 首次启动前请阅读 USER_AGREEMENT.md，默认 false（未同意时容器拒绝启动）
+ACCEPT_USER_AGREEMENT=true
+
 # 首次启动必须设置非空密码（不支持默认密码，上限 72 字节）
 ADMIN_PASSWORD=请替换为你的高强度密码
 ```
 
-> 提示：默认管理端口为 `30000`，节点入站端口默认从 `30001` 开始顺延分配，数据保存在同目录的 `./config`。如需调整管理端口，可在 `.env` 中修改 `PORT=30000`。
+> 提示：
+> - 默认管理端口为 `30000`，节点入站端口默认从 `30001` 开始顺延分配，数据保存在同目录的 `./config`。如需调整管理端口，可在 `.env` 中修改 `PORT=30000`。
+> - 镜像已内置 Docker `HEALTHCHECK`（通过 `/app/singbox-proxy-manager --healthcheck` 探测 `/api/health`），可执行 `docker compose --profile ghcr ps` 直接查看容器 `healthy / unhealthy` 状态。
+> - 正式版 GHCR 多架构镜像提供精确版本（如 `1.7.28`）、次版本滚动（如 `1.7`）、主版本滚动（如 `1`）与 `latest` 标签，并附带构建来源证明（Provenance）和 SBOM；日常 `main` 分支未发版提交仅更新 `edge` 标签。
 
 #### 第 3 步：启动服务
 
@@ -158,7 +167,7 @@ docker compose --profile ghcr logs --tail=50
 <details>
 <summary><strong>展开查看：Docker 版本升级与本地源码构建方式</strong></summary>
 
-- **升级到最新预构建镜像**（配置与数据库会自动保留在 `./config`，切勿使用 `down -v`）：
+- **升级到最新预构建镜像**（配置与数据库会自动保留在 `./config`，切勿使用 `down -v`；**从 `1.7.27` 及更早版本升级时，请先阅读 [`USER_AGREEMENT.md`](USER_AGREEMENT.md) 并在 `.env` 中 `ADMIN_PASSWORD` 上方新增 `ACCEPT_USER_AGREEMENT=true`**）：
   ```bash
   docker compose --profile ghcr pull
   docker compose --profile ghcr up -d
@@ -186,7 +195,7 @@ docker compose --profile ghcr logs --tail=50
 ```bash
 mkdir -p singbox-proxy-manager && cd singbox-proxy-manager
 
-APP_VERSION=1.7.27
+APP_VERSION=1.7.28
 OS=linux      # 可选：linux / darwin / freebsd
 ARCH=amd64    # 可选：amd64 / arm64
 
@@ -197,7 +206,7 @@ sha256sum --ignore-missing -c checksums.txt
 chmod 700 "singbox-proxy-manager-${OS}-${ARCH}"
 ```
 
-#### 第 2 步：写入首次管理员密码并启动
+#### 第 2 步：写入首次管理员密码、确认用户协议并启动
 
 在可执行文件同目录创建 `.env` 文件（权限设为仅本人可读）：
 
@@ -206,6 +215,9 @@ cat > .env <<'EOF'
 PORT=30000
 BIND_ADDRESS=0.0.0.0
 CONFIG_DIR=./config
+# 默认不同意协议；交互式终端首次运行可留为 false 并输入 y 同意，
+# 若使用 systemd 等非交互方式启动，请先阅读 USER_AGREEMENT.md 后改为 true
+ACCEPT_USER_AGREEMENT=false
 ADMIN_PASSWORD=请替换为你的高强度密码
 EOF
 chmod 600 .env
@@ -217,12 +229,12 @@ chmod 600 .env
 "./singbox-proxy-manager-${OS}-${ARCH}"
 ```
 
-看到服务监听提示后，访问 **`http://<你的服务器IP>:30000`** 即可登录。数据与自动释放的 `sing-box` 内核都会保存在同目录的 `./config` 下。
+首次在终端直接运行时，命令行会自动打印完整用户协议，输入 `y` 并回车同意后程序才会继续启动（同意状态会保存在 `<CONFIG_DIR>/user-agreement.accepted`，后续重启无需重复确认；若不同意则立即退出）。看到服务监听提示后，访问 **`http://<你的服务器IP>:30000`** 即可登录。数据与自动释放的 `sing-box` 内核都会保存在同目录的 `./config` 下。
 
 <details>
 <summary><strong>展开查看：单文件后台常驻（systemd）与无缝升级说明</strong></summary>
 
-- **原地升级**：先停止旧进程，下载新版本二进制替换旧文件，保留原工作目录、`.env` 与 `./config` 后重新启动即可，节点与密码均完整保留。
+- **原地升级**：先停止旧进程，下载新版本二进制替换旧文件，保留原工作目录、`.env` 与 `./config` 后重新启动即可，节点与密码均完整保留。**从 `1.7.27` 及更早版本升级时**：若使用 `systemd` 等非交互方式重启，请先阅读 [`USER_AGREEMENT.md`](USER_AGREEMENT.md) 并在 `.env` 中 `ADMIN_PASSWORD` 上方新增 `ACCEPT_USER_AGREEMENT=true`；若在终端直接启动，按提示输入 `y` 确认一次即可。
 - **使用 `systemd` 后台运行示例**（按实际目录调整路径）：
   ```ini
   [Unit]
@@ -273,7 +285,7 @@ chmod 600 .env
 | [系统架构与核心机制](docs/architecture.md) | 单常驻内核模型、内置内核与预压缩前端、原子变更与自愈、端口与 TCP 复用、链式防环路及安全边界 |
 | [配置、数据库与运维指南](docs/configuration.md) | 全部环境变量参考、SQLite / PostgreSQL / MySQL / Turso 接入与单实例租约、数据目录与故障排查 |
 | [协议支持与导入导出规范](docs/protocols.md) | 12 种出站协议字段、15 种 URI Scheme 与 Clash 导入边界、导出限制及出站去重规则 |
-| [HTTP API 参考](docs/api.md) | 鉴权方式与全部 26 个接口的入参、出参与状态码说明 |
+| [HTTP API 参考](docs/api.md) | 鉴权方式与全部 27 个接口的入参、出参与状态码说明 |
 | [本地开发、构建与测试指南](docs/development.md) | Go 1.26.11 + sing-box 1.12.12 安全重编译、本地联调、完整测试矩阵与 CI/CD 流水线 |
 
 ---
@@ -282,4 +294,4 @@ chmod 600 .env
 
 本项目自身代码采用 MIT 许可证。发行版内置的独立内核 `sing-box v1.12.12` 使用官方源码重编译，并按 `GPL-3.0-or-later` 分发。本项目与 `sing-box`、`SagerNet` 和 `nekohasekai` 没有官方隶属、赞助或背书关系。
 
-[MIT 许可证](LICENSE) · [第三方声明与对应源码](THIRD_PARTY_NOTICES.md) · [GNU GPL v3 正文](licenses/SING-BOX-GPL-3.0.txt)
+[用户协议](USER_AGREEMENT.md) · [MIT 许可证](LICENSE) · [第三方声明与对应源码](THIRD_PARTY_NOTICES.md) · [GNU GPL v3 正文](licenses/SING-BOX-GPL-3.0.txt)

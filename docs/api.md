@@ -1,6 +1,6 @@
 # HTTP API 参考
 
-本文档基于 `1.7.27` 后端路由注册（`backend/main.go`、`backend/api/`）整理全部 **26 个业务接口**（2 个公开接口 + 24 个鉴权接口）。
+本文档基于 `1.7.28` 后端路由注册（`backend/main.go`、`backend/api/`）整理全部 **27 个业务接口**（3 个公开接口 + 24 个鉴权接口）。
 
 ---
 
@@ -18,7 +18,8 @@
 
 | 方法与路径 | 请求体 | 响应与行为说明 |
 | --- | --- | --- |
-| `GET /api/version` | 无 | 返回 `{ "version": "1.7.27", "update": { ... } }`。按需检查 GitHub 最新 Release 并缓存 `SBPM_UPDATE_CHECK_TTL`；即使上游查询失败仍返回 HTTP `200`，且首次失败与缓存命中均统一在 `update` 中携带错误信息与 `checked_at`。 |
+| `GET /api/health` | 无 | 轻量健康探针（供 Docker `HEALTHCHECK` 与监控系统调用，不请求外部 GitHub API）。以 `2s` 超时校验数据库连接池存活并返回 `{ "status": "ok", "runtime_running": true, "runtime_degraded": false }`；数据库不可用时返回 `503 Service Unavailable` 及 `{ "status": "unhealthy" }`。 |
+| `GET /api/version` | 无 | 返回 `{ "version": "1.7.28", "update": { ... } }`。按需检查 GitHub 最新 Release 并缓存 `SBPM_UPDATE_CHECK_TTL`；即使上游查询失败仍返回 HTTP `200`，且首次失败与缓存命中均统一在 `update` 中携带错误信息与 `checked_at`。 |
 | `POST /api/login` | `{ "password": "..." }` | 验证管理员密码，成功返回 `200` 及 `{ "token": "...", "expiry": 1700000000 }`（`expiry` 为整数 Unix 秒时间戳）；密码错误返回 `401`；触发 IP 限流或全局并发校验上限返回 `429`（附 `Retry-After` 头）。 |
 
 ---
@@ -93,8 +94,8 @@
 
 | 方法与路径 | 请求体 | 响应与行为说明 |
 | --- | --- | --- |
-| `GET /api/settings` | 无 | 返回 `start_port`、`preserve_inbound_ports`、全局前置代理配置及其最近检测结果（**绝不返回管理员密码哈希**）。 |
-| `PUT /api/settings` | 可选字段：`start_port`、`preserve_inbound_ports`、`admin_password`、`global_upstream_enabled`、`global_upstream_type`、`global_upstream_config` | 更新全局配置并按需重新应用内核。有变更时返回含 `changed: true` 与 `password_changed` 的响应；配置无变化时仅返回 `message` 与 `changed: false`（不含 `password_changed`）。`start_port` 范围 `1024–65535`；修改 `admin_password` 要求至少 `8` 个 Unicode 字符且不超过 `72` UTF-8 字节，修改成功后立即递增 `auth_generation` 吊销全部会话。 |
+| `GET /api/settings` | 无 | 返回 `start_port`、`preserve_inbound_ports`、全局前置代理配置及其最近检测结果，以及前端节点列表自定义列宽 `node_list_column_widths`（JSON 对象，默认 `{}`；**绝不返回管理员密码哈希**）。 |
+| `PUT /api/settings` | 可选字段：`start_port`、`preserve_inbound_ports`、`admin_password`、`global_upstream_enabled`、`global_upstream_type`、`global_upstream_config`、`node_list_column_widths` | 更新全局配置并按需重新应用内核。有变更时返回含 `changed: true`、`password_changed` 与最新 `node_list_column_widths` 的响应；配置无变化时仅返回 `message`、`changed: false` 与当前 `node_list_column_widths`。`node_list_column_widths` 仅允许白名单列键（`name` / `port` / `user` / `pass` / `type` / `server` / `region` / `ip` / `latency`）与 `40–1200` 像素整数（传 `{}` 清空恢复默认，省略该字段则保留原值）；**仅变更列宽时只写数据库，不重启 `sing-box` 也不吊销会话**。`start_port` 范围 `1024–65535`；修改 `admin_password` 要求至少 `8` 个 Unicode 字符且不超过 `72` UTF-8 字节，修改成功后立即递增 `auth_generation` 吊销全部会话。 |
 | `POST /api/settings/upstream/check-ip` | 无 | 通过临时隔离 `sing-box` 进程检测**已保存**的全局前置代理出口 IP（不要求「启用全局前置代理」开关处于打开状态）；若检测期间全局前置定义被并发修改，返回 `409`。 |
 
 ---
