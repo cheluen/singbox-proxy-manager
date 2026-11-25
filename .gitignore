@@ -18,6 +18,8 @@ config/*.log
 *~
 .DS_Store
 *.pid
+__pycache__/
+*.py[cod]
 
 # 构建产物
 sb-proxy
