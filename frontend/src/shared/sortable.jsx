@@ -1,8 +1,10 @@
 // 拖拽排序封装（@dnd-kit）：支持鼠标、触屏与键盘（聚焦手柄后 空格 抓起，方向键移动，空格 放下）。
 import { DndContext, KeyboardSensor, PointerSensor, closestCenter, useSensor, useSensors } from '@dnd-kit/core'
-import { SortableContext, sortableKeyboardCoordinates, useSortable, verticalListSortingStrategy } from '@dnd-kit/sortable'
+import { SortableContext, horizontalListSortingStrategy, sortableKeyboardCoordinates, useSortable, verticalListSortingStrategy } from '@dnd-kit/sortable'
 import { CSS } from '@dnd-kit/utilities'
 import { GripVertical } from 'lucide-react'
+
+const restrictHorizontal = ({ transform }) => ({ ...transform, y: 0 })
 
 export function SortableList({ ids, disabled, onReorder, children }) {
   const sensors = useSensors(
@@ -21,6 +23,52 @@ export function SortableList({ ids, disabled, onReorder, children }) {
         {children}
       </SortableContext>
     </DndContext>
+  )
+}
+
+export function SortableHorizontalList({ ids, disabled, onReorder, children }) {
+  const sensors = useSensors(
+    useSensor(PointerSensor, { activationConstraint: { distance: 6 } })
+  )
+  return (
+    <DndContext
+      sensors={sensors}
+      collisionDetection={closestCenter}
+      modifiers={[restrictHorizontal]}
+      onDragEnd={({ active, over }) => {
+        if (over && active.id !== over.id) onReorder(active.id, over.id)
+      }}
+    >
+      <SortableContext items={ids} disabled={disabled} strategy={horizontalListSortingStrategy}>
+        {children}
+      </SortableContext>
+    </DndContext>
+  )
+}
+
+export function SortableTabItem({ id, disabled, className = '', style, onClick, children, ...rest }) {
+  const { attributes, listeners, setNodeRef, transform, transition, isDragging } = useSortable({ id, disabled })
+  const mergedStyle = {
+    ...style,
+    transform: CSS.Translate.toString(transform),
+    transition,
+  }
+  return (
+    <button
+      ref={setNodeRef}
+      type="button"
+      className={`${className}${isDragging ? ' is-dragging' : ''}`}
+      style={mergedStyle}
+      {...attributes}
+      {...listeners}
+      {...rest}
+      onClick={(event) => {
+        if (isDragging) return
+        onClick?.(event)
+      }}
+    >
+      {children}
+    </button>
   )
 }
 

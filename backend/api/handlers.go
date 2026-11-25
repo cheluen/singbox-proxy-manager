@@ -36,6 +36,7 @@ type Handler struct {
 	nodeMutations             *nodeMutationCoordinator
 	skipPortAvailabilityCheck bool
 	checkProxyIP              func(context.Context, string, string, string) (*services.IPInfo, error)
+	checkProxyIPWithMode      func(context.Context, string, string, string, string) (*services.IPInfo, error)
 	checkUpstreamIP           func(context.Context, models.ProxyDefinition) (*services.IPInfo, error)
 	comparePassword           func([]byte, []byte) error
 }
@@ -47,6 +48,7 @@ type nodeUpsertRequest struct {
 	Type            string  `json:"type"`
 	Config          string  `json:"config"`
 	InboundPort     int     `json:"inbound_port"`
+	InboundMode     *string `json:"inbound_mode"`
 	Username        string  `json:"username"`
 	Password        string  `json:"password"`
 	AuthEnabled     *bool   `json:"auth_enabled,omitempty"`
@@ -132,11 +134,12 @@ func normalizeIPInfoForStorage(info *services.IPInfo) {
 func NewHandler(db *sql.DB, singBoxService *services.SingBoxService) *Handler {
 	return &Handler{
 		refreshing: make(map[int]bool), fetchSubscription: services.ExpandBatchImportSourcesWithType,
-		db:             db,
-		singBoxService: singBoxService,
-		loginLimiter:   newLoginRateLimiterFromEnv(),
-		nodeMutations:  newNodeMutationCoordinator(db, singBoxService),
-		checkProxyIP:   services.CheckProxyIPContext,
+		db:                   db,
+		singBoxService:       singBoxService,
+		loginLimiter:         newLoginRateLimiterFromEnv(),
+		nodeMutations:        newNodeMutationCoordinator(db, singBoxService),
+		checkProxyIP:         services.CheckProxyIPContext,
+		checkProxyIPWithMode: services.CheckProxyIPWithModeContext,
 		checkUpstreamIP: func(ctx context.Context, definition models.ProxyDefinition) (*services.IPInfo, error) {
 			return singBoxService.CheckUpstreamIPContext(ctx, definition, func(ctx context.Context) ([]models.ProxyNode, error) {
 				return models.LoadActiveInbounds(ctx, db)
@@ -268,6 +271,7 @@ func nodeFromUpsertRequest(req nodeUpsertRequest) models.ProxyNode {
 		Type:         strings.ToLower(strings.TrimSpace(req.Type)),
 		Config:       strings.TrimSpace(req.Config),
 		InboundPort:  req.InboundPort,
+		InboundMode:  models.InboundModeMixed,
 		Username:     req.Username,
 		Password:     req.Password,
 		Enabled:      req.Enabled,
@@ -280,6 +284,9 @@ func nodeFromUpsertRequest(req nodeUpsertRequest) models.ProxyNode {
 	}
 	if req.UpstreamMode != nil {
 		node.UpstreamMode = *req.UpstreamMode
+	}
+	if req.InboundMode != nil {
+		node.InboundMode = *req.InboundMode
 	}
 	if req.UpstreamType != nil {
 		node.UpstreamType = *req.UpstreamType
@@ -553,6 +560,9 @@ func (h *Handler) CreateNode(c *gin.Context) {
 				}
 			}
 
+			if err := validateNodeInboundTLS(ctx, tx, req, ""); err != nil {
+				return err
+			}
 			result, err := tx.ExecContext(ctx, insertNodeSQL, nodeInsertArgs(req)...)
 			if err != nil {
 				return err
@@ -1232,6 +1242,9 @@ func (h *Handler) UpdateNode(c *gin.Context) {
 			if payload.TCPReuseEnabled == nil {
 				req.TCPReuseEnabled = prev.TCPReuseEnabled
 			}
+			if payload.InboundMode == nil {
+				req.InboundMode = prev.InboundMode
+			}
 			if payload.UpstreamMode == nil && !models.IsPolicy(req.Type) {
 				req.UpstreamMode = prev.UpstreamMode
 				if err := validateCharacterLimit("upstream_mode", req.UpstreamMode, maxUpstreamModeCharacters); err != nil {
@@ -1310,12 +1323,12 @@ func (h *Handler) UpdateNode(c *gin.Context) {
 
 			result, err := tx.ExecContext(ctx, `
 				UPDATE proxy_nodes
-				SET name = ?, remark = ?, type = ?, config = ?, inbound_port = ?,
+				SET name = ?, remark = ?, type = ?, config = ?, inbound_port = ?, inbound_mode = ?,
 				    username = ?, password = ?, tcp_reuse_enabled = ?, upstream_mode = ?,
 				    upstream_type = ?, upstream_config = ?, enabled = ?,
 				    updated_at = CURRENT_TIMESTAMP
 				WHERE id = ?
-			`, req.Name, req.Remark, req.Type, req.Config, models.NullablePort(req.InboundPort), req.Username,
+			`, req.Name, req.Remark, req.Type, req.Config, models.NullablePort(req.InboundPort), req.InboundMode, req.Username,
 				req.Password, req.TCPReuseEnabled, req.UpstreamMode, req.UpstreamType,
 				req.UpstreamConfig, req.Enabled, id)
 			if err != nil {
@@ -1339,7 +1352,7 @@ func (h *Handler) UpdateNode(c *gin.Context) {
 					return err
 				}
 			}
-			return nil
+			return validateNodeInboundTLS(ctx, tx, req, prev.InboundMode)
 		},
 	})
 	if mutationErr != nil {
@@ -1791,6 +1804,9 @@ func (h *Handler) checkNodeExitIP(ctx context.Context, node models.ProxyNode) (*
 		return h.singBoxService.CheckPolicyIP(ctx, node.ID, h.checkProxyIP)
 	}
 	if node.InboundPort > 0 {
+		if node.InboundMode == models.InboundModeHTTPS {
+			return h.checkProxyIPWithMode(ctx, fmt.Sprintf("localhost:%d", node.InboundPort), node.Username, node.Password, node.InboundMode)
+		}
 		return h.checkProxyIP(ctx, fmt.Sprintf("localhost:%d", node.InboundPort), node.Username, node.Password)
 	}
 	return h.singBoxService.CheckIsolatedNodeIPContext(ctx, node.ID, func(checkCtx context.Context) ([]models.ProxyNode, models.Settings, error) {
@@ -2022,6 +2038,9 @@ func (h *Handler) GetSettings(c *gin.Context) {
 		"global_upstream_latency":      settings.GlobalUpstreamLatency,
 		"global_upstream_error":        settings.GlobalUpstreamError,
 		"node_list_column_widths":      settings.NodeListColumnWidths,
+		"inbound_tls_cert_path":        settings.InboundTLSCertPath,
+		"inbound_tls_key_path":         settings.InboundTLSKeyPath,
+		"inbound_tls":                  services.ResolveInboundTLS(settings.InboundTLSCertPath, settings.InboundTLSKeyPath),
 	})
 }
 
@@ -2166,6 +2185,8 @@ func (h *Handler) UpdateSettings(c *gin.Context) {
 		GlobalUpstreamType    *string         `json:"global_upstream_type,omitempty"`
 		GlobalUpstreamConfig  *string         `json:"global_upstream_config,omitempty"`
 		NodeListColumnWidths  *map[string]int `json:"node_list_column_widths"`
+		InboundTLSCertPath    *string         `json:"inbound_tls_cert_path"`
+		InboundTLSKeyPath     *string         `json:"inbound_tls_key_path"`
 	}
 
 	const invalidColumnWidths = "node_list_column_widths must be an object with integer widths"
@@ -2239,10 +2260,38 @@ func (h *Handler) UpdateSettings(c *gin.Context) {
 	if req.GlobalUpstreamConfig != nil {
 		nextGlobalUpstreamConfig = strings.TrimSpace(*req.GlobalUpstreamConfig)
 	}
+	nextInboundTLSCertPath, nextInboundTLSKeyPath := previous.InboundTLSCertPath, previous.InboundTLSKeyPath
+	if req.InboundTLSCertPath != nil {
+		nextInboundTLSCertPath = *req.InboundTLSCertPath
+	}
+	if req.InboundTLSKeyPath != nil {
+		nextInboundTLSKeyPath = *req.InboundTLSKeyPath
+	}
+	tlsSelectionRequested := req.InboundTLSCertPath != nil || req.InboundTLSKeyPath != nil
+	tlsSettingsChanged := nextInboundTLSCertPath != previous.InboundTLSCertPath || nextInboundTLSKeyPath != previous.InboundTLSKeyPath
+	if tlsSelectionRequested {
+		status := services.ResolveInboundTLS(nextInboundTLSCertPath, nextInboundTLSKeyPath)
+		if (nextInboundTLSCertPath != "" || nextInboundTLSKeyPath != "") && status.SelectionMode != "selected" {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "选择的入站 TLS 证书与私钥必须匹配当前扫描到的有效套件"})
+			return
+		}
+		if !status.Ready && tlsSettingsChanged {
+			var activeHTTPS int
+			if err := h.db.QueryRowContext(c.Request.Context(), "SELECT COUNT(*) FROM proxy_nodes WHERE enabled AND inbound_port>0 AND inbound_mode=?", models.InboundModeHTTPS).Scan(&activeHTTPS); err != nil {
+				c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to query HTTPS inbounds"})
+				return
+			}
+			if activeHTTPS > 0 {
+				_, err := status.RequireCertificate()
+				c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+				return
+			}
+		}
+	}
 	globalDefinitionRequested := req.GlobalUpstreamType != nil || req.GlobalUpstreamConfig != nil
-	onlyColumnWidths := req.NodeListColumnWidths != nil && req.PreserveInboundPorts == nil &&
+	skipGlobalValidation := (req.NodeListColumnWidths != nil || tlsSelectionRequested) && req.PreserveInboundPorts == nil &&
 		req.GlobalUpstreamEnabled == nil && !globalDefinitionRequested && req.AdminPassword == nil
-	if !onlyColumnWidths {
+	if !skipGlobalValidation {
 		if err := validateCharacterLimit("global_upstream_type", nextGlobalUpstreamType, maxUpstreamTypeCharacters); err != nil {
 			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 			return
@@ -2285,7 +2334,7 @@ func (h *Handler) UpdateSettings(c *gin.Context) {
 			return
 		}
 	}
-	if !portSettingsChanged && !globalSettingsChanged && !passwordChanged && !columnWidthsChanged {
+	if !portSettingsChanged && !globalSettingsChanged && !passwordChanged && !columnWidthsChanged && !tlsSettingsChanged {
 		c.JSON(http.StatusOK, gin.H{
 			"message": "settings unchanged", "changed": false, "node_list_column_widths": nextColumnWidths,
 		})
@@ -2295,7 +2344,7 @@ func (h *Handler) UpdateSettings(c *gin.Context) {
 	globalRuntimeChanged := globalEnabledChanged || (nextGlobalUpstreamEnabled && globalDefinitionChanged)
 
 	_, mutationErr := h.nodeMutations.execute(c.Request.Context(), nodeMutationOperation{
-		ApplyRuntime: shouldReassignInboundPorts || globalRuntimeChanged,
+		ApplyRuntime: shouldReassignInboundPorts || globalRuntimeChanged || tlsSettingsChanged,
 		Mutate: func(ctx context.Context, tx *sql.Tx) error {
 			query := `
 				UPDATE settings
@@ -2307,6 +2356,10 @@ func (h *Handler) UpdateSettings(c *gin.Context) {
 			if columnWidthsChanged {
 				query += ", node_list_column_widths = ?"
 				args = append(args, string(columnWidthsJSON))
+			}
+			if tlsSettingsChanged {
+				query += ", inbound_tls_cert_path = ?, inbound_tls_key_path = ?"
+				args = append(args, nextInboundTLSCertPath, nextInboundTLSKeyPath)
 			}
 			if passwordChanged {
 				query += ", admin_password = ?, auth_generation = auth_generation + 1"

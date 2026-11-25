@@ -351,6 +351,7 @@ jobs:
           - test:e2e:batch-check-ip-live
           - test:e2e:check-failed-ui
           - test:e2e:groups-policy-ui
+          - test:e2e:inbound-https-ui
           - test:e2e:connections-logs-ui
           - test:e2e:outbound-dedup
           - test:e2e:remark

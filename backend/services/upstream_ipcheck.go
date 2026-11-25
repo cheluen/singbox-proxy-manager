@@ -159,6 +159,7 @@ func isolatedNodeDependencies(targetID int, nodes []models.ProxyNode) ([]models.
 		seen[index] = true
 		node := nodes[index]
 		node.InboundPort, node.Username, node.Password, node.TCPReuseEnabled = 0, "", "", false
+		node.InboundMode = models.InboundModeMixed
 		selected = append(selected, node)
 		mode, err := models.NormalizeUpstreamMode(node.UpstreamMode)
 		if err != nil {

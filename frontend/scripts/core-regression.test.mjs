@@ -2,7 +2,15 @@ import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
 import test from 'node:test'
 import { protocolFixtures } from './fixtures/protocol-configs.mjs'
-import { createProtocolFormModel, parsePeersJSON, parseReservedInput } from '../src/core/protocolForm.js'
+import {
+  createProtocolFormModel,
+  groupPhysicalNodesById,
+  normalizePolicyMemberSources,
+  parsePeersJSON,
+  parseReservedInput,
+  resolvePolicyMemberIds,
+  unlinkPolicyGroupInSources,
+} from '../src/core/protocolForm.js'
 import { EMPTY_CRITERIA, collectFacets, filterNodes } from '../src/core/nodeFilters.js'
 import { stableConfigSignature } from '../src/core/nodeModel.js'
 import { parseNodesVirtualThreshold, readNodesVirtualThreshold } from '../src/core/nodeList.js'
@@ -194,7 +202,7 @@ test('节点列表列宽清洗、范围约束与 CSS 变量映射准确', () => 
   assert.deepEqual(normalizeColumnWidths([]), {})
   assert.deepEqual(normalizeColumnWidths({ name: 260.4, port: 12, server: 9999, unknown: 200, ip: 'bad' }), {
     name: 260,
-    port: 68,
+    port: 64,
     server: 560,
   })
   assert.equal(clampColumnWidth('latency', 30), 58)
@@ -207,10 +215,10 @@ test('节点列表列宽清洗、范围约束与 CSS 变量映射准确', () => 
   const style = buildColumnWidthStyle({ name: 260, server: 320 }, true, 1440)
   assert.equal(style['--dusk-col-name'], '260px')
   assert.equal(style['--dusk-col-server'], '320px')
-  assert.equal(calculateTableMinWidth({ name: 260, server: 320 }, 1440), 1494)
-  assert.equal(calculateTableMinWidth({ name: 280 }, 1080), 1148)
-  assert.equal(calculateTableMinWidth({ name: 280 }, 1000), 994)
-  assert.equal(style['--dusk-table-min-width'], '1494px')
+  assert.equal(calculateTableMinWidth({ name: 260, server: 320 }, 1440), 1486)
+  assert.equal(calculateTableMinWidth({ name: 280 }, 1080), 1146)
+  assert.equal(calculateTableMinWidth({ name: 280 }, 1000), 1003)
+  assert.equal(style['--dusk-table-min-width'], '1486px')
 })
 
 const nodes = [
@@ -536,4 +544,65 @@ test('分组编辑弹窗仅提交实际修改的字段，避免覆盖并发保�
     upstreamEnabledTouched: false,
   })
   assert.equal(abaConflict.upstreamConflict, true)
+})
+
+test('策略整组关联按组内 ID 排序，断链原地展开去重并在保存时彻底移除 member_sources', () => {
+  const all = [
+    { id: 30, group_id: 2, type: 'ss', name: 'G2-30' },
+    { id: 10, group_id: 2, type: 'vless', name: 'G2-10' },
+    { id: 20, group_id: 2, type: 'failover', name: 'Nested Policy' },
+    { id: 5, group_id: 1, type: 'vmess', name: 'G1-5' },
+    { id: 40, group_id: 3, type: 'trojan', name: 'G3-40' },
+  ]
+  assert.deepEqual(groupPhysicalNodesById(all, 2, 99).map((n) => n.id), [10, 30])
+  assert.deepEqual(normalizePolicyMemberSources(undefined, [5, 10, 5]), [
+    { type: 'node', id: 5 },
+    { type: 'node', id: 10 },
+  ])
+  const linked = [{ type: 'node', id: 10 }, { type: 'group', id: 2 }, { type: 'group', id: 3 }]
+  assert.deepEqual(resolvePolicyMemberIds(linked, all, 99), [10, 30, 40])
+  const unlinkedG2 = unlinkPolicyGroupInSources(linked, 2, all, 99)
+  assert.deepEqual(unlinkedG2, [
+    { type: 'node', id: 10 },
+    { type: 'node', id: 30 },
+    { type: 'group', id: 3 },
+  ])
+  // 分组在前、重复手工节点在后：断链必须保留首次出现位置 [10, 30]，不能反转成 [30, 10]
+  const groupBeforeDup = [{ type: 'group', id: 2 }, { type: 'node', id: 10 }]
+  assert.deepEqual(resolvePolicyMemberIds(groupBeforeDup, all, 99), [10, 30])
+  assert.deepEqual(unlinkPolicyGroupInSources(groupBeforeDup, 2, all, 99), [
+    { type: 'node', id: 10 },
+    { type: 'node', id: 30 },
+  ])
+  const unlinkedAll = unlinkPolicyGroupInSources(unlinkedG2, 3, all, 99)
+  assert.deepEqual(unlinkedAll, [
+    { type: 'node', id: 10 },
+    { type: 'node', id: 30 },
+    { type: 'node', id: 40 },
+  ])
+
+  const existingPolicy = {
+    id: 99,
+    type: 'failover',
+    inbound_mode: 'https',
+    config: JSON.stringify({
+      member_ids: [10, 30],
+      member_sources: [{ type: 'group', id: 2 }],
+    }),
+  }
+  const model = createProtocolFormModel(existingPolicy)
+  assert.equal(model.initialValues.inbound_mode, 'https')
+  assert.deepEqual(model.initialValues.policy_member_sources, [{ type: 'group', id: 2 }])
+
+  // 保持整组关联时保留 member_sources
+  const kept = model.buildConfig('failover', model.initialValues)
+  assert.deepEqual(kept.member_sources, [{ type: 'group', id: 2 }])
+
+  // 断链后变为纯手工节点，buildConfig 必须移除 member_sources，避免回退旧关联
+  const detached = model.buildConfig('failover', {
+    ...model.initialValues,
+    policy_member_sources: [{ type: 'node', id: 30 }, { type: 'node', id: 10 }],
+  })
+  assert.equal(Object.hasOwn(detached, 'member_sources'), false)
+  assert.deepEqual(detached.member_ids, [30, 10])
 })

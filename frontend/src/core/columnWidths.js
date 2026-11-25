@@ -5,7 +5,7 @@ export const NODE_LIST_COLUMN_KEYS = ['name', 'port', 'user', 'pass', 'type', 's
 
 export const NODE_LIST_COLUMN_LIMITS = {
   name: { min: 84, max: 520, fallbackMin: 108 },
-  port: { min: 68, max: 180, fallbackMin: 78 },
+  port: { min: 64, max: 160, fallbackMin: 66 },
   user: { min: 64, max: 420, fallbackMin: 88 },
   pass: { min: 84, max: 480, fallbackMin: 108 },
   type: { min: 60, max: 220, fallbackMin: 78 },
@@ -44,9 +44,9 @@ export function columnWidthsEqual(a, b) {
 }
 
 const FALLBACK_MIN_BY_BREAKPOINT = {
-  wide: { name: 108, port: 78, user: 88, pass: 108, type: 78, server: 90, region: 54, ip: 88, latency: 64 },
-  medium: { name: 96, port: 76, user: 88, pass: 112, type: 76, server: 90, region: 52, latency: 62 },
-  compact: { name: 80, port: 74, user: 88, pass: 104, type: 76, region: 50, latency: 60 },
+  wide: { name: 108, port: 66, user: 88, pass: 108, type: 78, server: 90, region: 54, ip: 88, latency: 64 },
+  medium: { name: 96, port: 66, user: 88, pass: 112, type: 76, server: 90, region: 52, latency: 62 },
+  compact: { name: 80, port: 65, user: 88, pass: 104, type: 76, region: 50, latency: 60 },
 }
 
 // 依据当前视口断点计算可见列组合及表格最小总宽，确保自定义列宽超出视口时可水平滚动而不挤压重叠。
@@ -64,7 +64,7 @@ export function calculateTableMinWidth(widths, viewportWidth = 1440) {
   const fallbackMin = FALLBACK_MIN_BY_BREAKPOINT[tier]
   const metaCount = visible.length - 1
   // 精确计入外层固定轨道 + 8 个外层 column-gap + 左右内边距（12px），避免临界宽度偏差。
-  const outerChrome = tier === 'compact' ? 232 : tier === 'medium' ? 264 : 286
+  const outerChrome = tier === 'compact' ? 250 : tier === 'medium' ? 272 : 290
   const metaGap = tier === 'compact' ? 6 : tier === 'medium' ? 8 : 10
   let total = outerChrome + Math.max(0, metaCount - 1) * metaGap
   for (const key of visible) {

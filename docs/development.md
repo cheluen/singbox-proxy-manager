@@ -1,6 +1,6 @@
 # 本地开发、构建发布与测试指南
 
-本文档以 `1.7.31` 为基线，说明工具链、本地联调、单文件与 Alpine 镜像发行、许可证分发和 CI 测试矩阵。
+本文档以 `1.7.32` 为基线，说明工具链、本地联调、单文件与 Alpine 镜像发行、许可证分发和 CI 测试矩阵。
 
 ---
 
@@ -101,7 +101,7 @@ SINGBOX_TEST_BINARY="$PWD/sing-box" go test -race -count=1 ./backend/... ./inter
 | `npm run test:version-sync` | 校验六处版本号（`version.txt`、`package.json`、`package-lock.json`、`README.md` 徽章与 `APP_VERSION` 行）完全一致 |
 | `npm run build` | Vite 构建并生成 Brotli / Gzip 预压缩资源 |
 | `npm audit --omit=dev --audit-level=moderate` | 生产依赖漏洞审计（CI 独立运行，非 `npm run audit`） |
-| `npm run test:e2e:all` | 运行 24 项共享 Mock API 浏览器回归（含 `column-resize`、`check-failed-ui`、`groups-policy-ui`、`connections-logs-ui` 等）+ `nodeform-config-preservation`（注：含 `live` 字样的共享场景仍基于 Mock 状态，**不包含** `full-stack` 真实后端测试） |
+| `npm run test:e2e:all` | 运行 25 项共享 Mock API 浏览器回归（含 `column-resize`、`check-failed-ui`、`groups-policy-ui`、`inbound-https-ui`、`connections-logs-ui` 等）+ `nodeform-config-preservation`（注：含 `live` 字样的共享场景仍基于 Mock 状态，**不包含** `full-stack` 真实后端测试） |
 
 节点列表回归覆盖节点名截断、列表列宽拖拽缩放与恢复默认持久化、三栏等高对称且入站优先的节点展开布局、备注上方显示及复制完整名称、入站用户名、固定宽度毛玻璃密码掩码、键盘切换及改密复位。连接区回归核对「路由号」双语标签、复制值与 TCP 复用开关。
 
@@ -167,7 +167,7 @@ rm -f /tmp/sbpm-upstream-e2e-backend
 1. **发布计划与条件触发判定**：`release-plan` 自动判定是否执行完整流水线（`run_full`）以及是否发版（`should_release`）：
    - Pull Request 与 `v*` Git Tag 始终执行完整 CI；
    - 推送至 `main` 时，若 `internal/version/version.txt` 内容未变且对应 `v<版本号>` 标签已存在（如仅更新文档或注释），自动跳过重量级测试与构建作业；若版本号递增或对应标签尚不存在，则执行完整 CI 与发版校验。
-   - 完整 CI 会重编译 `sing-box 1.12.12`，并行执行 `golangci-lint`、`govulncheck`（同时扫描管理程序源码与二进制及固定内核二进制）、Go `-race` 测试、四库真实服务集成测试（`postgres:17-alpine`、`mysql:8.4`、`libsql-server` 覆盖旧库升级、批量导入与独立日志库）、发布说明与 GHCR 清理脚本单测、前端 ESLint、生产依赖 `npm audit`、`test:core`、`audit`、`test:version-sync`、`build` 以及 25 项前端 E2E 矩阵。
+   - 完整 CI 会重编译 `sing-box 1.12.12`，并行执行 `golangci-lint`、`govulncheck`（同时扫描管理程序源码与二进制及固定内核二进制）、Go `-race` 测试、四库真实服务集成测试（`postgres:17-alpine`、`mysql:8.4`、`libsql-server` 覆盖旧库升级、批量导入与独立日志库）、发布说明与 GHCR 清理脚本单测、前端 ESLint、生产依赖 `npm audit`、`test:core`、`audit`、`test:version-sync`、`build` 以及 26 项前端 E2E 矩阵。
 2. **全栈与容器系统测试**：复用 `frontend-dist` 与测试内核执行真实上游与协议导入全栈回归、`docker compose --profile local`（基于 `alpine:3.24`）源码构建系统测试（验证未同意协议拒绝启动、`HEALTHCHECK` 达到 `healthy`、Shadowsocks 与 Direct 真实 HTTP/SOCKS5 转发）、单文件发行回归（覆盖非交互/伪终端协议门禁与 `v1.7.29` 原地升级）、`full-stack-system` / `full-stack-node-list` / `full-stack-features` / `precompressed-static` 浏览器验证，以及 `Dockerfile.release`（`alpine:3.24`）多架构构建、镜像体积报告与容器实际启动探活验证。
    - 源码构建和发行镜像均验证 `/app/LICENSE`、`/app/THIRD_PARTY_NOTICES.md`、`/app/USER_AGREEMENT.md`、`/app/licenses/SING-BOX-GPL-3.0.txt` 存在且匹配仓库文件 SHA-256，且校验镜像内置 `HEALTHCHECK`。
 3. **自动发布与规范化 GHCR 打标（含 SBOM）**：

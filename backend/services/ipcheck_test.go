@@ -2,15 +2,24 @@ package services
 
 import (
 	"context"
+	"crypto/tls"
+	"crypto/x509"
 	"encoding/base64"
+	"encoding/pem"
 	"errors"
 	"fmt"
+	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
+
+	"sb-proxy/backend/models"
 )
 
 func TestCheckProxyIPPreservesHTTPAuthenticationCredentials(t *testing.T) {
@@ -36,6 +45,131 @@ func TestCheckProxyIPPreservesHTTPAuthenticationCredentials(t *testing.T) {
 				t.Fatalf("HTTP proxy authentication failed: info=%+v err=%v", info, err)
 			}
 		})
+	}
+}
+
+func TestCheckProxyIPWithModeHTTPSLoopback(t *testing.T) {
+	for _, host := range []string{"localhost", "127.0.0.1", "::1"} {
+		t.Run(host, func(t *testing.T) {
+			server := httptest.NewUnstartedServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+				wantAuth := "Basic " + base64.StdEncoding.EncodeToString([]byte("test-user:test-key"))
+				if request.Header.Get("Proxy-Authorization") != wantAuth {
+					writer.WriteHeader(http.StatusProxyAuthRequired)
+					return
+				}
+				_, _ = writer.Write([]byte(`{"ip":"203.0.113.7","country":"Test","cc":"TT"}`))
+			}))
+			if host == "::1" {
+				listener, err := net.Listen("tcp6", "[::1]:0")
+				if err != nil {
+					server.Close()
+					t.Skip("IPv6 回环不可用")
+				}
+				_ = server.Listener.Close()
+				server.Listener = listener
+			}
+			server.StartTLS()
+			t.Cleanup(server.Close)
+			t.Setenv("SBPM_IPCHECK_URLS", "http://check.example/ip")
+			ctx, cancel := context.WithTimeout(t.Context(), 2*time.Second)
+			defer cancel()
+			address := net.JoinHostPort(host, strconv.Itoa(server.Listener.Addr().(*net.TCPAddr).Port))
+			info, err := CheckProxyIPWithModeContext(ctx, address, "test-user", "test-key", models.InboundModeHTTPS)
+			if err != nil || info == nil || info.Transport != "https" || info.HTTPError != "" || info.IP != "203.0.113.7" {
+				t.Fatalf("HTTPS 回环代理检测失败：%+v，%v", info, err)
+			}
+		})
+	}
+}
+
+func TestCheckProxyIPWithModeHTTPSDoesNotFallBackToSOCKS5(t *testing.T) {
+	var connections atomic.Int32
+	server := httptest.NewUnstartedServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
+		writer.WriteHeader(http.StatusBadGateway)
+	}))
+	server.Config.ConnState = func(_ net.Conn, state http.ConnState) {
+		if state == http.StateNew {
+			connections.Add(1)
+		}
+	}
+	server.StartTLS()
+	t.Cleanup(server.Close)
+	t.Setenv("SBPM_IPCHECK_URLS", "http://check.example/ip")
+	info, err := CheckProxyIPWithModeContext(t.Context(), server.Listener.Addr().String(), "", "", models.InboundModeHTTPS)
+	if err == nil || info != nil || !strings.Contains(err.Error(), "HTTPS") || strings.Contains(err.Error(), "SOCKS5") || connections.Load() != 2 {
+		t.Fatalf("HTTPS 失败发生 SOCKS5 回退：结果 %+v、错误 %v、连接数 %d", info, err, connections.Load())
+	}
+}
+
+func TestInboundProxyTLSVerificationOnlyBypassesLocalHop(t *testing.T) {
+	certificatePEM, _, _ := testInboundTLSPEM(t, testInboundTLSTemplate("untrusted.example"))
+	block, _ := pem.Decode(certificatePEM)
+	certificate, err := x509.ParseCertificate(block.Bytes)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, test := range []struct {
+		host, serverName string
+		allowed          bool
+	}{
+		{"localhost", "localhost", true}, {"127.0.0.1", "", true}, {"::1", "", true},
+		{"remote.example", "remote.example", false}, {"localhost", "remote.example", false},
+		{"127.0.0.1", "remote.example", false}, {"127.0.0.2", "", false},
+	} {
+		config := inboundProxyTLSConfig(test.host)
+		err := config.VerifyConnection(tls.ConnectionState{ServerName: test.serverName, PeerCertificates: []*x509.Certificate{certificate}})
+		if (err == nil) != test.allowed {
+			t.Fatalf("代理 %q、TLS 名称 %q 的证书验证结果错误：%v", test.host, test.serverName, err)
+		}
+	}
+}
+
+func TestHTTPSProxyStillVerifiesDestinationCertificate(t *testing.T) {
+	var originRequests atomic.Int32
+	origin := httptest.NewTLSServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
+		originRequests.Add(1)
+		_, _ = writer.Write([]byte(`{"ip":"203.0.113.7"}`))
+	}))
+	t.Cleanup(origin.Close)
+	proxyServer := httptest.NewTLSServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		if request.Method != http.MethodConnect {
+			writer.WriteHeader(http.StatusMethodNotAllowed)
+			return
+		}
+		_, port, err := net.SplitHostPort(request.Host)
+		if err != nil {
+			writer.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		dialer := net.Dialer{Timeout: time.Second}
+		remote, err := dialer.DialContext(request.Context(), "tcp", net.JoinHostPort("127.0.0.1", port))
+		if err != nil {
+			writer.WriteHeader(http.StatusBadGateway)
+			return
+		}
+		defer remote.Close()
+		connection, buffered, err := writer.(http.Hijacker).Hijack()
+		if err != nil {
+			return
+		}
+		defer connection.Close()
+		_, _ = buffered.WriteString("HTTP/1.1 200 Connection Established\r\n\r\n")
+		_ = buffered.Flush()
+		done := make(chan struct{})
+		go func() { _, _ = io.Copy(remote, buffered); close(done) }()
+		_, _ = io.Copy(connection, remote)
+		_ = connection.Close()
+		_ = remote.Close()
+		<-done
+	}))
+	t.Cleanup(proxyServer.Close)
+	t.Setenv("SBPM_IPCHECK_URLS", strings.Replace(origin.URL, "127.0.0.1", "localhost", 1))
+	address := net.JoinHostPort("localhost", strconv.Itoa(proxyServer.Listener.Addr().(*net.TCPAddr).Port))
+	ctx, cancel := context.WithTimeout(t.Context(), 2*time.Second)
+	defer cancel()
+	info, err := CheckProxyIPWithModeContext(ctx, address, "", "", models.InboundModeHTTPS)
+	if err == nil || info != nil || originRequests.Load() != 0 || !strings.Contains(err.Error(), "certificate") {
+		t.Fatalf("目标站点的证书验证被代理跳点豁免：%+v，%v，请求数 %d", info, err, originRequests.Load())
 	}
 }
 

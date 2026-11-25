@@ -122,6 +122,7 @@ async function waitControlReady(page, selector) {
 
 export async function clickControl(page, selector) {
   await waitControlReady(page, selector)
+  await page.$eval(selector, (element) => element.scrollIntoView({ block: 'center', inline: 'nearest' })).catch(() => {})
   await page.locator(selector).click()
 }
 

@@ -34,7 +34,7 @@ func TestIsolatedNodeIPCheckRendersOnlyEffectiveDependencies(t *testing.T) {
 	wireguard := strings.Replace(testWireGuardFlatConfig, `"mtu": 1280`, `"mtu":1280,"system_interface":true,"interface_name":"active-wg","listen_port":51820,"domain_resolver":"local"`, 1)
 	settings := models.Settings{GlobalUpstreamEnabled: true, GlobalUpstreamType: "wireguard", GlobalUpstreamConfig: wireguard}
 	sources := []models.ProxyNode{
-		{ID: 2, Enabled: true, Type: "socks5", Config: `{"server":"192.0.2.2","server_port":1080,"detour":"relay"}`, UpstreamMode: models.UpstreamModeLegacy},
+		{ID: 2, Enabled: true, Type: "socks5", Config: `{"server":"192.0.2.2","server_port":1080,"detour":"relay"}`, UpstreamMode: models.UpstreamModeLegacy, InboundMode: models.InboundModeHTTPS},
 		{ID: 3, Name: "relay", Enabled: true, Type: "direct", Config: `{"detour":"node-4-out"}`, InboundPort: 31003, Username: "existing-ingress", Password: "existing-key", TCPReuseEnabled: true, UpstreamMode: models.UpstreamModeLegacy},
 		{ID: 4, Name: "tunnel", Enabled: true, Type: "http", Config: `{"server":"192.0.2.4","server_port":8080,"detour":"ignored"}`, UpstreamMode: models.UpstreamModeGlobal},
 		{ID: 5, Name: "node-4-out", Enabled: true, Type: "invalid", Config: `invalid`, InboundPort: 31005},
@@ -60,7 +60,7 @@ func TestIsolatedNodeIPCheckRendersOnlyEffectiveDependencies(t *testing.T) {
 	}
 	config := decodeGeneratedConfig(t, data)
 	inbound := generatedEntryByTag(t, config, "inbounds", "node-2-in")
-	if len(config["inbounds"].([]any)) != 1 || inbound["listen"] != "127.0.0.1" || inbound["listen_port"] != float64(31999) || len(inbound["users"].([]any)) != 1 {
+	if len(config["inbounds"].([]any)) != 1 || inbound["listen"] != "127.0.0.1" || inbound["listen_port"] != float64(31999) || len(inbound["users"].([]any)) != 1 || inbound["type"] != "mixed" || inbound["tls"] != nil {
 		t.Fatal("dependency nodes opened extra listeners or exposed extra users")
 	}
 	for _, forbidden := range []string{"active-wg", "existing-ingress", "existing-key", "node-5-out", "node-6-out", "51820"} {

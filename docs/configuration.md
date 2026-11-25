@@ -1,6 +1,6 @@
 # 配置、数据库与运维指南
 
-本文档提供 SingBox Proxy Manager（`1.7.31`）完整的环境变量参考、多数据库配置、数据持久化、健康检查、安全加固与故障排查指南。
+本文档提供 SingBox Proxy Manager（`1.7.32`）完整的环境变量参考、多数据库配置、数据持久化、健康检查、安全加固与故障排查指南。
 
 ---
 
@@ -23,7 +23,9 @@
 | `PORT` | `30000` | 端口号字符串 | R | 管理后台 HTTP 监听端口 |
 | `BIND_ADDRESS` | `0.0.0.0` | IPv4 / IPv6 地址（自动剥离 IPv6 方括号） | R | **仅控制管理后台 HTTP 监听地址**；节点入站始终写为 `::` |
 | `CONFIG_DIR` | 二进制 `./config`<br/>容器 `/app/config` | 目录路径 | R | 存放 SQLite 数据库、`config.json`、`last-good`、内置内核与日志文件 |
-| `TZ` | `Asia/Shanghai`（容器） | IANA 时区或 `UTC/GMT` 偏移 | R | 兼容已有的 `UTC+8` 配置，解析失败时回退 `Asia/Shanghai` 或固定 `UTC+08`。 |
+| `TZ` | `Asia/Singapore` | 标准 IANA 时区名称（如 `Asia/Singapore`、`Asia/Shanghai`、`UTC`） | R | 仅接受标准 IANA 名称（拒绝 `UTC+8`、`GMT+8`、`Local` 等易与容器 POSIX 偏移反转的格式），无效或旧格式自动回退 `Asia/Singapore` 并同步进程 `TZ`。 |
+| `INBOUND_TLS_CERT_DIR` | 空（Compose 挂载 `./certs`） | 宿主机目录路径 | R / C | HTTPS 入站证书目录（Compose 只读挂载至容器 `/app/certs:ro`）。不使用 HTTPS 入站时留空且启动不报错；证书与私钥同目录时仅填本项（`INBOUND_TLS_KEY_DIR` 留空，切勿重复填同一路径）；Certbot 软链接场景请挂载包含目标文件的上级目录（如 `/etc/letsencrypt`）。 |
+| `INBOUND_TLS_KEY_DIR` | 空（Compose 挂载 `./certs`） | 宿主机目录路径 | R / C | HTTPS 入站私钥目录（Compose 只读挂载至容器 `/app/keys:ro`）。仅在证书与私钥分离存放于不同目录时选填；留空时自动在证书目录内配对。 |
 | `ACCEPT_USER_AGREEMENT` | `false` | `true` / `yes` / `y` / `1`（不区分大小写） | R | 位于 `.env` 中 `ADMIN_PASSWORD` 上方。二进制首次在交互式终端运行时会打印 `USER_AGREEMENT.md` 并要求输入 `y` 同意（同意哈希保存至 `<CONFIG_DIR>/user-agreement.accepted`）；Docker 或非交互式运行须显式设为 `true`，否则在建库与释放内核前直接退出 |
 | `ADMIN_PASSWORD` | 无默认密码 | 非空，上限 `72` UTF-8 字节 | R | 新库首次启动必填；老库已有有效密码时可留空；老库已有有效密码但尚未记录环境指纹时，首次设置仅登记指纹、不会覆盖旧密码或吊销会话；此后更改为新非空值并重启才会覆盖密码并吊销全部会话 |
 | `TRUSTED_PROXIES` | 空（不信任任何代理） | 逗号分隔 IP / CIDR | R | 反向代理可信列表（如 `127.0.0.1,10.0.0.0/8`），供 Gin 获取真实客户端 IP 用于登录限流 |
@@ -133,8 +135,8 @@
 
 数据库启动后自动创建并增量补齐核心应用表（无独立 `schema_version` 表）：
 - `node_groups`：节点分组定义、分组排序、端口分配开关（`allocate_port`）、分组起始端口（`start_port`）、分组级前置代理配置及检测结果（`upstream_*`）、独立订阅链接/定时周期与同步状态。
-- `proxy_nodes`：节点所属分组（`group_id`）、出站/策略配置、入站端口（无端口存 `NULL`）/认证/复用、前置代理定义、出口检测状态（`check_status` / `check_error`）与订阅同步标识（`subscription_key` / `subscription_name`）。
-- `settings`：全局单例配置、管理员密码与环境指纹、`auth_generation`、保留端口策略、全局前置代理、前端节点列表自定义列宽（`node_list_column_widths`）及日志持久化配置（`log_settings_json`）。
+- `proxy_nodes`：节点所属分组（`group_id`）、出站/策略配置（含 `member_sources` 整组同步来源）、入站端口（无端口存 `NULL`）/入站模式（`inbound_mode`，`mixed` 或 `https`）/认证/复用、前置代理定义、出口检测状态（`check_status` / `check_error`）与订阅同步标识（`subscription_key` / `subscription_name`）。
+- `settings`：全局单例配置、管理员密码与环境指纹、`auth_generation`、保留端口策略、全局前置代理、入站 TLS 已选证书与私钥逻辑路径（`inbound_tls_cert_path` / `inbound_tls_key_path`）、前端节点列表自定义列宽（`node_list_column_widths`）及日志持久化配置（`log_settings_json`）。
 - `admin_sessions`：登录会话 SHA-256 哈希、密码代次、有效期、登录 IP 与 User-Agent。
 - `manager_instance_lock`：单实例数据库租约锁。
 - `log_events` / `traffic_buckets`（按需创建）：仅当管理员显式启用日志持久化并选择 `store_mode=primary` 时在主库自动创建；选择 `local_sqlite` 或 `independent` 时创建在对应日志目标库中。
@@ -182,6 +184,7 @@ config/
 ### 5.1 版本升级与模式切换
 
 > **版本原地升级说明**：
+> - **从 `1.7.31` 升级至 `1.7.32`**：四类数据库均在启动时自动向 `proxy_nodes` 补齐 `inbound_mode`（默认 `'mixed'`）并向 `settings` 补齐 `inbound_tls_cert_path`、`inbound_tls_key_path`（默认 `''`），完整保留既有分组、节点、策略、端口与设置；若 `.env` 曾配置 `UTC+8` / `GMT+8` 等非 IANA 时区值，启动时会自动回退到标准 IANA 时区，建议同步调整 `.env` 中的 `TZ`。
 > - **从 `1.7.30` 升级至 `1.7.31`**：四类数据库均在启动时自动向 `node_groups` 补齐分组级前置代理字段（`upstream_*` 与内部修订号 `upstream_revision`，其中 MySQL 配置列使用 `LONGTEXT NOT NULL`、`upstream_ip` 为 `VARCHAR(255)`、`upstream_country_code` 为 `VARCHAR(32)`）并向 `settings` 补齐 `global_upstream_revision`，完整保留既有分组、节点、端口与订阅状态。
 > - **从 `1.7.29` 升级至 `1.7.30+`**：四类数据库均支持自动原地升级——系统会创建默认分组并继承原全局 `start_port`，完整保留全部节点的 ID、端口、固定标记、账密、备注与排序；无端口节点在数据库中以 `NULL` 存储，API 层统一返回 `0`。
 > - **从 `1.7.27` 及更早版本升级必读**：自 `1.7.28` 起新增用户协议首次确认门禁。升级前请先阅读 [`USER_AGREEMENT.md`](../USER_AGREEMENT.md)，并在原有 `.env` 的 `ADMIN_PASSWORD` 上方补充 `ACCEPT_USER_AGREEMENT=true`（独立二进制也可在交互式终端首次启动时输入 `y` 同意），否则 Docker 或 `systemd` 等非交互无人值守启动会拒绝启动并退出。

@@ -9,7 +9,7 @@ import (
 )
 
 const ProxyNodeSelectColumns = `
-	id, name, remark, type, config, inbound_port, inbound_port_pinned,
+	id, name, remark, type, config, inbound_port, inbound_mode, inbound_port_pinned,
 	username, password, tcp_reuse_enabled, upstream_mode, upstream_type,
 	upstream_config, upstream_ip, upstream_location, upstream_country_code,
 	upstream_latency, upstream_error, sort_order, node_ip, location, country_code, latency,
@@ -21,7 +21,7 @@ const runtimeSettingsSelectColumns = `
 	preserve_inbound_ports, global_upstream_enabled,
 	global_upstream_type, global_upstream_config, global_upstream_ip,
 	global_upstream_location, global_upstream_country_code, global_upstream_latency,
-	global_upstream_error, node_list_column_widths
+	global_upstream_error, node_list_column_widths, inbound_tls_cert_path, inbound_tls_key_path
 `
 
 const SettingsSnapshotColumns = `
@@ -51,6 +51,7 @@ func scanProxyNode(scanner rowScanner) (ProxyNode, error) {
 		&node.Type,
 		&node.Config,
 		&port,
+		&node.InboundMode,
 		&node.InboundPortPinned,
 		&node.Username,
 		&node.Password,
@@ -161,6 +162,8 @@ func LoadRuntimeSettings(ctx context.Context, db runtimeSettingsReader) (Setting
 		&settings.GlobalUpstreamLatency,
 		&settings.GlobalUpstreamError,
 		&columnWidths,
+		&settings.InboundTLSCertPath,
+		&settings.InboundTLSKeyPath,
 	)
 	if err != nil {
 		return settings, err

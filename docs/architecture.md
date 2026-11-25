@@ -1,10 +1,10 @@
 # 系统架构与核心机制
 
-本文档基于 `1.7.31` 源码梳理 SingBox Proxy Manager 的核心架构、运行时生命周期与安全边界。
+本文档基于 `1.7.32` 源码梳理 SingBox Proxy Manager 的核心架构、运行时生命周期与安全边界。
 
 ## 1. 总体定位与架构
 
-SingBox Proxy Manager 将多个不同协议的出站代理节点统一映射为多个本地 **Mixed（HTTP + SOCKS5 共用端口）** 入站，由**单个常驻 `sing-box` 子进程**负责全部转发；Go 后端同时托管管理 API、预压缩嵌入式前端面板、数据持久化以及 `sing-box` 进程守护。
+SingBox Proxy Manager 将多个不同协议的出站代理节点统一映射为多个本地 **Mixed（HTTP + SOCKS5 共用端口）** 或 **HTTPS (TLS 加密 HTTP)** 入站，由**单个常驻 `sing-box` 子进程**负责全部转发；Go 后端同时托管管理 API、预压缩嵌入式前端面板、数据持久化以及 `sing-box` 进程守护。
 
 > **架构边界澄清**：本项目不是订阅分发服务器、不是桌面端系统代理切换工具，也不是“一节点一内核进程”的多实例进程池。
 
@@ -40,7 +40,7 @@ flowchart LR
 
 | 组件 | 固定基线 | 源码依据 |
 | --- | --- | --- |
-| 应用版本 | `1.7.31`（后端嵌入 `version.txt`） | `internal/version/version.txt` |
+| 应用版本 | `1.7.32`（后端嵌入 `version.txt`） | `internal/version/version.txt` |
 | 容器基础镜像 | `alpine:3.24`（多架构静态二进制运行环境） | `Dockerfile`、`Dockerfile.release` |
 | Go 工具链 | **精确 `1.26.11`**（发行与内核构建强校验） | `go.mod`、`scripts/verify-go-build.sh` |
 | sing-box 内核 | **固定 `1.12.12`**（Go 1.26.11 重编译） | `scripts/build-sing-box.sh` |
@@ -104,7 +104,7 @@ flowchart LR
 
 ### 3.1 `sing-box` 配置生成规则（`backend/services/singbox.go`）
 
-- **单进程多入站与无端口出站**：每个已启用且分配了入站端口的节点生成一个 `mixed` 类型入站（标签 `node-<ID>-in`），同时承载 HTTP 与 SOCKS5 协议；入站监听地址固定写入 `::`（双栈监听），默认开启 `sniff` 与目标地址覆盖。位于不分配端口分组内的已启用实体节点（数据库 `inbound_port IS NULL`、API 返回 `0`）不生成独立 `mixed` 入站，但仍保留出站以供策略节点引用或隔离测 IP。
+- **单进程多入站、HTTPS (TLS) 加密与无端口出站**：每个已启用且分配了入站端口的节点默认生成一个 `mixed` 类型入站（标签 `node-<ID>-in`），同时承载 HTTP 与 SOCKS5 协议；当 `inbound_mode = "https"` 时生成 `sing-box` 原生 `type: "http"` + `tls`（`certificate_path` / `key_path`，支持宿主机证书续签热加载，并原生兼容现有 TCP 复用 `users` 路由），若外部证书丢失/过期则仅关闭该失效 HTTPS 监听器（fail-closed，绝不降级明文）而不阻断其他节点或恢复操作；后端 `services/inbound_tls.go` 自动扫描 `/app/certs` 与 `/app/keys`（含子目录与软链接，防环限容），按 PEM 头与 `tls.LoadX509KeyPair` 跨目录配对并按叶证书+公钥去重，唯一有效套件首次启用时自动落库稳定逻辑路径。入站监听地址固定写入 `::`（双栈监听），默认开启 `sniff` 与目标地址覆盖。位于不分配端口分组内的已启用实体节点（数据库 `inbound_port IS NULL`、API 返回 `0`）不生成独立入站，但仍保留出站以供策略节点引用或隔离测 IP。
   > 注意：环境变量 `BIND_ADDRESS` **仅控制管理后台 HTTP 服务**，不影响节点代理入站的 `::` 监听地址。
 - **出站映射与策略调度**：常规实体协议直接生成对应 `outbounds`（标签 `node-<ID>-out`，零额外跳转）；`wireguard` 协议按 `sing-box 1.12` 规范写入顶层 `endpoints`；配置末尾固定附加内置 `direct` 出站作为 `route.final`。仅当存在已启用策略节点（`failover` / `loadbalance`）时，才会额外启动管理进程内置的本机 SOCKS5 策略调度器（`127.0.0.1` 随机端口 + 随机认证密钥）并生成单个内部认证回环入站 `internal-policy-dispatch-in`，将策略出站映射到成员实体出站。
 - **本机控制接口**：配置内置 `experimental.clash_api`（监听随机 `127.0.0.1` 端口与随机 Bearer 密钥），仅在面板打开「当前连接」、调用连接快照或开启日志持久化时按需采集。

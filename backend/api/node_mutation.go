@@ -84,6 +84,7 @@ func (coordinator *nodeMutationCoordinator) executeTx(ctx context.Context, tx *s
 	var before []nodeMutationTable
 	var previousPaths map[int]checkPath
 	var previousGroupRoutes map[int]groupRuntimeRoute
+	var previousHTTPSListeners map[int]bool
 	if operation.ApplyRuntime {
 		var err error
 		before, err = captureNodeMutationTables(ctx, tx)
@@ -93,6 +94,12 @@ func (coordinator *nodeMutationCoordinator) executeTx(ctx context.Context, tx *s
 		previous, err := models.LoadProxyNodes(ctx, tx)
 		if err != nil {
 			return nil, err
+		}
+		previousHTTPSListeners = make(map[int]bool)
+		for _, node := range previous {
+			if node.Enabled && node.InboundPort > 0 && node.InboundMode == models.InboundModeHTTPS {
+				previousHTTPSListeners[node.ID] = true
+			}
 		}
 		settings, err := models.LoadRuntimeSettings(ctx, tx)
 		if err != nil {
@@ -122,6 +129,19 @@ func (coordinator *nodeMutationCoordinator) executeTx(ctx context.Context, tx *s
 	}
 	if err := reconcilePolicyReferences(ctx, tx, candidateNodes); err != nil {
 		return nil, err
+	}
+	for _, node := range candidateNodes {
+		if !node.Enabled || node.InboundPort <= 0 || node.InboundMode != models.InboundModeHTTPS || previousHTTPSListeners[node.ID] {
+			continue
+		}
+		if err := ensureInboundTLSReadyAndPersist(ctx, tx); err != nil {
+			return nil, err
+		}
+		settings, err = models.LoadRuntimeSettings(ctx, tx)
+		if err != nil {
+			return nil, err
+		}
+		break
 	}
 	candidatePaths := nodeCheckPaths(candidateNodes, settings)
 	if err := resetChangedChecks(ctx, tx, previousPaths, candidatePaths, candidateNodes, operation.ReplacedID); err != nil {

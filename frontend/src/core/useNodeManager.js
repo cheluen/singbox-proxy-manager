@@ -3,6 +3,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import api, { EXTERNAL_CHANGE_EVENT } from './api'
 import { columnWidthsEqual, normalizeColumnWidths } from './columnWidths'
 import { isNodeExportable, isPolicyNode, stableConfigSignature, stableJSONStringify } from './nodeModel'
+import { resolvePolicyMemberIds, unlinkPolicyGroupInSources } from './protocolForm'
 import { EMPTY_CRITERIA, collectFacets, filterNodes, hasActiveCriteria } from './nodeFilters'
 import { summarizeNodes } from './nodeView'
 import { useNodeChecks } from './useNodeChecks'
@@ -66,6 +67,7 @@ export function useNodeManager({ t, notify, confirm, onPasswordChanged }) {
   const allNodesRef = useRef(allNodes)
   const groupsRef = useRef(groups)
   const activeGroupIdRef = useRef(activeGroupId)
+  const flagBusyRef = useRef({})
   const runtimeRequest = useRef(null)
   const columnWidthsRef = useRef({})
   const persistedColumnWidthsRef = useRef({})
@@ -522,15 +524,24 @@ export function useNodeManager({ t, notify, confirm, onPasswordChanged }) {
   }, [loadGroups, loadNodes, notify, t])
 
   const reorderGroups = useCallback(async (ids) => {
+    const previous = groupsRef.current
+    const byId = new Map(previous.map((item) => [item.id, item]))
+    const optimistic = ids.map((id) => byId.get(id)).filter(Boolean)
+    if (optimistic.length === previous.length) {
+      resources.invalidate('groups')
+      setGroups(optimistic)
+    }
     try {
       await api.post('/node-groups/reorder', { ids })
       await loadGroups()
       return true
     } catch (error) {
+      setGroups(previous)
       notify.error(errorText(error, t('server_error')))
+      await loadGroups()
       return false
     }
-  }, [loadGroups, notify, t])
+  }, [loadGroups, notify, resources, t])
 
   const refreshGroupSubscription = useCallback(async (group) => {
     if (!group?.id || refreshingGroupId === group.id) return false
@@ -610,6 +621,80 @@ export function useNodeManager({ t, notify, confirm, onPasswordChanged }) {
       setFlagBusy((prev) => ({ ...prev, [node.id]: false }))
     }
   }, [flagBusy, loadGroups, loadNodes, notify, patchNode, t])
+
+  const setInboundMode = useCallback(async (node, nextMode) => {
+    if (!node?.id || flagBusy[node.id]) return false
+    const current = node.inbound_mode === 'https' ? 'https' : 'mixed'
+    const target = nextMode === 'https' ? 'https' : 'mixed'
+    if (current === target) return true
+    setFlagBusy((prev) => ({ ...prev, [node.id]: true }))
+    patchNode(node.id, { inbound_mode: target })
+    try {
+      const response = await api.patch(`/nodes/${node.id}`, { inbound_mode: target })
+      patchNode(node.id, response.data || { inbound_mode: target })
+      notify.success(t('inbound_mode_updated', { mode: target === 'https' ? t('inbound_mode_https') : t('inbound_mode_mixed') }))
+      return true
+    } catch (error) {
+      patchNode(node.id, { inbound_mode: current })
+      notify.error(errorText(error, t('server_error')))
+      void loadSettings()
+      return false
+    } finally {
+      setFlagBusy((prev) => ({ ...prev, [node.id]: false }))
+    }
+  }, [flagBusy, loadSettings, notify, patchNode, t])
+
+  const unlinkPolicyGroup = useCallback(async (node, groupId) => {
+    if (!node?.id || !isPolicyNode(node) || flagBusyRef.current[node.id]) return false
+    const latest = allNodesRef.current.find((item) => item.id === node.id) || node
+    let parsed = {}
+    try {
+      parsed = JSON.parse(latest.config || '{}')
+    } catch {
+      parsed = {}
+    }
+    const nextSources = unlinkPolicyGroupInSources(parsed.member_sources, groupId, allNodesRef.current, latest.id)
+    const hasGroupSource = nextSources.some((entry) => entry.type === 'group')
+    const nextConfig = {
+      ...parsed,
+      member_ids: resolvePolicyMemberIds(nextSources, allNodesRef.current, latest.id),
+    }
+    if (hasGroupSource) nextConfig.member_sources = nextSources
+    else delete nextConfig.member_sources
+    flagBusyRef.current = { ...flagBusyRef.current, [latest.id]: true }
+    setFlagBusy((prev) => ({ ...prev, [latest.id]: true }))
+    try {
+      const response = await api.put(`/nodes/${latest.id}`, {
+        group_id: latest.group_id,
+        name: latest.name,
+        remark: latest.remark || '',
+        type: latest.type,
+        config: JSON.stringify(nextConfig),
+        inbound_port: latest.inbound_port || 0,
+        inbound_mode: latest.inbound_mode === 'https' ? 'https' : 'mixed',
+        auth_enabled: Boolean(latest.username && latest.password),
+        username: latest.username || '',
+        password: latest.password || '',
+        tcp_reuse_enabled: latest.tcp_reuse_enabled !== false,
+        enabled: latest.enabled !== false,
+      })
+      if (response.data && typeof response.data === 'object') {
+        patchNode(latest.id, response.data)
+      }
+      const groupName = groupById.get(groupId)?.name || `#${groupId}`
+      notify.success(t('policy_group_unlinked', { name: groupName }))
+      await loadNodes({ silent: true })
+      return true
+    } catch (error) {
+      notify.error(errorText(error, t('server_error')))
+      return false
+    } finally {
+      const nextBusy = { ...flagBusyRef.current }
+      delete nextBusy[latest.id]
+      flagBusyRef.current = nextBusy
+      setFlagBusy((prev) => ({ ...prev, [latest.id]: false }))
+    }
+  }, [groupById, loadNodes, notify, patchNode, t])
 
   const togglePortPin = useCallback(async (node) => {
     if (preservePorts || pinBusy[node.id] || !node.inbound_port) return
@@ -723,6 +808,7 @@ export function useNodeManager({ t, notify, confirm, onPasswordChanged }) {
     createGroup, updateGroup, deleteGroup, reorderGroups, refreshGroupSubscription, checkGroupUpstream, moveNodesToGroup,
     toggleEnabled: (node) => toggleFlag(node, 'enabled'),
     toggleTcpReuse: (node) => toggleFlag(node, 'tcp_reuse_enabled'),
+    setInboundMode, unlinkPolicyGroup,
     togglePortPin, saveRemark, removeNode, saveNode, replaceNode, saveUpstream,
     helpers: { t, notify, confirm, onPasswordChanged, errorText, outboundSignature, isNodeExportable },
   }

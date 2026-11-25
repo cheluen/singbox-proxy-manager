@@ -1,11 +1,22 @@
-import { useState } from 'react'
-import { Alert, Button, Form, Input, Modal, Switch } from 'antd'
-import { Pencil, Plus, Zap } from 'lucide-react'
+import { useEffect, useState } from 'react'
+import { Alert, Button, Form, Input, Modal, Select, Switch } from 'antd'
+import { Lock, Pencil, Plus, RefreshCw, ShieldCheck, ShieldOff, Zap } from 'lucide-react'
 import { useTranslation } from 'react-i18next'
-import { protocolLabel } from '../core/nodeView'
+import { formatDateTime, protocolLabel } from '../core/nodeView'
 import { UpstreamDefinitionEditor } from './NodeDialogs'
 
 const utf8Length = (text) => new TextEncoder().encode(text).length
+const CERT_PAIR_SEP = '\u0000'
+const certPairKey = (certPath, keyPath) => (certPath && keyPath ? `${certPath}${CERT_PAIR_SEP}${keyPath}` : '')
+const splitCertPairKey = (key) => {
+  if (!key || !key.includes(CERT_PAIR_SEP)) return ['', '']
+  const [certPath, keyPath] = key.split(CERT_PAIR_SEP)
+  return [certPath || '', keyPath || '']
+}
+const certDomainLabel = (cert) => {
+  if (Array.isArray(cert?.domains) && cert.domains.length > 0) return cert.domains.join(', ')
+  return cert?.common_name || cert?.cert_path || ''
+}
 
 export function SettingsDialogBody({ ctl, onDone }) {
   const { t } = useTranslation()
@@ -16,19 +27,47 @@ export function SettingsDialogBody({ ctl, onDone }) {
 }
 
 function SettingsFormBody({ ctl, onDone }) {
-  const { t } = useTranslation()
+  const { t, i18n } = useTranslation()
   const [form] = Form.useForm()
   const saved = ctl.settings
+  const locale = i18n.language?.startsWith('zh') ? 'zh' : 'en'
   const [upstream, setUpstream] = useState({ type: saved.global_upstream_type || '', config: saved.global_upstream_config || '' })
   const [editorOpen, setEditorOpen] = useState(false)
   const [saving, setSaving] = useState(false)
   const [checking, setChecking] = useState(false)
+  const [rescanning, setRescanning] = useState(false)
   const upstreamEnabled = Form.useWatch('global_upstream_enabled', form)
   const newSecret = Form.useWatch('admin_secret', form)
+  const selectedCertPair = Form.useWatch('inbound_tls_pair', form)
+
+  const tlsStatus = saved.inbound_tls || { ready: false, selection_mode: 'none', certificates: [] }
+  const tlsCerts = Array.isArray(tlsStatus.certificates) ? tlsStatus.certificates : []
+  const validTlsCerts = tlsCerts.filter((cert) => !cert.expired)
+  const autoSingleCert = tlsStatus.ready && tlsStatus.selection_mode === 'auto' && tlsStatus.active ? tlsStatus.active : null
+  const showMultiSelect = !autoSingleCert && (tlsStatus.selection_mode === 'selected' || tlsStatus.selection_mode === 'unselected' || validTlsCerts.length > 1)
+  const savedCertKey = certPairKey(saved.inbound_tls_cert_path || '', saved.inbound_tls_key_path || '')
+  const matchedSavedCertKey = validTlsCerts.some((cert) => certPairKey(cert.cert_path, cert.key_path) === savedCertKey)
+    ? savedCertKey
+    : ''
+  const previewCert = autoSingleCert
+    || tlsCerts.find((cert) => certPairKey(cert.cert_path, cert.key_path) === (selectedCertPair || matchedSavedCertKey))
+    || null
+
+  useEffect(() => {
+    if (!form.isFieldTouched('inbound_tls_pair')) {
+      form.setFieldValue('inbound_tls_pair', matchedSavedCertKey || undefined)
+    }
+  }, [form, matchedSavedCertKey])
 
   const configured = Boolean(upstream.type && upstream.config)
   const matchesSaved = configured && upstream.type === (saved.global_upstream_type || '') && upstream.config === (saved.global_upstream_config || '')
   const hasCheckResult = Boolean(saved.global_upstream_ip || saved.global_upstream_latency || saved.global_upstream_error)
+
+  const rescanTLS = async () => {
+    setRescanning(true)
+    await ctl.loadSettings()
+    setRescanning(false)
+  }
 
   const submit = async (values) => {
     const update = {}
@@ -37,6 +76,16 @@ function SettingsFormBody({ ctl, onDone }) {
     if (upstream.type !== (saved.global_upstream_type || '')) update.global_upstream_type = upstream.type
     if (upstream.config !== (saved.global_upstream_config || '')) update.global_upstream_config = upstream.config
     if (values.admin_secret) update.admin_password = values.admin_secret
+    if (showMultiSelect) {
+      const nextPair = values.inbound_tls_pair || ''
+      if (nextPair && nextPair !== savedCertKey) {
+        const [certPath, keyPath] = splitCertPairKey(nextPair)
+        if (certPath && keyPath) {
+          update.inbound_tls_cert_path = certPath
+          update.inbound_tls_key_path = keyPath
+        }
+      }
+    }
 
     if (values.global_upstream_enabled && !configured) {
       ctl.helpers.notify.error(t('upstream_global_required'))
@@ -64,6 +113,17 @@ function SettingsFormBody({ ctl, onDone }) {
     setChecking(false)
   }
 
+  const tlsOptions = tlsCerts.map((cert) => {
+    const domains = certDomainLabel(cert)
+    const exp = cert.not_after ? formatDateTime(cert.not_after, locale) : '—'
+    const expSuffix = cert.expired ? ` [${t('inbound_tls_expired_badge')}]` : ''
+    return {
+      value: certPairKey(cert.cert_path, cert.key_path),
+      label: `${domains} · ${exp}${expSuffix}`,
+      disabled: Boolean(cert.expired),
+    }
+  })
+
   return (
     <Form
       form={form}
@@ -71,7 +131,13 @@ function SettingsFormBody({ ctl, onDone }) {
       requiredMark={false}
       className="sb-form"
       data-testid="settings-form"
-      initialValues={{ preserve_inbound_ports: Boolean(saved.preserve_inbound_ports), global_upstream_enabled: Boolean(saved.global_upstream_enabled), admin_secret: '', admin_secret_confirm: '' }}
+      initialValues={{
+        preserve_inbound_ports: Boolean(saved.preserve_inbound_ports),
+        global_upstream_enabled: Boolean(saved.global_upstream_enabled),
+        inbound_tls_pair: matchedSavedCertKey || undefined,
+        admin_secret: '',
+        admin_secret_confirm: '',
+      }}
       onFinish={submit}
     >
       <section className="sb-form-section">
@@ -86,6 +152,76 @@ function SettingsFormBody({ ctl, onDone }) {
           </Form.Item>
         </div>
         <p className="sb-form-note">{t('settings_group_start_port_hint')}</p>
+      </section>
+
+      <section className="sb-form-section" data-testid="settings-inbound-tls">
+        <div className="sb-form-section__head">
+          <h3 className="sb-form-section__title">{t('settings_inbound_tls')}</h3>
+          <Button
+            size="small"
+            icon={<RefreshCw size={13} strokeWidth={1.8} className={rescanning ? 'sb-spin' : undefined} />}
+            loading={rescanning}
+            onClick={rescanTLS}
+            data-testid="inbound-tls-rescan"
+          >
+            {t('inbound_tls_rescan')}
+          </Button>
+        </div>
+        {!autoSingleCert && !showMultiSelect ? (
+          <div className="sb-inline-card sb-tls-card is-empty" data-testid="inbound-tls-empty">
+            <span className="sb-tls-card__icon"><ShieldOff size={18} strokeWidth={1.75} /></span>
+            <div className="sb-inline-card__text">
+              <strong>{t('inbound_tls_none_title')}</strong>
+              <span>{t('inbound_tls_none_desc')}</span>
+            </div>
+          </div>
+        ) : autoSingleCert ? (
+          <div className="sb-tls-panel" data-testid="inbound-tls-single">
+            <p className="sb-form-note">{t('inbound_tls_single_hint')}</p>
+            <div className="sb-inline-card sb-tls-card is-ready">
+              <span className="sb-tls-card__icon"><ShieldCheck size={18} strokeWidth={1.75} /></span>
+              <div className="sb-inline-card__text">
+                <strong className="sb-inline">
+                  <span className="truncate">{certDomainLabel(autoSingleCert)}</span>
+                  <span className="sb-tls-badge is-ok">{t('inbound_tls_auto_badge')}</span>
+                  {autoSingleCert.expired ? <span className="sb-tls-badge is-bad">{t('inbound_tls_expired_badge')}</span> : null}
+                </strong>
+                <span>
+                  {`${t('inbound_tls_expires')}: ${formatDateTime(autoSingleCert.not_after, locale)}`}
+                </span>
+                <span className="mono sb-tls-card__path">{autoSingleCert.cert_path}</span>
+              </div>
+            </div>
+          </div>
+        ) : (
+          <div className="sb-tls-panel" data-testid="inbound-tls-multi">
+            <p className="sb-form-note">{t('inbound_tls_multi_hint')}</p>
+            <Form.Item name="inbound_tls_pair" label={t('inbound_tls_select_label')}>
+              <Select
+                options={tlsOptions}
+                placeholder={t('inbound_tls_select_placeholder')}
+                virtual={false}
+                data-testid="inbound-tls-cert-select"
+              />
+            </Form.Item>
+            {previewCert ? (
+              <div className="sb-inline-card sb-tls-card is-ready" data-testid="inbound-tls-selected-info">
+                <span className="sb-tls-card__icon"><Lock size={16} strokeWidth={1.8} /></span>
+                <div className="sb-inline-card__text">
+                  <strong className="sb-inline">
+                    <span className="truncate">{certDomainLabel(previewCert)}</span>
+                    {certPairKey(previewCert.cert_path, previewCert.key_path) === matchedSavedCertKey ? (
+                      <span className="sb-tls-badge is-ok">{t('inbound_tls_selected_badge')}</span>
+                    ) : null}
+                    {previewCert.expired ? <span className="sb-tls-badge is-bad">{t('inbound_tls_expired_badge')}</span> : null}
+                  </strong>
+                  <span>{`${t('inbound_tls_expires')}: ${formatDateTime(previewCert.not_after, locale)}`}</span>
+                  <span className="mono sb-tls-card__path">{`${previewCert.cert_path} · ${previewCert.key_path}`}</span>
+                </div>
+              </div>
+            ) : null}
+          </div>
+        )}
       </section>
 
       <section className="sb-form-section">

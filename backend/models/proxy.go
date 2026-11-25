@@ -32,6 +32,7 @@ type ProxyNode struct {
 	Type              string     `json:"type"`   // ss, vless, vmess, hy2, tuic, trojan, anytls, socks5, socks5h, http, wireguard, direct
 	Config            string     `json:"config"` // JSON string of protocol-specific config
 	InboundPort       int        `json:"inbound_port"`
+	InboundMode       string     `json:"inbound_mode"`
 	InboundPortPinned bool       `json:"inbound_port_pinned"`
 	Username          string     `json:"username"`
 	Password          string     `json:"password"`
@@ -56,6 +57,9 @@ type ProxyNode struct {
 }
 
 const (
+	InboundModeMixed = "mixed"
+	InboundModeHTTPS = "https"
+
 	UpstreamModeLegacy = "legacy"
 	UpstreamModeNone   = "none"
 	UpstreamModeGlobal = "global"
@@ -92,6 +96,17 @@ func (settings Settings) EffectiveUpstream(node ProxyNode) (string, ProxyDefinit
 		return mode, ProxyDefinition{}
 	}
 	return UpstreamModeNone, ProxyDefinition{}
+}
+
+func NormalizeInboundMode(raw string) (string, error) {
+	mode := strings.ToLower(strings.TrimSpace(raw))
+	if mode == "" {
+		return InboundModeMixed, nil
+	}
+	if mode != InboundModeMixed && mode != InboundModeHTTPS {
+		return "", fmt.Errorf("unsupported inbound mode: %s", raw)
+	}
+	return mode, nil
 }
 
 func NormalizeUpstreamMode(raw string) (string, error) {
@@ -492,6 +507,8 @@ type Settings struct {
 	GlobalUpstreamLatency     int                   `json:"global_upstream_latency"`
 	GlobalUpstreamError       string                `json:"global_upstream_error"`
 	NodeListColumnWidths      map[string]int        `json:"node_list_column_widths"`
+	InboundTLSCertPath        string                `json:"inbound_tls_cert_path"`
+	InboundTLSKeyPath         string                `json:"inbound_tls_key_path"`
 }
 
 const (
@@ -854,6 +871,7 @@ func schemaStatements(dialect appdb.Dialect) []string {
 				type TEXT NOT NULL,
 				config TEXT NOT NULL,
 				inbound_port INTEGER,
+				inbound_mode TEXT NOT NULL DEFAULT 'mixed',
 				inbound_port_pinned BOOLEAN NOT NULL DEFAULT FALSE,
 				username TEXT NOT NULL DEFAULT '',
 				password TEXT NOT NULL DEFAULT '',
@@ -893,6 +911,8 @@ func schemaStatements(dialect appdb.Dialect) []string {
 				global_upstream_latency INTEGER NOT NULL DEFAULT 0,
 				global_upstream_error TEXT NOT NULL DEFAULT '',
 				node_list_column_widths TEXT NOT NULL DEFAULT '{}',
+				inbound_tls_cert_path TEXT NOT NULL DEFAULT '',
+				inbound_tls_key_path TEXT NOT NULL DEFAULT '',
 				created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
 				updated_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
 			)`,
@@ -919,6 +939,7 @@ func schemaStatements(dialect appdb.Dialect) []string {
 				type VARCHAR(64) NOT NULL,
 				config LONGTEXT NOT NULL,
 				inbound_port INTEGER,
+				inbound_mode VARCHAR(16) NOT NULL DEFAULT 'mixed',
 				inbound_port_pinned BOOLEAN NOT NULL DEFAULT FALSE,
 				username VARCHAR(255) NOT NULL DEFAULT '',
 				password VARCHAR(255) NOT NULL DEFAULT '',
@@ -958,6 +979,8 @@ func schemaStatements(dialect appdb.Dialect) []string {
 				global_upstream_latency INTEGER NOT NULL DEFAULT 0,
 				global_upstream_error VARCHAR(2048) NOT NULL DEFAULT '',
 				node_list_column_widths TEXT NULL,
+				inbound_tls_cert_path VARCHAR(4096) NOT NULL DEFAULT '',
+				inbound_tls_key_path VARCHAR(4096) NOT NULL DEFAULT '',
 				created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
 				updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
 			)`,
@@ -984,6 +1007,7 @@ func schemaStatements(dialect appdb.Dialect) []string {
 				type TEXT NOT NULL,
 				config TEXT NOT NULL,
 				inbound_port INTEGER,
+				inbound_mode TEXT NOT NULL DEFAULT 'mixed',
 				inbound_port_pinned INTEGER NOT NULL DEFAULT 0,
 				username TEXT DEFAULT '',
 				password TEXT DEFAULT '',
@@ -1023,6 +1047,8 @@ func schemaStatements(dialect appdb.Dialect) []string {
 				global_upstream_latency INTEGER NOT NULL DEFAULT 0,
 				global_upstream_error TEXT NOT NULL DEFAULT '',
 				node_list_column_widths TEXT NOT NULL DEFAULT '{}',
+				inbound_tls_cert_path TEXT NOT NULL DEFAULT '',
+				inbound_tls_key_path TEXT NOT NULL DEFAULT '',
 				created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
 				updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
 			)`,
@@ -1043,6 +1069,9 @@ func migrationColumns(dialect appdb.Dialect) []migrationColumn {
 	switch dialect {
 	case appdb.DialectPostgres:
 		return []migrationColumn{
+			{Table: "proxy_nodes", Name: "inbound_mode", AlterSQL: "ALTER TABLE proxy_nodes ADD COLUMN inbound_mode TEXT NOT NULL DEFAULT 'mixed'"},
+			{Table: "settings", Name: "inbound_tls_cert_path", AlterSQL: "ALTER TABLE settings ADD COLUMN inbound_tls_cert_path TEXT NOT NULL DEFAULT ''"},
+			{Table: "settings", Name: "inbound_tls_key_path", AlterSQL: "ALTER TABLE settings ADD COLUMN inbound_tls_key_path TEXT NOT NULL DEFAULT ''"},
 			{Table: "proxy_nodes", Name: "remark", AlterSQL: "ALTER TABLE proxy_nodes ADD COLUMN remark TEXT NOT NULL DEFAULT ''"},
 			{Table: "proxy_nodes", Name: "tcp_reuse_enabled", AlterSQL: "ALTER TABLE proxy_nodes ADD COLUMN tcp_reuse_enabled BOOLEAN NOT NULL DEFAULT TRUE"},
 			{Table: "proxy_nodes", Name: "inbound_port_pinned", AlterSQL: "ALTER TABLE proxy_nodes ADD COLUMN inbound_port_pinned BOOLEAN NOT NULL DEFAULT FALSE"},
@@ -1071,6 +1100,9 @@ func migrationColumns(dialect appdb.Dialect) []migrationColumn {
 		}
 	case appdb.DialectMySQL:
 		return []migrationColumn{
+			{Table: "proxy_nodes", Name: "inbound_mode", AlterSQL: "ALTER TABLE proxy_nodes ADD COLUMN inbound_mode VARCHAR(16) NOT NULL DEFAULT 'mixed'"},
+			{Table: "settings", Name: "inbound_tls_cert_path", AlterSQL: "ALTER TABLE settings ADD COLUMN inbound_tls_cert_path VARCHAR(4096) NOT NULL DEFAULT ''"},
+			{Table: "settings", Name: "inbound_tls_key_path", AlterSQL: "ALTER TABLE settings ADD COLUMN inbound_tls_key_path VARCHAR(4096) NOT NULL DEFAULT ''"},
 			{Table: "proxy_nodes", Name: "remark", AlterSQL: "ALTER TABLE proxy_nodes ADD COLUMN remark VARCHAR(1024) NOT NULL DEFAULT ''"},
 			{Table: "proxy_nodes", Name: "tcp_reuse_enabled", AlterSQL: "ALTER TABLE proxy_nodes ADD COLUMN tcp_reuse_enabled BOOLEAN NOT NULL DEFAULT TRUE"},
 			{Table: "proxy_nodes", Name: "inbound_port_pinned", AlterSQL: "ALTER TABLE proxy_nodes ADD COLUMN inbound_port_pinned BOOLEAN NOT NULL DEFAULT FALSE"},
@@ -1099,6 +1131,9 @@ func migrationColumns(dialect appdb.Dialect) []migrationColumn {
 		}
 	default:
 		return []migrationColumn{
+			{Table: "proxy_nodes", Name: "inbound_mode", AlterSQL: "ALTER TABLE proxy_nodes ADD COLUMN inbound_mode TEXT NOT NULL DEFAULT 'mixed'"},
+			{Table: "settings", Name: "inbound_tls_cert_path", AlterSQL: "ALTER TABLE settings ADD COLUMN inbound_tls_cert_path TEXT NOT NULL DEFAULT ''"},
+			{Table: "settings", Name: "inbound_tls_key_path", AlterSQL: "ALTER TABLE settings ADD COLUMN inbound_tls_key_path TEXT NOT NULL DEFAULT ''"},
 			{Table: "proxy_nodes", Name: "remark", AlterSQL: "ALTER TABLE proxy_nodes ADD COLUMN remark TEXT DEFAULT ''"},
 			{Table: "proxy_nodes", Name: "tcp_reuse_enabled", AlterSQL: "ALTER TABLE proxy_nodes ADD COLUMN tcp_reuse_enabled INTEGER NOT NULL DEFAULT 1"},
 			{Table: "proxy_nodes", Name: "inbound_port_pinned", AlterSQL: "ALTER TABLE proxy_nodes ADD COLUMN inbound_port_pinned INTEGER NOT NULL DEFAULT 0"},

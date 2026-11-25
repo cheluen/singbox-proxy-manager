@@ -18,7 +18,7 @@ const TOKEN = 'dusk-regression-session'
 const makeNode = (id, patch = {}) => ({
   id, group_id: 1, name: `Node ${String(id).padStart(3, '0')}`, remark: '', type: 'ss',
   config: JSON.stringify({ server: `n${id}.example.com`, server_port: 443, method: 'aes-128-gcm', password: 'protocol-secret' }),
-  inbound_port: 30000 + id, inbound_port_pinned: false, sort_order: id - 1,
+  inbound_port: 30000 + id, inbound_port_pinned: false, inbound_mode: 'mixed', sort_order: id - 1,
   username: 'alice', password: 'inbound-secret', enabled: true, tcp_reuse_enabled: true,
   upstream_mode: 'none', upstream_type: '', upstream_config: '',
   check_status: 'ok', check_error: '',
@@ -63,7 +63,16 @@ function createFixture() {
       subscription_url: '', subscription_auto_update: false, subscription_interval_minutes: 60, subscription_last_error: '',
     }],
     nodes: [makeNode(1), makeNode(2, { type: 'vless', check_status: 'untested', country_code: '', location: '', node_ip: '', latency: 0, tcp_reuse_enabled: false }), makeNode(3, { type: 'vmess', enabled: false, country_code: 'US', location: 'Boston, United States' }), makeNode(4)],
-    settings: { preserve_inbound_ports: false, global_upstream_enabled: false, global_upstream_type: '', global_upstream_config: '', node_list_column_widths: {} },
+    settings: {
+      preserve_inbound_ports: false,
+      global_upstream_enabled: false,
+      global_upstream_type: '',
+      global_upstream_config: '',
+      node_list_column_widths: {},
+      inbound_tls_cert_path: '',
+      inbound_tls_key_path: '',
+      inbound_tls: { ready: false, selection_mode: 'none', certificates: [] },
+    },
     runtime: { running: true, degraded: false, pid: 1234 }, version: VERSION, update: { available: false },
     connectionsSnapshot: {
       runtime_epoch: '1234-1', sampled_at: new Date().toISOString(), active_connections: 3, client_count: 1, route_count: 2,
@@ -285,6 +294,18 @@ function createFixture() {
     if (route === '/api/settings' && method === 'PUT') {
       state.settingsSaves.push(body)
       Object.assign(state.settings, body)
+      if (Object.hasOwn(body || {}, 'inbound_tls_cert_path') || Object.hasOwn(body || {}, 'inbound_tls_key_path')) {
+        const certs = state.settings.inbound_tls?.certificates || []
+        const matched = certs.find((c) => c.cert_path === state.settings.inbound_tls_cert_path && c.key_path === state.settings.inbound_tls_key_path)
+        if (matched) {
+          state.settings.inbound_tls = {
+            ...state.settings.inbound_tls,
+            ready: true,
+            selection_mode: certs.length === 1 ? 'auto' : 'selected',
+            active: matched,
+          }
+        }
+      }
       const runtimeFields = ['start_port', 'preserve_inbound_ports', 'global_upstream_enabled', 'global_upstream_type', 'global_upstream_config']
       if (runtimeFields.some((key) => Object.hasOwn(body || {}, key))) reorderPorts()
       if (body.admin_password) {
@@ -1207,10 +1228,12 @@ const scenarios = {
     assert.deepEqual(state.settings.node_list_column_widths, {})
     await page.waitForSelector('[data-testid="reset-column-widths"]', { hidden: true })
 
-    // 验证缩窄后的端口与延迟列在三个断点、中英文双语下容纳 5 位固定端口与 4 位延迟不换行且不裁切表头
-    state.nodes[0].inbound_port = 65535
+    // 验证缩窄后的端口与延迟列在三个断点、中英文双语下容纳最宽 5 位固定端口（65535 / 88888）与 4 位延迟不换行且不裁切表头
+    state.nodes[0].inbound_port = 88888
     state.nodes[0].inbound_port_pinned = true
     state.nodes[0].latency = 9999
+    state.nodes[1].inbound_port = 65535
+    state.nodes[1].inbound_port_pinned = true
     await refresh()
     for (const lang of ['English', '中文']) {
       await clickControl(page, `button[title="${lang}"]`)
@@ -1221,20 +1244,22 @@ const scenarios = {
         const fit = await page.evaluate(() => {
           const portHead = document.querySelector('.dusk-head [data-col-key="port"]')?.getBoundingClientRect()
           const latHead = document.querySelector('.dusk-head [data-col-key="latency"]')?.getBoundingClientRect()
-          const portChip = document.querySelector('[data-row-id="1"] .sb-port')
+          const portChip1 = document.querySelector('[data-row-id="1"] .sb-port')
+          const portChip2 = document.querySelector('[data-row-id="2"] .sb-port')
           const latEl = document.querySelector('[data-row-id="1"] .sb-latency')
-          const portRect = portChip?.getBoundingClientRect()
+          const portRect1 = portChip1?.getBoundingClientRect()
+          const portRect2 = portChip2?.getBoundingClientRect()
           const latRect = latEl?.getBoundingClientRect()
           return {
             portHeadW: Math.round(portHead?.width || 0),
             latHeadW: Math.round(latHead?.width || 0),
-            portOverflow: portRect ? portRect.right > (portHead?.right || 0) + 1 : true,
-            portWrapped: portRect ? portRect.height > 28 : true,
+            portOverflow: [portRect1, portRect2].some((rect) => !rect || rect.right > (portHead?.right || 0) + 1),
+            portWrapped: [portRect1, portRect2].some((rect) => !rect || rect.height > 28),
             latOverflow: latRect ? latRect.right > (latHead?.right || 0) + 1 : true,
             latWrapped: latRect ? latRect.height > 24 : true,
           }
         })
-        assert.ok(fit.portHeadW <= 82, `${lang}/${width} 端口列过宽：${fit.portHeadW}px`)
+        assert.ok(fit.portHeadW <= 70, `${lang}/${width} 端口列过宽：${fit.portHeadW}px`)
         assert.ok(fit.latHeadW <= 66, `${lang}/${width} 延迟列过宽：${fit.latHeadW}px`)
         assert.equal(fit.portOverflow, false, `${lang}/${width} 5位固定端口溢出`)
         assert.equal(fit.portWrapped, false, `${lang}/${width} 5位固定端口换行`)
@@ -1323,6 +1348,129 @@ const scenarios = {
     await closeOverlay(page)
     await clickControl(page, 'button[title="English"]')
     await page.waitForFunction(() => document.documentElement.lang === 'en')
+
+    // 分组标签拖动排序：将右侧分组 Pool NoPort(2) 拖到 Default(1) 左侧
+    const tab2 = await page.$('[data-testid="group-tab-2"]')
+    const tab1 = await page.$('[data-testid="group-tab-1"]')
+    const box2 = await tab2.boundingBox()
+    const box1 = await tab1.boundingBox()
+    await page.mouse.move(box2.x + box2.width / 2, box2.y + box2.height / 2)
+    await page.mouse.down()
+    await page.mouse.move(box1.x + 8, box1.y + box1.height / 2, { steps: 16 })
+    await page.mouse.up()
+    await eventually(() => state.groups[0].id === 2 && state.groups[1].id === 1, '分组拖动排序未提交生效')
+    assert.deepEqual(
+      await page.$$eval('.dusk-group-tab', (els) => els.map((el) => Number(el.dataset.groupId))),
+      [2, 1],
+      '分组标签顺序未更新'
+    )
+
+    // 策略节点整组导入 + 按 ID 排序预览 + 编辑器内断链与详情卡片快捷断链
+    await clickControl(page, '[data-testid="group-tab-1"]')
+    await clickControl(page, '[data-testid="nodes-add-node"]')
+    await selectOption(page, 'proxy_type', 'Failover (Policy)')
+    await setInput(page, '#name', 'Group Sync Policy')
+    await clickControl(page, '[data-testid="policy-add-group-select"]')
+    await clickText(page, 'Pool NoPort', { root: '.ant-select-dropdown:not(.ant-select-dropdown-hidden)', exact: false })
+    await page.waitForSelector('[data-member-group-id="2"]', { visible: true })
+    await clickControl(page, '[data-testid="auth-generate"]')
+    await saveNodeForm(page)
+    await waitOverlaysClosed(page)
+    const createdPolicy = state.nodes.find((n) => n.name === 'Group Sync Policy')
+    assert.ok(createdPolicy, '整组策略节点未创建')
+    assert.deepEqual(JSON.parse(createdPolicy.config).member_sources, [{ type: 'group', id: 2 }])
+
+    // 详情卡片展示已关联分组标签与断链按钮，点击断链将成员固化为独立节点列表
+    await clickControl(page, `[data-testid="node-open-${createdPolicy.id}"]`)
+    await page.waitForSelector(`[data-testid="policy-linked-groups-${createdPolicy.id}"]`, { visible: true })
+    await clickControl(page, '[data-testid="policy-detail-unlink-group-2"]')
+    await eventually(() => {
+      const updated = state.nodes.find((n) => n.id === createdPolicy.id)
+      const cfg = JSON.parse(updated?.config || '{}')
+      return !Object.hasOwn(cfg, 'member_sources') && Array.isArray(cfg.member_ids) && cfg.member_ids.includes(2)
+    }, '详情快捷断链未解除分组关联')
+    await page.waitForSelector(`[data-testid="policy-linked-groups-${createdPolicy.id}"]`, { hidden: true })
+  },
+
+  async 'inbound-https-ui'({ page, state }) {
+    const syncSettings = async () => {
+      await Promise.all([
+        page.waitForResponse((response) => response.request().method() === 'GET' && new URL(response.url()).pathname === '/api/settings'),
+        page.click('[data-testid="nodes-refresh"]'),
+      ])
+      await sleep(80)
+    }
+    // 1. 无有效证书时：设置中展示引导，节点详情点击 HTTPS 触发弹回微动效并保持 Mixed
+    await clickControl(page, '[data-testid="open-settings"]')
+    await page.waitForSelector('[data-testid="inbound-tls-empty"]', { visible: true })
+    await closeOverlay(page)
+
+    await clickControl(page, '[data-testid="node-open-1"]')
+    await page.waitForSelector('[data-testid="node-inbound-mode-1"]', { visible: true })
+    assert.equal(await page.$eval('[data-testid="node-inbound-mode-1"]', (el) => el.dataset.mode), 'mixed')
+    await clickControl(page, '[data-testid="node-inbound-mode-1"] [data-value="https"]')
+    await eventually(async () => Number(await page.$eval('[data-testid="node-inbound-mode-1"]', (el) => el.dataset.bounceSeq)) >= 1, '无证书时点击 HTTPS 未触发弹回微动效')
+    assert.equal(await page.$eval('[data-testid="node-inbound-mode-1"]', (el) => el.dataset.mode), 'mixed', '无证书时不应切换到 HTTPS')
+    assert.equal(state.nodes[0].inbound_mode, 'mixed')
+
+    // 2. 单套有效证书时自动默认选中：设置展示自动选中卡片，可切换至 HTTPS 且连接区仅展示 HTTPS 与 curl
+    const certA = {
+      cert_path: '/app/certs/alpha.crt',
+      key_path: '/app/certs/alpha.key',
+      domains: ['alpha.example.com'],
+      common_name: 'alpha.example.com',
+      not_after: '2027-06-01T00:00:00Z',
+      expired: false,
+    }
+    const certB = {
+      cert_path: '/app/certs/beta.crt',
+      key_path: '/app/keys/beta.key',
+      domains: ['beta.example.com', '*.beta.example.com'],
+      common_name: 'beta.example.com',
+      not_after: '2027-09-01T00:00:00Z',
+      expired: false,
+    }
+    state.settings.inbound_tls = { ready: true, selection_mode: 'auto', active: certA, certificates: [certA] }
+    await syncSettings()
+    await clickControl(page, '[data-testid="open-settings"]')
+    await page.waitForSelector('[data-testid="inbound-tls-single"]', { visible: true })
+    await closeOverlay(page)
+
+    await clickControl(page, '[data-testid="node-inbound-mode-1"] [data-value="https"]')
+    await eventually(() => state.nodes[0].inbound_mode === 'https', '有效证书下切换到 HTTPS 失败')
+    await page.waitForSelector('[data-testid="node-https-mark-1"]', { visible: true })
+    const connectLabels = await page.$$eval('[data-testid="node-inspector"] .sb-connect .sb-url__label', (els) => els.map((el) => el.textContent.trim()))
+    assert.ok(connectLabels.includes('HTTPS') && connectLabels.includes('curl'), `HTTPS 模式连接区标签异常：${connectLabels.join(',')}`)
+    assert.equal(connectLabels.includes('HTTP'), false, 'HTTPS 模式不应显示明文 HTTP 连接项')
+    assert.equal(connectLabels.includes('SOCKS5'), false, 'HTTPS 模式不应显示 SOCKS5 连接项')
+    const httpsConnectText = await page.$eval('[data-testid="node-inspector"] .sb-connect', (el) => el.textContent)
+    assert.ok(httpsConnectText.includes('https://'), 'HTTPS 模式未展示 https:// 连接地址')
+
+    // 切回 Mixed 后恢复 HTTP + SOCKS5
+    await clickControl(page, '[data-testid="node-inbound-mode-1"] [data-value="mixed"]')
+    await eventually(() => state.nodes[0].inbound_mode === 'mixed', '切回 Mixed 失败')
+
+    // 3. 多套证书未选择时拦截切换并弹回，在设置下拉选择保存后解锁切换
+    state.settings.inbound_tls = { ready: false, selection_mode: 'unselected', active: null, certificates: [certA, certB] }
+    state.settings.inbound_tls_cert_path = ''
+    state.settings.inbound_tls_key_path = ''
+    await syncSettings()
+    const seqBefore = Number(await page.$eval('[data-testid="node-inbound-mode-1"]', (el) => el.dataset.bounceSeq))
+    await clickControl(page, '[data-testid="node-inbound-mode-1"] [data-value="https"]')
+    await eventually(async () => Number(await page.$eval('[data-testid="node-inbound-mode-1"]', (el) => el.dataset.bounceSeq)) > seqBefore, '多证书未选定时未弹回')
+    assert.equal(state.nodes[0].inbound_mode, 'mixed')
+
+    await clickControl(page, '[data-testid="open-settings"]')
+    await page.waitForSelector('[data-testid="inbound-tls-multi"]', { visible: true })
+    await clickControl(page, '[data-testid="inbound-tls-cert-select"]')
+    await clickText(page, 'beta.example.com', { root: '.ant-select-dropdown:not(.ant-select-dropdown-hidden)', exact: false })
+    await clickText(page, 'Save Settings')
+    await waitOverlaysClosed(page)
+    assert.equal(state.settings.inbound_tls_cert_path, certB.cert_path)
+    assert.equal(state.settings.inbound_tls_key_path, certB.key_path)
+
+    await clickControl(page, '[data-testid="node-inbound-mode-1"] [data-value="https"]')
+    await eventually(() => state.nodes[0].inbound_mode === 'https', '多证书保存后切换到 HTTPS 失败')
   },
 
   async 'connections-logs-ui'({ page, state }) {

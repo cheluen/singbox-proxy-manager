@@ -1,12 +1,20 @@
 // 节点 / 前置代理编辑表单。字段由 core/protocolSchema.js 声明，保存逻辑由 core/protocolForm.js 提供
 import { useMemo, useState } from 'react'
 import { App, Button, Collapse, Form, Input, InputNumber, Radio, Select, Switch } from 'antd'
-import { ArrowDown, ArrowUp, Braces, X } from 'lucide-react'
+import { ArrowDown, ArrowUp, Braces, Link2, Unlink, X } from 'lucide-react'
 import { useTranslation } from 'react-i18next'
-import { createProtocolFormModel, isPolicyType, localizedProxyTypes, normalizeClearedSelect } from '../core/protocolForm'
+import {
+  createProtocolFormModel,
+  groupPhysicalNodesById,
+  isPolicyType,
+  localizedProxyTypes,
+  normalizeClearedSelect,
+  normalizePolicyMemberSources,
+  unlinkPolicyGroupInSources,
+} from '../core/protocolForm'
 import { groupFields, protocolLabel } from '../core/protocolSchema'
 import { isPolicyNode } from '../core/nodeModel'
-import { InboundAuthBox } from './NodeParts'
+import { InboundAuthBox, InboundModeSwitch } from './NodeParts'
 
 const GROUP_TITLE = { main: 'form_group_protocol', transport: 'form_group_transport', tls: 'form_group_tls', advanced: 'form_group_advanced' }
 
@@ -64,6 +72,26 @@ function PolicyMemberSelector({ value = [], onChange, allNodes = [], groups = []
   const nodeById = useMemo(() => new Map(entityNodes.map((item) => [item.id, item])), [entityNodes])
   const groupById = useMemo(() => new Map(groups.map((item) => [item.id, item])), [groups])
 
+  const sources = useMemo(() => normalizePolicyMemberSources(value), [value])
+  const linkedGroupIds = useMemo(
+    () => new Set(sources.filter((entry) => entry.type === 'group').map((entry) => entry.id)),
+    [sources]
+  )
+  const manualNodeIds = useMemo(
+    () => sources.filter((entry) => entry.type === 'node').map((entry) => entry.id),
+    [sources]
+  )
+
+  const groupOptions = useMemo(() => groups.map((group) => {
+    const members = groupPhysicalNodesById(entityNodes, group.id, excludeNodeId)
+    const noPort = group.allocate_port === false ? ` · ${t('group_no_port_badge')}` : ''
+    return {
+      value: group.id,
+      disabled: linkedGroupIds.has(group.id),
+      label: `${group.name} (${t('policy_group_node_count', { count: members.length })}${noPort})`,
+    }
+  }), [entityNodes, excludeNodeId, groups, linkedGroupIds, t])
+
   const groupedOptions = useMemo(() => {
     const byGroup = new Map()
     for (const item of entityNodes) {
@@ -96,38 +124,126 @@ function PolicyMemberSelector({ value = [], onChange, allNodes = [], groups = []
     return result
   }, [entityNodes, groups, t])
 
-  const selectedIds = Array.isArray(value) ? value : []
+  const addGroup = (groupId) => {
+    const id = Number(groupId)
+    if (!Number.isInteger(id) || id <= 0 || linkedGroupIds.has(id)) return
+    onChange?.([...sources, { type: 'group', id }])
+  }
+
+  const updateManualNodes = (nextNodeIds) => {
+    const nextSet = new Set(nextNodeIds)
+    const kept = sources.filter((entry) => entry.type === 'group' || nextSet.has(entry.id))
+    const existingNodes = new Set(kept.filter((entry) => entry.type === 'node').map((entry) => entry.id))
+    for (const id of nextNodeIds) {
+      if (!existingNodes.has(id)) kept.push({ type: 'node', id })
+    }
+    onChange?.(kept)
+  }
+
   const move = (index, delta) => {
     const target = index + delta
-    if (target < 0 || target >= selectedIds.length) return
-    const next = [...selectedIds]
+    if (target < 0 || target >= sources.length) return
+    const next = [...sources]
     ;[next[index], next[target]] = [next[target], next[index]]
     onChange?.(next)
   }
-  const remove = (id) => onChange?.(selectedIds.filter((item) => item !== id))
+
+  const remove = (index) => onChange?.(sources.filter((_, itemIndex) => itemIndex !== index))
+
+  const unlinkGroup = (groupId) => {
+    onChange?.(unlinkPolicyGroupInSources(sources, groupId, allNodes, excludeNodeId))
+  }
 
   return (
     <div className="sb-policy-picker" data-testid="policy-member-picker">
-      <Select
-        mode="multiple"
-        showSearch
-        optionFilterProp="label"
-        placeholder={t('policy_members_placeholder')}
-        value={selectedIds}
-        options={groupedOptions}
-        onChange={(next) => onChange?.(next)}
-        style={{ width: '100%' }}
-        data-testid="policy-members-select"
-      />
-      {selectedIds.length > 0 ? (
+      <div className="sb-policy-picker__controls">
+        <Select
+          value={null}
+          showSearch
+          virtual={false}
+          optionFilterProp="label"
+          placeholder={t('policy_add_group_placeholder')}
+          options={groupOptions}
+          onChange={addGroup}
+          style={{ width: '100%' }}
+          data-testid="policy-add-group-select"
+        />
+        <Select
+          mode="multiple"
+          showSearch
+          virtual={false}
+          optionFilterProp="label"
+          placeholder={t('policy_members_placeholder')}
+          value={manualNodeIds}
+          options={groupedOptions}
+          onChange={updateManualNodes}
+          style={{ width: '100%' }}
+          data-testid="policy-members-select"
+        />
+      </div>
+      {sources.length > 0 ? (
         <ul className="sb-policy-order" data-testid="policy-member-order">
-          {selectedIds.map((id, index) => {
-            const member = nodeById.get(id)
+          {sources.map((entry, index) => {
+            if (entry.type === 'group') {
+              const group = groupById.get(entry.id)
+              const members = groupPhysicalNodesById(entityNodes, entry.id, excludeNodeId)
+              return (
+                <li
+                  key={`group:${entry.id}`}
+                  className="sb-policy-order__item sb-policy-order__item--group"
+                  data-member-group-id={entry.id}
+                >
+                  <div className="sb-policy-order__row">
+                    <span className="sb-policy-order__idx mono">{index + 1}</span>
+                    <Link2 size={13} strokeWidth={1.9} className="sb-policy-order__link-icon" aria-hidden="true" />
+                    <span className="sb-policy-order__name truncate">
+                      {group ? group.name : t('policy_group_missing', { id: entry.id })}
+                    </span>
+                    <span className="sb-policy-order__sync">{t('policy_group_sync_badge')}</span>
+                    <span className="sb-policy-order__meta mono">{t('policy_group_node_count', { count: members.length })}</span>
+                    <span className="sb-policy-order__ops">
+                      <button
+                        type="button"
+                        className="sb-icon-btn sb-icon-btn--sm sb-policy-order__unlink"
+                        aria-label={t('policy_unlink_group')}
+                        data-tip={t('policy_unlink_group_tip')}
+                        data-testid={`policy-unlink-group-${entry.id}`}
+                        onClick={() => unlinkGroup(entry.id)}
+                      >
+                        <Unlink size={13} strokeWidth={1.9} />
+                      </button>
+                      <button type="button" className="sb-icon-btn sb-icon-btn--sm" aria-label={t('move_up')} disabled={index === 0} onClick={() => move(index, -1)}>
+                        <ArrowUp size={13} strokeWidth={1.8} />
+                      </button>
+                      <button type="button" className="sb-icon-btn sb-icon-btn--sm" aria-label={t('move_down')} disabled={index === sources.length - 1} onClick={() => move(index, 1)}>
+                        <ArrowDown size={13} strokeWidth={1.8} />
+                      </button>
+                      <button type="button" className="sb-icon-btn sb-icon-btn--sm" aria-label={t('delete')} onClick={() => remove(index)}>
+                        <X size={13} strokeWidth={1.8} />
+                      </button>
+                    </span>
+                  </div>
+                  <div className="sb-policy-order__preview">
+                    {members.length === 0 ? (
+                      <span className="sb-dim">{t('policy_group_empty_sync_hint')}</span>
+                    ) : (
+                      members.map((member) => (
+                        <span key={member.id} className={`sb-policy-order__chip${member.enabled === false ? ' is-off' : ''}`}>
+                          <span className="mono sb-dim">#{member.id}</span>
+                          <span className="truncate">{member.name}</span>
+                        </span>
+                      ))
+                    )}
+                  </div>
+                </li>
+              )
+            }
+            const member = nodeById.get(entry.id)
             const groupName = member ? groupById.get(member.group_id)?.name : ''
             return (
-              <li key={id} className="sb-policy-order__item" data-member-id={id}>
+              <li key={`node:${entry.id}`} className="sb-policy-order__item" data-member-id={entry.id}>
                 <span className="sb-policy-order__idx mono">{index + 1}</span>
-                <span className="sb-policy-order__name truncate">{member ? member.name : `#${id} (${t('policy_member_missing')})`}</span>
+                <span className="sb-policy-order__name truncate">{member ? member.name : `#${entry.id} (${t('policy_member_missing')})`}</span>
                 {groupName ? <span className="sb-policy-order__meta">{groupName}</span> : null}
                 {member ? <span className="sb-tag sb-tag--protocol">{protocolLabel(member.type, t)}</span> : null}
                 {member?.enabled === false ? <span className="sb-policy-order__warn">{t('disabled')}</span> : null}
@@ -135,10 +251,10 @@ function PolicyMemberSelector({ value = [], onChange, allNodes = [], groups = []
                   <button type="button" className="sb-icon-btn sb-icon-btn--sm" aria-label={t('move_up')} disabled={index === 0} onClick={() => move(index, -1)}>
                     <ArrowUp size={13} strokeWidth={1.8} />
                   </button>
-                  <button type="button" className="sb-icon-btn sb-icon-btn--sm" aria-label={t('move_down')} disabled={index === selectedIds.length - 1} onClick={() => move(index, 1)}>
+                  <button type="button" className="sb-icon-btn sb-icon-btn--sm" aria-label={t('move_down')} disabled={index === sources.length - 1} onClick={() => move(index, 1)}>
                     <ArrowDown size={13} strokeWidth={1.8} />
                   </button>
-                  <button type="button" className="sb-icon-btn sb-icon-btn--sm" aria-label={t('delete')} onClick={() => remove(id)}>
+                  <button type="button" className="sb-icon-btn sb-icon-btn--sm" aria-label={t('delete')} onClick={() => remove(index)}>
                     <X size={13} strokeWidth={1.8} />
                   </button>
                 </span>
@@ -151,7 +267,7 @@ function PolicyMemberSelector({ value = [], onChange, allNodes = [], groups = []
   )
 }
 
-export default function NodeEditor({ node, variant = 'node', formName, preservePorts = false, allocatePort = true, allNodes = [], groups = [], onSave, onCancel, submitLabel }) {
+export default function NodeEditor({ node, variant = 'node', formName, preservePorts = false, allocatePort = true, allNodes = [], groups = [], tlsStatus, onSave, onCancel, submitLabel }) {
   const { t, i18n } = useTranslation()
   const { message } = App.useApp()
   const [form] = Form.useForm()
@@ -200,6 +316,7 @@ export default function NodeEditor({ node, variant = 'node', formName, preserveP
         type: proxyType,
         config,
         inbound_port: all.inbound_port || 0,
+        inbound_mode: all.inbound_mode === 'https' ? 'https' : 'mixed',
         auth_enabled: Boolean(all.auth_enabled),
         username: all.auth_enabled ? all.username || '' : '',
         password: all.auth_enabled ? all.password || '' : '',
@@ -274,7 +391,7 @@ export default function NodeEditor({ node, variant = 'node', formName, preserveP
             </Form.Item>
           ) : null}
           <Form.Item
-            name="policy_member_ids"
+            name="policy_member_sources"
             label={proxyType === 'failover' ? t('policy_members_priority') : t('policy_members')}
             extra={t('policy_members_desc')}
             rules={[{
@@ -323,13 +440,21 @@ export default function NodeEditor({ node, variant = 'node', formName, preserveP
       {!isUpstream && (
         <section className="sb-form-section">
           <h3 className="sb-form-section__title">{t('section_inbound')}</h3>
-          <div className="sb-form-grid">
+          <div className="sb-form-grid sb-form-grid--3">
             <Form.Item
               name="inbound_port"
               label={t('inbound_port')}
               extra={!allocatePort ? t('port_hint_group_disabled') : preservePorts ? t('port_hint_preserve') : node?.inbound_port_pinned ? t('port_hint_pinned') : t('port_hint_managed')}
             >
               <InputNumber min={0} max={65535} style={{ width: '100%' }} placeholder={allocatePort ? t('auto_assign') : t('group_no_port_badge')} disabled={!portEditable} />
+            </Form.Item>
+            <Form.Item name="inbound_mode" label={t('inbound_mode')}>
+              <InboundModeSwitch
+                tlsStatus={tlsStatus}
+                disabled={!allocatePort}
+                onRejected={(reason) => message.warning(reason)}
+                testId="node-form-inbound-mode"
+              />
             </Form.Item>
             <Form.Item name="enabled" label={t('node_enabled_label')} valuePropName="checked">
               <Switch checkedChildren={t('enabled')} unCheckedChildren={t('disabled')} />

@@ -8,10 +8,10 @@ import os from 'node:os'
 import path from 'node:path'
 import process from 'node:process'
 import { randomBytes } from 'node:crypto'
-import { spawn } from 'node:child_process'
+import { execFileSync, spawn } from 'node:child_process'
 import { findTestPortRange } from './test-ports.mjs'
 import { launchBrowser, stopProcess } from './test-harness.mjs'
-import { clickControl, setInput, sleep, toggle, waitOverlaysClosed } from './ui-driver.mjs'
+import { clickControl, closeOverlay, setInput, sleep, toggle, waitOverlaysClosed } from './ui-driver.mjs'
 
 const BINARY = process.env.SBPM_E2E_BACKEND_BINARY
 const SINGBOX_BINARY = process.env.SINGBOX_TEST_BINARY
@@ -120,6 +120,21 @@ const createTaggedSocks5Server = (targetPort) => net.createServer((client) => {
 
 const scratch = fs.mkdtempSync(path.join(os.tmpdir(), 'sbpm-features-e2e-'))
 const configDir = path.join(scratch, 'config')
+const certsDir = path.join(scratch, 'certs')
+const keysDir = path.join(scratch, 'keys')
+fs.mkdirSync(path.join(certsDir, 'nested'), { recursive: true })
+fs.mkdirSync(path.join(keysDir, 'archive'), { recursive: true })
+// 生成两套测试用自签 TLS 证书（一套同目录、一套跨目录软链接），覆盖自动跨目录配对与多证书选择
+const genSelfSigned = (certPath, keyPath, cn) => {
+  execFileSync('openssl', [
+    'req', '-x509', '-newkey', 'ec', '-pkeyopt', 'ec_paramgen_curve:prime256v1',
+    '-keyout', keyPath, '-out', certPath, '-days', '30', '-nodes',
+    '-subj', `/CN=${cn}`, '-addext', `subjectAltName=DNS:${cn},DNS:localhost,IP:127.0.0.1`,
+  ], { stdio: 'ignore' })
+}
+genSelfSigned(path.join(certsDir, 'alpha.crt'), path.join(certsDir, 'alpha.key'), 'alpha.tls.test')
+genSelfSigned(path.join(certsDir, 'nested', 'beta.pem'), path.join(keysDir, 'archive', 'beta-1.key'), 'beta.tls.test')
+fs.symlinkSync(path.join(keysDir, 'archive', 'beta-1.key'), path.join(keysDir, 'beta.key'))
 const SECRET = `Features-${randomBytes(16).toString('hex')}`
 const backendLogs = []
 const browserErrors = []
@@ -191,9 +206,11 @@ try {
         CONFIG_DIR: configDir,
         PORT: String(httpPort),
         SINGBOX_BINARY,
+        SBPM_INBOUND_TLS_CERT_DIR: certsDir,
+        SBPM_INBOUND_TLS_KEY_DIR: keysDir,
         SBPM_UPDATE_CHECK_DISABLED: '1',
         SBPM_IPCHECK_URLS: `http://127.0.0.1:${targetPortA}/ip`,
-        TZ: 'UTC',
+        TZ: 'Asia/Singapore',
       },
       stdio: ['ignore', 'pipe', 'pipe'],
     })
@@ -414,6 +431,108 @@ try {
   assert.ok(lbHits.has('backend-A') && lbHits.has('backend-B'), `LoadBalance 未在双成员间轮询分发：${[...lbHits].join(',')}`)
   steps.push('policy-failover-and-loadbalance-live')
 
+  // 3.2 策略整组关联自动同步（按组内 ID 升序）+ 断链后独立管理不再受分组影响
+  const groupPolicy = await api('POST', '/nodes', {
+    group_id: defaultGroupId,
+    name: 'Group Sync Policy',
+    type: 'failover',
+    config: JSON.stringify({
+      member_sources: [{ type: 'group', id: noPortGroup.id }],
+      health_check_interval: 15,
+    }),
+    auth_enabled: false,
+    enabled: true,
+  })
+  assert.deepEqual(JSON.parse(groupPolicy.config).member_ids, [memberA.id, memberB.id], '整组策略未按组内 ID 升序展开')
+  const memberC = await api('POST', '/nodes', {
+    group_id: noPortGroup.id,
+    name: 'Member C',
+    type: 'socks5',
+    config: JSON.stringify({ server: '127.0.0.1', server_port: socksPortB }),
+    auth_enabled: false,
+    enabled: true,
+  })
+  const syncedAfterAdd = await api('GET', `/nodes/${groupPolicy.id}`)
+  assert.deepEqual(JSON.parse(syncedAfterAdd.config).member_ids, [memberA.id, memberB.id, memberC.id], '组内新增节点未自动同步到整组策略')
+  // 断链后手动调换优先级顺序，再删除 memberC 不影响其余顺序且新加入组内节点不会再同步
+  await api('PUT', `/nodes/${groupPolicy.id}`, {
+    group_id: defaultGroupId,
+    name: groupPolicy.name,
+    type: 'failover',
+    config: JSON.stringify({ member_ids: [memberB.id, memberA.id], health_check_interval: 15 }),
+    auth_enabled: false,
+    enabled: true,
+  })
+  const afterUnlink = await api('GET', `/nodes/${groupPolicy.id}`)
+  assert.equal(Object.hasOwn(JSON.parse(afterUnlink.config), 'member_sources'), false, '断链后仍残留 member_sources')
+  assert.deepEqual(JSON.parse(afterUnlink.config).member_ids, [memberB.id, memberA.id], '断链后自定义优先级顺序未生效')
+  const memberD = await api('POST', '/nodes', {
+    group_id: noPortGroup.id,
+    name: 'Member D',
+    type: 'socks5',
+    config: JSON.stringify({ server: '127.0.0.1', server_port: socksPortB }),
+    auth_enabled: false,
+    enabled: true,
+  })
+  const afterUnlinkGroupAdd = await api('GET', `/nodes/${groupPolicy.id}`)
+  assert.deepEqual(JSON.parse(afterUnlinkGroupAdd.config).member_ids, [memberB.id, memberA.id], '断链后组内新增节点不应再同步到策略')
+  await api('DELETE', `/nodes/${memberC.id}`)
+  await api('DELETE', `/nodes/${memberD.id}`)
+  steps.push('policy-group-sync-and-unlink')
+
+  // 3.3 入站 HTTPS (TLS) 加密：两套证书扫描、多证书未选择拦截止步、选定保存、真实 HTTPS 代理转发 + TCP 复用 + HTTPS 测 IP
+  const initialSettings = await api('GET', '/settings')
+  assert.equal(initialSettings.inbound_tls?.ready, false, '多套证书未选择时 ready 应为 false')
+  assert.equal(initialSettings.inbound_tls?.selection_mode, 'unselected')
+  assert.equal(initialSettings.inbound_tls?.certificates?.length, 2, `预期扫描到 2 套有效 TLS 证书，实际：${JSON.stringify(initialSettings.inbound_tls)}`)
+  const betaCert = initialSettings.inbound_tls.certificates.find((c) => c.domains?.includes('beta.tls.test'))
+  assert.ok(betaCert && betaCert.key_path.endsWith('/keys/beta.key'), `跨目录软链接证书配对路径异常：${JSON.stringify(betaCert)}`)
+
+  const httpsTargetNode = await api('POST', '/nodes', {
+    group_id: defaultGroupId,
+    name: 'HTTPS Direct Node',
+    type: 'socks5',
+    config: JSON.stringify({ server: '127.0.0.1', server_port: socksPortA }),
+    username: 'https-user',
+    password: 'https-secret',
+    auth_enabled: true,
+    tcp_reuse_enabled: true,
+    enabled: true,
+  })
+  const rejectedSwitch = await reqAPI('PATCH', `/nodes/${httpsTargetNode.id}`, { inbound_mode: 'https' })
+  assert.equal(rejectedSwitch.status, 400, `多证书未选择时切换到 HTTPS 应被拒绝，实际 ${rejectedSwitch.status}`)
+
+  await api('PUT', '/settings', {
+    inbound_tls_cert_path: betaCert.cert_path,
+    inbound_tls_key_path: betaCert.key_path,
+  })
+  const switchedHttps = await api('PATCH', `/nodes/${httpsTargetNode.id}`, { inbound_mode: 'https' })
+  assert.equal(switchedHttps.inbound_mode, 'https')
+  const httpsRes = await curl([
+    '--proxy', `https://127.0.0.1:${switchedHttps.inbound_port}`,
+    '--proxy-insecure',
+    '--proxy-user', 'https-user:https-secret',
+    `http://127.0.0.1:${targetPortA}/`,
+  ])
+  assert.equal(httpsRes.code, 0, `HTTPS 入站代理转发失败：${httpsRes.stderr}`)
+  assert.equal(httpsRes.stdout.trim(), 'backend-A')
+
+  // 验证 HTTPS 入站原生兼容 TCP 复用单端口路由（通过 HTTPS 端口复用路由到 lbNode / failoverNode）
+  const reuseOverHttps = await curl([
+    '--proxy', `https://127.0.0.1:${switchedHttps.inbound_port}`,
+    '--proxy-insecure',
+    '--proxy-user', `policy-user+${failoverNode.inbound_port}:policy-secret`,
+    `http://127.0.0.1:${targetPortA}/`,
+  ])
+  assert.equal(reuseOverHttps.code, 0, `HTTPS 入站 TCP 复用转发失败：${reuseOverHttps.stderr}`)
+  assert.equal(reuseOverHttps.stdout.trim(), 'backend-A')
+
+  // 验证后端测 IP 经由 https:// 回环拨号且返回 transport: https
+  const httpsIPCheck = await api('POST', `/nodes/${httpsTargetNode.id}/check-ip`)
+  assert.equal(httpsIPCheck.ip, '203.0.113.101', `HTTPS 节点测 IP 异常：${JSON.stringify(httpsIPCheck)}`)
+  assert.equal(httpsIPCheck.transport, 'https', `HTTPS 节点测 IP 未走 https 通道：${JSON.stringify(httpsIPCheck)}`)
+  steps.push('inbound-https-tls-proxy-reuse-and-ipcheck')
+
   // 3.5 分组级前置代理 + 三层优先级真实转发验证（节点自定义 > 分组前置代理 > 全局前置代理）
   await api('PUT', '/settings', {
     global_upstream_enabled: true,
@@ -535,6 +654,23 @@ try {
   assert.equal(await page.$eval(`[data-row-id="${failoverNode.id}"] .dusk-col--server`, (el) => el.textContent.trim()), '2 · 故障转移')
   assert.equal(await page.$eval(`[data-row-id="${lbNode.id}"] .dusk-col--type`, (el) => el.textContent.trim()), '负载均衡')
   assert.equal(await page.$eval(`[data-row-id="${lbNode.id}"] .dusk-col--server`, (el) => el.textContent.trim()), '2 · 轮询')
+  await page.waitForSelector(`[data-testid="node-https-mark-${httpsTargetNode.id}"]`, { visible: true })
+  // 打开 HTTPS 节点详情验证仅展示 HTTPS 与 curl 连接方式，且可平滑切换回 Mixed 再切回 HTTPS
+  await clickControl(page, `[data-testid="node-open-${httpsTargetNode.id}"]`)
+  const httpsLabels = await page.$$eval('[data-testid="node-inspector"] .sb-connect .sb-url__label', (els) => els.map((el) => el.textContent.trim()))
+  assert.ok(httpsLabels.includes('HTTPS') && httpsLabels.includes('curl'), `全栈 HTTPS 连接区标签异常：${httpsLabels.join(',')}`)
+  assert.equal(httpsLabels.includes('HTTP') || httpsLabels.includes('SOCKS5'), false, '全栈 HTTPS 连接区不应显示明文 HTTP 或 SOCKS5')
+  await clickControl(page, `[data-testid="node-open-${httpsTargetNode.id}"]`)
+  // 打开系统设置验证多证书列表与当前生效卡片
+  await clickControl(page, '[data-testid="open-settings"]')
+  await page.waitForSelector('[data-testid="inbound-tls-multi"]', { visible: true })
+  await page.waitForSelector('[data-testid="inbound-tls-selected-info"]', { visible: true })
+  if (ARTIFACT_DIR) {
+    fs.mkdirSync(ARTIFACT_DIR, { recursive: true })
+    await sleep(300)
+    await page.screenshot({ path: path.join(ARTIFACT_DIR, 'full-settings-tls.png'), fullPage: true })
+  }
+  await closeOverlay(page)
   if (ARTIFACT_DIR) {
     fs.mkdirSync(ARTIFACT_DIR, { recursive: true })
     await page.screenshot({ path: path.join(ARTIFACT_DIR, 'full-nodes-overview.png'), fullPage: true })

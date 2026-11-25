@@ -8,6 +8,8 @@ import (
 	"net/http"
 
 	"github.com/gin-gonic/gin"
+
+	"sb-proxy/backend/models"
 )
 
 func (h *Handler) UpdateNodeFlags(c *gin.Context) {
@@ -16,14 +18,15 @@ func (h *Handler) UpdateNodeFlags(c *gin.Context) {
 		return
 	}
 	var payload struct {
-		Enabled         *bool `json:"enabled"`
-		TCPReuseEnabled *bool `json:"tcp_reuse_enabled"`
+		Enabled         *bool   `json:"enabled"`
+		TCPReuseEnabled *bool   `json:"tcp_reuse_enabled"`
+		InboundMode     *string `json:"inbound_mode"`
 	}
 	decoder := json.NewDecoder(c.Request.Body)
 	decoder.DisallowUnknownFields()
 	if err := decoder.Decode(&payload); err != nil ||
-		(payload.Enabled == nil && payload.TCPReuseEnabled == nil) {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "only enabled and tcp_reuse_enabled boolean fields are accepted"})
+		(payload.Enabled == nil && payload.TCPReuseEnabled == nil && payload.InboundMode == nil) {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "only enabled, tcp_reuse_enabled and inbound_mode fields are accepted"})
 		return
 	}
 	if err := decoder.Decode(new(any)); err != io.EOF {
@@ -39,17 +42,28 @@ func (h *Handler) UpdateNodeFlags(c *gin.Context) {
 			if err != nil {
 				return err
 			}
+			previousMode := node.InboundMode
 			if payload.Enabled != nil {
 				node.Enabled = *payload.Enabled
 			}
 			if payload.TCPReuseEnabled != nil {
 				node.TCPReuseEnabled = *payload.TCPReuseEnabled
 			}
+			if payload.InboundMode != nil {
+				mode, err := models.NormalizeInboundMode(*payload.InboundMode)
+				if err != nil {
+					return invalidNodeRequest(err)
+				}
+				node.InboundMode = mode
+			}
+			if err := validateNodeInboundTLS(ctx, tx, node, previousMode); err != nil {
+				return err
+			}
 			_, err = tx.ExecContext(ctx, `
 				UPDATE proxy_nodes
-				SET enabled = ?, tcp_reuse_enabled = ?, updated_at = CURRENT_TIMESTAMP
+				SET enabled = ?, tcp_reuse_enabled = ?, inbound_mode = ?, updated_at = CURRENT_TIMESTAMP
 				WHERE id = ?
-			`, node.Enabled, node.TCPReuseEnabled, id)
+			`, node.Enabled, node.TCPReuseEnabled, node.InboundMode, id)
 			return err
 		},
 	})

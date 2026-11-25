@@ -13,8 +13,10 @@ export function useNodeMenu(node, { act, canReorder }) {
   const { message } = App.useApp()
   return useMemo(() => {
     const copy = async (text) => ((await copyText(text)) ? message.success(t('copied')) : message.error(t('copy_failed')))
+    const isHttps = node.inbound_mode === 'https'
     const handlers = {
       'copy-http': () => copy(buildProxyUrl(node, 'http')),
+      'copy-https': () => copy(buildProxyUrl(node, 'https')),
       'copy-socks': () => copy(buildProxyUrl(node, 'socks5')),
       check: () => act.checkNodes([node.id]),
       edit: () => act.open({ kind: 'node', node }),
@@ -32,8 +34,12 @@ export function useNodeMenu(node, { act, canReorder }) {
     const policy = isPolicyNode(node)
     return {
       items: [
-        { key: 'copy-http', icon: <MenuIcon icon={Copy} />, label: t('copy_proxy_http'), disabled: !hasPort },
-        { key: 'copy-socks', icon: <MenuIcon icon={Copy} />, label: t('copy_proxy_socks'), disabled: !hasPort },
+        ...(isHttps
+          ? [{ key: 'copy-https', icon: <MenuIcon icon={Copy} />, label: t('copy_proxy_https'), disabled: !hasPort }]
+          : [
+              { key: 'copy-http', icon: <MenuIcon icon={Copy} />, label: t('copy_proxy_http'), disabled: !hasPort },
+              { key: 'copy-socks', icon: <MenuIcon icon={Copy} />, label: t('copy_proxy_socks'), disabled: !hasPort },
+            ]),
         { type: 'divider' },
         { key: 'check', icon: <MenuIcon icon={Zap} />, label: t('check_ip'), disabled: node.enabled === false },
         { key: 'edit', icon: <MenuIcon icon={Pencil} />, label: t('edit') },

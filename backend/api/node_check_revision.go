@@ -9,6 +9,7 @@ import (
 	"strings"
 
 	"sb-proxy/backend/models"
+	"sb-proxy/backend/services"
 )
 
 type checkOutbound struct {
@@ -23,6 +24,8 @@ type checkOutbound struct {
 type checkPath struct {
 	outbound           checkOutbound
 	port               int
+	inboundMode        string
+	certPath, keyPath  string
 	username, password string
 }
 
@@ -50,6 +53,7 @@ func nodeCheckPaths(nodes []models.ProxyNode, settings models.Settings) map[int]
 	}
 	upstreams := make(map[string][sha256.Size]byte)
 	paths := make(map[int]checkPath, len(nodes))
+	var inboundTLS *services.InboundTLSStatus
 	for _, node := range nodes {
 		config, detour := checkConfig(node.Config)
 		outbound := checkOutbound{protocol: node.Type, config: config, enabled: node.Enabled}
@@ -72,6 +76,16 @@ func nodeCheckPaths(nodes []models.ProxyNode, settings models.Settings) map[int]
 		}
 		path := checkPath{outbound: outbound, port: node.InboundPort}
 		if node.InboundPort > 0 {
+			path.inboundMode, _ = models.NormalizeInboundMode(node.InboundMode)
+			if path.inboundMode == models.InboundModeHTTPS {
+				if inboundTLS == nil {
+					status := services.ResolveInboundTLS(settings.InboundTLSCertPath, settings.InboundTLSKeyPath)
+					inboundTLS = &status
+				}
+				if inboundTLS.Active != nil {
+					path.certPath, path.keyPath = inboundTLS.Active.CertPath, inboundTLS.Active.KeyPath
+				}
+			}
 			path.username, path.password = node.Username, node.Password
 		}
 		paths[node.ID] = path

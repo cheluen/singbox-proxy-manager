@@ -1,7 +1,7 @@
 {
   "name": "sb-proxy-frontend",
   "private": true,
-  "version": "1.7.31",
+  "version": "1.7.32",
   "type": "module",
   "description": "SingBox Proxy Manager 暮色管理面板，连接真实后端接口",
   "scripts": {
@@ -40,6 +40,7 @@
     "test:e2e:column-resize": "node ./scripts/dusk-ui-regression.mjs column-resize",
     "test:e2e:check-failed-ui": "node ./scripts/dusk-ui-regression.mjs check-failed-ui",
     "test:e2e:groups-policy-ui": "node ./scripts/dusk-ui-regression.mjs groups-policy-ui",
+    "test:e2e:inbound-https-ui": "node ./scripts/dusk-ui-regression.mjs inbound-https-ui",
     "test:e2e:connections-logs-ui": "node ./scripts/dusk-ui-regression.mjs connections-logs-ui",
     "test:e2e:runtime-restart": "node ./scripts/dusk-ui-regression.mjs runtime-restart",
     "test:e2e:full-stack-node-list": "node ./scripts/full-stack-node-list-regression.mjs",

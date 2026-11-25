@@ -1,6 +1,7 @@
 package api
 
 import (
+	"context"
 	"database/sql"
 	"errors"
 	"net/http"
@@ -74,6 +75,12 @@ func parseNodeUpsert(c *gin.Context) (models.ProxyNode, nodeUpsertRequest, bool)
 		return models.ProxyNode{}, payload, false
 	}
 	node := nodeFromUpsertRequest(payload)
+	mode, err := models.NormalizeInboundMode(node.InboundMode)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return models.ProxyNode{}, payload, false
+	}
+	node.InboundMode = mode
 	if err := validateNodeStorageFields(node); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return models.ProxyNode{}, payload, false
@@ -87,4 +94,28 @@ func parseNodeUpsert(c *gin.Context) (models.ProxyNode, nodeUpsertRequest, bool)
 		return models.ProxyNode{}, payload, false
 	}
 	return node, payload, true
+}
+
+func validateNodeInboundTLS(ctx context.Context, tx *sql.Tx, node models.ProxyNode, previousMode string) error {
+	if node.InboundMode != models.InboundModeHTTPS || node.InboundPort <= 0 || (!node.Enabled && previousMode == models.InboundModeHTTPS) {
+		return nil
+	}
+	return ensureInboundTLSReadyAndPersist(ctx, tx)
+}
+
+func ensureInboundTLSReadyAndPersist(ctx context.Context, tx *sql.Tx) error {
+	var certPath, keyPath string
+	if err := tx.QueryRowContext(ctx, "SELECT inbound_tls_cert_path,inbound_tls_key_path FROM settings WHERE singleton_key=1").Scan(&certPath, &keyPath); err != nil {
+		return err
+	}
+	status := services.ResolveInboundTLS(certPath, keyPath)
+	certificate, err := status.RequireCertificate()
+	if err != nil {
+		return invalidNodeRequest(err)
+	}
+	if status.SelectionMode == "auto" && certPath == "" && keyPath == "" {
+		_, err := tx.ExecContext(ctx, "UPDATE settings SET inbound_tls_cert_path=?,inbound_tls_key_path=?,updated_at=CURRENT_TIMESTAMP WHERE singleton_key=1", certificate.CertPath, certificate.KeyPath)
+		return err
+	}
+	return nil
 }

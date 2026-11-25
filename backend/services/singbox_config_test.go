@@ -3,6 +3,8 @@ package services
 import (
 	"context"
 	"encoding/json"
+	"path/filepath"
+	"strings"
 	"testing"
 
 	"sb-proxy/backend/models"
@@ -70,6 +72,99 @@ func TestMarshalConfigPreservesCanonicalEncoding(t *testing.T) {
 	data, err := marshalConfig(config)
 	if err != nil || string(data) != want {
 		t.Fatalf("unexpected canonical JSON: %s, err=%v", data, err)
+	}
+}
+
+func TestBuildGlobalConfigHTTPSPreservesMixedAndTCPReuse(t *testing.T) {
+	root := t.TempDir()
+	setInboundTLSTestDirectories(t, root, filepath.Join(root, "missing"))
+	certificate, key, _ := testInboundTLSPEM(t, testInboundTLSTemplate("proxy.example"))
+	certPath, keyPath := filepath.Join(root, "cert.pem"), filepath.Join(root, "key.pem")
+	writeInboundTLSFile(t, certPath, certificate)
+	writeInboundTLSFile(t, keyPath, key)
+	service := NewSingBoxService(t.TempDir())
+	nodes := []models.ProxyNode{
+		{ID: 1, Name: "https", Type: "direct", Config: "{}", Enabled: true, InboundPort: 31001, InboundMode: models.InboundModeHTTPS, Username: "secure", Password: "secure-key", TCPReuseEnabled: true},
+		{ID: 2, Name: "mixed", Type: "direct", Config: "{}", Enabled: true, InboundPort: 31002, InboundMode: models.InboundModeMixed, Username: "mixed", Password: "mixed-key", TCPReuseEnabled: true},
+	}
+	data, err := service.BuildGlobalConfigContext(t.Context(), nodes)
+	if err != nil {
+		t.Fatal(err)
+	}
+	config := decodeGeneratedConfig(t, data)
+	secure := generatedEntryByTag(t, config, "inbounds", "node-1-in")
+	tlsOptions, ok := secure["tls"].(map[string]any)
+	if !ok || secure["type"] != "http" || tlsOptions["enabled"] != true || tlsOptions["certificate_path"] != certPath || tlsOptions["key_path"] != keyPath {
+		t.Fatalf("HTTPS 入站未生成原生 HTTP + TLS 配置：%+v", secure)
+	}
+	mixed := generatedEntryByTag(t, config, "inbounds", "node-2-in")
+	if mixed["type"] != "mixed" || mixed["tls"] != nil {
+		t.Fatalf("mixed 入站被改变：%+v", mixed)
+	}
+	inbounds := inboundsFromConfig(t, config)
+	secureUsers, mixedUsers := usersForInboundTag(t, inbounds, "node-1-in"), usersForInboundTag(t, inbounds, "node-2-in")
+	if secureUsers["secure"] != "secure-key" || secureUsers["mixed+31002"] != "mixed-key" || mixedUsers["secure+31001"] != "secure-key" {
+		t.Fatal("HTTPS 和 mixed 入站没有共享相同认证与单端口复用路由")
+	}
+	if findRuleIndexByAuthUser(routeRulesFromConfig(t, config), "mixed+31002") < 0 {
+		t.Fatal("HTTPS 入站缺少 TCP 复用路由")
+	}
+}
+
+func TestBuildGlobalConfigHTTPSRequiresSelectedValidCertificate(t *testing.T) {
+	root := t.TempDir()
+	setInboundTLSTestDirectories(t, root, filepath.Join(root, "missing"))
+	service := NewSingBoxService(t.TempDir())
+	node := models.ProxyNode{ID: 1, Name: "https", Type: "direct", Config: "{}", Enabled: true, InboundPort: 31001, InboundMode: models.InboundModeHTTPS}
+	other := node
+	other.ID, other.InboundPort = 2, 31002
+	mixed := models.ProxyNode{ID: 3, Name: "mixed", Type: "direct", Config: "{}", Enabled: true, InboundPort: 31003}
+	assertUnavailable := func() {
+		t.Helper()
+		data, err := service.BuildGlobalConfigContext(t.Context(), []models.ProxyNode{node, other, mixed})
+		if err != nil {
+			t.Fatalf("失效 HTTPS 入站阻止了其他节点生成配置：%v", err)
+		}
+		for _, tag := range []string{"node-1-in", "node-2-in"} {
+			if strings.Contains(string(data), `"`+tag+`"`) {
+				t.Fatalf("失效 HTTPS 节点仍有入站监听或直连路由：%s", tag)
+			}
+		}
+		config := decodeGeneratedConfig(t, data)
+		for _, tag := range []string{"node-1-out", "node-2-out"} {
+			if generatedEntryByTag(t, config, "outbounds", tag)["type"] != "direct" {
+				t.Fatalf("失效 HTTPS 节点的出站未保留：%s", tag)
+			}
+		}
+		if generatedEntryByTag(t, config, "inbounds", "node-3-in")["type"] != "mixed" {
+			t.Fatal("失效 HTTPS 入站影响了正常 mixed 监听")
+		}
+	}
+	assertUnavailable()
+	node.Enabled = false
+	if _, err := service.BuildGlobalConfigContext(t.Context(), []models.ProxyNode{node}); err != nil {
+		t.Fatalf("禁用的 HTTPS 入站不应要求证书：%v", err)
+	}
+	node.Enabled, node.InboundPort = true, 0
+	if _, err := service.BuildGlobalConfigContext(t.Context(), []models.ProxyNode{node}); err != nil {
+		t.Fatalf("无入站端口的节点不应要求证书：%v", err)
+	}
+	node.InboundPort = 31001
+	var selectedCert, selectedKey string
+	for _, name := range []string{"first", "second"} {
+		certificate, key, _ := testInboundTLSPEM(t, testInboundTLSTemplate(name+".example"))
+		selectedCert, selectedKey = filepath.Join(root, name+".pem"), filepath.Join(root, name+".key")
+		writeInboundTLSFile(t, selectedCert, certificate)
+		writeInboundTLSFile(t, selectedKey, key)
+	}
+	assertUnavailable()
+	data, err := service.BuildGlobalConfigContext(t.Context(), []models.ProxyNode{node}, models.Settings{InboundTLSCertPath: selectedCert, InboundTLSKeyPath: selectedKey})
+	if err != nil {
+		t.Fatal(err)
+	}
+	options := generatedEntryByTag(t, decodeGeneratedConfig(t, data), "inbounds", "node-1-in")["tls"].(map[string]any)
+	if options["certificate_path"] != selectedCert || options["key_path"] != selectedKey {
+		t.Fatal("HTTPS 入站未使用数据库保存的证书选择")
 	}
 }
 

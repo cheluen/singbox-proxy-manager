@@ -536,16 +536,49 @@ func TestApplyTimezoneFromEnvDefault(t *testing.T) {
 	}
 }
 
-func TestResolveTimezoneParsesUTCOffset(t *testing.T) {
-	loc, canonical, err := resolveTimezone("UTC-05:30")
-	if err != nil {
-		t.Fatalf("resolve timezone: %v", err)
+func TestResolveTimezoneIANA(t *testing.T) {
+	for _, name := range []string{"Asia/Singapore", "Asia/Shanghai", "UTC", "America/New_York"} {
+		t.Run(name, func(t *testing.T) {
+			loc, canonical, err := resolveTimezone(name)
+			if err != nil || loc.String() != name || canonical != name {
+				t.Fatalf("resolve %q: location=%v canonical=%q error=%v", name, loc, canonical, err)
+			}
+		})
 	}
-	if canonical != "UTC-05:30" {
-		t.Fatalf("unexpected canonical timezone: %s", canonical)
+}
+
+func TestApplyTimezoneFromEnvRejectsNonIANA(t *testing.T) {
+	previousLocal := time.Local
+	t.Cleanup(func() { time.Local = previousLocal })
+	for _, name := range []string{"UTC+8", "GMT+8", "UTC-05:30", "GMT-8", "Local", "local", "not-a-timezone"} {
+		t.Run(name, func(t *testing.T) {
+			if _, _, err := resolveTimezone(name); err == nil {
+				t.Fatalf("accepted invalid timezone %q", name)
+			}
+			t.Setenv("TZ", name)
+			if got := applyTimezoneFromEnv(); got != "Asia/Singapore" || os.Getenv("TZ") != got || time.Local.String() != got {
+				t.Fatalf("fallback mismatch: canonical=%q TZ=%q location=%v", got, os.Getenv("TZ"), time.Local)
+			}
+			if _, offset := time.Now().In(time.Local).Zone(); offset != 8*3600 {
+				t.Fatalf("unexpected fallback offset: %d", offset)
+			}
+		})
 	}
-	if _, offset := time.Now().In(loc).Zone(); offset != -(5*3600 + 30*60) {
-		t.Fatalf("unexpected offset: %d", offset)
+	if _, _, err := resolveTimezone(""); err == nil {
+		t.Fatal("accepted empty timezone")
+	}
+}
+
+func TestApplyTimezoneFromEnvPreservesIANA(t *testing.T) {
+	previousLocal := time.Local
+	t.Cleanup(func() { time.Local = previousLocal })
+	for _, name := range []string{"Asia/Shanghai", "UTC"} {
+		t.Run(name, func(t *testing.T) {
+			t.Setenv("TZ", name)
+			if got := applyTimezoneFromEnv(); got != name || os.Getenv("TZ") != name || time.Local.String() != name {
+				t.Fatalf("timezone mismatch: canonical=%q TZ=%q location=%v", got, os.Getenv("TZ"), time.Local)
+			}
+		})
 	}
 }
 

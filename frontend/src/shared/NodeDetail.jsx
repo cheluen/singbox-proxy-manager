@@ -1,12 +1,12 @@
 import { Button } from 'antd'
-import { Pencil, Route, TriangleAlert, Zap } from 'lucide-react'
+import { Link2, Pencil, Route, TriangleAlert, Unlink, Zap } from 'lucide-react'
 import { useTranslation } from 'react-i18next'
 import { isPolicyNode } from '../core/nodeModel'
 import { configEndpointAddress, formatDateTime, nodeHealth, parsedNodeConfig, protocolLabel, resolveEffectiveUpstream, serverAddress } from '../core/nodeView'
 import { Toggle } from './controls'
 import { NodeMenuButton } from './menus'
 import { policyWarningLabel, upstreamModeLabel } from './labels'
-import { ConnectInfo, PortChip, RemarkEditor } from './NodeParts'
+import { ConnectInfo, InboundModeSwitch, PortChip, RemarkEditor } from './NodeParts'
 import { CopyButton, Field, HealthBadge, Latency, Region, SecretText } from './primitives'
 
 const dash = <span className="sb-dim">—</span>
@@ -52,13 +52,24 @@ function ConnectSection({ node }) {
   )
 }
 
-function InboundSection({ node, act, pinBusy, flagBusy, preservePorts }) {
+function InboundSection({ node, ctl, act, pinBusy, flagBusy, preservePorts }) {
   const { t } = useTranslation()
   const hasPort = Number(node.inbound_port) > 0
   return (
     <Section title={t('section_inbound')}>
       <dl className="sb-fields">
         <Field label={t('inbound_port')}><PortChip node={node} act={act} pinBusy={pinBusy} preservePorts={preservePorts} copyable /></Field>
+        <Field label={t('inbound_mode')}>
+          <InboundModeSwitch
+            value={node.inbound_mode === 'https' ? 'https' : 'mixed'}
+            tlsStatus={ctl.settings?.inbound_tls}
+            disabled={!hasPort}
+            busy={flagBusy}
+            onChange={(mode) => act.setInboundMode(node, mode)}
+            onRejected={(reason) => ctl.helpers.notify.warning(reason)}
+            testId={`node-inbound-mode-${node.id}`}
+          />
+        </Field>
         <Field label={t('tcp_reuse')}>
           <span className="sb-inline">
             <Toggle checked={hasPort && node.tcp_reuse_enabled !== false} busy={flagBusy} disabled={!hasPort} label={t('tcp_reuse')} onChange={() => act.toggleTcpReuse(node)} testId={`node-tcp-reuse-${node.id}`} />
@@ -68,21 +79,52 @@ function InboundSection({ node, act, pinBusy, flagBusy, preservePorts }) {
         <Field label={t('username')}>
           {node.username ? <span className="sb-inline"><span className="mono">{node.username}</span><CopyButton text={node.username} /></span> : dash}
         </Field>
-        <Field label={t('password_auth')}><SecretText value={node.password} label={t('password_auth')} /></Field>
+        <Field label={t('password_auth')} wide><SecretText value={node.password} label={t('password_auth')} /></Field>
       </dl>
     </Section>
   )
 }
 
-function PolicyMembersSection({ node, ctl }) {
+function PolicyMembersSection({ node, ctl, act, busy = false }) {
   const { t } = useTranslation()
   const cfg = parsedNodeConfig(node)
   const memberIds = Array.isArray(cfg.member_ids) ? cfg.member_ids : []
+  const linkedGroupIds = Array.isArray(cfg.member_sources)
+    ? cfg.member_sources.filter((entry) => entry?.type === 'group' && Number(entry.id) > 0).map((entry) => Number(entry.id))
+    : []
   const nodeMap = new Map((ctl.allNodes || ctl.nodes || []).map((item) => [item.id, item]))
+  const groupMap = ctl.groupById || new Map((ctl.groups || []).map((item) => [item.id, item]))
   const healthMap = new Map((node.policy_member_health || []).map((item) => [item.node_id, item]))
   const warnings = Array.isArray(node.policy_warnings) ? node.policy_warnings : []
   return (
     <Section title={t('policy_members_status')}>
+      {linkedGroupIds.length > 0 ? (
+        <div className="sb-policy-linked-bar" data-testid={`policy-linked-groups-${node.id}`}>
+          <span className="sb-policy-linked-bar__label">{t('policy_linked_groups_label')}</span>
+          {linkedGroupIds.map((gid) => {
+            const group = groupMap.get(gid)
+            const name = group ? group.name : t('policy_group_missing', { id: gid })
+            return (
+              <span key={gid} className="sb-policy-linked-pill" data-testid={`policy-linked-pill-${gid}`}>
+                <Link2 size={12} strokeWidth={1.9} aria-hidden="true" />
+                <span className="truncate">{name}</span>
+                <span className="sb-policy-linked-pill__tag">{t('policy_group_sync_badge')}</span>
+                <button
+                  type="button"
+                  className="sb-policy-linked-pill__unlink"
+                  aria-label={t('policy_unlink_group')}
+                  data-tip={t('policy_unlink_group_tip')}
+                  data-testid={`policy-detail-unlink-group-${gid}`}
+                  disabled={busy}
+                  onClick={() => void act.unlinkPolicyGroup(node, gid)}
+                >
+                  <Unlink size={12} strokeWidth={1.9} aria-hidden="true" />
+                </button>
+              </span>
+            )
+          })}
+        </div>
+      ) : null}
       {warnings.map((warn, idx) => (
         <p key={idx} className="sb-callout sb-callout--warn sb-section__note" style={{ marginTop: 0, marginBottom: 8 }}>
           <TriangleAlert size={14} strokeWidth={1.8} />
@@ -243,13 +285,13 @@ export function DetailSections({ node, ctl, act }) {
   return (
     <>
       <div className="sb-detail-card" data-detail-group="inbound">
-        <InboundSection node={node} act={act} pinBusy={Boolean(ctl.pinBusy[node.id])} flagBusy={Boolean(ctl.flagBusy[node.id])} preservePorts={ctl.preservePorts} />
+        <InboundSection node={node} ctl={ctl} act={act} pinBusy={Boolean(ctl.pinBusy[node.id])} flagBusy={Boolean(ctl.flagBusy[node.id])} preservePorts={ctl.preservePorts} />
         <ConnectSection node={node} />
       </div>
       <div className="sb-detail-card" data-detail-group="outbound">
         <OutboundSection node={node} />
         <ExitSection node={node} checking={checking} />
-        {isPolicyNode(node) ? <PolicyMembersSection node={node} ctl={ctl} /> : <UpstreamSection node={node} ctl={ctl} act={act} />}
+        {isPolicyNode(node) ? <PolicyMembersSection node={node} ctl={ctl} act={act} busy={Boolean(ctl.flagBusy[node.id])} /> : <UpstreamSection node={node} ctl={ctl} act={act} />}
       </div>
       <RemarkSection node={node} act={act} />
     </>

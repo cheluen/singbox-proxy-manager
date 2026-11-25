@@ -7,11 +7,22 @@ import (
 	"time"
 )
 
+const (
+	PolicyMemberSourceNode  = "node"
+	PolicyMemberSourceGroup = "group"
+)
+
+type PolicyMemberSource struct {
+	Type string `json:"type"`
+	ID   int    `json:"id"`
+}
+
 type PolicyConfig struct {
-	MemberIDs []int  `json:"member_ids"`
-	Strategy  string `json:"strategy,omitempty"`
-	HealthURL string `json:"health_check_url,omitempty"`
-	Interval  int    `json:"health_check_interval"`
+	MemberIDs     []int                `json:"member_ids"`
+	MemberSources []PolicyMemberSource `json:"member_sources,omitempty"`
+	Strategy      string               `json:"strategy,omitempty"`
+	HealthURL     string               `json:"health_check_url,omitempty"`
+	Interval      int                  `json:"health_check_interval"`
 }
 
 type MemberHealth struct {
@@ -51,6 +62,28 @@ func (config *PolicyConfig) normalize(protocol string) error {
 		if err != nil || target.Hostname() == "" || (target.Scheme != "http" && target.Scheme != "https") || target.User != nil {
 			return fmt.Errorf("health_check_url requires an HTTP or HTTPS URL without credentials")
 		}
+	}
+	sources := make([]PolicyMemberSource, 0, len(config.MemberSources))
+	seenSources := make(map[PolicyMemberSource]bool, len(config.MemberSources))
+	hasGroup := false
+	for _, source := range config.MemberSources {
+		if source.ID <= 0 || (source.Type != PolicyMemberSourceNode && source.Type != PolicyMemberSourceGroup) {
+			return fmt.Errorf("invalid policy member source")
+		}
+		if !seenSources[source] {
+			sources = append(sources, source)
+			seenSources[source] = true
+		}
+		hasGroup = hasGroup || source.Type == PolicyMemberSourceGroup
+	}
+	config.MemberSources = sources
+	if !hasGroup {
+		if len(config.MemberIDs) == 0 {
+			for _, source := range sources {
+				config.MemberIDs = append(config.MemberIDs, source.ID)
+			}
+		}
+		config.MemberSources = nil
 	}
 	members := make([]int, 0, len(config.MemberIDs))
 	seen := make(map[int]bool, len(config.MemberIDs))

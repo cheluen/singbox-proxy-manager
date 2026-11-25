@@ -17,7 +17,7 @@ import { AddMenu } from '../shared/menus'
 import { DetailActions, DetailSections } from '../shared/NodeDetail'
 import { Overlays } from '../shared/Overlays'
 import { IconButton, Kbd, LangSwitch, SkeletonRows } from '../shared/primitives'
-import { SortableList } from '../shared/sortable'
+import { SortableHorizontalList, SortableList, SortableTabItem } from '../shared/sortable'
 import { usePanel } from '../shared/usePanel'
 import { CommandPalette } from './Palette'
 import { DuskRow } from './Row'
@@ -71,12 +71,16 @@ function ResizableHeaderCell({ colKey, label, t, className = '', active, current
   )
 }
 
+const EMPTY_GROUPS = []
+
 function GroupBar({ ctl, t, onSelectGroup }) {
-  const groups = ctl.groups || []
+  const groups = ctl.groups || EMPTY_GROUPS
   const active = ctl.activeGroup
   const activeIndex = groups.findIndex((item) => item.id === active?.id)
   const hasSub = Boolean(String(active?.subscription_url || '').trim())
   const subBusy = Boolean(active?.id && ctl.refreshingGroupId === active.id)
+
+  const groupIds = useMemo(() => groups.map((item) => item.id), [groups])
 
   const shiftGroup = (delta) => {
     if (activeIndex < 0) return
@@ -85,6 +89,16 @@ function GroupBar({ ctl, t, onSelectGroup }) {
     const ids = groups.map((item) => item.id)
     ;[ids[activeIndex], ids[target]] = [ids[target], ids[activeIndex]]
     void ctl.reorderGroups(ids)
+  }
+
+  const dragReorderGroup = (activeId, overId) => {
+    const from = groupIds.indexOf(activeId)
+    const to = groupIds.indexOf(overId)
+    if (from < 0 || to < 0 || from === to) return
+    const next = [...groupIds]
+    const [moved] = next.splice(from, 1)
+    next.splice(to, 0, moved)
+    void ctl.reorderGroups(next)
   }
 
   const groupMenu = {
@@ -111,54 +125,58 @@ function GroupBar({ ctl, t, onSelectGroup }) {
 
   return (
     <div className="dusk-groups" role="region" aria-label={t('groups_bar_label')} data-testid="node-groups-bar">
-      <div className="dusk-groups__tabs" role="tablist" aria-label={t('groups_bar_label')}>
-        {groups.map((group) => {
-          const selected = group.id === active?.id
-          const count = typeof group.node_count === 'number'
-            ? group.node_count
-            : ctl.allNodes.filter((node) => node.group_id === group.id).length
-          const groupHasSub = Boolean(String(group.subscription_url || '').trim())
-          const subErr = Boolean(group.subscription_last_error)
-          return (
-            <button
-              key={group.id}
-              type="button"
-              role="tab"
-              aria-selected={selected}
-              className={`dusk-group-tab${selected ? ' is-active' : ''}`}
-              data-testid={`group-tab-${group.id}`}
-              data-group-id={group.id}
-              onClick={() => onSelectGroup(group.id)}
-            >
-              <span className="dusk-group-tab__name">{group.name}</span>
-              <span className="dusk-group-tab__count mono">{count}</span>
-              {group.allocate_port === false ? (
-                <span className="dusk-group-tab__badge" data-tip={t('group_no_port_badge')} aria-label={t('group_no_port_badge')}>
-                  <Link2Off size={12} strokeWidth={1.9} aria-hidden="true" />
-                </span>
-              ) : null}
-              {group.upstream_enabled ? (
-                <span
-                  className="dusk-group-tab__badge is-upstream"
-                  data-tip={t('group_upstream_active_tip', { type: protocolLabel(group.upstream_type, t) })}
-                  aria-label={t('group_upstream_badge')}
-                >
-                  <Route size={12} strokeWidth={1.9} aria-hidden="true" />
-                </span>
-              ) : null}
-              {groupHasSub ? (
-                <span
-                  className={`dusk-group-tab__badge${subErr ? ' is-err' : ''}`}
-                  data-tip={subErr ? `${t('group_subscription_last_error')}: ${group.subscription_last_error}` : t('group_subscription')}
-                  aria-label={t('group_subscription')}
-                >
-                  <Rss size={12} strokeWidth={1.9} aria-hidden="true" />
-                </span>
-              ) : null}
-            </button>
-          )
-        })}
-      </div>
+      <SortableHorizontalList ids={groupIds} disabled={groups.length < 2} onReorder={dragReorderGroup}>
+        <div className="dusk-groups__tabs" role="tablist" aria-label={t('groups_bar_label')}>
+          {groups.map((group) => {
+            const selected = group.id === active?.id
+            const count = typeof group.node_count === 'number'
+              ? group.node_count
+              : ctl.allNodes.filter((node) => node.group_id === group.id).length
+            const groupHasSub = Boolean(String(group.subscription_url || '').trim())
+            const subErr = Boolean(group.subscription_last_error)
+            return (
+              <SortableTabItem
+                key={group.id}
+                id={group.id}
+                disabled={groups.length < 2}
+                role="tab"
+                aria-selected={selected}
+                className={`dusk-group-tab${selected ? ' is-active' : ''}${groups.length > 1 ? ' is-draggable' : ''}`}
+                data-testid={`group-tab-${group.id}`}
+                data-group-id={group.id}
+                data-tip={groups.length > 1 ? t('group_drag_sort_hint') : undefined}
+                onClick={() => onSelectGroup(group.id)}
+              >
+                <span className="dusk-group-tab__name">{group.name}</span>
+                <span className="dusk-group-tab__count mono">{count}</span>
+                {group.allocate_port === false ? (
+                  <span className="dusk-group-tab__badge" data-tip={t('group_no_port_badge')} aria-label={t('group_no_port_badge')}>
+                    <Link2Off size={12} strokeWidth={1.9} aria-hidden="true" />
+                  </span>
+                ) : null}
+                {group.upstream_enabled ? (
+                  <span
+                    className="dusk-group-tab__badge is-upstream"
+                    data-tip={t('group_upstream_active_tip', { type: protocolLabel(group.upstream_type, t) })}
+                    aria-label={t('group_upstream_badge')}
+                  >
+                    <Route size={12} strokeWidth={1.9} aria-hidden="true" />
+                  </span>
+                ) : null}
+                {groupHasSub ? (
+                  <span
+                    className={`dusk-group-tab__badge${subErr ? ' is-err' : ''}`}
+                    data-tip={subErr ? `${t('group_subscription_last_error')}: ${group.subscription_last_error}` : t('group_subscription')}
+                    aria-label={t('group_subscription')}
+                  >
+                    <Rss size={12} strokeWidth={1.9} aria-hidden="true" />
+                  </span>
+                ) : null}
+              </SortableTabItem>
+            )
+          })}
+        </div>
+      </SortableHorizontalList>
 
       <div className="dusk-groups__actions">
         {active ? (

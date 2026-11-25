@@ -2,6 +2,8 @@ package services
 
 import (
 	"context"
+	"crypto/tls"
+	"crypto/x509"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -29,7 +31,7 @@ type IPInfo struct {
 	Region      string `json:"region"`
 	Location    string `json:"location"`
 	Latency     int    `json:"latency"`   // in milliseconds
-	Transport   string `json:"transport"` // http or socks5
+	Transport   string `json:"transport"` // http、https 或 socks5
 	HTTPError   string `json:"http_error,omitempty"`
 }
 
@@ -335,25 +337,44 @@ func CheckProxyIPContext(
 	username string,
 	password string,
 ) (*IPInfo, error) {
+	return CheckProxyIPWithModeContext(ctx, proxyAddr, username, password, models.InboundModeMixed)
+}
+
+func CheckProxyIPWithModeContext(ctx context.Context, proxyAddr, username, secret, inboundMode string) (*IPInfo, error) {
+	mode, err := models.NormalizeInboundMode(inboundMode)
+	if err != nil {
+		return nil, err
+	}
 	log.Printf("[IPCheck] Starting IP check for proxy: %s (auth: %v)", proxyAddr, username != "")
 
 	if err := waitForTCPReady(ctx, proxyAddr, ipCheckReadyTimeout); err != nil {
 		return nil, fmt.Errorf("%w: %v", ErrProxyNotReady, err)
 	}
 
-	proxyURL, err := url.Parse("http://" + proxyAddr)
+	scheme := "http"
+	if mode == models.InboundModeHTTPS {
+		scheme = "https"
+	}
+	proxyURL, err := url.Parse(scheme + "://" + proxyAddr)
 	if err != nil {
 		log.Printf("[IPCheck] Failed to parse proxy URL: %v", err)
 		return nil, fmt.Errorf("invalid proxy address: %v", err)
 	}
-	if username != "" && password != "" {
-		proxyURL.User = url.UserPassword(username, password)
+	if username != "" && secret != "" {
+		proxyURL.User = url.UserPassword(username, secret)
 	}
 
 	transport := &http.Transport{
 		Proxy:              http.ProxyURL(proxyURL),
 		DisableKeepAlives:  true,
 		DisableCompression: false,
+	}
+	if mode == models.InboundModeHTTPS {
+		plainProxyURL := *proxyURL
+		plainProxyURL.Scheme = "http"
+		transport.Proxy = http.ProxyURL(&plainProxyURL)
+		dialer := &tls.Dialer{Config: inboundProxyTLSConfig(proxyURL.Hostname())}
+		transport.DialContext = dialer.DialContext
 	}
 
 	client := &http.Client{
@@ -367,17 +388,20 @@ func CheckProxyIPContext(
 		return checkWithServicesRacing(attemptCtx, client, services)
 	})
 	if err == nil && info != nil && info.IP != "" {
-		info.Transport = "http"
+		info.Transport = scheme
 		log.Printf("[IPCheck] Success! IP: %s, Location: %s, Latency: %dms", info.IP, info.Location, info.Latency)
 		return info, nil
 	}
-	httpErr := fmt.Errorf("all HTTP IP check services failed: %w", err)
+	httpErr := fmt.Errorf("all %s IP check services failed: %w", strings.ToUpper(scheme), err)
+	if mode == models.InboundModeHTTPS {
+		return nil, httpErr
+	}
 
 	// Try with SOCKS5 if HTTP fails
-	httpMessage := redactIPCheckDiagnostic(httpErr.Error(), username, password)
+	httpMessage := redactIPCheckDiagnostic(httpErr.Error(), username, secret)
 	log.Printf("[IPCheck] HTTP proxy failed (%s), trying SOCKS5...", boundIPCheckDiagnostic(httpMessage))
 	result, socksErr := runIPCheckAttempt(ctx, ipCheckTotalDeadline, func(attemptCtx context.Context) (*IPInfo, error) {
-		return checkWithSOCKS5(attemptCtx, proxyAddr, username, password, services)
+		return checkWithSOCKS5(attemptCtx, proxyAddr, username, secret, services)
 	})
 	if socksErr == nil {
 		result.Transport = "socks5"
@@ -386,8 +410,36 @@ func CheckProxyIPContext(
 		return result, nil
 	}
 
-	log.Printf("[IPCheck] All methods failed. Last error: %s", boundIPCheckDiagnostic(redactIPCheckDiagnostic(socksErr.Error(), username, password)))
+	log.Printf("[IPCheck] All methods failed. Last error: %s", boundIPCheckDiagnostic(redactIPCheckDiagnostic(socksErr.Error(), username, secret)))
 	return nil, fmt.Errorf("all IP check methods failed: %w", errors.Join(httpErr, socksErr))
+}
+
+func inboundProxyTLSConfig(host string) *tls.Config {
+	expectedServerName := host
+	if net.ParseIP(host) != nil {
+		expectedServerName = ""
+	}
+	return &tls.Config{
+		ServerName: host, InsecureSkipVerify: true,
+		VerifyConnection: func(state tls.ConnectionState) error {
+			if (strings.EqualFold(host, "localhost") || host == "127.0.0.1" || host == "::1") && state.ServerName == expectedServerName {
+				return nil
+			}
+			if len(state.PeerCertificates) == 0 {
+				return errors.New("TLS proxy did not provide a certificate")
+			}
+			intermediates := x509.NewCertPool()
+			for _, certificate := range state.PeerCertificates[1:] {
+				intermediates.AddCert(certificate)
+			}
+			serverName := state.ServerName
+			if serverName == "" {
+				serverName = host
+			}
+			_, err := state.PeerCertificates[0].Verify(x509.VerifyOptions{DNSName: serverName, Intermediates: intermediates})
+			return err
+		},
+	}
 }
 
 func runIPCheckAttempt(

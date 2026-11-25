@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"maps"
 	"net"
 	"os"
@@ -382,6 +383,7 @@ func (s *SingBoxService) renderGlobalConfig(
 	}
 
 	directInboundRoutes := make([]RouteRule, 0, len(parsedNodes))
+	var inboundTLS *InboundTLSStatus
 	for _, upstream := range upstreams {
 		if upstream.Endpoint != nil {
 			config.Endpoints = append(config.Endpoints, *upstream.Endpoint)
@@ -407,23 +409,48 @@ func (s *SingBoxService) renderGlobalConfig(
 					"sniff_override_destination": true,
 				},
 			}
-
-			hasInboundAuth := node.Username != "" && node.Password != ""
-			if hasInboundAuth {
-				inbound.Users = append(inbound.Users, InboundUser{
-					Username: node.Username,
-					Password: node.Password,
-				})
-				for _, route := range reuseRoutes {
-					inbound.Users = append(inbound.Users, InboundUser{
-						Username: route.AuthUser,
-						Password: route.Password,
-					})
+			mode, err := models.NormalizeInboundMode(node.InboundMode)
+			if err != nil {
+				return nil, fmt.Errorf("node %d: %w", node.ID, err)
+			}
+			inboundAvailable := true
+			if mode == models.InboundModeHTTPS {
+				if inboundTLS == nil {
+					var settings models.Settings
+					if len(wiring) > 0 {
+						settings = wiring[0].settings
+					}
+					status := ResolveInboundTLS(settings.InboundTLSCertPath, settings.InboundTLSKeyPath)
+					inboundTLS = &status
+				}
+				certificate, err := inboundTLS.RequireCertificate()
+				if err != nil {
+					log.Printf("WARN 节点 %d 的 HTTPS 入站已关闭，出站保持可用：%v", node.ID, err)
+					inboundAvailable = false
+				} else {
+					inbound.Type = "http"
+					inbound.Extra["tls"] = map[string]any{"enabled": true, "certificate_path": certificate.CertPath, "key_path": certificate.KeyPath}
 				}
 			}
 
-			config.Inbounds = append(config.Inbounds, inbound)
-			directInboundRoutes = append(directInboundRoutes, RouteRule{Inbound: []string{inboundTag}, Outbound: outboundTag})
+			if inboundAvailable {
+				hasInboundAuth := node.Username != "" && node.Password != ""
+				if hasInboundAuth {
+					inbound.Users = append(inbound.Users, InboundUser{
+						Username: node.Username,
+						Password: node.Password,
+					})
+					for _, route := range reuseRoutes {
+						inbound.Users = append(inbound.Users, InboundUser{
+							Username: route.AuthUser,
+							Password: route.Password,
+						})
+					}
+				}
+
+				config.Inbounds = append(config.Inbounds, inbound)
+				directInboundRoutes = append(directInboundRoutes, RouteRule{Inbound: []string{inboundTag}, Outbound: outboundTag})
+			}
 		}
 
 		// A direct outbound cannot use detour in sing-box. A single-choice

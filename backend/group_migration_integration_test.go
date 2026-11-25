@@ -186,7 +186,14 @@ func verifyLegacyGroupMigration(t *testing.T, withDatabase func(func(*sql.DB))) 
 		if len(nodes) != 4 {
 			t.Fatalf("迁移后节点数量为 %d，预期 4", len(nodes))
 		}
+		settings, err := models.LoadRuntimeSettings(t.Context(), db)
+		if err != nil || settings.InboundTLSCertPath != "" || settings.InboundTLSKeyPath != "" {
+			t.Fatalf("旧库的默认 TLS 选择错误：%+v，%v", settings, err)
+		}
 		for _, node := range nodes {
+			if node.InboundMode != models.InboundModeMixed {
+				t.Fatalf("历史节点 %d 未保留 mixed 入站模式", node.ID)
+			}
 			if node.Name == "latency-only" && node.Latency != 0 {
 				t.Fatal("无 IP 的旧测速应清零")
 			}
@@ -200,6 +207,12 @@ func verifyLegacyGroupMigration(t *testing.T, withDatabase func(func(*sql.DB))) 
 			}
 		}
 		advanceMigratedGroupState(t, db, groups[0].ID, highID)
+		if _, err := db.Exec("UPDATE proxy_nodes SET inbound_mode=? WHERE name='healthy-pinned'", models.InboundModeHTTPS); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := db.Exec("UPDATE settings SET inbound_tls_cert_path=?,inbound_tls_key_path=? WHERE singleton_key=1", "/app/certs/fullchain.pem", "/app/keys/privkey.pem"); err != nil {
+			t.Fatal(err)
+		}
 		beforeGroups, beforeNodes = migratedGroupState(t, db)
 	})
 	withDatabase(func(db *sql.DB) {
@@ -211,6 +224,10 @@ func verifyLegacyGroupMigration(t *testing.T, withDatabase func(func(*sql.DB))) 
 			t.Fatalf("重新迁移改变了日志设置 %q, %v", logSettings, err)
 		}
 		groups, nodes := migratedGroupState(t, db)
+		settings, err := models.LoadRuntimeSettings(t.Context(), db)
+		if err != nil || settings.InboundTLSCertPath != "/app/certs/fullchain.pem" || settings.InboundTLSKeyPath != "/app/keys/privkey.pem" {
+			t.Fatalf("重启改变了入站 TLS 选择：%+v，%v", settings, err)
+		}
 		if !reflect.DeepEqual(groups, beforeGroups) || !reflect.DeepEqual(nodes, beforeNodes) {
 			t.Fatal("重启后分组、端口或显式检测结果发生变化")
 		}

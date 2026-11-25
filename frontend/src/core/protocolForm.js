@@ -1,5 +1,78 @@
 export { proxyTypes, upstreamProxyTypes, localizedProxyTypes, isPolicyType } from './protocolSchema.js'
 
+const isPolicyTypeName = (type) => type === 'failover' || type === 'loadbalance'
+
+// 清洗策略成员来源（支持单个实体节点与整组自动同步），去重并保留顺序。
+export function normalizePolicyMemberSources(sources, fallbackMemberIds = []) {
+  const normalized = []
+  const seen = new Set()
+  const raw = Array.isArray(sources) && sources.length > 0
+    ? sources
+    : (Array.isArray(fallbackMemberIds) ? fallbackMemberIds.map((id) => ({ type: 'node', id })) : [])
+  for (const entry of raw) {
+    const type = entry?.type === 'group' ? 'group' : entry?.type === 'node' ? 'node' : ''
+    const id = Number(entry?.id)
+    if (!type || !Number.isInteger(id) || id <= 0) continue
+    const key = `${type}:${id}`
+    if (seen.has(key)) continue
+    seen.add(key)
+    normalized.push({ type, id })
+  }
+  return normalized
+}
+
+// 将分组内物理节点按 ID 升序排列（排除策略节点与自身）。
+export function groupPhysicalNodesById(allNodes, groupId, excludeNodeId = null) {
+  return (Array.isArray(allNodes) ? allNodes : [])
+    .filter((item) => item && item.group_id === groupId && !isPolicyTypeName(item.type) && item.id !== excludeNodeId)
+    .sort((left, right) => left.id - right.id)
+}
+
+// 断开指定分组的关联：按首次出现顺序原地展开该分组当前物理节点（按 ID 升序）为独立成员并去重，保持原有优先级不变。
+export function unlinkPolicyGroupInSources(sources, groupId, allNodes, excludeNodeId = null) {
+  const normalized = normalizePolicyMemberSources(sources)
+  const seenNodeIds = new Set()
+  const expanded = []
+  for (const entry of normalized) {
+    if (entry.type === 'group' && entry.id === groupId) {
+      for (const member of groupPhysicalNodesById(allNodes, groupId, excludeNodeId)) {
+        if (seenNodeIds.has(member.id)) continue
+        seenNodeIds.add(member.id)
+        expanded.push({ type: 'node', id: member.id })
+      }
+      continue
+    }
+    if (entry.type === 'node') {
+      if (seenNodeIds.has(entry.id)) continue
+      seenNodeIds.add(entry.id)
+    }
+    expanded.push(entry)
+  }
+  return normalizePolicyMemberSources(expanded)
+}
+
+// 将策略来源列表展开为去重后的成员节点 ID 列表（供预览或保存前计算）。
+export function resolvePolicyMemberIds(sources, allNodes, excludeNodeId = null) {
+  const result = []
+  const seen = new Set()
+  for (const entry of normalizePolicyMemberSources(sources)) {
+    if (entry.type === 'node') {
+      if (!seen.has(entry.id)) {
+        seen.add(entry.id)
+        result.push(entry.id)
+      }
+      continue
+    }
+    for (const member of groupPhysicalNodesById(allNodes, entry.id, excludeNodeId)) {
+      if (!seen.has(member.id)) {
+        seen.add(member.id)
+        result.push(member.id)
+      }
+    }
+  }
+  return result
+}
+
 const splitMultilineList = (rawValue) => {
   if (typeof rawValue !== 'string') {
     return []
@@ -352,11 +425,20 @@ export function createProtocolFormModel(node, { isUpstreamEditor = false, isFiel
     delete normalizedConfig.reduce_rtt
   }
 
+  const initialPolicyMemberIds = Array.isArray(normalizedConfig.member_ids)
+    ? normalizedConfig.member_ids.map(Number).filter((id) => Number.isInteger(id) && id > 0)
+    : []
+  const initialPolicyMemberSources = normalizePolicyMemberSources(
+    normalizedConfig.member_sources,
+    initialPolicyMemberIds
+  )
+
   const initialValues = {
     name: node?.name || '',
     remark: node?.remark || '',
     enabled: node?.enabled !== false,
     inbound_port: node?.inbound_port || 0,
+    inbound_mode: node?.inbound_mode === 'https' ? 'https' : 'mixed',
     username: node?.username || '',
     password: node?.password || '',
     auth_enabled: node?.id
@@ -364,7 +446,8 @@ export function createProtocolFormModel(node, { isUpstreamEditor = false, isFiel
       : true,
     server: normalizedConfig.server || '',
     server_port: normalizedConfig.server_port || 443,
-    policy_member_ids: Array.isArray(normalizedConfig.member_ids) ? normalizedConfig.member_ids.map(Number).filter((id) => Number.isInteger(id) && id > 0) : [],
+    policy_member_ids: initialPolicyMemberIds,
+    policy_member_sources: initialPolicyMemberSources,
     policy_strategy: normalizedConfig.strategy || 'round-robin',
     policy_health_check_url: normalizedConfig.health_check_url || '',
     policy_health_check_interval: normalizedConfig.health_check_interval || 30,
@@ -418,6 +501,14 @@ export function createProtocolFormModel(node, { isUpstreamEditor = false, isFiel
 
   const finalizeFormConfig = (type, config) => {
     if (isUpstreamEditor) config = { ...config, detour: '' }
+    if (type === 'failover' || type === 'loadbalance') {
+      const finalized = { ...config }
+      const sources = Array.isArray(finalized.member_sources) ? finalized.member_sources : []
+      if (!sources.some((entry) => entry?.type === 'group')) {
+        delete finalized.member_sources
+      }
+      return finalized
+    }
     if (type === 'hy2') {
       const finalized = { ...config }
       delete finalized.brutal_up_mbps
@@ -449,11 +540,14 @@ export function createProtocolFormModel(node, { isUpstreamEditor = false, isFiel
       return {}
     }
     if (type === 'failover' || type === 'loadbalance') {
-      const memberIds = Array.isArray(values.policy_member_ids)
-        ? [...new Set(values.policy_member_ids.map(Number).filter((id) => Number.isInteger(id) && id > 0))]
-        : []
+      const sources = normalizePolicyMemberSources(values.policy_member_sources, values.policy_member_ids)
+      const hasGroupSource = sources.some((entry) => entry.type === 'group')
+      const memberIds = hasGroupSource
+        ? sources.filter((entry) => entry.type === 'node').map((entry) => entry.id)
+        : sources.map((entry) => entry.id)
       const base = {
         member_ids: memberIds,
+        member_sources: hasGroupSource ? sources : [],
         ...(values.policy_health_check_url ? { health_check_url: String(values.policy_health_check_url).trim() } : {}),
         ...(Number(values.policy_health_check_interval) > 0 ? { health_check_interval: Number(values.policy_health_check_interval) } : {}),
       }

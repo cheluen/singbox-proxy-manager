@@ -468,8 +468,17 @@ func (h *Handler) DeleteGroup(c *gin.Context) {
 				return err
 			}
 		}
-		_, err := tx.ExecContext(ctx, "DELETE FROM node_groups WHERE id=?", id)
-		return err
+		if _, err := tx.ExecContext(ctx, "DELETE FROM node_groups WHERE id=?", id); err != nil {
+			return err
+		}
+		if group.NodeCount == 0 {
+			nodes, err := models.LoadProxyNodes(ctx, tx)
+			if err != nil {
+				return err
+			}
+			return reconcilePolicyReferences(ctx, tx, nodes)
+		}
+		return nil
 	}})
 	if err != nil {
 		groupError(c, err)

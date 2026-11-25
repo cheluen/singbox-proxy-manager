@@ -1,7 +1,7 @@
-// 节点信息的可复用展示块：端口、认证、前置代理、备注、连接方式。
-import { memo, useEffect, useState } from 'react'
+// 节点信息的可复用展示块：端口、入站模式、认证、前置代理、备注、连接方式。
+import { memo, useEffect, useRef, useState } from 'react'
 import { Button, Form, Input, Switch } from 'antd'
-import { Dices, Eye, EyeOff, Route, ShieldCheck, ShieldOff, StickyNote, TriangleAlert } from 'lucide-react'
+import { Dices, Eye, EyeOff, Lock, Route, ShieldCheck, ShieldOff, StickyNote, TriangleAlert } from 'lucide-react'
 import { useTranslation } from 'react-i18next'
 import { randomCredentials } from '../core/credentials'
 import { buildHostPort, buildProxyUrl, hasInboundAuth, initialUpstreamMode, panelHost, reuseUsername, shellQuote } from '../core/nodeView'
@@ -10,7 +10,7 @@ import { upstreamModeLabel } from './labels'
 import { CopyButton, IconButton, Spinner } from './primitives'
 
 // 入站端口 + 固定开关。开启「保留入站端口」后或无端口分组节点不显示固定开关。
-export const PortChip = memo(function PortChip({ node, act, pinBusy = false, preservePorts = false, copyable = false }) {
+export const PortChip = memo(function PortChip({ node, act, pinBusy = false, preservePorts = false, copyable = false, compact = false }) {
   const { t } = useTranslation()
   const hasPort = Number(node.inbound_port) > 0
   const pinned = hasPort && Boolean(node.inbound_port_pinned)
@@ -36,13 +36,108 @@ export const PortChip = memo(function PortChip({ node, act, pinBusy = false, pre
           data-testid={`node-port-pin-${node.id}`}
           onClick={() => act.togglePortPin(node)}
         >
-          {busy ? <Spinner size={12} /> : <PinGlyph pinned={pinned} size={13} />}
+          {busy ? <Spinner size={compact ? 11 : 12} /> : <PinGlyph pinned={pinned} size={compact ? 12 : 13} />}
         </button>
       )}
       {copyable ? <CopyButton text={buildHostPort(node)} label={`${t('copy')} ${buildHostPort(node)}`} /> : null}
     </span>
   )
 })
+
+export const InboundTLSBadge = memo(function InboundTLSBadge({ node }) {
+  const { t } = useTranslation()
+  if (Number(node?.inbound_port) <= 0 || node?.inbound_mode !== 'https') return null
+  const label = t('inbound_mode_https_mark')
+  return (
+    <span className="sb-mini-mark is-tls" role="img" aria-label={label} data-tip={label} data-testid={`node-https-mark-${node.id}`}>
+      <Lock size={12} strokeWidth={2} />
+    </span>
+  )
+})
+
+// 入站模式滑动切换控件（Mixed ↔ HTTPS）：无有效 TLS 证书时点击 HTTPS 播放滑过去再弹回 Mixed 的微动效并提示引导。
+export function InboundModeSwitch({ value = 'mixed', tlsStatus, disabled = false, busy = false, onChange, onRejected, testId }) {
+  const { t } = useTranslation()
+  const [bounceSeq, setBounceSeq] = useState(0)
+  const [bouncing, setBouncing] = useState(false)
+  const timerRef = useRef(null)
+  const rafRef = useRef(null)
+  const isHttps = value === 'https'
+  const tlsReady = Boolean(tlsStatus?.ready)
+  const rejectReason = tlsStatus?.selection_mode === 'unselected'
+    ? t('inbound_tls_select_in_settings')
+    : t('inbound_tls_missing_guide')
+
+  useEffect(() => () => {
+    window.clearTimeout(timerRef.current)
+    window.cancelAnimationFrame(rafRef.current)
+  }, [])
+
+  const triggerBounce = () => {
+    window.clearTimeout(timerRef.current)
+    window.cancelAnimationFrame(rafRef.current)
+    setBouncing(false)
+    rafRef.current = window.requestAnimationFrame(() => {
+      setBounceSeq((seq) => seq + 1)
+      setBouncing(true)
+      timerRef.current = window.setTimeout(() => setBouncing(false), 540)
+    })
+  }
+
+  const allowMixedReset = disabled && isHttps
+  const select = (target) => {
+    if (busy) return
+    if (disabled && !(target === 'mixed' && allowMixedReset)) return
+    if (target === (isHttps ? 'https' : 'mixed')) return
+    if (target === 'https' && !tlsReady) {
+      triggerBounce()
+      onRejected?.(rejectReason)
+      return
+    }
+    onChange?.(target)
+  }
+
+  return (
+    <div
+      className={`sb-mode-switch${isHttps ? ' is-https' : ''}${bouncing ? ' is-bouncing' : ''}${!tlsReady ? ' is-tls-missing' : ''}${disabled && !allowMixedReset ? ' is-disabled' : ''}${busy ? ' is-busy' : ''}`}
+      role="radiogroup"
+      aria-label={t('inbound_mode')}
+      data-testid={testId}
+      data-mode={isHttps ? 'https' : 'mixed'}
+      data-bouncing={bouncing ? 'true' : 'false'}
+      data-bounce-seq={bounceSeq}
+      data-tls-ready={tlsReady ? 'true' : 'false'}
+      onClick={(event) => event.stopPropagation()}
+    >
+      <span key={bounceSeq} className="sb-mode-switch__thumb" aria-hidden="true" />
+      <button
+        type="button"
+        role="radio"
+        aria-checked={!isHttps}
+        disabled={busy || (disabled && !allowMixedReset)}
+        className={`sb-mode-switch__opt${!isHttps ? ' is-active' : ''}`}
+        data-value="mixed"
+        onClick={() => select('mixed')}
+      >
+        {t('inbound_mode_mixed')}
+      </button>
+      <button
+        type="button"
+        role="radio"
+        aria-checked={isHttps}
+        disabled={disabled || busy}
+        aria-disabled={disabled || busy || !tlsReady}
+        className={`sb-mode-switch__opt${isHttps ? ' is-active' : ''}${!tlsReady ? ' is-locked' : ''}`}
+        data-value="https"
+        data-tip={!tlsReady ? rejectReason : undefined}
+        onClick={() => select('https')}
+      >
+        <Lock size={11} strokeWidth={2} aria-hidden="true" />
+        <span>{t('inbound_mode_https')}</span>
+      </button>
+    </div>
+  )
+}
 
 export const AuthMark = memo(function AuthMark() {
   const { t } = useTranslation()
@@ -191,13 +286,14 @@ export function ConnectInfo({ node }) {
   const { t } = useTranslation()
   const [visible, setVisible] = useState(false)
   const auth = hasInboundAuth(node)
-  const httpUrl = buildProxyUrl(node, 'http')
-  const socksUrl = buildProxyUrl(node, 'socks5')
+  const isHttps = node.inbound_mode === 'https'
+  const httpUrl = buildProxyUrl(node, isHttps ? 'https' : 'http')
+  const socksUrl = isHttps ? '' : buildProxyUrl(node, 'socks5')
   const curl = `curl -x ${shellQuote(httpUrl)} http://httpbin.org/ip`
   const reuse = node.tcp_reuse_enabled !== false ? reuseUsername(node) : ''
   if (!node.inbound_port) return <p className="sb-dim">{t('connect_no_port')}</p>
   return (
-    <div className="sb-connect">
+    <div className="sb-connect" data-inbound-mode={isHttps ? 'https' : 'mixed'}>
       {node.enabled === false ? (
         <p className="sb-callout sb-callout--warn"><TriangleAlert size={15} strokeWidth={1.75} />{t('connect_disabled_hint')}</p>
       ) : null}
@@ -210,9 +306,18 @@ export function ConnectInfo({ node }) {
           <IconButton label={visible ? t('hide') : t('show')} icon={visible ? EyeOff : Eye} size="sm" onClick={() => setVisible((prev) => !prev)} />
         ) : null}
       </div>
-      <UrlRow label="HTTP" url={httpUrl} masked={maskSecret(httpUrl, node, visible)} />
-      <UrlRow label="SOCKS5" url={socksUrl} masked={maskSecret(socksUrl, node, visible)} />
-      <UrlRow label="curl" url={curl} masked={maskSecret(curl, node, visible)} />
+      {isHttps ? (
+        <>
+          <UrlRow label="HTTPS" url={httpUrl} masked={maskSecret(httpUrl, node, visible)} />
+          <UrlRow label="curl" url={curl} masked={maskSecret(curl, node, visible)} />
+        </>
+      ) : (
+        <>
+          <UrlRow label="HTTP" url={httpUrl} masked={maskSecret(httpUrl, node, visible)} />
+          <UrlRow label="SOCKS5" url={socksUrl} masked={maskSecret(socksUrl, node, visible)} />
+          <UrlRow label="curl" url={curl} masked={maskSecret(curl, node, visible)} />
+        </>
+      )}
       {reuse ? (
         <div className="sb-connect__reuse" data-testid={`node-route-id-section-${node.id}`}>
           <div className="sb-url">

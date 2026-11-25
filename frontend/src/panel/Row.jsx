@@ -5,7 +5,7 @@ import { hasInboundAuth, nodeHealth, serverAddress } from '../core/nodeView'
 import { CheckBox, Toggle } from '../shared/controls'
 import { isInteractive } from '../shared/labels'
 import { NodeMenuButton } from '../shared/menus'
-import { AuthMark, PortChip, RemarkMark, UpstreamMark } from '../shared/NodeParts'
+import { AuthMark, InboundTLSBadge, PortChip, RemarkMark, UpstreamMark } from '../shared/NodeParts'
 import { HealthBadge, Latency, ProtocolTag, Region } from '../shared/primitives'
 import { SortableItem } from '../shared/sortable'
 
@@ -131,6 +131,7 @@ export const DuskRow = memo(function DuskRow({ node, index, selected, expanded, 
         <span className="truncate">{node.name}</span>
       </button>
       <span className="dusk-row__marks">
+        <InboundTLSBadge node={node} />
         <RemarkMark node={node} />
         <UpstreamMark node={node} />
         {hasInboundAuth(node) ? null : <AuthMark />}
@@ -141,7 +142,7 @@ export const DuskRow = memo(function DuskRow({ node, index, selected, expanded, 
         入站信息（入站端口、明文入站用户名、毛玻璃掩码入站密码）→ 出站信息（节点类型、服务器地址、地区、节点IP、延迟）。
       */}
       <div className="dusk-row__meta">
-        <span className="dusk-col--port"><PortChip node={node} act={act} pinBusy={pinBusy} preservePorts={preservePorts} /></span>
+        <span className="dusk-col--port"><PortChip node={node} act={act} pinBusy={pinBusy} preservePorts={preservePorts} compact /></span>
         <span
           className="dusk-col--user dusk-row__user mono truncate"
           data-tip={node.username || undefined}

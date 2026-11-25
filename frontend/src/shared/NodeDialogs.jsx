@@ -92,6 +92,7 @@ export function NodeDialogBody({ node, focusLink, ctl, onDone }) {
         allocatePort={allocatePort}
         allNodes={ctl.allNodes || ctl.nodes}
         groups={ctl.groups || []}
+        tlsStatus={ctl.settings?.inbound_tls}
         onSave={save}
         onCancel={onDone}
         submitLabel={editing ? t('save') : t('create_node')}

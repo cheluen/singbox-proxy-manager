@@ -39,8 +39,7 @@ const (
 	defaultConfigDir            = "./config"
 	defaultPort                 = "30000"
 	defaultBindAddress          = "0.0.0.0"
-	defaultTZ                   = "UTC+8"
-	defaultTimezoneLocationName = "Asia/Shanghai"
+	defaultTimezoneLocationName = "Asia/Singapore"
 )
 
 func loadDotEnv() {
@@ -92,10 +91,7 @@ func discoverDotEnvPaths() []string {
 func applyTimezoneFromEnv() string {
 	rawTZ := strings.TrimSpace(os.Getenv("TZ"))
 	if rawTZ == "" {
-		rawTZ = defaultTZ
-		if err := os.Setenv("TZ", rawTZ); err != nil {
-			log.Printf("Failed to set default TZ=%s: %v", rawTZ, err)
-		}
+		rawTZ = defaultTimezoneLocationName
 	}
 
 	loc, canonicalName, err := resolveTimezone(rawTZ)
@@ -104,11 +100,9 @@ func applyTimezoneFromEnv() string {
 		fallbackLoc, fallbackErr := time.LoadLocation(defaultTimezoneLocationName)
 		if fallbackErr != nil {
 			log.Printf("Failed to load fallback timezone %s: %v", defaultTimezoneLocationName, fallbackErr)
-			fallbackLoc = time.FixedZone("UTC+08:00", 8*3600)
-			canonicalName = "UTC+08:00"
-		} else {
-			canonicalName = defaultTimezoneLocationName
+			fallbackLoc = time.FixedZone(defaultTimezoneLocationName, 8*3600)
 		}
+		canonicalName = defaultTimezoneLocationName
 		loc = fallbackLoc
 	}
 
@@ -127,19 +121,9 @@ func resolveTimezone(raw string) (*time.Location, string, error) {
 	}
 
 	upper := strings.ToUpper(tz)
-	switch upper {
-	case "UTC+8", "UTC+08", "UTC+08:00", "GMT+8", "GMT+08", "GMT+08:00":
-		loc, err := time.LoadLocation(defaultTimezoneLocationName)
-		if err != nil {
-			return nil, "", err
-		}
-		return loc, defaultTimezoneLocationName, nil
-	}
-
-	if strings.HasPrefix(upper, "UTC") || strings.HasPrefix(upper, "GMT") {
-		if loc, canonicalName, ok := parseUTCOffsetLocation(upper); ok {
-			return loc, canonicalName, nil
-		}
+	if upper == "LOCAL" || strings.HasPrefix(upper, "UTC+") || strings.HasPrefix(upper, "UTC-") ||
+		strings.HasPrefix(upper, "GMT+") || strings.HasPrefix(upper, "GMT-") {
+		return nil, "", fmt.Errorf("timezone must use a standard IANA name")
 	}
 
 	loc, err := time.LoadLocation(tz)
@@ -147,52 +131,6 @@ func resolveTimezone(raw string) (*time.Location, string, error) {
 		return nil, "", err
 	}
 	return loc, tz, nil
-}
-
-func parseUTCOffsetLocation(raw string) (*time.Location, string, bool) {
-	offset := strings.TrimPrefix(strings.TrimPrefix(raw, "UTC"), "GMT")
-	if offset == "" {
-		return time.UTC, "UTC", true
-	}
-	if len(offset) < 2 {
-		return nil, "", false
-	}
-
-	sign := offset[0]
-	if sign != '+' && sign != '-' {
-		return nil, "", false
-	}
-	number := offset[1:]
-	parts := strings.Split(number, ":")
-	if len(parts) > 2 {
-		return nil, "", false
-	}
-
-	hourPart := parts[0]
-	minutePart := "0"
-	if len(parts) == 2 {
-		minutePart = parts[1]
-	} else if len(number) == 4 {
-		hourPart = number[:2]
-		minutePart = number[2:]
-	}
-
-	hours, err := strconv.Atoi(hourPart)
-	if err != nil || hours < 0 || hours > 14 {
-		return nil, "", false
-	}
-	minutes, err := strconv.Atoi(minutePart)
-	if err != nil || minutes < 0 || minutes >= 60 {
-		return nil, "", false
-	}
-
-	totalSeconds := hours*3600 + minutes*60
-	if sign == '-' {
-		totalSeconds = -totalSeconds
-	}
-
-	canonical := fmt.Sprintf("UTC%c%02d:%02d", sign, hours, minutes)
-	return time.FixedZone(canonical, totalSeconds), canonical, true
 }
 
 func main() {

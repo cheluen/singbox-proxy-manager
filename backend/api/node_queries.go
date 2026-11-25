@@ -16,18 +16,22 @@ const nodeIDsPerQuery = 500
 
 const insertNodeSQL = `
 	INSERT INTO proxy_nodes (
-		name, remark, type, config, inbound_port, inbound_port_pinned,
+		name, remark, type, config, inbound_port, inbound_mode, inbound_port_pinned,
 		username, password, tcp_reuse_enabled, upstream_mode, upstream_type,
 		upstream_config, sort_order, latency, enabled, group_id, subscription_key, subscription_name
 	)
-	VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+	VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 `
 
 const nodeExportColumns = "name, type, config"
 
 func nodeInsertArgs(node models.ProxyNode) []any {
+	inboundMode := node.InboundMode
+	if inboundMode == "" {
+		inboundMode = models.InboundModeMixed
+	}
 	return []any{
-		node.Name, node.Remark, node.Type, node.Config, models.NullablePort(node.InboundPort), node.InboundPortPinned,
+		node.Name, node.Remark, node.Type, node.Config, models.NullablePort(node.InboundPort), inboundMode, node.InboundPortPinned,
 		node.Username, node.Password, node.TCPReuseEnabled, node.UpstreamMode, node.UpstreamType,
 		node.UpstreamConfig, node.SortOrder, node.Latency, node.Enabled, node.GroupID, node.SubscriptionKey, node.SubscriptionName,
 	}
