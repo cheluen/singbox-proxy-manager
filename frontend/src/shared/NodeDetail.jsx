@@ -2,10 +2,10 @@ import { Button } from 'antd'
 import { Pencil, Route, TriangleAlert, Zap } from 'lucide-react'
 import { useTranslation } from 'react-i18next'
 import { isPolicyNode } from '../core/nodeModel'
-import { formatDateTime, initialUpstreamMode, nodeHealth, parsedNodeConfig, protocolLabel, serverAddress, upstreamAddress } from '../core/nodeView'
+import { configEndpointAddress, formatDateTime, nodeHealth, parsedNodeConfig, protocolLabel, resolveEffectiveUpstream, serverAddress } from '../core/nodeView'
 import { Toggle } from './controls'
 import { NodeMenuButton } from './menus'
-import { upstreamModeLabel } from './labels'
+import { policyWarningLabel, upstreamModeLabel } from './labels'
 import { ConnectInfo, PortChip, RemarkEditor } from './NodeParts'
 import { CopyButton, Field, HealthBadge, Latency, Region, SecretText } from './primitives'
 
@@ -86,7 +86,7 @@ function PolicyMembersSection({ node, ctl }) {
       {warnings.map((warn, idx) => (
         <p key={idx} className="sb-callout sb-callout--warn sb-section__note" style={{ marginTop: 0, marginBottom: 8 }}>
           <TriangleAlert size={14} strokeWidth={1.8} />
-          <span>{warn}</span>
+          <span>{policyWarningLabel(warn, t)}</span>
         </p>
       ))}
       {memberIds.length === 0 ? (
@@ -128,7 +128,7 @@ function OutboundSection({ node }) {
   const { t, i18n } = useTranslation()
   const policy = isPolicyNode(node)
   const cfg = policy ? parsedNodeConfig(node) : null
-  const address = serverAddress(node)
+  const address = serverAddress(node, t)
   const locale = i18n.language?.startsWith('zh') ? 'zh' : 'en'
   return (
     <Section title={t('section_outbound')}>
@@ -144,18 +144,36 @@ function OutboundSection({ node }) {
             {address ? <span className="sb-inline"><span className="mono truncate">{address}</span><CopyButton text={address} /></span> : dash}
           </Field>
         )}
-        <Field label={t('node_type')}>{protocolLabel(node.type)}</Field>
+        <Field label={t('node_type')}>{protocolLabel(node.type, t)}</Field>
         <Field label={t('updated_at')}>{formatDateTime(node.updated_at, locale)}</Field>
       </dl>
     </Section>
   )
 }
 
-function UpstreamSection({ node, act }) {
+function UpstreamSection({ node, ctl, act }) {
   const { t } = useTranslation()
-  const mode = initialUpstreamMode(node)
-  const custom = mode === 'custom'
-  const address = custom ? upstreamAddress(node) : ''
+  const group = ctl.groupById?.get(node.group_id) || null
+  const effective = resolveEffectiveUpstream(node, group, ctl.settings)
+  const mode = effective.mode
+  const showEffectiveField = mode === 'group' || mode === 'global' || (mode === 'custom' && effective.disabled)
+  const showManagedDetails = mode === 'custom'
+    ? Boolean(node.upstream_type && node.upstream_config)
+    : effective.active && (mode === 'group' || mode === 'global')
+  const displayConfig = mode === 'custom' ? node.upstream_config : effective.config
+  const displayIP = mode === 'custom' ? node.upstream_ip : effective.ip
+  const displayLocation = mode === 'custom' ? node.upstream_location : effective.location
+  const displayCountryCode = mode === 'custom' ? node.upstream_country_code : effective.country_code
+  const displayLatency = mode === 'custom' ? node.upstream_latency : effective.latency
+  const displayError = mode === 'custom' ? node.upstream_error : effective.error
+  const address = showManagedDetails ? configEndpointAddress(displayConfig) : ''
+  const effectiveLabel = effective.disabled
+    ? t('upstream_effective_disabled')
+    : effective.source === 'group'
+      ? t('upstream_effective_group', { type: protocolLabel(effective.type, t) })
+      : effective.source === 'global'
+        ? t('upstream_effective_global', { type: protocolLabel(effective.type, t) })
+        : t('upstream_effective_direct')
   return (
     <Section
       title={t('upstream_info')}
@@ -167,17 +185,24 @@ function UpstreamSection({ node, act }) {
     >
       <dl className="sb-fields">
         <Field label={t('upstream_policy')}>{upstreamModeLabel(mode, t)}</Field>
-        {custom ? (
+        {showEffectiveField ? (
+          <Field label={t('upstream_effective_source')} wide={!showManagedDetails}>
+            <span data-testid={`node-upstream-effective-${node.id}`}>{effectiveLabel}</span>
+          </Field>
+        ) : null}
+        {mode === 'custom' ? (
+          <Field label={t('node_type')}>{node.upstream_type ? protocolLabel(node.upstream_type, t) : dash}</Field>
+        ) : null}
+        {showManagedDetails ? (
           <>
-            <Field label={t('node_type')}>{node.upstream_type ? protocolLabel(node.upstream_type) : dash}</Field>
             <Field label={t('upstream_address')}>{address ? <span className="mono">{address}</span> : dash}</Field>
-            <Field label={t('upstream_ip')}>{node.upstream_ip ? <span className="mono">{node.upstream_ip}</span> : dash}</Field>
-            <Field label={t('upstream_location')}><Region location={node.upstream_location} code={node.upstream_country_code} /></Field>
-            <Field label={t('upstream_latency')}><Latency value={node.upstream_latency} /></Field>
+            <Field label={t('upstream_ip')}>{displayIP ? <span className="mono">{displayIP}</span> : dash}</Field>
+            <Field label={t('upstream_location')}><Region location={displayLocation} code={displayCountryCode} /></Field>
+            <Field label={t('upstream_latency')}><Latency value={displayLatency} /></Field>
           </>
         ) : null}
       </dl>
-      {custom && node.upstream_error ? <p className="sb-callout sb-callout--bad sb-section__note">{node.upstream_error}</p> : null}
+      {showManagedDetails && displayError ? <p className="sb-callout sb-callout--bad sb-section__note">{displayError}</p> : null}
     </Section>
   )
 }
@@ -224,7 +249,7 @@ export function DetailSections({ node, ctl, act }) {
       <div className="sb-detail-card" data-detail-group="outbound">
         <OutboundSection node={node} />
         <ExitSection node={node} checking={checking} />
-        {isPolicyNode(node) ? <PolicyMembersSection node={node} ctl={ctl} /> : <UpstreamSection node={node} act={act} />}
+        {isPolicyNode(node) ? <PolicyMembersSection node={node} ctl={ctl} /> : <UpstreamSection node={node} ctl={ctl} act={act} />}
       </div>
       <RemarkSection node={node} act={act} />
     </>

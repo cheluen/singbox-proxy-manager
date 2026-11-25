@@ -60,7 +60,7 @@ export default {
   // Node Form
   parse_link: 'Parse Link',
   upstream_mode: 'Node Upstream Proxy',
-  upstream_mode_desc: 'Follow Global uses the system setting, Custom overrides it, and Direct explicitly bypasses it.',
+  upstream_mode_desc: 'Priority: Node Custom > Group Upstream > Global Upstream. Direct explicitly bypasses both group and global upstreams.',
   upstream_follow_global: 'Follow Global',
   upstream_custom: 'Custom',
   upstream_direct: 'Direct',
@@ -116,7 +116,7 @@ export default {
   preserve_inbound_ports_desc: 'When enabled, drag sorting, delete reindexing, and start-port changes will not rewrite existing node ports. Only manual edits change a node port.',
   preserve_inbound_ports_disable_warning: 'Disabling this will reassign unpinned inbound ports per group start port (ports may change) and restart sing-box. Continue?',
   upstream_global: 'Global Upstream Proxy',
-  upstream_global_desc: 'When enabled, every node set to Follow Global establishes its outbound connection through this proxy.',
+  upstream_global_desc: 'When enabled, nodes set to Follow Global use this proxy unless their group enables a group upstream (priority: Node Custom > Group Upstream > Global Upstream).',
   upstream_global_proxy: 'Global Upstream Configuration',
   upstream_global_required: 'Configure the proxy before enabling the global upstream',
   new_admin_password: 'New Admin Password',

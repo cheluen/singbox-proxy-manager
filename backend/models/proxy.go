@@ -59,6 +59,7 @@ const (
 	UpstreamModeLegacy = "legacy"
 	UpstreamModeNone   = "none"
 	UpstreamModeGlobal = "global"
+	UpstreamModeGroup  = "group"
 	UpstreamModeCustom = "custom"
 )
 
@@ -67,13 +68,39 @@ type ProxyDefinition struct {
 	Config string `json:"config"`
 }
 
+type GroupUpstream struct {
+	Enabled bool
+	ProxyDefinition
+}
+
+func (settings Settings) EffectiveUpstream(node ProxyNode) (string, ProxyDefinition) {
+	if !node.Enabled || IsPolicy(node.Type) {
+		return UpstreamModeNone, ProxyDefinition{}
+	}
+	mode, _ := NormalizeUpstreamMode(node.UpstreamMode)
+	switch mode {
+	case UpstreamModeCustom:
+		return mode, ProxyDefinition{Type: node.UpstreamType, Config: node.UpstreamConfig}
+	case UpstreamModeGroup, UpstreamModeGlobal:
+		if group := settings.GroupUpstreams[node.GroupID]; group.Enabled {
+			return UpstreamModeGroup, group.ProxyDefinition
+		}
+		if mode == UpstreamModeGlobal && settings.GlobalUpstreamEnabled {
+			return UpstreamModeGlobal, ProxyDefinition{Type: settings.GlobalUpstreamType, Config: settings.GlobalUpstreamConfig}
+		}
+	case UpstreamModeLegacy:
+		return mode, ProxyDefinition{}
+	}
+	return UpstreamModeNone, ProxyDefinition{}
+}
+
 func NormalizeUpstreamMode(raw string) (string, error) {
 	mode := strings.ToLower(strings.TrimSpace(raw))
 	if mode == "" {
 		return UpstreamModeLegacy, nil
 	}
 	switch mode {
-	case UpstreamModeLegacy, UpstreamModeNone, UpstreamModeGlobal, UpstreamModeCustom:
+	case UpstreamModeLegacy, UpstreamModeNone, UpstreamModeGlobal, UpstreamModeGroup, UpstreamModeCustom:
 		return mode, nil
 	default:
 		return "", fmt.Errorf("unsupported upstream mode: %s", raw)
@@ -454,16 +481,17 @@ type WireGuardConfig struct {
 
 // Settings contains the settings used by the runtime and the admin panel.
 type Settings struct {
-	PreserveInboundPorts      bool           `json:"preserve_inbound_ports"`
-	GlobalUpstreamEnabled     bool           `json:"global_upstream_enabled"`
-	GlobalUpstreamType        string         `json:"global_upstream_type"`
-	GlobalUpstreamConfig      string         `json:"global_upstream_config"`
-	GlobalUpstreamIP          string         `json:"global_upstream_ip"`
-	GlobalUpstreamLocation    string         `json:"global_upstream_location"`
-	GlobalUpstreamCountryCode string         `json:"global_upstream_country_code"`
-	GlobalUpstreamLatency     int            `json:"global_upstream_latency"`
-	GlobalUpstreamError       string         `json:"global_upstream_error"`
-	NodeListColumnWidths      map[string]int `json:"node_list_column_widths"`
+	GroupUpstreams            map[int]GroupUpstream `json:"-"`
+	PreserveInboundPorts      bool                  `json:"preserve_inbound_ports"`
+	GlobalUpstreamEnabled     bool                  `json:"global_upstream_enabled"`
+	GlobalUpstreamType        string                `json:"global_upstream_type"`
+	GlobalUpstreamConfig      string                `json:"global_upstream_config"`
+	GlobalUpstreamIP          string                `json:"global_upstream_ip"`
+	GlobalUpstreamLocation    string                `json:"global_upstream_location"`
+	GlobalUpstreamCountryCode string                `json:"global_upstream_country_code"`
+	GlobalUpstreamLatency     int                   `json:"global_upstream_latency"`
+	GlobalUpstreamError       string                `json:"global_upstream_error"`
+	NodeListColumnWidths      map[string]int        `json:"node_list_column_widths"`
 }
 
 const (
@@ -639,7 +667,15 @@ func createSchema(db *sql.DB, dialect appdb.Dialect) error {
 	}
 
 	columnsByTable := make(map[string]map[string]schemaColumn)
-	for _, migration := range migrationColumns(dialect) {
+	migrations := append(migrationColumns(dialect), migrationColumn{"settings", "global_upstream_revision", "ALTER TABLE settings ADD COLUMN global_upstream_revision INTEGER NOT NULL DEFAULT 0"})
+	for _, column := range groupUpstreamColumns(dialect) {
+		name, _, _ := strings.Cut(column, " ")
+		if dialect == appdb.DialectMySQL && name == "upstream_config" {
+			column = "upstream_config LONGTEXT NULL"
+		}
+		migrations = append(migrations, migrationColumn{"node_groups", name, "ALTER TABLE node_groups ADD COLUMN " + column})
+	}
+	for _, migration := range migrations {
 		columns, loaded := columnsByTable[migration.Table]
 		if !loaded {
 			var err error
@@ -671,6 +707,15 @@ func createSchema(db *sql.DB, dialect appdb.Dialect) error {
 	if dialect == appdb.DialectMySQL {
 		if err := ensureMySQLLongTextColumns(db, columnsByTable); err != nil {
 			return err
+		}
+		for _, column := range groupUpstreamColumns(dialect) {
+			name, _, _ := strings.Cut(column, " ")
+			width := columnsByTable["node_groups"][name].charLength
+			if width.Valid && (name == "upstream_ip" && width.Int64 < 255 || name == "upstream_country_code" && width.Int64 < 32) {
+				if _, err := db.Exec("ALTER TABLE node_groups MODIFY COLUMN " + column); err != nil {
+					return err
+				}
+			}
 		}
 	}
 
@@ -757,6 +802,7 @@ func ensureMySQLLongTextColumns(db *sql.DB, columnsByTable map[string]map[string
 		{table: "proxy_nodes", name: "config"},
 		{table: "proxy_nodes", name: "upstream_config"},
 		{table: "settings", name: "global_upstream_config"},
+		{table: "node_groups", name: "upstream_config"},
 	}
 	for _, column := range columns {
 		metadata := columnsByTable[column.table][column.name]
@@ -790,6 +836,7 @@ type schemaColumn struct {
 	dataType     string
 	isNullable   string
 	defaultValue sql.NullString
+	charLength   sql.NullInt64
 }
 
 func schemaStatements(dialect appdb.Dialect) []string {
@@ -839,6 +886,7 @@ func schemaStatements(dialect appdb.Dialect) []string {
 				global_upstream_enabled BOOLEAN NOT NULL DEFAULT FALSE,
 				global_upstream_type TEXT NOT NULL DEFAULT '',
 				global_upstream_config TEXT NOT NULL DEFAULT '',
+				global_upstream_revision INTEGER NOT NULL DEFAULT 0,
 				global_upstream_ip TEXT NOT NULL DEFAULT '',
 				global_upstream_location TEXT NOT NULL DEFAULT '',
 				global_upstream_country_code TEXT NOT NULL DEFAULT '',
@@ -903,6 +951,7 @@ func schemaStatements(dialect appdb.Dialect) []string {
 				global_upstream_enabled BOOLEAN NOT NULL DEFAULT FALSE,
 				global_upstream_type VARCHAR(64) NOT NULL DEFAULT '',
 				global_upstream_config LONGTEXT NOT NULL,
+				global_upstream_revision INTEGER NOT NULL DEFAULT 0,
 				global_upstream_ip VARCHAR(255) NOT NULL DEFAULT '',
 				global_upstream_location VARCHAR(255) NOT NULL DEFAULT '',
 				global_upstream_country_code VARCHAR(32) NOT NULL DEFAULT '',
@@ -967,6 +1016,7 @@ func schemaStatements(dialect appdb.Dialect) []string {
 				global_upstream_enabled INTEGER NOT NULL DEFAULT 0,
 				global_upstream_type TEXT NOT NULL DEFAULT '',
 				global_upstream_config TEXT NOT NULL DEFAULT '',
+				global_upstream_revision INTEGER NOT NULL DEFAULT 0,
 				global_upstream_ip TEXT NOT NULL DEFAULT '',
 				global_upstream_location TEXT NOT NULL DEFAULT '',
 				global_upstream_country_code TEXT NOT NULL DEFAULT '',
@@ -1091,7 +1141,7 @@ func loadSchemaColumns(db *sql.DB, dialect appdb.Dialect, table string) (map[str
 		`, table)
 	case appdb.DialectMySQL:
 		rows, err = db.Query(`
-			SELECT column_name, data_type, is_nullable, column_default
+			SELECT column_name, data_type, is_nullable, column_default, character_maximum_length
 			FROM information_schema.columns
 			WHERE table_schema = DATABASE()
 			  AND table_name = ?
@@ -1112,7 +1162,7 @@ func loadSchemaColumns(db *sql.DB, dialect appdb.Dialect, table string) (map[str
 		case appdb.DialectPostgres:
 			err = rows.Scan(&name, &metadata.isNullable)
 		case appdb.DialectMySQL:
-			err = rows.Scan(&name, &metadata.dataType, &metadata.isNullable, &metadata.defaultValue)
+			err = rows.Scan(&name, &metadata.dataType, &metadata.isNullable, &metadata.defaultValue, &metadata.charLength)
 		default:
 			var columnID, notNull, primaryKey int
 			err = rows.Scan(&columnID, &name, &metadata.dataType, &notNull, &metadata.defaultValue, &primaryKey)

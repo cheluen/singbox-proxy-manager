@@ -23,6 +23,13 @@ type upstreamIPChecker func(context.Context, string, string, string) (*IPInfo, e
 
 const upstreamIPCheckMaxAttempts = 3
 
+func (s *SingBoxService) UpstreamCheckTimeout() time.Duration {
+	if s == nil || s.upstreamCheckTimeout <= 0 {
+		return 30 * time.Second
+	}
+	return s.upstreamCheckTimeout
+}
+
 type isolatedIPCheckPlan struct {
 	nodes         []parsedEnabledNode
 	upstreams     []parsedUpstreamProxy
@@ -37,21 +44,40 @@ type isolatedIPCheckPlan struct {
 func (s *SingBoxService) CheckUpstreamIPContext(
 	ctx context.Context,
 	definition models.ProxyDefinition,
+	listeners func(context.Context) ([]models.ProxyNode, error),
 ) (*IPInfo, error) {
-	return s.checkUpstreamIPContext(ctx, definition, CheckProxyIPContext)
+	return s.checkUpstreamIPContext(ctx, definition, listeners, CheckProxyIPContext)
 }
 
 func (s *SingBoxService) checkUpstreamIPContext(
 	ctx context.Context,
 	definition models.ProxyDefinition,
+	listeners func(context.Context) ([]models.ProxyNode, error),
 	checker upstreamIPChecker,
 ) (*IPInfo, error) {
 	target := models.ProxyNode{
-		ID: 1, Enabled: true, Type: "direct", Config: `{}`, UpstreamMode: models.UpstreamModeCustom,
+		Enabled: true, Type: "direct", Config: `{}`, UpstreamMode: models.UpstreamModeCustom,
 		UpstreamType: definition.Type, UpstreamConfig: definition.Config,
 	}
-	return s.CheckIsolatedNodeIPContext(ctx, target.ID, func(context.Context) ([]models.ProxyNode, models.Settings, error) {
-		return []models.ProxyNode{target}, models.Settings{}, nil
+	if strings.EqualFold(strings.TrimSpace(definition.Type), "direct") {
+		upstream, err := s.parseManagedUpstreamDefinition(definition, "")
+		if err != nil {
+			return nil, redactIPCheckError(err, appendIPCheckConfigCredentials(nil, definition.Config))
+		}
+		if directUpstreamIsEmpty(upstream.Config) {
+			target.UpstreamMode = models.UpstreamModeNone
+		}
+	}
+	return s.CheckIsolatedNodeIPContext(ctx, target.ID, func(ctx context.Context) ([]models.ProxyNode, models.Settings, error) {
+		var nodes []models.ProxyNode
+		if listeners != nil {
+			var err error
+			nodes, err = listeners(ctx)
+			if err != nil {
+				return nil, models.Settings{}, errors.New("failed to load active inbound ports")
+			}
+		}
+		return append(nodes, target), models.Settings{}, nil
 	}, checker)
 }
 
@@ -70,11 +96,7 @@ func (s *SingBoxService) CheckIsolatedNodeIPContext(
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	checkTimeout := s.upstreamCheckTimeout
-	if checkTimeout <= 0 {
-		checkTimeout = 30 * time.Second
-	}
-	checkCtx, cancelCheck := context.WithTimeout(ctx, checkTimeout)
+	checkCtx, cancelCheck := context.WithTimeout(ctx, s.UpstreamCheckTimeout())
 	defer cancelCheck()
 	release, err := acquireExecutionSlot(checkCtx, s.upstreamCheckSlots, "isolated IP check")
 	if err != nil {
@@ -171,12 +193,20 @@ func (s *SingBoxService) prepareIsolatedIPCheck(ctx context.Context, targetID in
 	}
 	var usesGlobal bool
 	var credentials []string
+	usedGroups := make(map[int]models.GroupUpstream)
+	for _, group := range settings.GroupUpstreams {
+		credentials = appendIPCheckConfigCredentials(credentials, group.Config)
+	}
 	for _, node := range selected {
-		mode, _ := models.NormalizeUpstreamMode(node.UpstreamMode)
-		usesGlobal = usesGlobal || mode == models.UpstreamModeGlobal
+		source, _ := settings.EffectiveUpstream(node)
+		usesGlobal = usesGlobal || source == models.UpstreamModeGlobal
+		if source == models.UpstreamModeGroup {
+			usedGroups[node.GroupID] = settings.GroupUpstreams[node.GroupID]
+		}
 		credentials = appendIPCheckConfigCredentials(credentials, node.Config, node.UpstreamConfig)
 	}
-	settings.GlobalUpstreamEnabled = settings.GlobalUpstreamEnabled && usesGlobal
+	settings.GroupUpstreams = usedGroups
+	settings.GlobalUpstreamEnabled = usesGlobal
 	if settings.GlobalUpstreamEnabled {
 		credentials = appendIPCheckConfigCredentials(credentials, settings.GlobalUpstreamConfig)
 	}
@@ -185,7 +215,7 @@ func (s *SingBoxService) prepareIsolatedIPCheck(ctx context.Context, targetID in
 	if err != nil {
 		return nil, err
 	}
-	upstreams, upstreamDNS, err := s.prepareManagedUpstreams(ctx, parsed, settings)
+	upstreams, upstreamDNS, err := s.prepareManagedUpstreams(ctx, parsed, settings, 0)
 	if err != nil {
 		return nil, err
 	}
@@ -200,6 +230,11 @@ func (s *SingBoxService) prepareIsolatedIPCheck(ctx context.Context, targetID in
 		usedPorts: make(map[int]struct{}), needsLocalDNS: localDNS || upstreamDNS, credentials: credentials,
 	}
 	inbounds := make(map[int]*models.ProxyNode)
+	for port, tag := range s.runningInboundTags() {
+		id, _ := tagID(tag, "node-", "-in")
+		inbounds[port] = &models.ProxyNode{ID: id, InboundPort: port}
+		plan.usedPorts[port] = struct{}{}
+	}
 	for index := range nodes {
 		node := &nodes[index]
 		if node.InboundPort > 0 {

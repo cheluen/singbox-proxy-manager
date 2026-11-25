@@ -1,6 +1,6 @@
 # 系统架构与核心机制
 
-本文档基于 `1.7.30` 源码梳理 SingBox Proxy Manager 的核心架构、运行时生命周期与安全边界。
+本文档基于 `1.7.31` 源码梳理 SingBox Proxy Manager 的核心架构、运行时生命周期与安全边界。
 
 ## 1. 总体定位与架构
 
@@ -40,7 +40,7 @@ flowchart LR
 
 | 组件 | 固定基线 | 源码依据 |
 | --- | --- | --- |
-| 应用版本 | `1.7.30`（后端嵌入 `version.txt`） | `internal/version/version.txt` |
+| 应用版本 | `1.7.31`（后端嵌入 `version.txt`） | `internal/version/version.txt` |
 | 容器基础镜像 | `alpine:3.24`（多架构静态二进制运行环境） | `Dockerfile`、`Dockerfile.release` |
 | Go 工具链 | **精确 `1.26.11`**（发行与内核构建强校验） | `go.mod`、`scripts/verify-go-build.sh` |
 | sing-box 内核 | **固定 `1.12.12`**（Go 1.26.11 重编译） | `scripts/build-sing-box.sh` |
@@ -109,8 +109,9 @@ flowchart LR
 - **出站映射与策略调度**：常规实体协议直接生成对应 `outbounds`（标签 `node-<ID>-out`，零额外跳转）；`wireguard` 协议按 `sing-box 1.12` 规范写入顶层 `endpoints`；配置末尾固定附加内置 `direct` 出站作为 `route.final`。仅当存在已启用策略节点（`failover` / `loadbalance`）时，才会额外启动管理进程内置的本机 SOCKS5 策略调度器（`127.0.0.1` 随机端口 + 随机认证密钥）并生成单个内部认证回环入站 `internal-policy-dispatch-in`，将策略出站映射到成员实体出站。
 - **本机控制接口**：配置内置 `experimental.clash_api`（监听随机 `127.0.0.1` 端口与随机 Bearer 密钥），仅在面板打开「当前连接」、调用连接快照或开启日志持久化时按需采集。
 - **日志分流前脱敏**：`sing-box` 子进程 stdout/stderr 在写入控制台、轮转文件及日志观测缓冲之前先经行级脱敏处理器，自动拦截 HTTP/SOCKS5 认证失败错误中携带的明文密码与本机内部控制凭据。
-- **托管前置代理（链式转发）**：
-  - 全局前置标签为 `managed-upstream-global`，节点自定义前置标签为 `node-<ID>-upstream`。
+- **托管前置代理（三级链式转发）**：
+  - 全局前置标签为 `managed-upstream-global`，分组前置标签为 `managed-upstream-group-<groupID>`，节点自定义前置标签为 `node-<ID>-upstream`。
+  - 生效优先级固定为 **节点自定义 (`custom`) > 分组前置代理 (`group` / 分组已启用) > 全局前置代理 (`global`)**。
   - 普通出站通过 `detour` 串联至前置代理；`direct` 节点无法直接设 `detour`，由系统自动生成单选 `selector` 桥接至前置代理。
   - 历史遗留的 `legacy` 模式 `detour` 仍保持兼容（可按启用节点名称或标签引用），但严格拦截重名歧义、未定义目标、自引用及环路。
 - **配置文件写入**：运行时配置写入 `<CONFIG_DIR>/config.json`，最近一次成功启动的快照保存为 `<CONFIG_DIR>/config.json.last-good`，均采用 `0600` 权限与「临时文件 + `Sync` + `Rename`」原子落盘。
@@ -158,10 +159,11 @@ flowchart LR
 
 ### 4.3 托管前置代理与防环路保护（`upstream_loop_guard.go`）
 
-节点的前置代理支持三种常规策略（及旧数据兼容的 `legacy`）：
-- `none`（直连）：明确绕过全局前置代理。
-- `global`（跟随全局）：当系统设置启用全局前置代理时，出站流量先经全局前置代理中转。
-- `custom`（自定义）：使用该节点专属的前置代理配置，支持独立出口 IP 检测（通过临时短生命周期 `sing-box` 进程隔离探测，结束后自动清理临时目录）。
+节点的前置代理支持四种常规策略（及旧数据兼容的 `legacy`），整体遵循 **节点自定义 > 分组前置代理 > 全局前置代理** 三级优先级：
+- `none`（直连）：明确绕过分组前置代理与全局前置代理。
+- `group`（跟随分组）：仅使用当前所属分组的分组前置代理；若本组前置未启用则直接出站，**不回退**到系统全局前置代理。
+- `global`（跟随全局）：优先使用当前所属分组已启用的分组前置代理；仅当本组未启用分组前置代理时，回退使用系统设置中的全局前置代理。
+- `custom`（自定义）：最高优先级，使用该节点专属的前置代理配置并覆盖分组与全局设置；节点、分组与全局前置均支持通过临时短生命周期 `sing-box` 进程隔离检测出口 IP（结束后自动清理临时目录）。
 
 为防止配置出死循环流量，系统强制执行以下防环路规则：
 1. 禁止前置代理定义与节点自身出站完全相同，禁止在前置定义内再次嵌套 `detour`。

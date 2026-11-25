@@ -199,4 +199,16 @@ func TestRealPortlessNodeIPCheck(t *testing.T) {
 		t.Fatal(err)
 	}
 	check("127.0.0.2")
+	if _, err := handler.db.Exec(`UPDATE node_groups SET upstream_enabled=TRUE,upstream_type='direct',upstream_config='{"inet4_bind_address":"127.0.0.3"}' WHERE id=(SELECT group_id FROM proxy_nodes WHERE id=?)`, nodeID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := handler.db.Exec(`UPDATE settings SET global_upstream_enabled=TRUE,global_upstream_type='direct',global_upstream_config='{"inet4_bind_address":"127.0.0.4"}' WHERE singleton_key=1`); err != nil {
+		t.Fatal(err)
+	}
+	for _, mode := range []string{"global", "group"} {
+		if _, err := handler.db.Exec(`UPDATE proxy_nodes SET upstream_mode=?,config='{}' WHERE id=?`, mode, nodeID); err != nil {
+			t.Fatal(err)
+		}
+		check("127.0.0.3")
+	}
 }

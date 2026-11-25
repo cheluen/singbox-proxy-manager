@@ -1,188 +1,344 @@
-// 代理节点分组相关弹窗：新建/编辑分组、删除非空分组策略、跨分组移动节点。
-import { useState } from 'react'
-import { Alert, Button, Form, Input, InputNumber, Radio, Select, Switch } from 'antd'
-import { RefreshCw, Trash2 } from 'lucide-react'
+// 代理节点分组相关弹窗：新建/编辑分组、分组前置代理、删除非空分组策略、跨分组移动节点。
+import { useEffect, useState } from 'react'
+import { Alert, Button, Form, Input, InputNumber, Modal, Radio, Select, Switch } from 'antd'
+import { Pencil, Plus, RefreshCw, Trash2, Zap } from 'lucide-react'
 import { useTranslation } from 'react-i18next'
-import { formatDateTime } from '../core/nodeView'
+import { buildGroupFormPlan } from '../core/groupForm'
+import { formatDateTime, protocolLabel } from '../core/nodeView'
+import { UpstreamDefinitionEditor } from './NodeDialogs'
 
 export function GroupFormDialogBody({ group, ctl, onDone }) {
   const { t, i18n } = useTranslation()
   const [form] = Form.useForm()
   const editing = Boolean(group?.id)
+  const savedGroup = editing ? (ctl.groupById?.get(group.id) || group) : null
   const [saving, setSaving] = useState(false)
   const [syncing, setSyncing] = useState(false)
+  const [checkingUpstream, setCheckingUpstream] = useState(false)
+  const [upstreamEditorOpen, setUpstreamEditorOpen] = useState(false)
+  const [upstreamDraft, setUpstreamDraft] = useState(null)
+  const [upstreamEnabledTouched, setUpstreamEnabledTouched] = useState(false)
+  const [openedSnapshot] = useState(() => ({
+    upstream_enabled: Boolean(savedGroup?.upstream_enabled),
+    upstream_type: savedGroup?.upstream_type || '',
+    upstream_config: savedGroup?.upstream_config || '',
+    upstream_revision: typeof savedGroup?.upstream_revision === 'number' ? savedGroup.upstream_revision : undefined,
+  }))
   const allocatePort = Form.useWatch('allocate_port', form)
+  const upstreamEnabled = Form.useWatch('upstream_enabled', form)
   const subUrl = Form.useWatch('subscription_url', form)
   const autoUpdate = Form.useWatch('subscription_auto_update', form)
   const locale = i18n.language?.startsWith('zh') ? 'zh' : 'en'
-  const hasSavedSub = Boolean(editing && String(group?.subscription_url || '').trim())
-  const subMatchesSaved = hasSavedSub && String(subUrl || '').trim() === String(group?.subscription_url || '').trim()
+  const hasSavedSub = Boolean(editing && String(savedGroup?.subscription_url || '').trim())
+  const subMatchesSaved = hasSavedSub && String(subUrl || '').trim() === String(savedGroup?.subscription_url || '').trim()
+
+  useEffect(() => {
+    if (!editing || upstreamEnabledTouched) return
+    form.setFieldValue('upstream_enabled', Boolean(savedGroup?.upstream_enabled))
+  }, [editing, form, savedGroup?.upstream_enabled, upstreamEnabledTouched])
+
+  const upstream = upstreamDraft ?? {
+    type: savedGroup?.upstream_type || '',
+    config: savedGroup?.upstream_config || '',
+  }
+  const upstreamConfigured = Boolean(upstream.type && upstream.config)
+  const upstreamMatchesSaved = Boolean(
+    editing &&
+    upstreamConfigured &&
+    upstream.type === (savedGroup?.upstream_type || '') &&
+    upstream.config === (savedGroup?.upstream_config || '')
+  )
+  const hasUpstreamCheckResult = Boolean(
+    savedGroup?.upstream_ip || savedGroup?.upstream_latency || savedGroup?.upstream_error
+  )
 
   const submit = async (values) => {
-    const payload = {
-      name: String(values.name || '').trim(),
-      allocate_port: Boolean(values.allocate_port),
-      start_port: values.allocate_port ? Number(values.start_port || 30001) : Number(group?.start_port || values.start_port || 30001),
-      subscription_url: String(values.subscription_url || '').trim(),
-      subscription_auto_update: Boolean(values.subscription_url && String(values.subscription_url).trim() && values.subscription_auto_update),
-      subscription_interval_minutes: Number(values.subscription_interval_minutes || 60),
+    const plan = buildGroupFormPlan({
+      editing,
+      values,
+      savedGroup,
+      openedSnapshot,
+      touchedFields: {
+        name: form.isFieldTouched('name'),
+        allocate_port: form.isFieldTouched('allocate_port'),
+        start_port: form.isFieldTouched('start_port'),
+        subscription_url: form.isFieldTouched('subscription_url'),
+        subscription_auto_update: form.isFieldTouched('subscription_auto_update'),
+        subscription_interval_minutes: form.isFieldTouched('subscription_interval_minutes'),
+      },
+      upstreamDraft,
+      upstreamEnabledTouched,
+    })
+    if (plan.missingUpstream) {
+      ctl.helpers.notify.error(t('group_upstream_required'))
+      return
+    }
+    if (editing && Object.keys(plan.payload || {}).length === 0) {
+      onDone()
+      return
+    }
+    if (plan.upstreamConflict) {
+      const confirmed = await ctl.helpers.confirm({
+        title: t('group_upstream_conflict_title'),
+        content: t('group_upstream_conflict_desc'),
+        okText: t('confirm'),
+        danger: true,
+      })
+      if (!confirmed) return
     }
     setSaving(true)
     const ok = editing
-      ? await ctl.updateGroup(group, payload)
-      : await ctl.createGroup(payload)
+      ? await ctl.updateGroup(savedGroup, plan.payload)
+      : await ctl.createGroup(plan.payload)
     setSaving(false)
     if (ok) onDone()
   }
 
   const refreshSub = async () => {
-    if (!group?.id) return
+    if (!savedGroup?.id) return
     setSyncing(true)
-    await ctl.refreshGroupSubscription(group)
+    await ctl.refreshGroupSubscription(savedGroup)
     setSyncing(false)
   }
 
+  const checkUpstream = async () => {
+    if (!savedGroup?.id) return
+    setCheckingUpstream(true)
+    await ctl.checkGroupUpstream(savedGroup.id)
+    setCheckingUpstream(false)
+  }
+
   return (
-    <Form
-      form={form}
-      layout="vertical"
-      requiredMark={false}
-      className="sb-form"
-      data-testid="group-form"
-      initialValues={{
-        name: group?.name || '',
-        allocate_port: editing ? Boolean(group?.allocate_port) : true,
-        start_port: group?.start_port || 30001,
-        subscription_url: group?.subscription_url || '',
-        subscription_auto_update: Boolean(group?.subscription_auto_update),
-        subscription_interval_minutes: group?.subscription_interval_minutes || 60,
-      }}
-      onFinish={submit}
-    >
-      <section className="sb-form-section">
-        <h3 className="sb-form-section__title">{t('form_group_basic')}</h3>
-        <Form.Item
-          name="name"
-          label={t('group_name')}
-          rules={[{ required: true, whitespace: true, message: t('group_name_required') }]}
-        >
-          <Input autoFocus maxLength={80} placeholder={t('group_name_placeholder')} data-testid="group-name-input" />
-        </Form.Item>
-      </section>
-
-      <section className="sb-form-section">
-        <h3 className="sb-form-section__title">{t('group_port_policy')}</h3>
-        <div className="sb-setting-row">
-          <div className="sb-setting-row__text">
-            <strong>{t('group_allocate_port')}</strong>
-            <span>{t('group_allocate_port_desc')}</span>
-          </div>
-          <Form.Item name="allocate_port" valuePropName="checked" noStyle>
-            <Switch aria-label={t('group_allocate_port')} data-testid="group-allocate-port" />
+    <>
+      <Form
+        form={form}
+        layout="vertical"
+        requiredMark={false}
+        className="sb-form"
+        data-testid="group-form"
+        initialValues={{
+          name: savedGroup?.name || '',
+          allocate_port: editing ? Boolean(savedGroup?.allocate_port) : true,
+          start_port: savedGroup?.start_port || 30001,
+          upstream_enabled: Boolean(savedGroup?.upstream_enabled),
+          subscription_url: savedGroup?.subscription_url || '',
+          subscription_auto_update: Boolean(savedGroup?.subscription_auto_update),
+          subscription_interval_minutes: savedGroup?.subscription_interval_minutes || 60,
+        }}
+        onFinish={submit}
+      >
+        <section className="sb-form-section">
+          <h3 className="sb-form-section__title">{t('form_group_basic')}</h3>
+          <Form.Item
+            name="name"
+            label={t('group_name')}
+            rules={[{ required: true, whitespace: true, message: t('group_name_required') }]}
+          >
+            <Input autoFocus maxLength={80} placeholder={t('group_name_placeholder')} data-testid="group-name-input" />
           </Form.Item>
-        </div>
-        {allocatePort === false ? (
-          <Alert type="info" showIcon className="sb-gap" message={t('group_no_port_notice')} />
-        ) : null}
-        <Form.Item
-          name="start_port"
-          label={t('start_port')}
-          extra={t('group_start_port_desc')}
-          className="sb-gap"
-          rules={allocatePort ? [
-            { required: true, message: t('start_port_required') },
-            { type: 'number', min: 1024, max: 65535, message: t('start_port_range') },
-          ] : []}
-        >
-          <InputNumber
-            min={1024}
-            max={65535}
-            disabled={!allocatePort}
-            style={{ width: 200 }}
-            data-testid="group-start-port"
-          />
-        </Form.Item>
-      </section>
+        </section>
 
-      <section className="sb-form-section">
-        <h3 className="sb-form-section__title">{t('group_subscription')}</h3>
-        <Form.Item
-          name="subscription_url"
-          label={t('group_subscription_url')}
-          extra={t('group_subscription_url_desc')}
-          rules={[{
-            validator: (_, value) => {
-              const trimmed = String(value || '').trim()
-              if (!trimmed) return Promise.resolve()
-              if (/^https?:\/\/\S+$/i.test(trimmed)) return Promise.resolve()
-              return Promise.reject(new Error(t('group_subscription_url_invalid')))
-            },
-          }]}
-        >
-          <Input allowClear spellCheck={false} placeholder="https://example.com/subscription" data-testid="group-sub-url" />
-        </Form.Item>
-        <div className="sb-setting-row">
-          <div className="sb-setting-row__text">
-            <strong>{t('group_subscription_auto')}</strong>
-            <span>{t('group_subscription_auto_desc')}</span>
+        <section className="sb-form-section">
+          <h3 className="sb-form-section__title">{t('group_port_policy')}</h3>
+          <div className="sb-setting-row">
+            <div className="sb-setting-row__text">
+              <strong>{t('group_allocate_port')}</strong>
+              <span>{t('group_allocate_port_desc')}</span>
+            </div>
+            <Form.Item name="allocate_port" valuePropName="checked" noStyle>
+              <Switch aria-label={t('group_allocate_port')} data-testid="group-allocate-port" />
+            </Form.Item>
           </div>
-          <Form.Item name="subscription_auto_update" valuePropName="checked" noStyle>
-            <Switch disabled={!String(subUrl || '').trim()} aria-label={t('group_subscription_auto')} data-testid="group-sub-auto" />
+          {allocatePort === false ? (
+            <Alert type="info" showIcon className="sb-gap" message={t('group_no_port_notice')} />
+          ) : null}
+          <Form.Item
+            name="start_port"
+            label={t('start_port')}
+            extra={t('group_start_port_desc')}
+            className="sb-gap"
+            rules={allocatePort ? [
+              { required: true, message: t('start_port_required') },
+              { type: 'number', min: 1024, max: 65535, message: t('start_port_range') },
+            ] : []}
+          >
+            <InputNumber
+              min={1024}
+              max={65535}
+              disabled={!allocatePort}
+              style={{ width: 200 }}
+              data-testid="group-start-port"
+            />
           </Form.Item>
-        </div>
-        <Form.Item
-          name="subscription_interval_minutes"
-          label={t('group_subscription_interval')}
-          rules={autoUpdate ? [{ required: true, type: 'integer', min: 1, max: 525600, message: t('group_subscription_interval_range') }] : []}
-        >
-          <InputNumber min={1} max={525600} precision={0} step={1} disabled={!String(subUrl || '').trim() || !autoUpdate} style={{ width: 200 }} suffix={t('minutes')} data-testid="group-sub-interval" />
-        </Form.Item>
-        {editing && hasSavedSub ? (
-          <div className="sb-inline-card">
+        </section>
+
+        <section className="sb-form-section">
+          <h3 className="sb-form-section__title">{t('group_upstream')}</h3>
+          <div className="sb-setting-row">
+            <div className="sb-setting-row__text">
+              <strong>{t('group_upstream_enable')}</strong>
+              <span>{t('group_upstream_desc')}</span>
+            </div>
+            <Form.Item name="upstream_enabled" valuePropName="checked" noStyle>
+              <Switch
+                aria-label={t('group_upstream')}
+                data-testid="group-upstream-enabled"
+                onChange={() => setUpstreamEnabledTouched(true)}
+              />
+            </Form.Item>
+          </div>
+          <div className={`sb-inline-card${upstreamEnabled && !upstreamConfigured ? ' is-error' : ''}`}>
             <div className="sb-inline-card__text">
-              <strong>{t('group_subscription_status')}</strong>
+              <strong>{t('group_upstream_proxy')}</strong>
               <span>
-                {group.subscription_last_updated_at
-                  ? `${t('updated_at')}: ${formatDateTime(group.subscription_last_updated_at, locale)}`
-                  : t('group_subscription_never')}
+                {upstreamConfigured
+                  ? `${protocolLabel(upstream.type, t)} · ${upstreamMatchesSaved ? t('configured') : t('configured_unsaved')}`
+                  : upstreamEnabled
+                    ? t('group_upstream_required')
+                    : t('not_configured')}
               </span>
             </div>
             <Button
-              icon={<RefreshCw size={14} strokeWidth={1.75} />}
-              loading={syncing}
-              disabled={!subMatchesSaved}
-              data-tip={subMatchesSaved ? undefined : t('group_sub_save_first')}
-              onClick={refreshSub}
-              data-testid="group-sub-refresh-now"
+              icon={<Zap size={14} strokeWidth={1.75} />}
+              loading={checkingUpstream}
+              disabled={!upstreamMatchesSaved}
+              data-tip={upstreamMatchesSaved ? undefined : t('upstream_check_save_first')}
+              onClick={checkUpstream}
+              data-testid="group-upstream-check-ip"
             >
-              {t('group_subscription_refresh')}
+              {t('check_ip')}
+            </Button>
+            <Button
+              icon={upstreamConfigured ? <Pencil size={14} strokeWidth={1.75} /> : <Plus size={14} strokeWidth={1.75} />}
+              onClick={() => setUpstreamEditorOpen(true)}
+              data-testid="group-upstream-configure"
+            >
+              {upstreamConfigured ? t('upstream_edit') : t('upstream_configure')}
             </Button>
           </div>
-        ) : null}
-        {editing && group?.subscription_last_error ? (
-          <Alert type="error" showIcon className="sb-gap" message={t('group_subscription_last_error')} description={group.subscription_last_error} />
-        ) : null}
-      </section>
+          {upstreamMatchesSaved && hasUpstreamCheckResult ? (
+            savedGroup?.upstream_error ? (
+              <Alert
+                type="error"
+                showIcon
+                className="sb-gap"
+                message={t('upstream_check_error')}
+                description={savedGroup.upstream_error}
+                data-testid="group-upstream-check-result"
+              />
+            ) : (
+              <dl className="sb-fields sb-fields--3 sb-gap" data-testid="group-upstream-check-result">
+                <div className="sb-field"><dt>{t('upstream_ip')}</dt><dd className="mono">{savedGroup.upstream_ip || '—'}</dd></div>
+                <div className="sb-field"><dt>{t('upstream_location')}</dt><dd>{[savedGroup.upstream_country_code, savedGroup.upstream_location].filter(Boolean).join(' ') || '—'}</dd></div>
+                <div className="sb-field"><dt>{t('upstream_latency')}</dt><dd className="mono">{savedGroup.upstream_latency > 0 ? `${savedGroup.upstream_latency} ms` : '—'}</dd></div>
+              </dl>
+            )
+          ) : null}
+        </section>
 
-      <div className="sb-form-footer">
-        {editing && (ctl.groups?.length || 0) > 1 ? (
-          <Button
-            danger
-            icon={<Trash2 size={14} strokeWidth={1.75} />}
-            style={{ marginRight: 'auto' }}
-            disabled={saving}
-            onClick={() => ctl.open({ kind: 'group-delete', group })}
-            data-testid="group-delete-open"
+        <section className="sb-form-section">
+          <h3 className="sb-form-section__title">{t('group_subscription')}</h3>
+          <Form.Item
+            name="subscription_url"
+            label={t('group_subscription_url')}
+            extra={t('group_subscription_url_desc')}
+            rules={[{
+              validator: (_, value) => {
+                const trimmed = String(value || '').trim()
+                if (!trimmed) return Promise.resolve()
+                if (/^https?:\/\/\S+$/i.test(trimmed)) return Promise.resolve()
+                return Promise.reject(new Error(t('group_subscription_url_invalid')))
+              },
+            }]}
           >
-            {t('group_delete')}
+            <Input allowClear spellCheck={false} placeholder="https://example.com/subscription" data-testid="group-sub-url" />
+          </Form.Item>
+          <div className="sb-setting-row">
+            <div className="sb-setting-row__text">
+              <strong>{t('group_subscription_auto')}</strong>
+              <span>{t('group_subscription_auto_desc')}</span>
+            </div>
+            <Form.Item name="subscription_auto_update" valuePropName="checked" noStyle>
+              <Switch disabled={!String(subUrl || '').trim()} aria-label={t('group_subscription_auto')} data-testid="group-sub-auto" />
+            </Form.Item>
+          </div>
+          <Form.Item
+            name="subscription_interval_minutes"
+            label={t('group_subscription_interval')}
+            rules={autoUpdate ? [{ required: true, type: 'integer', min: 1, max: 525600, message: t('group_subscription_interval_range') }] : []}
+          >
+            <InputNumber min={1} max={525600} precision={0} step={1} disabled={!String(subUrl || '').trim() || !autoUpdate} style={{ width: 200 }} suffix={t('minutes')} data-testid="group-sub-interval" />
+          </Form.Item>
+          {editing && hasSavedSub ? (
+            <div className="sb-inline-card">
+              <div className="sb-inline-card__text">
+                <strong>{t('group_subscription_status')}</strong>
+                <span>
+                  {savedGroup.subscription_last_updated_at
+                    ? `${t('updated_at')}: ${formatDateTime(savedGroup.subscription_last_updated_at, locale)}`
+                    : t('group_subscription_never')}
+                </span>
+              </div>
+              <Button
+                icon={<RefreshCw size={14} strokeWidth={1.75} />}
+                loading={syncing}
+                disabled={!subMatchesSaved}
+                data-tip={subMatchesSaved ? undefined : t('group_sub_save_first')}
+                onClick={refreshSub}
+                data-testid="group-sub-refresh-now"
+              >
+                {t('group_subscription_refresh')}
+              </Button>
+            </div>
+          ) : null}
+          {editing && savedGroup?.subscription_last_error ? (
+            <Alert type="error" showIcon className="sb-gap" message={t('group_subscription_last_error')} description={savedGroup.subscription_last_error} />
+          ) : null}
+        </section>
+
+        <div className="sb-form-footer">
+          {editing && (ctl.groups?.length || 0) > 1 ? (
+            <Button
+              danger
+              icon={<Trash2 size={14} strokeWidth={1.75} />}
+              style={{ marginRight: 'auto' }}
+              disabled={saving}
+              onClick={() => ctl.open({ kind: 'group-delete', group: savedGroup })}
+              data-testid="group-delete-open"
+            >
+              {t('group_delete')}
+            </Button>
+          ) : null}
+          <Button onClick={onDone} disabled={saving}>{t('cancel')}</Button>
+          <Button type="primary" htmlType="submit" loading={saving} data-testid="group-form-submit">
+            {editing ? t('save') : t('group_create')}
           </Button>
-        ) : null}
-        <Button onClick={onDone} disabled={saving}>{t('cancel')}</Button>
-        <Button type="primary" htmlType="submit" loading={saving} data-testid="group-form-submit">
-          {editing ? t('save') : t('group_create')}
-        </Button>
-      </div>
-    </Form>
+        </div>
+      </Form>
+
+      <Modal
+        title={t('group_upstream_proxy')}
+        open={upstreamEditorOpen}
+        footer={null}
+        width={720}
+        destroyOnHidden
+        centered
+        maskClosable={false}
+        rootClassName="sb-overlay"
+        onCancel={() => setUpstreamEditorOpen(false)}
+      >
+        <UpstreamDefinitionEditor
+          value={upstreamConfigured ? upstream : null}
+          parse={ctl.parseLink}
+          formName="group_upstream"
+          onCancel={() => setUpstreamEditorOpen(false)}
+          onSave={async (next) => {
+            setUpstreamDraft(next)
+            setUpstreamEditorOpen(false)
+          }}
+        />
+      </Modal>
+    </>
   )
 }
 

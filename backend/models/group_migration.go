@@ -19,6 +19,24 @@ func groupSQLTypes(dialect appdb.Dialect) (string, string) {
 	}
 }
 
+func groupUpstreamColumns(dialect appdb.Dialect) []string {
+	text := func(size int) string {
+		if dialect == appdb.DialectMySQL {
+			return fmt.Sprintf("VARCHAR(%d) NOT NULL DEFAULT ''", size)
+		}
+		return "TEXT NOT NULL DEFAULT ''"
+	}
+	config := "TEXT NOT NULL DEFAULT ''"
+	if dialect == appdb.DialectMySQL {
+		config = "LONGTEXT NOT NULL"
+	}
+	return []string{
+		"upstream_enabled BOOLEAN NOT NULL DEFAULT FALSE", "upstream_type " + text(32), "upstream_config " + config,
+		"upstream_ip " + text(255), "upstream_location " + text(255), "upstream_country_code " + text(32),
+		"upstream_latency INTEGER NOT NULL DEFAULT 0", "upstream_error " + text(2048), "upstream_revision INTEGER NOT NULL DEFAULT 0",
+	}
+}
+
 func createGroupTable(db *sql.DB, dialect appdb.Dialect) error {
 	key, timestamp := groupSQLTypes(dialect)
 	now := "CURRENT_TIMESTAMP"
@@ -30,7 +48,7 @@ func createGroupTable(db *sql.DB, dialect appdb.Dialect) error {
 		start_port INTEGER NOT NULL, subscription_url VARCHAR(4096) NOT NULL DEFAULT '',
 		subscription_auto_update BOOLEAN NOT NULL DEFAULT FALSE, subscription_interval_minutes INTEGER NOT NULL DEFAULT 60,
 		subscription_last_updated_at %s NULL, subscription_last_error VARCHAR(2048) NOT NULL DEFAULT '',
-		revision BIGINT NOT NULL DEFAULT 0, created_at %s DEFAULT %s, updated_at %s DEFAULT %s)`, key, timestamp, timestamp, now, timestamp, now))
+		%s, revision BIGINT NOT NULL DEFAULT 0, created_at %s DEFAULT %s, updated_at %s DEFAULT %s)`, key, timestamp, strings.Join(groupUpstreamColumns(dialect), ", "), timestamp, now, timestamp, now))
 	return err
 }
 
@@ -56,8 +74,8 @@ func migrateGroupNodes(db *sql.DB, dialect appdb.Dialect) error {
 		return err
 	}
 	defer tx.Rollback()
-	_, err = tx.Exec(`INSERT INTO node_groups (name,sort_order,allocate_port,start_port)
-		SELECT 'Default',0,TRUE,CASE WHEN start_port BETWEEN 1024 AND 65535 THEN start_port ELSE 30001 END
+	_, err = tx.Exec(`INSERT INTO node_groups (name,sort_order,allocate_port,start_port,upstream_config)
+		SELECT 'Default',0,TRUE,CASE WHEN start_port BETWEEN 1024 AND 65535 THEN start_port ELSE 30001 END,''
 		FROM settings WHERE singleton_key=1 AND NOT EXISTS (SELECT 1 FROM node_groups)`)
 	if err != nil {
 		return err

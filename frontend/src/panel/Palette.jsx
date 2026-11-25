@@ -66,7 +66,7 @@ export function CommandPalette({ open, onClose, ctl, session, onJump }) {
             id: `node-${node.id}`,
             icon: Server,
             label: node.name,
-            hint: [groupName, protocolLabel(node.type), portText].filter(Boolean).join(' · '),
+            hint: [groupName, protocolLabel(node.type, t), portText].filter(Boolean).join(' · '),
             group: 'nodes',
             run: () => onJump(node.id),
           }

@@ -458,35 +458,45 @@ export function useNodeManager({ t, notify, confirm, onPasswordChanged }) {
   }, [loadGroups, notify, selectGroup, t])
 
   const updateGroup = useCallback(async (group, payload) => {
-    try {
-      await api.patch(`/node-groups/${group.id}`, payload)
-      await Promise.all([loadGroups(), loadNodes({ silent: true })])
-      notify.success(t('group_updated'))
-      return true
-    } catch (error) {
-      const data = error?.response?.data
-      if (error?.response?.status === 409 && data?.code === 'pinned_ports_exist') {
-        const count = Array.isArray(data.pinned_node_ids) ? data.pinned_node_ids.length : 0
-        const confirmed = await confirm({
-          title: t('group_release_pins_title'),
-          content: t('group_release_pins_desc', { count }),
-          okText: t('confirm'),
-          danger: true,
-        })
-        if (!confirmed) return false
-        try {
-          await api.patch(`/node-groups/${group.id}`, { ...payload, release_pins: true })
-          await Promise.all([loadGroups(), loadNodes({ silent: true })])
-          notify.success(t('group_updated'))
-          return true
-        } catch (retryError) {
-          notify.error(errorText(retryError, t('server_error')))
-          return false
+    const attempt = async (body, retried = new Set()) => {
+      try {
+        await api.patch(`/node-groups/${group.id}`, body)
+        await Promise.all([loadGroups(), loadNodes({ silent: true })])
+        notify.success(t('group_updated'))
+        return true
+      } catch (error) {
+        const data = error?.response?.data
+        const code = error?.response?.status === 409 ? data?.code : ''
+        if (code === 'pinned_ports_exist' && !retried.has(code)) {
+          const count = Array.isArray(data.pinned_node_ids) ? data.pinned_node_ids.length : 0
+          const confirmed = await confirm({
+            title: t('group_release_pins_title'),
+            content: t('group_release_pins_desc', { count }),
+            okText: t('confirm'),
+            danger: true,
+          })
+          if (!confirmed) return false
+          return attempt({ ...body, release_pins: true }, new Set([...retried, code]))
         }
+        if (code === 'upstream_conflict' && !retried.has(code)) {
+          await loadGroups()
+          const confirmed = await confirm({
+            title: t('group_upstream_conflict_title'),
+            content: t('group_upstream_conflict_desc'),
+            okText: t('confirm'),
+            danger: true,
+          })
+          if (!confirmed) return false
+          const next = { ...body }
+          delete next.expected_upstream_revision
+          delete next.expected_upstream_enabled
+          return attempt(next, new Set([...retried, code]))
+        }
+        notify.error(errorText(error, t('server_error')))
+        return false
       }
-      notify.error(errorText(error, t('server_error')))
-      return false
     }
+    return attempt(payload)
   }, [confirm, loadGroups, loadNodes, notify, t])
 
   const deleteGroup = useCallback(async (group, { mode, targetGroupId } = {}) => {
@@ -543,6 +553,20 @@ export function useNodeManager({ t, notify, confirm, onPasswordChanged }) {
       setRefreshingGroupId(null)
     }
   }, [loadGroups, loadNodes, notify, refreshingGroupId, t])
+
+  const checkGroupUpstream = useCallback(async (groupId) => {
+    if (!groupId) return false
+    try {
+      await api.post(`/node-groups/${groupId}/upstream/check-ip`, null, { timeout: 310000 })
+      await loadGroups()
+      notify.success(t('upstream_check_success'))
+      return true
+    } catch (error) {
+      await loadGroups()
+      notify.error(errorText(error, t('server_error')))
+      return false
+    }
+  }, [loadGroups, notify, t])
 
   const moveNodesToGroup = useCallback(async (ids, groupId) => {
     if (!Array.isArray(ids) || ids.length === 0 || !groupId) return false
@@ -696,7 +720,7 @@ export function useNodeManager({ t, notify, confirm, onPasswordChanged }) {
     flagBusy, pinBusy, refreshingGroupId, working, setWorking, overlay, setOverlay, canReorder,
     checks, checkNodes, loadGroups, loadNodes, refreshAll, patchNode, setNodes,
     allNodesRef, nodesRef, visibleRef, selectedNodesRef, activeGroupIdRef,
-    createGroup, updateGroup, deleteGroup, reorderGroups, refreshGroupSubscription, moveNodesToGroup,
+    createGroup, updateGroup, deleteGroup, reorderGroups, refreshGroupSubscription, checkGroupUpstream, moveNodesToGroup,
     toggleEnabled: (node) => toggleFlag(node, 'enabled'),
     toggleTcpReuse: (node) => toggleFlag(node, 'tcp_reuse_enabled'),
     togglePortPin, saveRemark, removeNode, saveNode, replaceNode, saveUpstream,

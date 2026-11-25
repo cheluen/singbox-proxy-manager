@@ -65,7 +65,8 @@ export const HealthBadge = memo(function HealthBadge({ node, checking, compact =
 })
 
 export const ProtocolTag = memo(function ProtocolTag({ type }) {
-  return <span className="sb-tag sb-tag--protocol">{protocolLabel(type)}</span>
+  const { t } = useTranslation()
+  return <span className="sb-tag sb-tag--protocol">{protocolLabel(type, t)}</span>
 })
 
 export const Latency = memo(function Latency({ value, failed = false, healthy = false, untested = false, error = '' }) {

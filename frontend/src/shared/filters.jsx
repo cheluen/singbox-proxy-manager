@@ -121,7 +121,7 @@ function AdvancedFilters({ ctl }) {
     <div className="sb-filter-panel" data-testid="nodes-filter-panel">
       <div className="sb-filter-panel__group">
         <span className="sb-filter-panel__label">{t('node_type')}</span>
-        <ChipGroup testId="filter-types" options={facets.types} selected={criteria.types} onToggle={toggleIn('types')} render={(option) => protocolLabel(option.value)} />
+        <ChipGroup testId="filter-types" options={facets.types} selected={criteria.types} onToggle={toggleIn('types')} render={(option) => protocolLabel(option.value, t)} />
       </div>
       <div className="sb-filter-panel__group">
         <span className="sb-filter-panel__label">{t('location')}</span>

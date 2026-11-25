@@ -17,23 +17,24 @@ import (
 )
 
 type ConnectionRoute struct {
-	Key          string   `json:"key"`
-	ClientIP     string   `json:"client_ip"`
-	InboundPort  int      `json:"inbound_port"`
-	InboundID    int      `json:"inbound_node_id"`
-	InboundName  string   `json:"inbound_node_name"`
-	RouteID      string   `json:"route_id"`
-	OutboundID   int      `json:"outbound_node_id"`
-	OutboundName string   `json:"outbound_node_name"`
-	OutboundType string   `json:"outbound_type"`
-	MemberID     int      `json:"policy_member_id"`
-	MemberName   string   `json:"policy_member_name"`
-	Upstream     string   `json:"upstream_label"`
-	Count        int      `json:"active_count"`
-	Upload       int64    `json:"upload_bytes"`
-	Download     int64    `json:"download_bytes"`
-	UploadRate   *float64 `json:"upload_bps"`
-	DownloadRate *float64 `json:"download_bps"`
+	Key            string   `json:"key"`
+	ClientIP       string   `json:"client_ip"`
+	InboundPort    int      `json:"inbound_port"`
+	InboundID      int      `json:"inbound_node_id"`
+	InboundName    string   `json:"inbound_node_name"`
+	RouteID        string   `json:"route_id"`
+	OutboundID     int      `json:"outbound_node_id"`
+	OutboundName   string   `json:"outbound_node_name"`
+	OutboundType   string   `json:"outbound_type"`
+	MemberID       int      `json:"policy_member_id"`
+	MemberName     string   `json:"policy_member_name"`
+	Upstream       string   `json:"upstream_label"`
+	UpstreamSource string   `json:"upstream_source,omitempty"`
+	Count          int      `json:"active_count"`
+	Upload         int64    `json:"upload_bytes"`
+	Download       int64    `json:"download_bytes"`
+	UploadRate     *float64 `json:"upload_bps"`
+	DownloadRate   *float64 `json:"download_bps"`
 }
 
 type ConnectionSnapshot struct {
@@ -304,26 +305,23 @@ func (m *ConnectionMonitor) capture(ctx context.Context, poll bool) (ConnectionS
 	return snapshot, nil
 }
 
-func upstreamLabel(w *runtimeWiring, node models.ProxyNode) string {
-	switch node.UpstreamMode {
-	case models.UpstreamModeGlobal:
-		if w.settings.GlobalUpstreamEnabled {
-			return "global: " + w.settings.GlobalUpstreamType
-		}
-	case models.UpstreamModeCustom:
-		return "custom: " + node.UpstreamType
-	case models.UpstreamModeLegacy, "":
+func (route *ConnectionRoute) setUpstream(w *runtimeWiring, node models.ProxyNode) {
+	source, upstream := w.settings.EffectiveUpstream(node)
+	route.Upstream, route.UpstreamSource = "", ""
+	switch source {
+	case models.UpstreamModeGlobal, models.UpstreamModeGroup, models.UpstreamModeCustom:
+		route.Upstream, route.UpstreamSource = source+": "+upstream.Type, source
+	case models.UpstreamModeLegacy:
 		var legacy struct {
 			Detour string `json:"detour"`
 		}
 		if json.Unmarshal([]byte(node.Config), &legacy) == nil && legacy.Detour != "" && legacy.Detour != "direct" {
+			route.Upstream, route.UpstreamSource = legacy.Detour, source
 			if id, ok := tagID(legacy.Detour, "node-", "-out"); ok {
-				return w.nodes[id].Name
+				route.Upstream = w.nodes[id].Name
 			}
-			return legacy.Detour
 		}
 	}
-	return ""
 }
 
 func (c clashConnection) route(w *runtimeWiring) (ConnectionRoute, bool) {
@@ -347,7 +345,8 @@ func (c clashConnection) route(w *runtimeWiring) (ConnectionRoute, bool) {
 			}
 		}
 	}
-	route := ConnectionRoute{ClientIP: c.Metadata.SourceIP, InboundID: id, InboundName: in.Name, InboundPort: in.InboundPort, OutboundID: out.ID, OutboundName: out.Name, OutboundType: out.Type, Upstream: upstreamLabel(w, out)}
+	route := ConnectionRoute{ClientIP: c.Metadata.SourceIP, InboundID: id, InboundName: in.Name, InboundPort: in.InboundPort, OutboundID: out.ID, OutboundName: out.Name, OutboundType: out.Type}
+	route.setUpstream(w, out)
 	reuse := out.Username + "+" + strconv.Itoa(out.InboundPort)
 	if out.Username != "" && strings.Contains(c.Rule, "auth_user="+reuse+" =>") {
 		route.RouteID = reuse
@@ -436,7 +435,7 @@ func (m *ConnectionMonitor) aggregate(snapshot *ConnectionSnapshot, raw []clashC
 			}
 			if member, ok := w.nodes[r.MemberID]; ok {
 				r.MemberName = member.Name
-				r.Upstream = upstreamLabel(w, member)
+				r.setUpstream(w, member)
 			}
 		}
 		r.Key = fmt.Sprintf("%s|%d|%d|%s|%d", r.ClientIP, r.InboundPort, r.OutboundID, r.RouteID, r.MemberID)

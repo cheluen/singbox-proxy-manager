@@ -1,4 +1,4 @@
-import { getNodeStatusCode } from './nodeModel.js'
+import { getNodeStatusCode, isPolicyNode } from './nodeModel.js'
 import { protocolLabel } from './protocolSchema.js'
 
 export { protocolLabel }
@@ -50,34 +50,127 @@ const configEndpoint = (config) => {
   return formatEndpoint(config.server || peer?.server, config.server_port || peer?.server_port)
 }
 
-export const serverAddress = (node) => {
+export const serverAddress = (node, t) => {
   if (!node || node.type === 'direct') return ''
   if (node.type === 'failover' || node.type === 'loadbalance') {
     const cfg = parsedConfig(node)
     const count = Array.isArray(cfg.member_ids) ? cfg.member_ids.length : 0
     if (node.type === 'loadbalance') {
-      const algo = cfg.strategy === 'consistent-hashing' ? 'hash' : 'rr'
+      const algo = cfg.strategy === 'consistent-hashing'
+        ? (typeof t === 'function' ? t('policy_summary_hash') : 'hash')
+        : (typeof t === 'function' ? t('policy_summary_rr') : 'rr')
       return `${count} · ${algo}`
     }
-    return `${count} · failover`
+    const label = typeof t === 'function' ? t('policy_summary_failover') : 'failover'
+    return `${count} · ${label}`
   }
   return configEndpoint(parsedConfig(node))
 }
 
 export const parsedNodeConfig = (node) => parsedConfig(node)
 
-export const upstreamAddress = (node) => {
-  if (node?.upstream_mode !== 'custom' || !node.upstream_config) return ''
+export const configEndpointAddress = (rawConfig) => {
+  if (!rawConfig) return ''
   try {
-    return configEndpoint(JSON.parse(node.upstream_config))
+    return configEndpoint(JSON.parse(rawConfig))
   } catch {
     return ''
   }
 }
 
+export const upstreamAddress = (node) => {
+  if (node?.upstream_mode !== 'custom' || !node.upstream_config) return ''
+  return configEndpointAddress(node.upstream_config)
+}
+
 export const initialUpstreamMode = (node) => {
   if (node?.upstream_mode) return node.upstream_mode
   return parsedConfig(node).detour ? 'legacy' : 'none'
+}
+
+// 节点实际生效的前置代理（与后端三层优先级完全一致：节点自定义 > 分组前置代理 > 全局前置代理；禁用节点与策略节点不生效）。
+export const resolveEffectiveUpstream = (node, group, settings) => {
+  const mode = initialUpstreamMode(node)
+  if (node?.enabled === false || isPolicyNode(node)) {
+    return {
+      mode,
+      source: 'none',
+      active: false,
+      disabled: node?.enabled === false,
+      type: '',
+      config: '',
+      ip: '',
+      location: '',
+      country_code: '',
+      latency: 0,
+      error: '',
+    }
+  }
+  if (mode === 'custom') {
+    return {
+      mode,
+      source: 'custom',
+      active: Boolean(node?.upstream_type && node?.upstream_config),
+      disabled: false,
+      type: node?.upstream_type || '',
+      config: node?.upstream_config || '',
+      ip: node?.upstream_ip || '',
+      location: node?.upstream_location || '',
+      country_code: node?.upstream_country_code || '',
+      latency: Number(node?.upstream_latency) || 0,
+      error: node?.upstream_error || '',
+    }
+  }
+  if (mode === 'group') {
+    const active = Boolean(group?.upstream_enabled && group?.upstream_type && group?.upstream_config)
+    return {
+      mode,
+      source: active ? 'group' : 'none',
+      active,
+      disabled: false,
+      type: active ? group.upstream_type : '',
+      config: active ? group.upstream_config : '',
+      ip: active ? (group.upstream_ip || '') : '',
+      location: active ? (group.upstream_location || '') : '',
+      country_code: active ? (group.upstream_country_code || '') : '',
+      latency: active ? (Number(group.upstream_latency) || 0) : 0,
+      error: active ? (group.upstream_error || '') : '',
+    }
+  }
+  if (mode === 'global') {
+    if (group?.upstream_enabled && group?.upstream_type && group?.upstream_config) {
+      return {
+        mode,
+        source: 'group',
+        active: true,
+        disabled: false,
+        type: group.upstream_type,
+        config: group.upstream_config,
+        ip: group.upstream_ip || '',
+        location: group.upstream_location || '',
+        country_code: group.upstream_country_code || '',
+        latency: Number(group.upstream_latency) || 0,
+        error: group.upstream_error || '',
+      }
+    }
+    if (settings?.global_upstream_enabled && settings?.global_upstream_type && settings?.global_upstream_config) {
+      return {
+        mode,
+        source: 'global',
+        active: true,
+        disabled: false,
+        type: settings.global_upstream_type,
+        config: settings.global_upstream_config,
+        ip: settings.global_upstream_ip || '',
+        location: settings.global_upstream_location || '',
+        country_code: settings.global_upstream_country_code || '',
+        latency: Number(settings.global_upstream_latency) || 0,
+        error: settings.global_upstream_error || '',
+      }
+    }
+    return { mode, source: 'none', active: false, disabled: false, type: '', config: '', ip: '', location: '', country_code: '', latency: 0, error: '' }
+  }
+  return { mode, source: mode, active: mode === 'legacy', disabled: false, type: '', config: '', ip: '', location: '', country_code: '', latency: 0, error: '' }
 }
 
 export const hasInboundAuth = (node) => Boolean(node?.username && node?.password)
@@ -102,10 +195,22 @@ export const shellQuote = (value) => `'${String(value).replace(/'/g, "'\\''")}'`
 
 const haystackCache = new WeakMap()
 
+const searchTypeAliases = (node) => {
+  if (node?.type === 'direct') return '直连 本机直连'
+  if (node?.type === 'failover') return '故障转移 策略'
+  if (node?.type === 'loadbalance') {
+    return parsedConfig(node).strategy === 'consistent-hashing'
+      ? '负载均衡 策略 哈希 一致性哈希'
+      : '负载均衡 策略 轮询'
+  }
+  return ''
+}
+
 const nodeHaystack = (node) => {
   if (haystackCache.has(node)) return haystackCache.get(node)
   const text = [
-    node.name, node.remark, node.type, protocolLabel(node.type), node.node_ip, node.location, node.country_code,
+    node.name, node.remark, node.type, protocolLabel(node.type), searchTypeAliases(node),
+    node.node_ip, node.location, node.country_code,
     node.inbound_port, node.username, serverAddress(node),
   ].map((part) => String(part ?? '')).join('\n').toLowerCase()
   haystackCache.set(node, text)

@@ -13,7 +13,7 @@ const zh = { ...baseZh, ...extraZh }
 const en = { ...baseEn, ...extraEn }
 const sourceTypes = ['auto', 'subscription', 'http_proxy']
 const templateValues = {
-  'upstream_mode_hint_*': ['none', 'global', 'custom', 'legacy'],
+  'upstream_mode_hint_*': ['none', 'group', 'global', 'custom', 'legacy'],
   'import_source_*': sourceTypes,
   'import_source_*_hint': sourceTypes,
 }

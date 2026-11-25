@@ -2,12 +2,16 @@ package services
 
 import (
 	"context"
+	"crypto/tls"
+	"errors"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"net/netip"
 	"net/url"
 	"strings"
+	"syscall"
 	"time"
 )
 
@@ -17,6 +21,33 @@ type subscriptionTargetPolicy struct {
 }
 
 var subscriptionHTTPClient = newSecureSubscriptionHTTPClient(net.DefaultResolver)
+
+var errNonPublicSubscription = errors.New("subscription target is local or resolves to a non-public address")
+var errTooManyRedirects = errors.New("too many subscription redirects")
+
+func subscriptionHTTPError(err error) error {
+	for _, cause := range []error{context.Canceled, context.DeadlineExceeded, errNonPublicSubscription, errTooManyRedirects, io.ErrUnexpectedEOF, io.EOF} {
+		if errors.Is(err, cause) {
+			return cause
+		}
+	}
+	var network net.Error
+	var lookup *net.DNSError
+	var verify *tls.CertificateVerificationError
+	var errno syscall.Errno
+	switch {
+	case errors.As(err, &network) && network.Timeout():
+		return context.DeadlineExceeded
+	case errors.As(err, &lookup):
+		return errors.New("failed to resolve subscription target")
+	case errors.As(err, &errno):
+		return errno
+	case errors.As(err, &verify):
+		return errors.New("subscription TLS certificate verification failed")
+	default:
+		return errors.New("invalid HTTP response or redirect from subscription server")
+	}
+}
 
 func newSecureSubscriptionHTTPClient(resolver netIPResolver) *http.Client {
 	policy := &subscriptionTargetPolicy{
@@ -45,7 +76,7 @@ func newSecureSubscriptionHTTPClient(resolver netIPResolver) *http.Client {
 
 func (p *subscriptionTargetPolicy) checkRedirect(req *http.Request, via []*http.Request) error {
 	if len(via) >= 10 {
-		return fmt.Errorf("too many subscription redirects")
+		return errTooManyRedirects
 	}
 	_, err := p.resolveAndValidate(req.Context(), req.URL)
 	if err != nil {
@@ -112,13 +143,13 @@ func (p *subscriptionTargetPolicy) resolveAndValidate(
 	}
 	normalizedHost := strings.TrimSuffix(strings.ToLower(host), ".")
 	if normalizedHost == "localhost" || strings.HasSuffix(normalizedHost, ".localhost") {
-		return nil, fmt.Errorf("subscription target %q is local", host)
+		return nil, errNonPublicSubscription
 	}
 
 	if literal, err := netip.ParseAddr(host); err == nil {
 		literal = literal.Unmap()
 		if !isPublicSubscriptionAddress(literal) {
-			return nil, fmt.Errorf("subscription target address %s is not public", literal)
+			return nil, errNonPublicSubscription
 		}
 		return []netip.Addr{literal}, nil
 	}
@@ -135,7 +166,7 @@ func (p *subscriptionTargetPolicy) resolveAndValidate(
 	for _, address := range addresses {
 		address = address.Unmap()
 		if !isPublicSubscriptionAddress(address) {
-			return nil, fmt.Errorf("subscription target resolved to non-public address %s", address)
+			return nil, errNonPublicSubscription
 		}
 		validated = append(validated, address)
 	}

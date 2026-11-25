@@ -60,7 +60,7 @@ export default {
   // Node Form
   parse_link: '解析链接',
   upstream_mode: '节点前置代理',
-  upstream_mode_desc: '跟随全局时使用系统设置中的前置代理；自定义会覆盖全局；直连会明确绕过全局前置代理。',
+  upstream_mode_desc: '优先级：节点自定义 > 分组前置代理 > 全局前置代理；选择“直连”将明确绕过分组与全局前置代理。',
   upstream_follow_global: '跟随全局',
   upstream_custom: '自定义',
   upstream_direct: '直连',
@@ -116,7 +116,7 @@ export default {
   preserve_inbound_ports_desc: '开启后，拖拽排序、删除补位、修改起始端口都不会改写现有节点端口，只有手动编辑节点端口时才会变更。',
   preserve_inbound_ports_disable_warning: '关闭后将按各分组起始端口对未固定节点重新顺序分配入站端口（可能导致端口变化），并重启 sing-box。是否继续？',
   upstream_global: '全局前置代理',
-  upstream_global_desc: '启用后，所有选择“跟随全局”的节点都会通过该代理建立出站连接。',
+  upstream_global_desc: '启用后，选择“跟随全局”的节点在所属分组未启用分组前置代理时，会通过该代理建立出站连接（优先级：节点自定义 > 分组前置代理 > 全局前置代理）。',
   upstream_global_proxy: '全局前置代理配置',
   upstream_global_required: '启用全局前置代理前必须完成代理配置',
   new_admin_password: '新的管理员密码',

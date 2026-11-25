@@ -267,10 +267,11 @@ export function useNodeActions(manager) {
 
   const checkGlobalUpstream = useCallback(async () => {
     try {
-      await api.post('/settings/upstream/check-ip')
+      await api.post('/settings/upstream/check-ip', null, { timeout: 310000 })
       await loadSettings()
       notify.success(t('upstream_check_success'))
     } catch (error) {
+      await loadSettings()
       notify.error(errorText(error, t('server_error')))
     }
   }, [errorText, loadSettings, notify, t])

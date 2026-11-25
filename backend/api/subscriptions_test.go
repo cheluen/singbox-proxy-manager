@@ -83,7 +83,7 @@ func TestSubscriptionRefreshIncremental(t *testing.T) {
 	t.Setenv("PORT", "30000")
 	groupID := configureTestSubscription(t, handler, true)
 	manualID := insertTestNode(t, handler.db)
-	if _, err := handler.db.Exec(`INSERT INTO node_groups(name,sort_order,start_port) VALUES ('Other',1,30000)`); err != nil {
+	if _, err := handler.db.Exec(`INSERT INTO node_groups(name,sort_order,start_port,upstream_config) VALUES ('Other',1,30000,'')`); err != nil {
 		t.Fatal(err)
 	}
 	var otherID int
@@ -379,7 +379,7 @@ func TestSubscriptionRefreshRejectsStaleFetchAndFailure(t *testing.T) {
 func TestSubscriptionSchedulerCancellation(t *testing.T) {
 	handler := newTestHandler(t, nil)
 	id := configureTestSubscription(t, handler, true)
-	if _, err := handler.db.Exec(`INSERT INTO node_groups(name,sort_order,start_port,subscription_url) VALUES ('disabled',1,31000,?)`, testSubscriptionURL); err != nil {
+	if _, err := handler.db.Exec(`INSERT INTO node_groups(name,sort_order,start_port,subscription_url,upstream_config) VALUES ('disabled',1,31000,?,'')`, testSubscriptionURL); err != nil {
 		t.Fatal(err)
 	}
 	ids, err := handler.dueSubscriptionIDs(t.Context(), time.Now())

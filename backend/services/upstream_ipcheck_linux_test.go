@@ -51,6 +51,7 @@ while true; do sleep 1; done
 	info, err := service.checkUpstreamIPContext(
 		context.Background(),
 		models.ProxyDefinition{Type: "socks5", Config: `{"server":"upstream.example.com","server_port":1080}`},
+		nil,
 		func(ctx context.Context, address, _, _ string) (*IPInfo, error) {
 			addresses.Store(address, struct{}{})
 			if checkerCalls.Add(1) == 1 {
@@ -104,6 +105,7 @@ while true; do sleep 1; done
 	_, err := service.checkUpstreamIPContext(
 		context.Background(),
 		models.ProxyDefinition{Type: "socks5", Config: `{"server":"upstream.example.com","server_port":1080}`},
+		nil,
 		func(ctx context.Context, _ string, _ string, _ string) (*IPInfo, error) {
 			deadline := time.Now().Add(time.Second)
 			for time.Now().Before(deadline) {
@@ -160,6 +162,7 @@ exit 2
 			Type:   "socks5",
 			Config: `{"server":"upstream.example.com","server_port":1080}`,
 		},
+		nil,
 		func(_ context.Context, address, username, password string) (*IPInfo, error) {
 			if username == "" || len(password) < 32 {
 				t.Error("isolated inbound must use one-time authentication")
@@ -188,7 +191,7 @@ exit 2
 			if err := json.Unmarshal(configJSON, &config); err != nil {
 				t.Fatalf("decode isolated config: %v", err)
 			}
-			inbound := generatedEntryByTag(t, config, "inbounds", "node-1-in")
+			inbound := generatedEntryByTag(t, config, "inbounds", "node-0-in")
 			if inbound["listen"] != "127.0.0.1" {
 				t.Errorf("isolated inbound is exposed beyond loopback: %v", inbound["listen"])
 			}
@@ -198,12 +201,12 @@ exit 2
 			} else if user, _ := users[0].(map[string]interface{}); user["username"] != username || user["password"] != password {
 				t.Error("checker credentials differ from isolated inbound credentials")
 			}
-			upstream := generatedEntryByTag(t, config, "outbounds", "node-1-upstream")
+			upstream := generatedEntryByTag(t, config, "outbounds", "node-0-upstream")
 			if upstream["type"] != "socks" || upstream["server"] != "upstream.example.com" {
 				t.Fatalf("unexpected isolated upstream: %#v", upstream)
 			}
-			selector := generatedEntryByTag(t, config, "outbounds", "node-1-out")
-			if selector["type"] != "selector" || !strings.Contains(strings.TrimSpace(toString(selector["outbounds"])), "node-1-upstream") {
+			selector := generatedEntryByTag(t, config, "outbounds", "node-0-out")
+			if selector["type"] != "selector" || !strings.Contains(strings.TrimSpace(toString(selector["outbounds"])), "node-0-upstream") {
 				t.Fatalf("isolated node does not route through upstream: %#v", selector)
 			}
 			return &IPInfo{IP: "198.51.100.40", Location: "Isolated", Latency: 25}, nil
@@ -284,6 +287,7 @@ func TestCheckUpstreamIPLimitsConcurrentIsolatedProcesses(t *testing.T) {
 			_, err := service.checkUpstreamIPContext(
 				ctx,
 				models.ProxyDefinition{Type: "socks5", Config: `{"server":"192.0.2.80","server_port":1080}`},
+				nil,
 				checker,
 			)
 			errorsCh <- err

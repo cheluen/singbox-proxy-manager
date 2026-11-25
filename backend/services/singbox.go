@@ -13,6 +13,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -31,6 +32,7 @@ type SingBoxService struct {
 	upstreamCheckTimeout time.Duration
 	resolver             netIPResolver
 	process              *exec.Cmd
+	activeInboundTags    map[int]string
 	processDone          chan struct{}
 	processErr           error
 	processStartedAt     time.Time
@@ -268,7 +270,6 @@ type parsedEnabledNode struct {
 	Config             interface{}
 	InboundTag         string
 	OutboundTag        string
-	UpstreamMode       string
 	ManagedUpstreamTag string
 }
 
@@ -277,8 +278,10 @@ type parsedUpstreamProxy struct {
 	Config     interface{}
 	Tag        string
 	Scope      string
+	identity   string
 	Outbound   *OutboundConfig
 	Endpoint   *EndpointConfig
+	localDNS   bool
 }
 
 // BuildGlobalConfigContext renders the unified sing-box configuration for all enabled
@@ -301,13 +304,36 @@ func (s *SingBoxService) BuildGlobalConfigContext(
 }
 
 func (s *SingBoxService) buildWiredConfig(ctx context.Context, nodes []models.ProxyNode, runtimeSettings models.Settings, w *runtimeWiring) ([]byte, error) {
+	return s.buildConfigWithGroup(ctx, nodes, runtimeSettings, w, 0)
+}
+
+func (s *SingBoxService) ValidateGroupUpstreamContext(ctx context.Context, nodes []models.ProxyNode, settings models.Settings, groupID int) error {
+	wiring, err := newWiring(nodes, settings)
+	if err != nil {
+		return err
+	}
+	config, err := s.buildConfigWithGroup(ctx, nodes, settings, wiring, groupID)
+	if err != nil {
+		return err
+	}
+	return s.ValidateConfigContext(ctx, config)
+}
+
+func (s *SingBoxService) buildConfigWithGroup(ctx context.Context, nodes []models.ProxyNode, runtimeSettings models.Settings, w *runtimeWiring, validationGroupID int) ([]byte, error) {
 	parsedNodes, needsLocalDNS, err := prepareEnabledNodes(nodes)
 	if err != nil {
 		return nil, err
 	}
-	upstreams, upstreamNeedsLocalDNS, err := s.prepareManagedUpstreams(ctx, parsedNodes, runtimeSettings)
+	upstreams, upstreamNeedsLocalDNS, err := s.prepareManagedUpstreams(ctx, parsedNodes, runtimeSettings, validationGroupID)
 	if err != nil {
-		return nil, err
+		credentials := appendIPCheckConfigCredentials(nil, runtimeSettings.GlobalUpstreamConfig)
+		for _, group := range runtimeSettings.GroupUpstreams {
+			credentials = appendIPCheckConfigCredentials(credentials, group.Config)
+		}
+		for _, node := range nodes {
+			credentials = appendIPCheckConfigCredentials(credentials, node.UpstreamConfig)
+		}
+		return nil, redactIPCheckError(err, credentials)
 	}
 	return s.renderGlobalConfig(parsedNodes, upstreams, "::", needsLocalDNS || upstreamNeedsLocalDNS, w)
 }
@@ -504,6 +530,8 @@ func writeSensitiveFileAtomically(path string, content []byte) error {
 	return nil
 }
 
+var ErrConfigRejected = errors.New("sing-box rejected the generated config")
+
 // ValidateConfigContext 在调用方上下文及校验超时内执行 sing-box check，
 // 不修改运行进程或正式配置；拒绝时返回内核诊断信息。
 func (s *SingBoxService) ValidateConfigContext(ctx context.Context, configJSON []byte) error {
@@ -560,11 +588,15 @@ func (s *SingBoxService) ValidateConfigContext(ctx context.Context, configJSON [
 		return fmt.Errorf("sing-box config validation did not finish within %s: %w", validationTimeout, validationCtx.Err())
 	}
 	if err != nil {
+		var exitErr *exec.ExitError
+		if !errors.As(err, &exitErr) {
+			return fmt.Errorf("run sing-box validation: %w", err)
+		}
 		detail := strings.TrimSpace(output.String())
 		if detail == "" {
 			detail = err.Error()
 		}
-		return fmt.Errorf("sing-box rejected the generated config: %s", detail)
+		return fmt.Errorf("%w: %s", ErrConfigRejected, redactIPCheckDiagnostic(detail, appendIPCheckConfigCredentials(nil, string(configJSON))...))
 	}
 	return nil
 }
@@ -720,13 +752,15 @@ func prepareEnabledNodes(nodes []models.ProxyNode) ([]parsedEnabledNode, bool, e
 		if upstreamMode != models.UpstreamModeLegacy {
 			setConfigDetour(parsedConfig, "")
 		}
+		if models.IsPolicy(node.Type) && node.UpstreamMode != "" && upstreamMode != models.UpstreamModeNone {
+			return nil, false, upstreamValidationErrorf("policy nodes cannot use an upstream proxy")
+		}
 		parsedIndex := len(parsedNodes)
 		parsedNodes = append(parsedNodes, parsedEnabledNode{
-			Node:         node,
-			Config:       parsedConfig,
-			InboundTag:   fmt.Sprintf("node-%d-in", node.ID),
-			OutboundTag:  fmt.Sprintf("node-%d-out", node.ID),
-			UpstreamMode: upstreamMode,
+			Node:        node,
+			Config:      parsedConfig,
+			InboundTag:  fmt.Sprintf("node-%d-in", node.ID),
+			OutboundTag: fmt.Sprintf("node-%d-out", node.ID),
 		})
 		idToIndex[node.ID] = parsedIndex
 
@@ -862,7 +896,7 @@ type upstreamDialTarget struct {
 
 func (s *SingBoxService) ValidateUpstreamDefinition(definition models.ProxyDefinition) error {
 	_, err := s.parseManagedUpstreamDefinition(definition, "")
-	return err
+	return redactIPCheckError(err, appendIPCheckConfigCredentials(nil, definition.Config))
 }
 
 func (s *SingBoxService) parseManagedUpstreamDefinition(
@@ -876,6 +910,9 @@ func (s *SingBoxService) parseManagedUpstreamDefinition(
 	}
 	if definition.Config == "" {
 		return parsedUpstreamProxy{}, upstreamValidationErrorf("upstream proxy config is required")
+	}
+	if models.IsPolicy(definition.Type) {
+		return parsedUpstreamProxy{}, upstreamValidationErrorf("policy nodes cannot be an upstream proxy")
 	}
 
 	parsedConfig, err := definition.ParseConfig()
@@ -930,119 +967,97 @@ func (s *SingBoxService) prepareManagedUpstreams(
 	ctx context.Context,
 	nodes []parsedEnabledNode,
 	settings models.Settings,
+	validationGroupID int,
 ) ([]parsedUpstreamProxy, bool, error) {
 	upstreams := make([]parsedUpstreamProxy, 0, len(nodes)+1)
 	inboundPorts := make(map[int]*models.ProxyNode, len(nodes))
+	requiredGroups := make(map[int]bool)
+	if settings.GroupUpstreams[validationGroupID].Enabled {
+		requiredGroups[validationGroupID] = true
+	}
 	for index := range nodes {
-		if port := nodes[index].Node.InboundPort; port > 0 {
-			inboundPorts[port] = nodes[index].Node
+		node := nodes[index].Node
+		if port := node.InboundPort; port > 0 {
+			inboundPorts[port] = node
+		}
+		if source, _ := settings.EffectiveUpstream(*node); source == models.UpstreamModeGroup {
+			requiredGroups[node.GroupID] = true
 		}
 	}
-	needsLocalDNS := false
-
-	prepare := func(
+	byTag := make(map[string]int)
+	register := func(
 		definition models.ProxyDefinition,
 		tag string,
 		scope string,
-	) (parsedUpstreamProxy, error) {
+	) error {
 		upstream, err := s.parseManagedUpstreamDefinition(definition, tag)
 		if err != nil {
-			return parsedUpstreamProxy{}, fmt.Errorf("%s: %w", scope, err)
+			return fmt.Errorf("%s: %w", scope, err)
 		}
 		upstream.Scope = scope
 		usesLocal, err := upstream.usesLocalDNS()
 		if err != nil {
-			return parsedUpstreamProxy{}, err
+			return err
 		}
-		needsLocalDNS = needsLocalDNS || usesLocal
-		return upstream, nil
+		upstream.localDNS = usesLocal
+		upstream.identity, err = canonicalProxyIdentity(upstream.Definition, upstream.Config)
+		if err != nil {
+			return upstreamValidationErrorf("failed to compare %s: %v", scope, err)
+		}
+		byTag[tag] = len(upstreams)
+		upstreams = append(upstreams, upstream)
+		return nil
 	}
 
-	var global *parsedUpstreamProxy
 	if settings.GlobalUpstreamEnabled {
-		prepared, err := prepare(models.ProxyDefinition{
+		if err := register(models.ProxyDefinition{
 			Type:   settings.GlobalUpstreamType,
 			Config: settings.GlobalUpstreamConfig,
-		}, globalUpstreamTag, "global upstream proxy")
-		if err != nil {
+		}, globalUpstreamTag, "global upstream proxy"); err != nil {
 			return nil, false, err
 		}
-		global = &prepared
-		globalIdentity, err := canonicalProxyIdentity(global.Definition, global.Config)
-		if err != nil {
-			return nil, false, upstreamValidationErrorf("failed to compare global upstream proxy: %v", err)
+	}
+	for _, id := range slices.Sorted(maps.Keys(requiredGroups)) {
+		if err := register(settings.GroupUpstreams[id].ProxyDefinition, groupUpstreamTag(id), fmt.Sprintf("group %d upstream proxy", id)); err != nil {
+			return nil, false, err
 		}
-		for index := range nodes {
-			if nodes[index].UpstreamMode != models.UpstreamModeGlobal {
-				continue
-			}
-			nodeIdentity, err := canonicalProxyIdentity(
-				models.ProxyDefinition{Type: nodes[index].Node.Type, Config: nodes[index].Node.Config},
-				nodes[index].Config,
-			)
-			if err != nil {
-				return nil, false, upstreamValidationErrorf("failed to compare node %d outbound: %v", nodes[index].Node.ID, err)
-			}
-			if globalIdentity == nodeIdentity {
-				return nil, false, upstreamValidationErrorf(
-					"global upstream proxy must not be identical to node %d outbound",
-					nodes[index].Node.ID,
-				)
-			}
-		}
-		upstreams = append(upstreams, prepared)
 	}
 
 	for index := range nodes {
 		node := &nodes[index]
-		switch node.UpstreamMode {
-		case models.UpstreamModeLegacy, models.UpstreamModeNone:
-			continue
+		source, definition := settings.EffectiveUpstream(*node.Node)
+		var tag string
+		switch source {
 		case models.UpstreamModeGlobal:
-			if global != nil {
-				applyManagedUpstream(node, *global)
-			}
+			tag = globalUpstreamTag
+		case models.UpstreamModeGroup:
+			tag = groupUpstreamTag(node.Node.GroupID)
 		case models.UpstreamModeCustom:
-			tag := fmt.Sprintf("node-%d-upstream", node.Node.ID)
-			prepared, err := prepare(models.ProxyDefinition{
-				Type:   node.Node.UpstreamType,
-				Config: node.Node.UpstreamConfig,
-			}, tag, fmt.Sprintf("node %d custom upstream proxy", node.Node.ID))
-			if err != nil {
+			tag = fmt.Sprintf("node-%d-upstream", node.Node.ID)
+			if err := register(definition, tag, fmt.Sprintf("node %d custom upstream proxy", node.Node.ID)); err != nil {
 				return nil, false, err
 			}
-			upstreamIdentity, err := canonicalProxyIdentity(prepared.Definition, prepared.Config)
-			if err != nil {
-				return nil, false, upstreamValidationErrorf("failed to compare node %d custom upstream proxy: %v", node.Node.ID, err)
-			}
-			nodeIdentity, err := canonicalProxyIdentity(
-				models.ProxyDefinition{Type: node.Node.Type, Config: node.Node.Config},
-				node.Config,
-			)
-			if err != nil {
-				return nil, false, upstreamValidationErrorf("failed to compare node %d outbound: %v", node.Node.ID, err)
-			}
-			if upstreamIdentity == nodeIdentity {
-				return nil, false, upstreamValidationErrorf(
-					"node %d custom upstream proxy must not be identical to its outbound",
-					node.Node.ID,
-				)
-			}
-			applyManagedUpstream(node, prepared)
-			upstreams = append(upstreams, prepared)
 		default:
-			return nil, false, upstreamValidationErrorf(
-				"node %d has invalid upstream mode %q",
-				node.Node.ID,
-				node.UpstreamMode,
-			)
+			continue
 		}
+		upstream := upstreams[byTag[tag]]
+		identity, err := canonicalProxyIdentity(models.ProxyDefinition{Type: node.Node.Type}, node.Config)
+		if err != nil {
+			return nil, false, upstreamValidationErrorf("failed to compare node %d outbound: %v", node.Node.ID, err)
+		}
+		if identity == upstream.identity {
+			return nil, false, upstreamValidationErrorf("%s must not be identical to node %d outbound", upstream.Scope, node.Node.ID)
+		}
+		applyManagedUpstream(node, upstream)
 	}
 	if err := s.validateManagedUpstreamInboundCollisions(ctx, upstreams, inboundPorts); err != nil {
 		return nil, false, err
 	}
+	needsLocalDNS := slices.ContainsFunc(upstreams, func(upstream parsedUpstreamProxy) bool { return upstream.localDNS })
 	return upstreams, needsLocalDNS, nil
 }
+
+func groupUpstreamTag(id int) string { return "managed-upstream-group-" + strconv.Itoa(id) }
 
 func applyManagedUpstream(node *parsedEnabledNode, upstream parsedUpstreamProxy) {
 	if node.Node.Type == "direct" {
@@ -2894,8 +2909,10 @@ func (s *SingBoxService) startProcessLocked(configHash string) error {
 
 	done := make(chan struct{})
 	startedAt := time.Now()
+	inboundTags := configInboundTags(data)
 	s.mu.Lock()
 	s.process = cmd
+	s.activeInboundTags = inboundTags
 	s.processDone = done
 	s.processErr = nil
 	s.processStartedAt = startedAt
@@ -2982,6 +2999,7 @@ func (s *SingBoxService) watchProcess(
 		desiredHash := s.runtimeStatus.DesiredConfigHash
 		applyStage := s.runtimeStatus.ApplyStage
 		s.process = nil
+		s.activeInboundTags = nil
 		s.processDone = nil
 		s.processErr = err
 		s.processStartedAt = time.Time{}
@@ -3071,15 +3089,7 @@ func (s *SingBoxService) Stop() error {
 	return err
 }
 
-func (s *SingBoxService) ActiveInboundPorts() map[int]bool {
-	status := s.RuntimeStatus()
-	if !status.Running || status.ActiveConfigHash == "" {
-		return nil
-	}
-	data, err := os.ReadFile(s.ConfigPath())
-	if err != nil || runtimeConfigHash(data) != status.ActiveConfigHash {
-		return nil
-	}
+func configInboundTags(data []byte) map[int]string {
 	var config struct {
 		Inbounds []struct {
 			Port int    `json:"listen_port"`
@@ -3089,10 +3099,27 @@ func (s *SingBoxService) ActiveInboundPorts() map[int]bool {
 	if json.Unmarshal(data, &config) != nil {
 		return nil
 	}
-	ports := make(map[int]bool, len(config.Inbounds))
+	ports := make(map[int]string, len(config.Inbounds))
 	for _, inbound := range config.Inbounds {
-		if inbound.Tag != dispatchTag {
-			ports[inbound.Port] = true
+		if inbound.Port > 0 {
+			ports[inbound.Port] = inbound.Tag
+		}
+	}
+	return ports
+}
+
+func (s *SingBoxService) runningInboundTags() map[int]string {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.activeInboundTags
+}
+
+func (s *SingBoxService) ActiveInboundPorts() map[int]bool {
+	tags := s.runningInboundTags()
+	ports := make(map[int]bool, len(tags))
+	for port, tag := range tags {
+		if tag != dispatchTag {
+			ports[port] = true
 		}
 	}
 	return ports

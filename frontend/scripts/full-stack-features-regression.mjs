@@ -62,10 +62,11 @@ const curl = (args, timeoutSec = 10) => new Promise((resolve, reject) => {
 })
 
 // 轻量本地 HTTP/SOCKS5 目标服务：支持慢速流式响应以验证「当前连接」实时速率，以及区分不同上游标记。
-const createBackendEchoServer = (tag) => http.createServer((req, res) => {
+const createBackendEchoServer = (tag, ip = '') => http.createServer((req, res) => {
   if (req.url === '/ip') {
+    const resolvedIP = ip || (tag === 'A' ? '203.0.113.101' : '203.0.113.102')
     res.writeHead(200, { 'Content-Type': 'application/json' })
-    res.end(JSON.stringify({ ip: tag === 'A' ? '203.0.113.101' : '203.0.113.102', country: 'Japan', cc: 'JP' }))
+    res.end(JSON.stringify({ ip: resolvedIP, country: 'Japan', cc: 'JP' }))
     return
   }
   if (req.url?.startsWith('/stream')) {
@@ -130,20 +131,38 @@ let page
 let token = ''
 let targetA
 let targetB
+let targetGlobal
+let targetGroup
+let targetCustom
 let socksA
 let socksB
+let socksGlobal
+let socksGroup
+let socksCustom
 let subServer
 
 try {
-  targetA = createBackendEchoServer('A')
-  targetB = createBackendEchoServer('B')
+  targetA = createBackendEchoServer('A', '203.0.113.101')
+  targetB = createBackendEchoServer('B', '203.0.113.102')
+  targetGlobal = createBackendEchoServer('GLOBAL', '203.0.113.201')
+  targetGroup = createBackendEchoServer('GROUP', '203.0.113.202')
+  targetCustom = createBackendEchoServer('CUSTOM', '203.0.113.203')
   const targetPortA = await listen(targetA)
   const targetPortB = await listen(targetB)
+  const targetPortGlobal = await listen(targetGlobal)
+  const targetPortGroup = await listen(targetGroup)
+  const targetPortCustom = await listen(targetCustom)
 
   socksA = createTaggedSocks5Server(targetPortA)
   socksB = createTaggedSocks5Server(targetPortB)
+  socksGlobal = createTaggedSocks5Server(targetPortGlobal)
+  socksGroup = createTaggedSocks5Server(targetPortGroup)
+  socksCustom = createTaggedSocks5Server(targetPortCustom)
   const socksPortA = await listen(socksA)
   const socksPortB = await listen(socksB)
+  const socksPortGlobal = await listen(socksGlobal)
+  const socksPortGroup = await listen(socksGroup)
+  const socksPortCustom = await listen(socksCustom)
 
   const unusedPort = await reservePort()
   let subHits = 0
@@ -395,6 +414,102 @@ try {
   assert.ok(lbHits.has('backend-A') && lbHits.has('backend-B'), `LoadBalance 未在双成员间轮询分发：${[...lbHits].join(',')}`)
   steps.push('policy-failover-and-loadbalance-live')
 
+  // 3.5 分组级前置代理 + 三层优先级真实转发验证（节点自定义 > 分组前置代理 > 全局前置代理）
+  await api('PUT', '/settings', {
+    global_upstream_enabled: true,
+    global_upstream_type: 'socks5',
+    global_upstream_config: JSON.stringify({ server: '127.0.0.1', server_port: socksPortGlobal }),
+  })
+  const groupWithUpstream = await api('POST', '/node-groups', {
+    name: 'Group Upstream A',
+    allocate_port: true,
+    start_port: startPort + 15,
+    upstream_enabled: true,
+    upstream_type: 'socks5',
+    upstream_config: JSON.stringify({ server: '127.0.0.1', server_port: socksPortGroup }),
+  })
+  const groupUpstreamCheck = await api('POST', `/node-groups/${groupWithUpstream.id}/upstream/check-ip`)
+  assert.equal(groupUpstreamCheck.ip, '203.0.113.202', `分组前置代理测 IP 异常：${JSON.stringify(groupUpstreamCheck)}`)
+
+  const groupPlain = await api('POST', '/node-groups', {
+    name: 'Group Plain B',
+    allocate_port: true,
+    start_port: startPort + 22,
+  })
+  const nodeCustomWins = await api('POST', '/nodes', {
+    group_id: groupWithUpstream.id,
+    name: 'Tier Custom Wins',
+    type: 'direct',
+    config: '{}',
+    auth_enabled: false,
+    enabled: true,
+    upstream_mode: 'custom',
+    upstream_type: 'socks5',
+    upstream_config: JSON.stringify({ server: '127.0.0.1', server_port: socksPortCustom }),
+  })
+  const nodeGroupFollow = await api('POST', '/nodes', {
+    group_id: groupWithUpstream.id,
+    name: 'Tier Group Mode',
+    type: 'direct',
+    config: '{}',
+    auth_enabled: false,
+    enabled: true,
+    upstream_mode: 'group',
+  })
+  const nodeGroupBeatsGlobal = await api('POST', '/nodes', {
+    group_id: groupWithUpstream.id,
+    name: 'Tier Global Cascade To Group',
+    type: 'direct',
+    config: '{}',
+    auth_enabled: false,
+    enabled: true,
+    upstream_mode: 'global',
+  })
+  const nodeDirectBypass = await api('POST', '/nodes', {
+    group_id: groupWithUpstream.id,
+    name: 'Tier Direct Bypass',
+    type: 'direct',
+    config: '{}',
+    auth_enabled: false,
+    enabled: true,
+    upstream_mode: 'none',
+  })
+  const nodeOtherGroupGlobal = await api('POST', '/nodes', {
+    group_id: groupPlain.id,
+    name: 'Other Group Uses Global',
+    type: 'direct',
+    config: '{}',
+    auth_enabled: false,
+    enabled: true,
+    upstream_mode: 'global',
+  })
+  const nodeOtherGroupOnly = await api('POST', '/nodes', {
+    group_id: groupPlain.id,
+    name: 'Other Group Mode Direct',
+    type: 'direct',
+    config: '{}',
+    auth_enabled: false,
+    enabled: true,
+    upstream_mode: 'group',
+  })
+
+  for (const [label, node, want] of [
+    ['custom > group > global', nodeCustomWins, 'backend-CUSTOM'],
+    ['group mode in group A', nodeGroupFollow, 'backend-GROUP'],
+    ['global mode in group A -> group beats global', nodeGroupBeatsGlobal, 'backend-GROUP'],
+    ['direct mode bypasses group and global', nodeDirectBypass, 'backend-A'],
+    ['global mode in group B -> system global', nodeOtherGroupGlobal, 'backend-GLOBAL'],
+    ['group mode in group B -> direct (no global fallback)', nodeOtherGroupOnly, 'backend-A'],
+  ]) {
+    const r = await curl([
+      '--socks5-hostname', `127.0.0.1:${node.inbound_port}`,
+      `http://127.0.0.1:${targetPortA}/`,
+    ])
+    assert.equal(r.code, 0, `${label} 请求失败：${r.stderr}`)
+    assert.equal(r.stdout.trim(), want, `${label} 预期 ${want}，实际 ${r.stdout.trim()}`)
+  }
+  steps.push('group-upstream-3tier-priority-live')
+
   // 4. 打开真实浏览器：验证 UI、当前连接实时流、日志与持久化校验/落盘 + 视觉截图
   browser = await launchBrowser({ userDataDir: path.join(scratch, 'browser') })
   page = await browser.newPage()
@@ -413,13 +528,29 @@ try {
 
   await page.goto(base, { waitUntil: 'networkidle2' })
   await page.waitForSelector('[data-testid="nodes-list"]', { visible: true })
-  // 验证失败节点红点与中性叉号在真实全栈中展示
+  // 验证失败节点红点与中性叉号在真实全栈中展示，且中文下策略节点名称与摘要完整中文化
   assert.equal(await page.$eval(`[data-testid="node-health-${deadNode.id}"]`, (el) => el.dataset.health), 'failed')
   assert.ok(await page.$(`[data-row-id="${deadNode.id}"] [data-testid="latency-failed"]`))
+  assert.equal(await page.$eval(`[data-row-id="${failoverNode.id}"] .dusk-col--type`, (el) => el.textContent.trim()), '故障转移')
+  assert.equal(await page.$eval(`[data-row-id="${failoverNode.id}"] .dusk-col--server`, (el) => el.textContent.trim()), '2 · 故障转移')
+  assert.equal(await page.$eval(`[data-row-id="${lbNode.id}"] .dusk-col--type`, (el) => el.textContent.trim()), '负载均衡')
+  assert.equal(await page.$eval(`[data-row-id="${lbNode.id}"] .dusk-col--server`, (el) => el.textContent.trim()), '2 · 轮询')
   if (ARTIFACT_DIR) {
     fs.mkdirSync(ARTIFACT_DIR, { recursive: true })
     await page.screenshot({ path: path.join(ARTIFACT_DIR, 'full-nodes-overview.png'), fullPage: true })
   }
+
+  // 切到启用了分组前置代理的分组，验证分组栏徽标、节点详情实际生效来源以及分组设置弹窗
+  await clickControl(page, `[data-testid="group-tab-${groupWithUpstream.id}"]`)
+  await page.waitForSelector('[data-testid="active-group-upstream-pill"]', { visible: true })
+  await clickControl(page, `[data-testid="node-open-${nodeGroupBeatsGlobal.id}"]`)
+  const effectiveLabel = await page.$eval(`[data-testid="node-upstream-effective-${nodeGroupBeatsGlobal.id}"]`, (el) => el.textContent.trim())
+  assert.ok(effectiveLabel.includes('分组前置'), `分组优先于全局的生效来源展示异常：${effectiveLabel}`)
+  if (ARTIFACT_DIR) {
+    await page.screenshot({ path: path.join(ARTIFACT_DIR, 'full-group-upstream-overview.png'), fullPage: true })
+  }
+  await clickControl(page, `[data-testid="group-tab-${defaultGroupId}"]`)
+  await page.waitForSelector(`[data-row-id="${failoverNode.id}"]`, { visible: true })
 
   // 启动一条慢速持续下载流经过 Failover 策略节点，检验「当前连接」实时三列视图与速率
   const streamProc = spawn('curl', [
@@ -510,8 +641,14 @@ try {
   await stopProcess(backend, { graceMs: 10000 })
   await closeServer(socksA)
   await closeServer(socksB)
+  await closeServer(socksGlobal)
+  await closeServer(socksGroup)
+  await closeServer(socksCustom)
   await closeServer(targetA)
   await closeServer(targetB)
+  await closeServer(targetGlobal)
+  await closeServer(targetGroup)
+  await closeServer(targetCustom)
   await closeServer(subServer)
   fs.rmSync(scratch, { recursive: true, force: true })
 }

@@ -322,7 +322,12 @@ func (h *Handler) fetchSubscriptionNodes(ctx context.Context, url string) ([]mod
 	switch {
 	case ctx.Err() != nil:
 		return nil, nil, ctx.Err()
-	case err != nil || len(failures) > 0 && len(items) == 0:
+	case err != nil:
+		return nil, nil, errSubscriptionLoad
+	case len(failures) > 0 && len(items) == 0:
+		if diagnostic := failures[0].SubscriptionFetchDiagnostic(); diagnostic != "" {
+			return nil, nil, nodeRequestError{http.StatusBadGateway, errors.New(diagnostic)}
+		}
 		return nil, nil, errSubscriptionLoad
 	case len(failures) > 0:
 		return nil, nil, errSubscriptionPartial

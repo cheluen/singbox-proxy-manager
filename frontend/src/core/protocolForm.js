@@ -1,4 +1,4 @@
-export { proxyTypes, upstreamProxyTypes, isPolicyType } from './protocolSchema.js'
+export { proxyTypes, upstreamProxyTypes, localizedProxyTypes, isPolicyType } from './protocolSchema.js'
 
 const splitMultilineList = (rawValue) => {
   if (typeof rawValue !== 'string') {

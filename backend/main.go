@@ -299,6 +299,7 @@ func main() {
 		authorized.DELETE("/node-groups/:id", handler.DeleteGroup)
 		authorized.POST("/node-groups/reorder", handler.ReorderGroups)
 		authorized.POST("/node-groups/:id/subscription/refresh", handler.RefreshSubscription)
+		authorized.POST("/node-groups/:id/upstream/check-ip", handler.CheckGroupUpstreamIP)
 		authorized.POST("/nodes/batch-move", handler.BatchMoveNodes)
 		authorized.GET("/nodes/:id", handler.GetNode)
 		authorized.POST("/nodes", handler.CreateNode)

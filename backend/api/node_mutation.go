@@ -4,6 +4,8 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"maps"
+	"slices"
 	"sync"
 
 	"sb-proxy/backend/models"
@@ -11,9 +13,10 @@ import (
 )
 
 type nodeMutationOperation struct {
-	ApplyRuntime bool
-	ReplacedID   int
-	Mutate       func(context.Context, *sql.Tx) error
+	ApplyRuntime   bool
+	ReplacedID     int
+	ChangedGroupID *int
+	Mutate         func(context.Context, *sql.Tx) error
 }
 
 type nodeMutationCoordinator struct {
@@ -74,9 +77,15 @@ func (coordinator *nodeMutationCoordinator) execute(
 		return nil, err
 	}
 	defer tx.Rollback()
+	return coordinator.executeTx(ctx, tx, operation)
+}
+
+func (coordinator *nodeMutationCoordinator) executeTx(ctx context.Context, tx *sql.Tx, operation nodeMutationOperation) ([]models.ProxyNode, error) {
 	var before []nodeMutationTable
 	var previousPaths map[int]checkPath
+	var previousGroupRoutes map[int]groupRuntimeRoute
 	if operation.ApplyRuntime {
+		var err error
 		before, err = captureNodeMutationTables(ctx, tx)
 		if err != nil {
 			return nil, err
@@ -90,6 +99,9 @@ func (coordinator *nodeMutationCoordinator) execute(
 			return nil, err
 		}
 		previousPaths = nodeCheckPaths(previous, settings)
+		if operation.ChangedGroupID != nil {
+			previousGroupRoutes = groupRuntimeRoutes(previous, settings, previousPaths)
+		}
 		ctx = context.WithValue(ctx, ownedPortKey{}, sync.OnceValue(coordinator.singBoxService.ActiveInboundPorts))
 	}
 
@@ -111,7 +123,8 @@ func (coordinator *nodeMutationCoordinator) execute(
 	if err := reconcilePolicyReferences(ctx, tx, candidateNodes); err != nil {
 		return nil, err
 	}
-	if err := resetChangedChecks(ctx, tx, previousPaths, candidateNodes, settings, operation.ReplacedID); err != nil {
+	candidatePaths := nodeCheckPaths(candidateNodes, settings)
+	if err := resetChangedChecks(ctx, tx, previousPaths, candidatePaths, candidateNodes, operation.ReplacedID); err != nil {
 		return nil, err
 	}
 	after, err := captureNodeMutationTables(ctx, tx)
@@ -121,6 +134,20 @@ func (coordinator *nodeMutationCoordinator) execute(
 	// 候选数据只保留在内存中，内核校验、启动和回滚均不持有数据库事务。
 	if err := tx.Rollback(); err != nil {
 		return nil, err
+	}
+	if operation.ChangedGroupID != nil {
+		groupID := *operation.ChangedGroupID
+		routes := groupRuntimeRoutes(candidateNodes, settings, candidatePaths)
+		unchanged := maps.Equal(previousGroupRoutes, routes)
+		usesGroup := slices.ContainsFunc(candidateNodes, func(node models.ProxyNode) bool { return routes[node.ID].groupID == groupID })
+		if settings.GroupUpstreams[groupID].Enabled && (unchanged || !usesGroup) {
+			if err := coordinator.singBoxService.ValidateGroupUpstreamContext(ctx, candidateNodes, settings, groupID); err != nil {
+				return nil, err
+			}
+		}
+		if unchanged {
+			return candidateNodes, coordinator.commitCandidate(ctx, before, after)
+		}
 	}
 	runtimePlan, err := coordinator.runtimeApplier.PrepareContext(ctx, candidateNodes, settings)
 	if err != nil {
@@ -148,6 +175,27 @@ func (coordinator *nodeMutationCoordinator) execute(
 	}
 	runtimeTransaction.Commit()
 	return candidateNodes, nil
+}
+
+type groupRuntimeRoute struct {
+	path    checkPath
+	source  string
+	groupID int
+}
+
+func groupRuntimeRoutes(nodes []models.ProxyNode, settings models.Settings, paths map[int]checkPath) map[int]groupRuntimeRoute {
+	routes := make(map[int]groupRuntimeRoute, len(nodes))
+	for _, node := range nodes {
+		if node.Enabled {
+			source, _ := settings.EffectiveUpstream(node)
+			route := groupRuntimeRoute{path: paths[node.ID], source: source}
+			if source == models.UpstreamModeGroup {
+				route.groupID = node.GroupID
+			}
+			routes[node.ID] = route
+		}
+	}
+	return routes
 }
 
 func normalizeNodeSortOrderTx(ctx context.Context, tx *sql.Tx, groupID int) error {

@@ -6,7 +6,7 @@ import { DeleteGroupDialogBody, GroupFormDialogBody, MoveGroupDialogBody } from 
 import { ExportDialogBody, NodeDialogBody, ReplaceDialogBody, UpstreamDialogBody } from './NodeDialogs'
 import { SettingsDialogBody } from './SettingsDialog'
 
-const WIDTH = { node: 720, upstream: 620, replace: 560, export: 640, import: 680, auth: 520, settings: 640, 'group-form': 580, 'group-delete': 520, 'move-group': 460 }
+const WIDTH = { node: 720, upstream: 620, replace: 560, export: 640, import: 680, auth: 520, settings: 640, 'group-form': 620, 'group-delete': 520, 'move-group': 460 }
 
 export function Overlays({ ctl }) {
   const { t } = useTranslation()

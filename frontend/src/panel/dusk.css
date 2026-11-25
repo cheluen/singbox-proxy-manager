@@ -97,11 +97,13 @@ body.is-resizing-cols, body.is-resizing-cols * { cursor: col-resize !important; 
 .dusk-group-tab__name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
 .dusk-group-tab__count { font-size: 11px; color: var(--ink-3); }
 .dusk-group-tab__badge { display: inline-flex; align-items: center; color: var(--ink-3); }
+.dusk-group-tab__badge.is-upstream { color: var(--accent-strong); }
 .dusk-group-tab__badge.is-err { color: var(--bad-ink); }
 .dusk-groups__actions { display: inline-flex; align-items: center; gap: 4px; flex: none; }
 .dusk-groups__meta { display: inline-flex; align-items: center; gap: 8px; margin-right: 4px; font-size: 11.5px; color: var(--ink-3); white-space: nowrap; }
 .dusk-groups__pill { display: inline-flex; align-items: center; gap: 4px; height: 22px; padding: 0 7px; border-radius: 999px; border: 1px solid var(--line); background: var(--bg); color: var(--ink-2); font-size: 11px; }
 .dusk-groups__pill.is-noport { border-style: dashed; color: var(--ink-3); }
+.dusk-groups__pill.is-upstream { border-color: color-mix(in srgb, var(--accent) 45%, var(--line)); background: color-mix(in srgb, var(--accent-soft) 65%, var(--bg)); color: var(--accent-strong); }
 .dusk-groups__pill.is-err { border-color: transparent; background: var(--bad-soft); color: var(--bad-ink); }
 
 /* 行内展开的详情：三张等高卡片按「入站与连接 → 出站与链路 → 名称与备注」对称排布 */

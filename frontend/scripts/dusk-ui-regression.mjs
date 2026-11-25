@@ -56,7 +56,12 @@ const readBody = async (request) => {
 
 function createFixture() {
   const state = {
-    groups: [{ id: 1, name: 'Default', sort_order: 0, allocate_port: true, start_port: 30001, subscription_url: '', subscription_auto_update: false, subscription_interval_minutes: 60, subscription_last_error: '' }],
+    groups: [{
+      id: 1, name: 'Default', sort_order: 0, allocate_port: true, start_port: 30001,
+      upstream_enabled: false, upstream_type: '', upstream_config: '', upstream_revision: 0,
+      upstream_ip: '', upstream_location: '', upstream_country_code: '', upstream_latency: 0, upstream_error: '',
+      subscription_url: '', subscription_auto_update: false, subscription_interval_minutes: 60, subscription_last_error: '',
+    }],
     nodes: [makeNode(1), makeNode(2, { type: 'vless', check_status: 'untested', country_code: '', location: '', node_ip: '', latency: 0, tcp_reuse_enabled: false }), makeNode(3, { type: 'vmess', enabled: false, country_code: 'US', location: 'Boston, United States' }), makeNode(4)],
     settings: { preserve_inbound_ports: false, global_upstream_enabled: false, global_upstream_type: '', global_upstream_config: '', node_list_column_widths: {} },
     runtime: { running: true, degraded: false, pid: 1234 }, version: VERSION, update: { available: false },
@@ -65,7 +70,7 @@ function createFixture() {
       total_upload_bps: 18400, total_download_bps: 262144,
       routes: [
         { key: '10.0.0.5|30001|node:1', client_ip: '10.0.0.5', inbound_port: 30001, inbound_node_id: 1, inbound_node_name: 'Node 001', route_id: '', outbound_node_id: 1, outbound_node_name: 'Node 001', active_count: 2, upload_bps: 12000, download_bps: 200000 },
-        { key: '10.0.0.5|30002|node:4|member:1', client_ip: '10.0.0.5', inbound_port: 30002, inbound_node_id: 2, inbound_node_name: 'Node 002', route_id: 'alice+30004', outbound_node_id: 4, outbound_node_name: 'JP Failover', policy_member_id: 1, policy_member_name: 'Node 001', upstream_label: 'Custom · SOCKS5', active_count: 1, upload_bps: 6400, download_bps: 62144 },
+        { key: '10.0.0.5|30002|node:4|member:1', client_ip: '10.0.0.5', inbound_port: 30002, inbound_node_id: 2, inbound_node_name: 'Node 002', route_id: 'alice+30004', outbound_node_id: 4, outbound_node_name: 'JP Failover', policy_member_id: 1, policy_member_name: 'Node 001', upstream_source: 'custom', upstream_label: 'custom: socks5', active_count: 1, upload_bps: 6400, download_bps: 62144 },
       ],
     },
     sseActive: 0, sseOpened: 0, sseClosed: 0,
@@ -157,8 +162,34 @@ function createFixture() {
         group.subscription_last_error = ''
         return send(200, { added: 1, updated: 0, removed: 0, unchanged: 0, warnings: [] })
       }
+      if (action === 'upstream/check-ip' && method === 'POST') {
+        Object.assign(group, {
+          upstream_ip: '198.51.100.31',
+          upstream_latency: 18,
+          upstream_location: 'Tokyo, Japan',
+          upstream_country_code: 'JP',
+          upstream_error: '',
+        })
+        return send(200, { ip: '198.51.100.31', latency: 18, location: 'Tokyo, Japan', country_code: 'JP' })
+      }
       if (method === 'PATCH') {
-        Object.assign(group, body)
+        const revMismatch = Object.hasOwn(body || {}, 'expected_upstream_revision') && body.expected_upstream_revision !== group.upstream_revision
+        const enabledMismatch = Object.hasOwn(body || {}, 'expected_upstream_enabled') && body.expected_upstream_enabled !== group.upstream_enabled
+        if (revMismatch || enabledMismatch) {
+          state.expectedFailures.add(route)
+          return send(409, { code: 'upstream_conflict', error: 'upstream_conflict', upstream_revision: group.upstream_revision, upstream_enabled: group.upstream_enabled })
+        }
+        const defChanged = (
+          (Object.hasOwn(body || {}, 'upstream_type') && body.upstream_type !== group.upstream_type) ||
+          (Object.hasOwn(body || {}, 'upstream_config') && body.upstream_config !== group.upstream_config)
+        )
+        const patchFields = { ...(body || {}) }
+        delete patchFields.expected_upstream_revision
+        delete patchFields.expected_upstream_enabled
+        if (defChanged) {
+          Object.assign(group, { upstream_revision: (group.upstream_revision || 0) + 1, upstream_ip: '', upstream_location: '', upstream_country_code: '', upstream_latency: 0, upstream_error: '' })
+        }
+        Object.assign(group, patchFields)
         reorderPorts()
         state.groupMutations.push({ op: 'update', id: gid, body })
         return send(200, group)
@@ -964,6 +995,73 @@ const scenarios = {
     await clickControl(page, '[data-testid="node-upstream-save"]')
     await eventually(() => state.upstreams.length === 3, '全局模式未保存')
     assert.equal(state.upstreams[2].upstream_mode, 'global')
+    await waitOverlaysClosed(page)
+
+    // 分组级前置代理配置、启用、测 IP 与三层优先级提示
+    await clickControl(page, '[data-testid="group-settings-button"]')
+    await clickText(page, 'Group Settings', { root: '.ant-dropdown:not(.ant-dropdown-hidden)' })
+    await page.waitForSelector('[data-testid="group-form"]', { visible: true })
+    await clickControl(page, '[data-testid="group-upstream-configure"]')
+    await selectOption(page, 'group_upstream_proxy_type', 'SOCKS5')
+    await setInput(page, '#group_upstream_server', 'group.example.com')
+    await setInput(page, '#group_upstream_server_port', '1080')
+    await clickControl(page, '[data-testid="upstream-editor"] button[type="submit"]')
+    await page.waitForSelector('[data-testid="upstream-editor"]', { hidden: true })
+    await toggle(page, '[data-testid="group-upstream-enabled"]', true)
+    await clickControl(page, '[data-testid="group-form-submit"]')
+    await waitOverlaysClosed(page)
+    await page.waitForSelector('[data-testid="active-group-upstream-pill"]', { visible: true })
+    assert.equal(state.groups[0].upstream_enabled, true)
+
+    await clickControl(page, '[data-testid="group-settings-button"]')
+    await clickText(page, 'Group Settings', { root: '.ant-dropdown:not(.ant-dropdown-hidden)' })
+    await page.waitForSelector('[data-testid="group-form"]', { visible: true })
+    await clickControl(page, '[data-testid="group-upstream-check-ip"]')
+    await page.waitForSelector('[data-testid="group-upstream-check-result"]', { visible: true })
+    assert.equal(state.groups[0].upstream_ip, '198.51.100.31')
+    await closeOverlay(page)
+
+    // 验证只改分组名不会覆盖其他管理员并发更新过的分组前置代理配置
+    await clickControl(page, '[data-testid="group-settings-button"]')
+    await clickText(page, 'Group Settings', { root: '.ant-dropdown:not(.ant-dropdown-hidden)' })
+    await page.waitForSelector('[data-testid="group-form"]', { visible: true })
+    state.groups[0].upstream_type = 'http'
+    state.groups[0].upstream_config = JSON.stringify({ server: 'concurrent-other-admin.example.com', server_port: 8080 })
+    state.groups[0].upstream_revision += 1
+    await clickControl(page, '[data-testid="group-upstream-check-ip"]')
+    await page.waitForFunction(() => document.querySelector('[data-testid="group-form"]')?.textContent?.includes('HTTP'))
+    await setInput(page, '[data-testid="group-name-input"]', 'Default Renamed')
+    await clickControl(page, '[data-testid="group-form-submit"]')
+    await waitOverlaysClosed(page)
+    assert.deepEqual(state.groupMutations.at(-1)?.body, { name: 'Default Renamed' }, '只改分组名时 PATCH 不应携带前置代理字段')
+    assert.equal(state.groups[0].name, 'Default Renamed')
+    assert.equal(state.groups[0].upstream_type, 'http', '只改分组名时覆盖了其他管理员保存的前置代理类型')
+    assert.equal(JSON.parse(state.groups[0].upstream_config).server, 'concurrent-other-admin.example.com', '只改分组名时覆盖了其他管理员保存的前置代理配置')
+
+    // 验证未刷新页面时并发修改同一前置配置触发服务端 409 upstream_conflict，经弹窗确认后才覆盖保存
+    await clickControl(page, '[data-testid="group-settings-button"]')
+    await clickText(page, 'Group Settings', { root: '.ant-dropdown:not(.ant-dropdown-hidden)' })
+    await page.waitForSelector('[data-testid="group-form"]', { visible: true })
+    state.groups[0].upstream_config = JSON.stringify({ server: 'other-session-newer.example.com', server_port: 8080 })
+    state.groups[0].upstream_revision += 1
+    await clickControl(page, '[data-testid="group-upstream-configure"]')
+    await setInput(page, '#group_upstream_server', 'confirmed-override.example.com')
+    await clickControl(page, '[data-testid="upstream-editor"] button[type="submit"]')
+    await page.waitForSelector('[data-testid="upstream-editor"]', { hidden: true })
+    await clickControl(page, '[data-testid="group-form-submit"]')
+    await confirmDialog(page)
+    await waitOverlaysClosed(page)
+    assert.equal(JSON.parse(state.groups[0].upstream_config).server, 'confirmed-override.example.com')
+
+    // 节点已处于 Follow Global 时，应展示「分组前置覆盖全局」提示与生效来源
+    const effectiveText = await page.$eval('[data-testid="node-upstream-effective-1"]', (el) => el.textContent)
+    assert.ok(effectiveText.includes('Group upstream'), `未显示分组前置生效来源：${effectiveText}`)
+    await clickControl(page, '[data-testid="node-upstream-action-1"]')
+    await page.waitForSelector('[data-testid="node-upstream-group-override-hint"]', { visible: true })
+    await switchMode(page, 'group')
+    await clickControl(page, '[data-testid="node-upstream-save"]')
+    await eventually(() => state.upstreams.length === 4, '分组模式未保存')
+    assert.equal(state.upstreams[3].upstream_mode, 'group')
   },
 
   async session({ page, state }) {
@@ -1205,6 +1303,26 @@ const scenarios = {
     await setInput(page, '#name', 'JP Policy')
     assert.equal(await page.$eval('#server', (el) => el.closest('.ant-form-item')?.hidden || el.offsetParent === null), true, '策略节点不应显示服务器地址输入框')
     await closeOverlay(page)
+
+    // 中文环境下故障转移 / 负载均衡节点类型、服务器摘要与下拉选项应完整中文化
+    state.nodes.push(
+      makeNode(5, { name: 'JP Policy Failover', type: 'failover', config: JSON.stringify({ member_ids: [1, 4] }) }),
+      makeNode(6, { name: 'JP Policy LB', type: 'loadbalance', config: JSON.stringify({ member_ids: [1, 4], strategy: 'round-robin' }) }),
+    )
+    await clickControl(page, 'button[title="中文"]')
+    await page.waitForFunction(() => document.documentElement.lang === 'zh-CN')
+    await clickControl(page, '[data-testid="nodes-refresh"]')
+    await page.waitForSelector('[data-row-id="5"]', { visible: true })
+    assert.equal(await page.$eval('[data-row-id="5"] .dusk-col--type', (el) => el.textContent.trim()), '故障转移')
+    assert.equal(await page.$eval('[data-row-id="5"] .dusk-col--server', (el) => el.textContent.trim()), '2 · 故障转移')
+    assert.equal(await page.$eval('[data-row-id="6"] .dusk-col--type', (el) => el.textContent.trim()), '负载均衡')
+    assert.equal(await page.$eval('[data-row-id="6"] .dusk-col--server', (el) => el.textContent.trim()), '2 · 轮询')
+    await clickControl(page, '[data-testid="nodes-add-node"]')
+    await selectOption(page, 'proxy_type', '故障转移（策略）')
+    await selectOption(page, 'proxy_type', '负载均衡（策略）')
+    await closeOverlay(page)
+    await clickControl(page, 'button[title="English"]')
+    await page.waitForFunction(() => document.documentElement.lang === 'en')
   },
 
   async 'connections-logs-ui'({ page, state }) {

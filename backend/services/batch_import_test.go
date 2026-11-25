@@ -145,6 +145,49 @@ func useLoopbackSubscriptionClientForTest(t *testing.T) {
 	t.Cleanup(func() { subscriptionHTTPClient = previous })
 }
 
+func TestSubscriptionFailureDiagnostics(t *testing.T) {
+	const pathToken, queryToken = "fixturePathMarker", "fixtureQueryMarker"
+	sources := []string{"", "http://127.0.0.1/" + pathToken + "?key=" + queryToken, "http://localhost/" + pathToken + "?key=" + queryToken}
+	for _, mode := range []BatchImportSourceType{BatchImportSourceAuto, BatchImportSourceSubscription} {
+		_, failures, err := ExpandBatchImportSourcesWithType(t.Context(), sources, mode)
+		if err != nil || len(failures) != 2 {
+			t.Fatalf("%s: expected two failures, %v", mode, err)
+		}
+		for index, failure := range failures {
+			if strings.Contains(failure.Error+failure.Source, pathToken) || strings.Contains(failure.Error+failure.Source, queryToken) || !strings.Contains(failure.Source, fmt.Sprintf("input %d", index+2)) || !strings.Contains(failure.Error, "subscription target") {
+				t.Errorf("%s input %d lacks safe contextual diagnostic", mode, index+2)
+			}
+		}
+	}
+	if _, err := fetchSubscription(t.Context(), "https://example.invalid/"+pathToken+"%zz?key="+queryToken); err == nil || strings.Contains(err.Error(), pathToken) || strings.Contains(err.Error(), queryToken) || !strings.Contains(err.Error(), "invalid URL escape") {
+		t.Error("malformed request disclosed the source")
+	}
+}
+
+func TestSubscriptionRedirectAndStatusDiagnostics(t *testing.T) {
+	useLoopbackSubscriptionClientForTest(t)
+	const marker = "fixtureRedirectMarker"
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/status" {
+			http.Error(w, marker, http.StatusBadGateway)
+			return
+		}
+		w.Header().Set("Location", "/"+marker+"%zz")
+		w.WriteHeader(http.StatusFound)
+	}))
+	defer server.Close()
+	if _, err := fetchSubscription(t.Context(), server.URL+"/status"); err == nil || !strings.Contains(err.Error(), "502") || strings.Contains(err.Error(), marker) {
+		t.Error("missing safe subscription HTTP status")
+	}
+	if _, err := fetchSubscription(t.Context(), server.URL+"/"+marker); err == nil || strings.Contains(err.Error(), marker) || !strings.Contains(err.Error(), "redirect") {
+		t.Error("invalid redirect diagnostic")
+	}
+	server.Close()
+	if _, err := fetchSubscription(t.Context(), server.URL+"/"+marker+"?key="+marker); err == nil || strings.Contains(err.Error(), marker) || !strings.Contains(err.Error(), "connection refused") {
+		t.Error("dial failure lost its safe transport cause")
+	}
+}
+
 func TestExpandBatchImportSources_Base64Subscription(t *testing.T) {
 	src := "trojan://pass123@example.com:443#A\nvless://00000000-0000-0000-0000-000000000000@example.com:443?security=tls&type=ws&path=%2Fws&host=example.com#B\n"
 	encoded := base64.StdEncoding.EncodeToString([]byte(src))

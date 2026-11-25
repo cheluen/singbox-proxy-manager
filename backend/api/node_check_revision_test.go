@@ -70,7 +70,7 @@ func TestResetChecksAcrossLegacyDetourChain(t *testing.T) {
 			nodes[index].InboundPort = 34567
 		}
 	}
-	if err = resetChangedChecks(t.Context(), tx, before, nodes, models.Settings{}, first); err != nil {
+	if err = resetChangedChecks(t.Context(), tx, before, nodeCheckPaths(nodes, models.Settings{}), nodes, first); err != nil {
 		t.Fatal(err)
 	}
 	for _, id := range []int{first, second, third, independent} {

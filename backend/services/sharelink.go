@@ -6,6 +6,7 @@ import (
 	"encoding/binary"
 	"encoding/json"
 	"encoding/pem"
+	"errors"
 	"fmt"
 	"maps"
 	"net"
@@ -56,7 +57,7 @@ func parseSSLink(link string) (interface{}, string, string, error) {
 	name := decodeShareLinkName(rawFragment, "SS Node")
 	params, err := url.ParseQuery(rawQuery)
 	if err != nil {
-		return nil, "", "", fmt.Errorf("invalid ss query: %w", err)
+		return nil, "", "", errors.New("invalid ss query encoding")
 	}
 
 	var credentials, serverPart string
@@ -186,7 +187,7 @@ func parseSSCredentials(raw string) (string, string, error) {
 	} else {
 		unescaped, unescapeErr := url.PathUnescape(raw)
 		if unescapeErr != nil {
-			return "", "", fmt.Errorf("invalid shadowsocks credentials escaping: %w", unescapeErr)
+			return "", "", errors.New("invalid shadowsocks credentials escaping")
 		}
 		decoded = unescaped
 	}
@@ -200,7 +201,7 @@ func parseSSCredentials(raw string) (string, string, error) {
 func parseRequiredHostPort(raw string) (string, int, error) {
 	host, portRaw, err := net.SplitHostPort(strings.TrimSpace(raw))
 	if err != nil {
-		return "", 0, fmt.Errorf("invalid server format: %w", err)
+		return "", 0, errors.New("invalid server format: expected host:port")
 	}
 	port, err := strconv.Atoi(portRaw)
 	if err != nil || port <= 0 || port > 65535 {
@@ -250,12 +251,33 @@ func validateShadowsocksPlugin(plugin string) error {
 	case "", "obfs-local", "v2ray-plugin":
 		return nil
 	default:
-		return fmt.Errorf("shadowsocks plugin %q is not supported by sing-box 1.12.12", plugin)
+		return errors.New("unsupported shadowsocks plugin for sing-box 1.12.12")
+	}
+}
+
+func parseShareURL(link string) (*url.URL, error) {
+	parsed, err := url.Parse(link)
+	if err == nil {
+		return parsed, nil
+	}
+	return nil, safeURLParseError(err)
+}
+
+func safeURLParseError(err error) error {
+	var escape url.EscapeError
+	var parseError *url.Error
+	switch {
+	case errors.As(err, &escape):
+		return errors.New("invalid URL escape")
+	case errors.As(err, &parseError) && strings.HasPrefix(parseError.Err.Error(), "invalid port "):
+		return errors.New("invalid port after host")
+	default:
+		return errors.New("invalid URL format")
 	}
 }
 
 func parseStandardProxyURL(link string, allowedSchemes []string, defaultPort int, defaultName string) (*parsedProxyURL, error) {
-	parsed, err := url.Parse(strings.TrimSpace(link))
+	parsed, err := parseShareURL(strings.TrimSpace(link))
 	if err != nil {
 		return nil, err
 	}
@@ -267,7 +289,7 @@ func parseStandardProxyURL(link string, allowedSchemes []string, defaultPort int
 		}
 	}
 	if !schemeAllowed {
-		return nil, fmt.Errorf("unexpected scheme: %s", parsed.Scheme)
+		return nil, errors.New("unexpected proxy URL scheme")
 	}
 	host := strings.TrimSpace(parsed.Hostname())
 	if host == "" {
@@ -383,7 +405,7 @@ func rejectUnsupportedShareParameter(values url.Values, feature string, keys ...
 		}
 		for _, candidate := range candidates {
 			if strings.TrimSpace(candidate) != "" {
-				return fmt.Errorf("share parameter %q (%s) is not supported by sing-box 1.12.12", key, feature)
+				return fmt.Errorf("share parameter %s is not supported by sing-box 1.12.12", feature)
 			}
 		}
 	}
@@ -417,7 +439,7 @@ func rejectUnsupportedJSONProperty(fields map[string]json.RawMessage, feature st
 		if value == "" || value == "null" || value == `""` || value == "false" {
 			continue
 		}
-		return fmt.Errorf("vmess JSON property %q (%s) is not supported by sing-box 1.12.12", key, feature)
+		return fmt.Errorf("vmess JSON property %s is not supported by sing-box 1.12.12", feature)
 	}
 	return nil
 }
@@ -476,7 +498,7 @@ func normalizePacketEncoding(raw string) (string, error) {
 	if value, ok := packetEncodingValue(raw); ok {
 		return value, nil
 	}
-	return "", fmt.Errorf("unsupported packet encoding for sing-box 1.12.12: %s", raw)
+	return "", errors.New("unsupported packet encoding for sing-box 1.12.12")
 }
 
 func packetEncodingValue(raw string) (string, bool) {
@@ -500,7 +522,7 @@ func normalizeVMessCipher(raw string) (string, error) {
 	case "auto", "aes-128-gcm", "aes-128-cfb", "chacha20-poly1305", "none", "zero":
 		return value, nil
 	default:
-		return "", fmt.Errorf("unsupported vmess cipher for sing-box 1.12.12: %s", raw)
+		return "", errors.New("unsupported vmess cipher for sing-box 1.12.12")
 	}
 }
 
@@ -514,7 +536,7 @@ func normalizeVMessTransportSecurity(raw string) (string, error) {
 	case "tls", "reality":
 		return value, nil
 	default:
-		return "", fmt.Errorf("unsupported vmess transport security: %s", raw)
+		return "", errors.New("unsupported vmess transport security")
 	}
 }
 
@@ -531,10 +553,10 @@ func normalizeNetworkList(raw string) ([]string, error) {
 			if len(values) == 1 {
 				return nil, nil
 			}
-			return nil, fmt.Errorf("network %q cannot be combined with other values", value)
+			return nil, errors.New("network all/both cannot be combined with other values")
 		}
 		if value != "tcp" && value != "udp" {
-			return nil, fmt.Errorf("unsupported network value: %s", value)
+			return nil, errors.New("unsupported network value")
 		}
 		if _, exists := seen[value]; exists {
 			continue
@@ -585,7 +607,7 @@ func applyURLDialerOptions(options *models.DialerOptions, values url.Values) err
 		if strings.HasPrefix(strings.TrimSpace(resolver), "{") {
 			var parsedResolver any
 			if err := json.Unmarshal([]byte(resolver), &parsedResolver); err != nil {
-				return fmt.Errorf("invalid domain resolver: %w", err)
+				return errors.New("invalid domain resolver JSON")
 			}
 			options.DomainResolver = parsedResolver
 		} else {
@@ -595,7 +617,7 @@ func applyURLDialerOptions(options *models.DialerOptions, values url.Values) err
 	if rawResolver := firstQueryValue(values, "domain_resolver_options", "domain-resolver-options"); rawResolver != "" {
 		var resolver any
 		if err := json.Unmarshal([]byte(rawResolver), &resolver); err != nil {
-			return fmt.Errorf("invalid domain resolver options: %w", err)
+			return errors.New("invalid domain resolver options JSON")
 		}
 		options.DomainResolver = resolver
 	}
@@ -636,13 +658,13 @@ func buildV2RayTransportOptions(params url.Values) (string, map[string]any, erro
 		}
 		return transportType, nil, nil
 	case "kcp", "mkcp", "xhttp", "splithttp", "mekya":
-		return "", nil, fmt.Errorf("transport %s is not supported by sing-box 1.12.12", transportType)
+		return "", nil, errors.New("transport is not supported by sing-box 1.12.12")
 	case "quic":
 		if params.Get("seed") != "" {
 			return "", nil, fmt.Errorf("quic seed is not supported by sing-box 1.12.12")
 		}
 		if security := strings.ToLower(strings.TrimSpace(firstQueryValue(params, "quicSecurity", "quic_security", "quic-security"))); security != "" && security != "none" {
-			return "", nil, fmt.Errorf("quic security %q is not supported by sing-box 1.12.12", security)
+			return "", nil, errors.New("unsupported quic security for sing-box 1.12.12")
 		}
 		if firstQueryValue(params, "key", "quicKey", "quic_key", "quic-key") != "" || params.Get("host") != "" || params.Get("path") != "" {
 			return "", nil, fmt.Errorf("quic transport options are not supported by sing-box 1.12.12")
@@ -701,7 +723,7 @@ func buildV2RayTransportOptions(params url.Values) (string, map[string]any, erro
 		setMapIfNotEmpty(options, "path", params.Get("path"))
 		return transportType, options, nil
 	default:
-		return "", nil, fmt.Errorf("unknown transport type: %s", transportType)
+		return "", nil, errors.New("unknown transport type")
 	}
 }
 
@@ -1108,7 +1130,7 @@ func reconcileShareTLSOptions(native models.NativeOptions, parameters shareTLSPa
 	switch result.mode {
 	case "none", "tls", "reality":
 	default:
-		return shareTLSResult{}, fmt.Errorf("unsupported %s TLS mode: %s", parameters.protocol, result.mode)
+		return shareTLSResult{}, fmt.Errorf("unsupported %s TLS mode", parameters.protocol)
 	}
 
 	if parameters.modePresent {
@@ -1326,7 +1348,7 @@ func parseHysteria2URL(link string) (*parsedProxyURL, []string, error) {
 	}
 	scheme := strings.ToLower(trimmed[:schemeEnd])
 	if scheme != "hysteria2" && scheme != "hy2" {
-		return nil, nil, fmt.Errorf("unexpected hysteria2 scheme: %s", scheme)
+		return nil, nil, errors.New("unexpected hysteria2 scheme")
 	}
 	remainder := trimmed[schemeEnd+3:]
 	authorityEnd := len(remainder)
@@ -1353,7 +1375,7 @@ func parseHysteria2URL(link string) (*parsedProxyURL, []string, error) {
 	if userinfoRaw != "" {
 		authorityForParse = userinfoRaw + "@" + authorityForParse
 	}
-	parsedURL, err := url.Parse(scheme + "://" + authorityForParse + tail)
+	parsedURL, err := parseShareURL(scheme + "://" + authorityForParse + tail)
 	if err != nil {
 		return nil, nil, fmt.Errorf("invalid hysteria2 link: %w", err)
 	}
@@ -1406,9 +1428,9 @@ func normalizeHysteria2Ports(raw string) (int, []string, error) {
 		ports, ranged := parseHysteria2Port(part)
 		if ports.start == 0 {
 			if ranged {
-				return 0, nil, fmt.Errorf("invalid hysteria2 port range: %s", part)
+				return 0, nil, errors.New("invalid hysteria2 port range")
 			}
-			return 0, nil, fmt.Errorf("invalid hysteria2 port: %s", part)
+			return 0, nil, errors.New("invalid hysteria2 port")
 		}
 		if firstPort == 0 {
 			firstPort = ports.start
@@ -1455,7 +1477,7 @@ func parseVLESSLink(link string) (interface{}, string, string, error) {
 	}
 	encryption := strings.TrimSpace(params.Get("encryption"))
 	if encryption != "" && !strings.EqualFold(encryption, "none") {
-		return nil, "", "", fmt.Errorf("vless encryption %q is not supported by sing-box 1.12.12", encryption)
+		return nil, "", "", errors.New("unsupported vless encryption for sing-box 1.12.12")
 	}
 
 	securityRaw, securityPresent := queryParameter(params, "security")
@@ -1467,7 +1489,7 @@ func parseVLESSLink(link string) (interface{}, string, string, error) {
 		security = "tls"
 	}
 	if security != "" && security != "none" && security != "tls" && security != "reality" {
-		return nil, "", "", fmt.Errorf("unsupported vless security: %s", security)
+		return nil, "", "", errors.New("unsupported vless security")
 	}
 
 	fingerprintRaw, fingerprintPresent := queryParameter(params, "fp", "fingerprint")
@@ -1890,7 +1912,7 @@ func parseVMESSURLLink(link string) (interface{}, string, string, error) {
 	} else if present {
 		nativeType := models.NormalizeTransportType(nativeString(nativeTransport["type"]))
 		if !supportsV2RayTransport(nativeType) {
-			return nil, "", "", fmt.Errorf("invalid vmess transport_options type: %s", nativeType)
+			return nil, "", "", errors.New("invalid vmess transport_options type")
 		}
 		if config.Network != "" && config.Network != nativeType {
 			return nil, "", "", fmt.Errorf("vmess transport type conflicts with transport_options")
@@ -1902,7 +1924,7 @@ func parseVMESSURLLink(link string) (interface{}, string, string, error) {
 	if rawMultiplex := strings.TrimSpace(params.Get("multiplex")); rawMultiplex != "" {
 		var multiplex map[string]interface{}
 		if err := json.Unmarshal([]byte(rawMultiplex), &multiplex); err != nil {
-			return nil, "", "", fmt.Errorf("invalid vmess multiplex options: %w", err)
+			return nil, "", "", errors.New("invalid vmess multiplex options JSON")
 		}
 		if multiplex == nil {
 			return nil, "", "", fmt.Errorf("invalid vmess multiplex options: expected object")
@@ -1923,14 +1945,14 @@ func parseNativeOptionsQuery(values url.Values, key string) (models.NativeOption
 	}
 	var options map[string]interface{}
 	if err := json.Unmarshal([]byte(raw), &options); err != nil {
-		return nil, true, fmt.Errorf("invalid %s: %w", key, err)
+		return nil, true, fmt.Errorf("invalid %s JSON", key)
 	}
 	if options == nil {
 		return nil, true, fmt.Errorf("invalid %s: expected object", key)
 	}
 	if key == "tls_options" {
 		if err := validateGeneratorTLSOptionSchema(options); err != nil {
-			return nil, true, fmt.Errorf("invalid %s: %w", key, err)
+			return nil, true, fmt.Errorf("invalid %s: unsupported option or option type", key)
 		}
 	}
 	return models.NativeOptions(options), true, nil
@@ -1943,7 +1965,7 @@ func parseV2RayNativeTransportQuery(values url.Values, currentType string) (mode
 	}
 	transportType := models.NormalizeTransportType(nativeString(options["type"]))
 	if !supportsV2RayTransport(transportType) {
-		return nil, currentType, true, fmt.Errorf("invalid transport_options type: %s", transportType)
+		return nil, currentType, true, errors.New("invalid transport_options type")
 	}
 	if currentType != "" && currentType != transportType {
 		return nil, currentType, true, fmt.Errorf("transport type conflicts with transport_options")
@@ -1959,7 +1981,7 @@ func parseMultiplexQuery(values url.Values) (map[string]interface{}, bool, error
 	}
 	var options map[string]interface{}
 	if err := json.Unmarshal([]byte(raw), &options); err != nil {
-		return nil, true, fmt.Errorf("invalid multiplex options: %w", err)
+		return nil, true, errors.New("invalid multiplex options JSON")
 	}
 	if options == nil {
 		return nil, true, fmt.Errorf("invalid multiplex options: expected object")
@@ -2006,7 +2028,7 @@ func parseTrojanLink(link string) (interface{}, string, string, error) {
 		security = "tls"
 	}
 	if security != "" && security != "none" && security != "tls" && security != "reality" {
-		return nil, "", "", fmt.Errorf("unsupported trojan security: %s", security)
+		return nil, "", "", errors.New("unsupported trojan security")
 	}
 	publicKey, publicKeyPresent := queryParameter(params, "pbk", "publicKey", "public-key")
 	shortID, shortIDPresent := queryParameter(params, "sid", "shortId", "short-id")
@@ -2104,7 +2126,7 @@ func parseHysteria2Link(link string) (interface{}, string, string, error) {
 	}
 	obfs := strings.ToLower(strings.TrimSpace(params.Get("obfs")))
 	if obfs != "" && obfs != "salamander" && obfs != "none" {
-		return nil, "", "", fmt.Errorf("unsupported hysteria2 obfs for sing-box 1.12.12: %s", obfs)
+		return nil, "", "", errors.New("unsupported hysteria2 obfs for sing-box 1.12.12")
 	}
 	insecure, insecurePresent, err := queryTLSBool(params, "insecure", "allowInsecure", "allow_insecure")
 	if err != nil {
@@ -2417,7 +2439,7 @@ func importUDPOverTCP(enabled bool, version int) (any, models.NativeOptions, err
 		return enabled, nil, nil
 	}
 	if version > 2 {
-		return nil, nil, fmt.Errorf("unsupported udp-over-tcp version: %d", version)
+		return nil, nil, errors.New("unsupported udp-over-tcp version")
 	}
 	options := models.NativeOptions{"enabled": enabled, "version": version}
 	return options, options, nil
@@ -2503,7 +2525,7 @@ func parseHTTPProxyLink(link string) (interface{}, string, string, error) {
 	if rawHeaders := q.Get("headers"); rawHeaders != "" {
 		headers := map[string]any{}
 		if err := json.Unmarshal([]byte(rawHeaders), &headers); err != nil {
-			return nil, "", "", fmt.Errorf("invalid http proxy headers: %w", err)
+			return nil, "", "", errors.New("invalid http proxy headers JSON")
 		}
 		cfg.Headers = models.NativeOptions(headers)
 	}
@@ -2517,7 +2539,7 @@ func parseHTTPProxyLink(link string) (interface{}, string, string, error) {
 
 func parseWireGuardLink(link string) (interface{}, string, string, error) {
 	normalizedLink := strings.Replace(link, "wg://", "wireguard://", 1)
-	parsed, err := url.Parse(normalizedLink)
+	parsed, err := parseShareURL(normalizedLink)
 	if err != nil {
 		return nil, "", "", fmt.Errorf("invalid wireguard link: %v", err)
 	}
@@ -2553,7 +2575,7 @@ func parseWireGuardLink(link string) (interface{}, string, string, error) {
 		domainResolverValue = rawResolver
 		if strings.HasPrefix(strings.TrimSpace(rawResolver), "{") {
 			if err := json.Unmarshal([]byte(rawResolver), &domainResolverValue); err != nil {
-				return nil, "", "", fmt.Errorf("invalid wireguard domain resolver: %w", err)
+				return nil, "", "", errors.New("invalid wireguard domain resolver JSON")
 			}
 		}
 	}
@@ -2632,7 +2654,7 @@ func parseWireGuardLink(link string) (interface{}, string, string, error) {
 	}
 	if rawResolver := firstQueryValue(query, "domain_resolver_options", "domain-resolver-options"); rawResolver != "" {
 		if err := json.Unmarshal([]byte(rawResolver), &cfg.DomainResolverOptions); err != nil {
-			return nil, "", "", fmt.Errorf("invalid wireguard domain resolver options: %w", err)
+			return nil, "", "", errors.New("invalid wireguard domain resolver options JSON")
 		}
 	}
 	if keepalive := queryPositiveInt(query, "persistent_keepalive_interval", "persistent-keepalive-interval", "persistent-keepalive"); keepalive > 0 {

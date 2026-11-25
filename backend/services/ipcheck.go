@@ -232,6 +232,8 @@ const (
 	ipCheckServicesMaxConcurrency = 3
 	ipCheckServiceTimeout         = 4 * time.Second
 	ipCheckTotalDeadline          = 10 * time.Second
+	ipCheckReadyTimeout           = 2 * time.Second
+	ProxyIPCheckTimeout           = ipCheckReadyTimeout + 2*ipCheckTotalDeadline
 	ipCheckPreferGeoWait          = 600 * time.Millisecond
 	ipCheckGlobalMaxConcurrency   = 6
 )
@@ -335,7 +337,7 @@ func CheckProxyIPContext(
 ) (*IPInfo, error) {
 	log.Printf("[IPCheck] Starting IP check for proxy: %s (auth: %v)", proxyAddr, username != "")
 
-	if err := waitForTCPReady(ctx, proxyAddr, 2*time.Second); err != nil {
+	if err := waitForTCPReady(ctx, proxyAddr, ipCheckReadyTimeout); err != nil {
 		return nil, fmt.Errorf("%w: %v", ErrProxyNotReady, err)
 	}
 

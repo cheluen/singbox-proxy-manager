@@ -92,6 +92,9 @@ func TestConnectionsRealKernelChainedRoutes(t *testing.T) {
 	if err := NewRuntimeApplier(service).Apply(nodes, settings); err != nil {
 		t.Fatal(err)
 	}
+	if err := waitForTCPReady(t.Context(), loopback(base.InboundPort), 3*time.Second); err != nil {
+		t.Fatalf("public proxy listener did not become ready: %v", err)
+	}
 	for _, node := range []models.ProxyNode{custom, global, legacy} {
 		routeID := node.Username + "+" + strconv.Itoa(node.InboundPort)
 		proxyURL := &url.URL{Scheme: "http", Host: loopback(base.InboundPort), User: url.UserPassword(routeID, node.Password)}
@@ -117,7 +120,7 @@ func TestConnectionsRealKernelChainedRoutes(t *testing.T) {
 		t.Fatalf("unexpected routed snapshot %+v", snap)
 	}
 	for _, route := range snap.Routes {
-		if route.InboundID != base.ID || route.InboundPort != base.InboundPort || labels[route.OutboundID] != route.Upstream || route.RouteID == "" || route.OutboundName != nodes[route.OutboundID-1].Name {
+		if route.InboundID != base.ID || route.InboundPort != base.InboundPort || labels[route.OutboundID] != route.Upstream || route.RouteID == "" || route.OutboundName != nodes[route.OutboundID-1].Name || route.UpstreamSource != nodes[route.OutboundID-1].UpstreamMode {
 			t.Fatalf("lost routed business node %+v", route)
 		}
 	}

@@ -3,7 +3,7 @@ import { useMemo, useState } from 'react'
 import { App, Button, Collapse, Form, Input, InputNumber, Radio, Select, Switch } from 'antd'
 import { ArrowDown, ArrowUp, Braces, X } from 'lucide-react'
 import { useTranslation } from 'react-i18next'
-import { createProtocolFormModel, isPolicyType, normalizeClearedSelect, proxyTypes, upstreamProxyTypes } from '../core/protocolForm'
+import { createProtocolFormModel, isPolicyType, localizedProxyTypes, normalizeClearedSelect } from '../core/protocolForm'
 import { groupFields, protocolLabel } from '../core/protocolSchema'
 import { isPolicyNode } from '../core/nodeModel'
 import { InboundAuthBox } from './NodeParts'
@@ -79,7 +79,7 @@ function PolicyMemberSelector({ value = [], onChange, allNodes = [], groups = []
         label: group.allocate_port === false ? `${group.name} (${t('group_no_port_badge')})` : group.name,
         options: list.map((item) => ({
           value: item.id,
-          label: `${item.name} · ${protocolLabel(item.type)}${item.enabled === false ? ` [${t('disabled')}]` : ''}`,
+          label: `${item.name} · ${protocolLabel(item.type, t)}${item.enabled === false ? ` [${t('disabled')}]` : ''}`,
         })),
       })
       byGroup.delete(group.id)
@@ -89,7 +89,7 @@ function PolicyMemberSelector({ value = [], onChange, allNodes = [], groups = []
         label: t('nodes'),
         options: list.map((item) => ({
           value: item.id,
-          label: `${item.name} · ${protocolLabel(item.type)}${item.enabled === false ? ` [${t('disabled')}]` : ''}`,
+          label: `${item.name} · ${protocolLabel(item.type, t)}${item.enabled === false ? ` [${t('disabled')}]` : ''}`,
         })),
       })
     }
@@ -129,7 +129,7 @@ function PolicyMemberSelector({ value = [], onChange, allNodes = [], groups = []
                 <span className="sb-policy-order__idx mono">{index + 1}</span>
                 <span className="sb-policy-order__name truncate">{member ? member.name : `#${id} (${t('policy_member_missing')})`}</span>
                 {groupName ? <span className="sb-policy-order__meta">{groupName}</span> : null}
-                {member ? <span className="sb-tag sb-tag--protocol">{protocolLabel(member.type)}</span> : null}
+                {member ? <span className="sb-tag sb-tag--protocol">{protocolLabel(member.type, t)}</span> : null}
                 {member?.enabled === false ? <span className="sb-policy-order__warn">{t('disabled')}</span> : null}
                 <span className="sb-policy-order__ops">
                   <button type="button" className="sb-icon-btn sb-icon-btn--sm" aria-label={t('move_up')} disabled={index === 0} onClick={() => move(index, -1)}>
@@ -162,7 +162,10 @@ export default function NodeEditor({ node, variant = 'node', formName, preserveP
   const watched = Form.useWatch([], form)
   const authEnabled = Form.useWatch('auth_enabled', form)
   const isPolicy = !isUpstream && isPolicyType(proxyType)
-  const typeOptions = isUpstream ? upstreamProxyTypes : proxyTypes
+  const typeOptions = useMemo(
+    () => localizedProxyTypes(t, { includePolicy: !isUpstream }),
+    [isUpstream, t]
+  )
 
   // 仅在被编辑的对象变化时重建模型；isFieldTouched 走实时的 form 实例。
   const model = useMemo(

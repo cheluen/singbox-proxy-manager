@@ -75,7 +75,7 @@ func (rows *restartReadRows) Next(values []driver.Value) error {
 	return err
 }
 
-func TestRestartRuntimeReadOnlyUsesTwoQueries(t *testing.T) {
+func TestRestartRuntimeReadOnlyLoadsNodesSettingsAndGroupUpstreams(t *testing.T) {
 	handler := newTestHandler(t, nil)
 	counts := &restartReadCounts{}
 	db := sql.OpenDB(&restartReadConnector{counts: counts})
@@ -86,11 +86,19 @@ func TestRestartRuntimeReadOnlyUsesTwoQueries(t *testing.T) {
 	}
 	handler.db = db
 	handler.nodeMutations = newNodeMutationCoordinator(db, handler.singBoxService)
-	for index := range 16 {
+	const nodeCount = 16
+	for index := range nodeCount {
 		insertTestNodeWithPortAndOrder(t, db, "restart-node", 31001+index, index)
+	}
+	if _, err := db.Exec(`UPDATE node_groups SET upstream_enabled=TRUE,upstream_type='http',upstream_config='{"server":"192.0.2.7","server_port":8080}'`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`UPDATE proxy_nodes SET upstream_mode='group'`); err != nil {
+		t.Fatal(err)
 	}
 	nodesBefore := postJSON(t, handler.GetNodes, http.MethodGet, "/api/nodes", nil, nil).Body.String()
 	settingsBefore := postJSON(t, handler.GetSettings, http.MethodGet, "/api/settings", nil, nil).Body.String()
+	groupsBefore := postJSON(t, handler.GetGroups, http.MethodGet, "/api/node-groups", nil, nil).Body.String()
 	counts.begins.Store(0)
 	counts.queries.Store(0)
 	counts.writes.Store(0)
@@ -101,8 +109,8 @@ func TestRestartRuntimeReadOnlyUsesTwoQueries(t *testing.T) {
 		t.Fatalf("重启失败：status=%d body=%s", response.Code, response.Body.String())
 	}
 	begins, queries, writes, scanned := counts.begins.Load(), counts.queries.Load(), counts.writes.Load(), counts.rows.Load()
-	t.Logf("16 个节点重启：事务=%d 查询=%d 写入=%d 扫描行=%d", begins, queries, writes, scanned)
-	if begins != 0 || queries != 2 || writes != 0 || scanned != 17 {
+	t.Logf("%d 个节点、1 条设置、1 个分组前置：事务=%d 查询=%d 写入=%d 扫描行=%d", nodeCount, begins, queries, writes, scanned)
+	if begins != 0 || queries != 3 || writes != 0 || scanned != nodeCount+2 {
 		t.Fatalf("重启不应预演数据修改：事务=%d 查询=%d 写入=%d 扫描行=%d", begins, queries, writes, scanned)
 	}
 	if got := postJSON(t, handler.GetNodes, http.MethodGet, "/api/nodes", nil, nil).Body.String(); got != nodesBefore {
@@ -110,5 +118,8 @@ func TestRestartRuntimeReadOnlyUsesTwoQueries(t *testing.T) {
 	}
 	if got := postJSON(t, handler.GetSettings, http.MethodGet, "/api/settings", nil, nil).Body.String(); got != settingsBefore {
 		t.Fatal("重启修改了设置数据")
+	}
+	if got := postJSON(t, handler.GetGroups, http.MethodGet, "/api/node-groups", nil, nil).Body.String(); got != groupsBefore {
+		t.Fatal("重启修改了分组数据")
 	}
 }

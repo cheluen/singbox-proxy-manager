@@ -69,7 +69,7 @@ export const describeCriteria = (criteria, t) => {
     chips.push({ id: 'status', label: `${t('status')}: ${label}`, clear: (c) => ({ ...c, status: 'all' }) })
   }
   for (const type of criteria.types) {
-    chips.push({ id: `type:${type}`, label: protocolLabel(type), clear: (c) => ({ ...c, types: c.types.filter((item) => item !== type) }) })
+    chips.push({ id: `type:${type}`, label: protocolLabel(type, t), clear: (c) => ({ ...c, types: c.types.filter((item) => item !== type) }) })
   }
   for (const region of criteria.regions) {
     const label = region === UNKNOWN_REGION ? t('region_unknown') : region.toUpperCase()

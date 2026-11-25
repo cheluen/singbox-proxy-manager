@@ -44,6 +44,7 @@ func newGroupTestClient(t *testing.T) groupTestClient {
 	router.POST("/api/nodes/batch-delete", handler.BatchDeleteNodes)
 	router.POST("/api/nodes", handler.CreateNode)
 	router.PUT("/api/nodes/:id", handler.UpdateNode)
+	router.PUT("/api/nodes/:id/upstream", handler.UpdateNodeUpstream)
 	router.PATCH("/api/nodes/:id", handler.UpdateNodeFlags)
 	router.PUT("/api/nodes/:id/port-pin", handler.SetNodeInboundPortPinned)
 	router.POST("/api/nodes/batch-move", handler.BatchMoveNodes)

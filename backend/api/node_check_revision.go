@@ -48,13 +48,13 @@ func nodeCheckPaths(nodes []models.ProxyNode, settings models.Settings) map[int]
 			tags["node-"+strconv.Itoa(node.ID)+"-out"] = node.ID
 		}
 	}
-	globalConfig, _ := checkConfig(settings.GlobalUpstreamConfig)
+	upstreams := make(map[string][sha256.Size]byte)
 	paths := make(map[int]checkPath, len(nodes))
 	for _, node := range nodes {
 		config, detour := checkConfig(node.Config)
 		outbound := checkOutbound{protocol: node.Type, config: config, enabled: node.Enabled}
-		mode, _ := models.NormalizeUpstreamMode(node.UpstreamMode)
-		switch mode {
+		source, upstream := settings.EffectiveUpstream(node)
+		switch source {
 		case models.UpstreamModeLegacy:
 			if detour != "" && detour != "direct" {
 				outbound.detourID = tags[detour]
@@ -62,13 +62,13 @@ func nodeCheckPaths(nodes []models.ProxyNode, settings models.Settings) map[int]
 					outbound.detourID = names[detour]
 				}
 			}
-		case models.UpstreamModeGlobal:
-			if settings.GlobalUpstreamEnabled {
-				outbound.upstreamType, outbound.upstreamConfig = settings.GlobalUpstreamType, globalConfig
+		case models.UpstreamModeGlobal, models.UpstreamModeGroup, models.UpstreamModeCustom:
+			fingerprint, found := upstreams[upstream.Config]
+			if !found {
+				fingerprint, _ = checkConfig(upstream.Config)
+				upstreams[upstream.Config] = fingerprint
 			}
-		case models.UpstreamModeCustom:
-			outbound.upstreamType = node.UpstreamType
-			outbound.upstreamConfig, _ = checkConfig(node.UpstreamConfig)
+			outbound.upstreamType, outbound.upstreamConfig = upstream.Type, fingerprint
 		}
 		path := checkPath{outbound: outbound, port: node.InboundPort}
 		if node.InboundPort > 0 {
@@ -79,8 +79,7 @@ func nodeCheckPaths(nodes []models.ProxyNode, settings models.Settings) map[int]
 	return paths
 }
 
-func resetChangedChecks(ctx context.Context, tx *sql.Tx, before map[int]checkPath, nodes []models.ProxyNode, settings models.Settings, replacedID int) error {
-	after := nodeCheckPaths(nodes, settings)
+func resetChangedChecks(ctx context.Context, tx *sql.Tx, before, after map[int]checkPath, nodes []models.ProxyNode, replacedID int) error {
 	dependents := map[int][]int{}
 	for _, node := range nodes {
 		if models.IsPolicy(node.Type) {

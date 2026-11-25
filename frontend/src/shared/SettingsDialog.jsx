@@ -103,7 +103,7 @@ function SettingsFormBody({ ctl, onDone }) {
           <div className="sb-inline-card__text">
             <strong>{t('upstream_global_proxy')}</strong>
             <span>
-              {configured ? `${protocolLabel(upstream.type)} · ${matchesSaved ? t('configured') : t('configured_unsaved')}` : upstreamEnabled ? t('upstream_global_required') : t('not_configured')}
+              {configured ? `${protocolLabel(upstream.type, t)} · ${matchesSaved ? t('configured') : t('configured_unsaved')}` : upstreamEnabled ? t('upstream_global_required') : t('not_configured')}
             </span>
           </div>
           <Button icon={<Zap size={14} strokeWidth={1.75} />} loading={checking} disabled={!matchesSaved} data-tip={matchesSaved ? undefined : t('upstream_check_save_first')} onClick={checkUpstream} data-testid="global-upstream-check-ip">

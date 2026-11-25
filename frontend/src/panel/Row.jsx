@@ -106,7 +106,7 @@ function InboundPasswordCell({ node }) {
 export const DuskRow = memo(function DuskRow({ node, index, selected, expanded, focused, checking, flagBusy, pinBusy, preservePorts, canReorder, dragLabel, act, onToggle, onFocus, children }) {
   const { t } = useTranslation()
   const off = node.enabled === false
-  const server = serverAddress(node)
+  const server = serverAddress(node, t)
   const health = nodeHealth(node)
   return (
     <SortableItem

@@ -1,6 +1,6 @@
 # 配置、数据库与运维指南
 
-本文档提供 SingBox Proxy Manager（`1.7.30`）完整的环境变量参考、多数据库配置、数据持久化、健康检查、安全加固与故障排查指南。
+本文档提供 SingBox Proxy Manager（`1.7.31`）完整的环境变量参考、多数据库配置、数据持久化、健康检查、安全加固与故障排查指南。
 
 ---
 
@@ -132,7 +132,7 @@
 - **Turso / libSQL**：固定 1 打开 / 0 空闲 / 1ns 连接寿命以规避驱动会话复用异常。
 
 数据库启动后自动创建并增量补齐核心应用表（无独立 `schema_version` 表）：
-- `node_groups`：节点分组定义、分组排序、端口分配开关（`allocate_port`）、分组起始端口（`start_port`）、独立订阅链接/定时周期与同步状态。
+- `node_groups`：节点分组定义、分组排序、端口分配开关（`allocate_port`）、分组起始端口（`start_port`）、分组级前置代理配置及检测结果（`upstream_*`）、独立订阅链接/定时周期与同步状态。
 - `proxy_nodes`：节点所属分组（`group_id`）、出站/策略配置、入站端口（无端口存 `NULL`）/认证/复用、前置代理定义、出口检测状态（`check_status` / `check_error`）与订阅同步标识（`subscription_key` / `subscription_name`）。
 - `settings`：全局单例配置、管理员密码与环境指纹、`auth_generation`、保留端口策略、全局前置代理、前端节点列表自定义列宽（`node_list_column_widths`）及日志持久化配置（`log_settings_json`）。
 - `admin_sessions`：登录会话 SHA-256 哈希、密码代次、有效期、登录 IP 与 User-Agent。
@@ -182,7 +182,8 @@ config/
 ### 5.1 版本升级与模式切换
 
 > **版本原地升级说明**：
-> - **从 `1.7.29` 升级至 `1.7.30`**：四类数据库均支持自动原地升级——系统会创建默认分组并继承原全局 `start_port`，完整保留全部节点的 ID、端口、固定标记、账密、备注与排序；无端口节点在数据库中以 `NULL` 存储，API 层统一返回 `0`。
+> - **从 `1.7.30` 升级至 `1.7.31`**：四类数据库均在启动时自动向 `node_groups` 补齐分组级前置代理字段（`upstream_*` 与内部修订号 `upstream_revision`，其中 MySQL 配置列使用 `LONGTEXT NOT NULL`、`upstream_ip` 为 `VARCHAR(255)`、`upstream_country_code` 为 `VARCHAR(32)`）并向 `settings` 补齐 `global_upstream_revision`，完整保留既有分组、节点、端口与订阅状态。
+> - **从 `1.7.29` 升级至 `1.7.30+`**：四类数据库均支持自动原地升级——系统会创建默认分组并继承原全局 `start_port`，完整保留全部节点的 ID、端口、固定标记、账密、备注与排序；无端口节点在数据库中以 `NULL` 存储，API 层统一返回 `0`。
 > - **从 `1.7.27` 及更早版本升级必读**：自 `1.7.28` 起新增用户协议首次确认门禁。升级前请先阅读 [`USER_AGREEMENT.md`](../USER_AGREEMENT.md)，并在原有 `.env` 的 `ADMIN_PASSWORD` 上方补充 `ACCEPT_USER_AGREEMENT=true`（独立二进制也可在交互式终端首次启动时输入 `y` 同意），否则 Docker 或 `systemd` 等非交互无人值守启动会拒绝启动并退出。
 
 - **Docker Compose（GHCR 预构建镜像）**：

@@ -84,7 +84,7 @@ export function NodeDialogBody({ node, focusLink, ctl, onDone }) {
           }}
         />
       )}
-      {fromLink ? <Alert type="success" showIcon className="sb-gap" message={t('link_import_filled', { type: protocolLabel(draft?.type) })} /> : null}
+      {fromLink ? <Alert type="success" showIcon className="sb-gap" message={t('link_import_filled', { type: protocolLabel(draft?.type, t) })} /> : null}
       <NodeEditor
         key={`${node?.id || 'new'}:${revision}`}
         node={draft}
@@ -136,8 +136,13 @@ export function UpstreamDialogBody({ node, ctl, onDone }) {
   const [saving, setSaving] = useState(false)
   const [touched, setTouched] = useState(false)
   const configured = Boolean(definition.type && definition.config)
-  const modes = ['none', 'global', 'custom', ...(initialMode === 'legacy' ? ['legacy'] : [])]
-  const globalOff = mode === 'global' && !ctl.settings?.global_upstream_enabled
+  const modes = ['none', 'group', 'global', 'custom', ...(initialMode === 'legacy' ? ['legacy'] : [])]
+  const nodeGroup = ctl.groupById?.get(node.group_id) || ctl.activeGroup
+  const groupUpstreamOn = Boolean(nodeGroup?.upstream_enabled)
+  const globalUpstreamOn = Boolean(ctl.settings?.global_upstream_enabled)
+  const groupOff = mode === 'group' && !groupUpstreamOn
+  const globalOverriddenByGroup = mode === 'global' && groupUpstreamOn
+  const globalOff = mode === 'global' && !groupUpstreamOn && !globalUpstreamOn
 
   const submit = async () => {
     setTouched(true)
@@ -161,13 +166,23 @@ export function UpstreamDialogBody({ node, ctl, onDone }) {
       </div>
 
       {mode === 'legacy' ? <Alert type="warning" showIcon className="sb-gap" message={t('upstream_legacy_warning')} /> : null}
+      {groupOff ? <Alert type="info" showIcon className="sb-gap" message={t('upstream_group_off_hint')} /> : null}
+      {globalOverriddenByGroup ? (
+        <Alert
+          type="info"
+          showIcon
+          className="sb-gap"
+          message={t('upstream_global_overridden_by_group_hint', { type: protocolLabel(nodeGroup?.upstream_type, t) })}
+          data-testid="node-upstream-group-override-hint"
+        />
+      ) : null}
       {globalOff ? <Alert type="info" showIcon className="sb-gap" message={t('upstream_global_off_hint')} /> : null}
 
       {mode === 'custom' ? (
         <div className={`sb-inline-card sb-gap${touched && !configured ? ' is-error' : ''}`}>
           <div className="sb-inline-card__text">
             <strong>{t('upstream_custom_proxy')}</strong>
-            <span>{configured ? `${protocolLabel(definition.type)} · ${t('configured')}` : t('upstream_custom_required')}</span>
+            <span>{configured ? `${protocolLabel(definition.type, t)} · ${t('configured')}` : t('upstream_custom_required')}</span>
           </div>
           <Button icon={configured ? <Pencil size={14} strokeWidth={1.75} /> : <Plus size={14} strokeWidth={1.75} />} onClick={() => setEditorOpen(true)} data-testid="node-upstream-configure">
             {configured ? t('upstream_edit') : t('upstream_configure')}

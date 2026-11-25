@@ -54,6 +54,9 @@ func newWiring(nodes []models.ProxyNode, settings models.Settings) (*runtimeWiri
 		}
 	}
 	addSecrets(appendIPCheckConfigCredentials(nil, settings.GlobalUpstreamConfig))
+	for _, group := range settings.GroupUpstreams {
+		addSecrets(appendIPCheckConfigCredentials(nil, group.Config))
+	}
 	for _, node := range nodes {
 		w.nodes[node.ID] = node
 		occupied[node.InboundPort] = true

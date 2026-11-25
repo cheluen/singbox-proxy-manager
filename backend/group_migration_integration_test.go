@@ -254,6 +254,72 @@ func migratedGroupState(t *testing.T, db *sql.DB) ([]models.NodeGroup, []models.
 	return groups, nodes
 }
 
+func verifyGroupUpstreamUpgrade(t *testing.T, db *sql.DB) {
+	t.Helper()
+	resetApplicationTables(t, db)
+	defer resetApplicationTables(t, db)
+	if err := models.InitDB(db); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`UPDATE node_groups SET name='historical',revision=17,subscription_url='https://example.invalid/feed'`); err != nil {
+		t.Fatal(err)
+	}
+	old, err := models.LoadGroup(t.Context(), db, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{"enabled", "type", "config", "ip", "location", "country_code", "latency", "error", "revision"} {
+		if _, err := db.Exec("ALTER TABLE node_groups DROP COLUMN upstream_" + name); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := db.Exec("ALTER TABLE settings DROP COLUMN global_upstream_revision"); err != nil {
+		t.Fatal(err)
+	}
+	if err := models.InitDB(db); err != nil {
+		t.Fatal(err)
+	}
+	var globalRevision int
+	if err := db.QueryRow("SELECT global_upstream_revision FROM settings WHERE singleton_key=1").Scan(&globalRevision); err != nil || globalRevision != 0 {
+		t.Fatalf("upgraded global revision %d: %v", globalRevision, err)
+	}
+	group, err := models.LoadGroup(t.Context(), db, old.ID)
+	if err != nil || !reflect.DeepEqual(old, group) {
+		t.Fatalf("group changed on upgrade: %+v, %v", group, err)
+	}
+	if _, err := db.Exec(`UPDATE node_groups SET upstream_enabled=TRUE,upstream_type='http',upstream_config='{"server":"192.0.2.2","server_port":8080}',upstream_ip='192.0.2.1',upstream_location='City',upstream_country_code='ZZ',upstream_latency=8,upstream_error='warning',upstream_revision=3 WHERE id=?`, old.ID); err != nil {
+		t.Fatal(err)
+	}
+	if appdb.DialectFor(db) == appdb.DialectMySQL {
+		if _, err := db.Exec(`ALTER TABLE node_groups MODIFY COLUMN upstream_ip VARCHAR(64) NOT NULL DEFAULT '', MODIFY COLUMN upstream_country_code VARCHAR(16) NOT NULL DEFAULT ''`); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := models.InitDB(db); err != nil {
+		t.Fatal(err)
+	}
+	group, err = models.LoadGroup(t.Context(), db, old.ID)
+	if err != nil || !group.UpstreamEnabled || group.UpstreamType != "http" || group.UpstreamConfig == "" || group.UpstreamIP != "192.0.2.1" || group.UpstreamLocation != "City" || group.UpstreamCountryCode != "ZZ" || group.UpstreamLatency != 8 || group.UpstreamError != "warning" || group.UpstreamRevision != 3 {
+		t.Fatal("saved upstream fields lost on restart", err)
+	}
+	if appdb.DialectFor(db) == appdb.DialectMySQL {
+		verifyMySQLLongTextContract(t, db)
+		for column, want := range map[string]int{"upstream_ip": 255, "upstream_country_code": 32} {
+			var width int
+			if err := db.QueryRow(`SELECT character_maximum_length FROM information_schema.columns WHERE table_schema=DATABASE() AND table_name='node_groups' AND column_name=?`, column).Scan(&width); err != nil || width != want {
+				t.Fatalf("upgraded %s width %d, want %d: %v", column, width, want, err)
+			}
+		}
+		ip, country := strings.Repeat("x", 255), strings.Repeat("z", 32)
+		if _, err := db.Exec(`UPDATE node_groups SET upstream_ip=?,upstream_country_code=? WHERE id=?`, ip, country, old.ID); err != nil {
+			t.Fatal(err)
+		}
+		if group, err = models.LoadGroup(t.Context(), db, old.ID); err != nil || group.UpstreamIP != ip || group.UpstreamCountryCode != country {
+			t.Fatal("full-length check result was not preserved", err)
+		}
+	}
+}
+
 func advanceMigratedGroupState(t *testing.T, db *sql.DB, defaultID, highID int) {
 	t.Helper()
 	if _, err := db.Exec(`UPDATE node_groups SET name = 'Retained group', start_port = 38200 WHERE id = ?`, defaultID); err != nil {
@@ -266,7 +332,7 @@ func advanceMigratedGroupState(t *testing.T, db *sql.DB, defaultID, highID int) 
 	if _, err := db.Exec(`UPDATE proxy_nodes SET latency = 75 WHERE name = 'ip-only'`); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := db.Exec(`INSERT INTO node_groups (name, sort_order, allocate_port, start_port) VALUES ('Second group', 1, TRUE, 41200)`); err != nil {
+	if _, err := db.Exec(`INSERT INTO node_groups (name, sort_order, allocate_port, start_port, upstream_config) VALUES ('Second group', 1, TRUE, 41200, '')`); err != nil {
 		t.Fatal(err)
 	}
 	var secondID int

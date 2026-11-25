@@ -3,6 +3,7 @@ package services
 import (
 	"context"
 	"encoding/base64"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -29,6 +30,8 @@ const (
 	batchImportFetchConcurrency = 5
 	batchImportTotalTimeout     = 70 * time.Second
 )
+
+var errSubscriptionFetch = errors.New("subscription request failed")
 
 type batchImportExpansionState struct {
 	mu         sync.Mutex
@@ -75,6 +78,7 @@ type batchExpansionResult struct {
 func expandInputsOrdered(
 	ctx context.Context,
 	inputs []string,
+	label string,
 	expand func(context.Context, string) ([]ImportItem, []ImportFailure, error),
 ) ([]ImportItem, []ImportFailure, error) {
 	if len(inputs) == 0 {
@@ -103,14 +107,19 @@ func expandInputsOrdered(
 	var items []ImportItem
 	var failures []ImportFailure
 	for index, result := range results {
+		source := fmt.Sprintf("%s %d", label, index+1)
 		if result.err != nil {
 			failures = append(failures, ImportFailure{
-				Source: summarizeSource(inputs[index]),
-				Error:  result.err.Error(),
+				Source:      source,
+				Error:       result.err.Error(),
+				fetchFailed: errors.Is(result.err, errSubscriptionFetch),
 			})
 		} else {
 			items = append(items, result.items...)
-			failures = append(failures, result.failures...)
+			for _, failure := range result.failures {
+				failure.Source = source + ", " + failure.Source
+				failures = append(failures, failure)
+			}
 		}
 		if len(items)+len(failures) > maxBatchImportItems {
 			return nil, nil, fmt.Errorf("too many nodes (>%d)", maxBatchImportItems)
@@ -136,8 +145,16 @@ type ImportItem struct {
 }
 
 type ImportFailure struct {
-	Source string
-	Error  string
+	Source      string
+	Error       string
+	fetchFailed bool
+}
+
+func (failure ImportFailure) SubscriptionFetchDiagnostic() string {
+	if failure.fetchFailed {
+		return failure.Source + ": " + failure.Error
+	}
+	return ""
 }
 
 func ParseBatchImportSourceType(raw string) (BatchImportSourceType, error) {
@@ -153,7 +170,7 @@ func ParseBatchImportSourceType(raw string) (BatchImportSourceType, error) {
 	case BatchImportSourceAuto, BatchImportSourceSubscription, BatchImportSourceHTTPProxy:
 		return sourceType, nil
 	default:
-		return "", fmt.Errorf("unsupported batch import source type %q", raw)
+		return "", fmt.Errorf("unsupported batch import source type")
 	}
 }
 
@@ -161,19 +178,14 @@ func ExpandBatchImportSourcesWithType(ctx context.Context, sources []string, sou
 	switch sourceType {
 	case "", BatchImportSourceAuto, BatchImportSourceSubscription, BatchImportSourceHTTPProxy:
 	default:
-		return nil, nil, fmt.Errorf("unsupported batch import source type %q", sourceType)
+		return nil, nil, fmt.Errorf("unsupported batch import source type")
 	}
 	ctx, cancel := context.WithTimeout(ctx, batchImportTotalTimeout)
 	defer cancel()
 
 	state := newBatchImportExpansionState()
-	normalizedSources := make([]string, 0, len(sources))
-	for _, source := range sources {
-		if normalized := normalizeImportText(source); normalized != "" {
-			normalizedSources = append(normalizedSources, normalized)
-		}
-	}
-	return expandInputsOrdered(ctx, normalizedSources, func(workerCtx context.Context, source string) ([]ImportItem, []ImportFailure, error) {
+	return expandInputsOrdered(ctx, sources, "input", func(workerCtx context.Context, source string) ([]ImportItem, []ImportFailure, error) {
+		source = normalizeImportText(source)
 		switch sourceType {
 		case BatchImportSourceSubscription:
 			return expandExplicitSubscriptionSources(workerCtx, source, state)
@@ -223,14 +235,14 @@ func expandBatchImportInput(
 	// 3) Multi-line share links / subscription URLs
 	lines := splitNonEmptyLines(input)
 	if len(lines) > 1 {
-		return expandInputsOrdered(ctx, lines, func(workerCtx context.Context, line string) ([]ImportItem, []ImportFailure, error) {
+		return expandInputsOrdered(ctx, lines, "line", func(workerCtx context.Context, line string) ([]ImportItem, []ImportFailure, error) {
 			return expandBatchImportInput(workerCtx, line, depth, allowSubscriptionFetch, state)
 		})
 	}
 
 	// 4) Single-line subscription URL or share link
 	if isHTTPURL(input) {
-		u, err := url.Parse(input)
+		u, err := parseShareURL(input)
 		if err != nil {
 			return nil, nil, fmt.Errorf("invalid url: %v", err)
 		}
@@ -254,13 +266,16 @@ func expandExplicitSubscriptionSources(
 	state *batchImportExpansionState,
 ) ([]ImportItem, []ImportFailure, error) {
 	lines := splitNonEmptyLines(input)
-	return expandInputsOrdered(ctx, lines, func(workerCtx context.Context, line string) ([]ImportItem, []ImportFailure, error) {
+	return expandInputsOrdered(ctx, lines, "line", func(workerCtx context.Context, line string) ([]ImportItem, []ImportFailure, error) {
 		if !isHTTPURL(line) {
 			return nil, nil, fmt.Errorf("subscription source must be an http or https URL")
 		}
-		u, err := url.Parse(line)
-		if err != nil || u.Hostname() == "" {
-			return nil, nil, fmt.Errorf("invalid subscription URL")
+		u, err := parseShareURL(line)
+		if err != nil {
+			return nil, nil, fmt.Errorf("%w: %w", errSubscriptionFetch, err)
+		}
+		if u.Hostname() == "" {
+			return nil, nil, fmt.Errorf("%w: missing subscription host", errSubscriptionFetch)
 		}
 		u.Scheme = strings.ToLower(u.Scheme)
 		return fetchAndExpandSubscription(workerCtx, u, 0, state)
@@ -275,14 +290,15 @@ func expandExplicitHTTPProxySources(input string) ([]ImportItem, []ImportFailure
 
 	items := make([]ImportItem, 0, len(lines))
 	var failures []ImportFailure
-	for _, line := range lines {
+	for index, line := range lines {
+		source := fmt.Sprintf("line %d", index+1)
 		if !isHTTPURL(line) {
-			failures = append(failures, ImportFailure{Source: summarizeSource(line), Error: "HTTP proxy source must be an http or https URL"})
+			failures = append(failures, ImportFailure{Source: source, Error: "HTTP proxy source must be an http or https URL"})
 			continue
 		}
 		expanded, _, err := validatedShareLinkItem(line)
 		if err != nil {
-			failures = append(failures, ImportFailure{Source: summarizeSource(line), Error: err.Error()})
+			failures = append(failures, ImportFailure{Source: source, Error: err.Error()})
 			continue
 		}
 		items = append(items, expanded...)
@@ -306,7 +322,7 @@ func fetchAndExpandSubscription(
 
 	body, err := state.fetch(ctx, normalizedURL)
 	if err != nil {
-		return nil, nil, fmt.Errorf("subscription request failed: %w", err)
+		return nil, nil, fmt.Errorf("%w: %w", errSubscriptionFetch, err)
 	}
 	items, failures, err := expandBatchImportInput(ctx, body, depth+1, false, state)
 	if err != nil {
@@ -343,7 +359,7 @@ func parseClashMetaYAML(input string) ([]ImportItem, []ImportFailure, bool, erro
 	var cfg clashConfig
 	if err := yaml.Unmarshal([]byte(input), &cfg); err != nil {
 		if looksLikeClashYAML(input) {
-			return nil, nil, false, fmt.Errorf("invalid yaml: %v", err)
+			return nil, nil, false, fmt.Errorf("invalid Clash YAML structure")
 		}
 		return nil, nil, false, nil
 	}
@@ -367,11 +383,11 @@ func parseClashMetaYAML(input string) ([]ImportItem, []ImportFailure, bool, erro
 
 	var items []ImportItem
 	var failures []ImportFailure
-	for _, proxy := range proxies {
+	for index, proxy := range proxies {
 		item, err := convertClashProxyToImportItem(proxy)
 		if err != nil {
 			failures = append(failures, ImportFailure{
-				Source: summarizeSource(getString(proxy, "name")),
+				Source: fmt.Sprintf("Clash node %d", index+1),
 				Error:  err.Error(),
 			})
 			continue
@@ -480,7 +496,7 @@ func convertClashProxyToImportItem(proxy map[string]any) (ImportItem, error) {
 		}
 		encryption := getString(proxy, "encryption")
 		if encryption != "" && !strings.EqualFold(encryption, "none") {
-			return ImportItem{}, fmt.Errorf("vless encryption %q is not supported by sing-box 1.12.12", encryption)
+			return ImportItem{}, fmt.Errorf("unsupported vless encryption for sing-box 1.12.12")
 		}
 		cfg := models.VLESSConfig{
 			Server:           server,
@@ -714,7 +730,7 @@ func convertClashProxyToImportItem(proxy map[string]any) (ImportItem, error) {
 		}
 		obfsType := strings.ToLower(getString(proxy, "obfs"))
 		if obfsType != "" && obfsType != "salamander" && obfsType != "none" {
-			return ImportItem{}, fmt.Errorf("unsupported hysteria2 obfs for sing-box 1.12.12: %s", obfsType)
+			return ImportItem{}, fmt.Errorf("unsupported hysteria2 obfs for sing-box 1.12.12")
 		}
 		obfsPassword, obfsPasswordPresent := getCredentialStringWithPresence(proxy, "obfs-password", "obfs_password")
 		if obfsType == "salamander" && (!obfsPasswordPresent || obfsPassword == "") {
@@ -1053,25 +1069,25 @@ func convertClashProxyToImportItem(proxy map[string]any) (ImportItem, error) {
 		return ImportItem{Source: "clash:" + name, Type: "http", Name: name, Config: cfg}, nil
 
 	default:
-		return ImportItem{}, fmt.Errorf("unsupported proxy type: %s", rawType)
+		return ImportItem{}, fmt.Errorf("unsupported proxy type")
 	}
 }
 
 func fetchSubscription(ctx context.Context, rawURL string) (string, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, rawURL, nil)
 	if err != nil {
-		return "", err
+		return "", safeURLParseError(err)
 	}
 	req.Header.Set("User-Agent", "sb-proxy-manager/1.0")
 
 	resp, err := subscriptionHTTPClient.Do(req)
 	if err != nil {
-		return "", err
+		return "", subscriptionHTTPError(err)
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return "", fmt.Errorf("unexpected status: %s", resp.Status)
+		return "", fmt.Errorf("unexpected HTTP status: %d", resp.StatusCode)
 	}
 	contentType := strings.ToLower(strings.TrimSpace(strings.SplitN(resp.Header.Get("Content-Type"), ";", 2)[0]))
 	if contentType == "text/html" || contentType == "application/xhtml+xml" {
@@ -1080,7 +1096,7 @@ func fetchSubscription(ctx context.Context, rawURL string) (string, error) {
 
 	body, err := io.ReadAll(io.LimitReader(resp.Body, maxSubscriptionBytes+1))
 	if err != nil {
-		return "", err
+		return "", fmt.Errorf("could not read subscription response: %w", subscriptionHTTPError(err))
 	}
 	if len(body) > maxSubscriptionBytes {
 		return "", fmt.Errorf("subscription response exceeds %d bytes", maxSubscriptionBytes)
@@ -1180,18 +1196,6 @@ func normalizeImportText(s string) string {
 	s = strings.TrimSpace(s)
 	s = strings.TrimPrefix(s, "\uFEFF")
 	return strings.TrimSpace(s)
-}
-
-func summarizeSource(s string) string {
-	s = normalizeImportText(s)
-	if s == "" {
-		return ""
-	}
-	if len([]rune(s)) <= 64 {
-		return s
-	}
-	r := []rune(s)
-	return string(r[:61]) + "..."
 }
 
 func looksLikeClashYAML(input string) bool {
@@ -1470,12 +1474,12 @@ func pluginOptsFromMap(plugin string, m map[string]any) (string, error) {
 		}
 		for key := range m {
 			if _, ok := allowed[key]; !ok {
-				return "", fmt.Errorf("unsupported obfs-local option: %s", key)
+				return "", fmt.Errorf("unsupported obfs-local option")
 			}
 		}
 		mode := firstNonEmpty(getString(m, "mode"), getString(m, "obfs"))
 		if mode != "" && mode != "http" && mode != "tls" {
-			return "", fmt.Errorf("unsupported obfs-local mode: %s", mode)
+			return "", fmt.Errorf("unsupported obfs-local mode")
 		}
 		host := firstNonEmpty(getString(m, "host"), getString(m, "hostname"), getString(m, "obfs-host"), getString(m, "obfs_host"))
 		parts := []string{}
@@ -1490,7 +1494,7 @@ func pluginOptsFromMap(plugin string, m map[string]any) (string, error) {
 	if plugin == "v2ray-plugin" {
 		return v2rayPluginOptsFromMap(m)
 	}
-	return "", fmt.Errorf("plugin options are not supported for shadowsocks plugin %q", plugin)
+	return "", fmt.Errorf("unsupported shadowsocks plugin options")
 }
 
 func v2rayPluginOptsFromMap(options map[string]any) (string, error) {
@@ -1520,7 +1524,7 @@ func v2rayPluginOptsFromMap(options map[string]any) (string, error) {
 	if rawMode, ok := normalized["mode"]; ok {
 		mode := strings.ToLower(strings.TrimSpace(fmt.Sprint(rawMode)))
 		if mode != "websocket" && mode != "quic" {
-			return "", fmt.Errorf("unsupported v2ray-plugin mode: %s", mode)
+			return "", fmt.Errorf("unsupported v2ray-plugin mode")
 		}
 		normalized["mode"] = mode
 	}
@@ -1582,7 +1586,7 @@ func encodeUnknownSIP003Option(key string, value any) (string, error) {
 		float32, float64:
 		return escapedKey + "=" + escapeSIP003Option(fmt.Sprint(typed)), nil
 	default:
-		return "", fmt.Errorf("invalid v2ray-plugin option %q value type %T", key, value)
+		return "", fmt.Errorf("invalid v2ray-plugin option value type %T", value)
 	}
 }
 
@@ -1604,7 +1608,7 @@ func strictPluginBool(value any) (bool, error) {
 			return false, nil
 		}
 	}
-	return false, fmt.Errorf("expected boolean, got %v", value)
+	return false, fmt.Errorf("expected boolean")
 }
 
 func normalizeV2RayPluginMux(value any) (int, error) {
@@ -1623,7 +1627,7 @@ func normalizeV2RayPluginMux(value any) (int, error) {
 	}
 	mux, err := strconv.Atoi(text)
 	if err != nil {
-		return 0, fmt.Errorf("invalid v2ray-plugin mux option %q", text)
+		return 0, fmt.Errorf("invalid v2ray-plugin mux option")
 	}
 	return mux, nil
 }
@@ -1910,7 +1914,7 @@ func applyClashDialerOptions(options *models.DialerOptions, proxy map[string]any
 	case "prefer-ipv6", "prefer_ipv6", "ipv6-prefer", "ipv6_prefer":
 		options.DomainStrategy = "prefer_ipv6"
 	default:
-		return fmt.Errorf("unsupported ip-version/domain-strategy: %s", ipVersion)
+		return fmt.Errorf("unsupported ip-version/domain-strategy")
 	}
 	return nil
 }
@@ -1925,7 +1929,7 @@ func buildClashMultiplex(proxy map[string]any) (map[string]interface{}, error) {
 	}
 	protocol := strings.ToLower(getString(smux, "protocol"))
 	if protocol != "" && protocol != "smux" && protocol != "yamux" && protocol != "h2mux" {
-		return nil, fmt.Errorf("unsupported smux protocol: %s", protocol)
+		return nil, fmt.Errorf("unsupported smux protocol")
 	}
 	result := map[string]interface{}{
 		"enabled": getBool(smux, "enabled"),
@@ -2127,7 +2131,7 @@ func buildClashTransportOptions(proxy map[string]any) (string, models.NativeOpti
 		}
 		return network, result, nil
 	default:
-		return "", nil, fmt.Errorf("unknown transport type: %s", network)
+		return "", nil, fmt.Errorf("unknown transport type")
 	}
 }
 

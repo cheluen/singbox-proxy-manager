@@ -25,7 +25,7 @@ const runtimeSettingsSelectColumns = `
 `
 
 const SettingsSnapshotColumns = `
-	id, singleton_key, ` + runtimeSettingsSelectColumns + `,
+	id, singleton_key, ` + runtimeSettingsSelectColumns + `, global_upstream_revision,
 	admin_password, admin_password_env_fingerprint, auth_generation, created_at, updated_at
 `
 
@@ -82,6 +82,23 @@ func LoadProxyNodes(ctx context.Context, queryer queryer) ([]ProxyNode, error) {
 	return LoadGroupNodes(ctx, queryer, 0)
 }
 
+func LoadActiveInbounds(ctx context.Context, db queryer) ([]ProxyNode, error) {
+	rows, err := db.QueryContext(ctx, `SELECT id, inbound_port, enabled FROM proxy_nodes WHERE inbound_port > 0 AND enabled`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var listeners []ProxyNode
+	for rows.Next() {
+		var listener ProxyNode
+		if err := rows.Scan(&listener.ID, &listener.InboundPort, &listener.Enabled); err != nil {
+			return nil, err
+		}
+		listeners = append(listeners, listener)
+	}
+	return listeners, rows.Err()
+}
+
 func LoadGroupNodes(ctx context.Context, queryer queryer, groupID int) ([]ProxyNode, error) {
 	query := "SELECT " + ProxyNodeSelectColumns + " FROM proxy_nodes"
 	var args []any
@@ -121,10 +138,15 @@ func LoadProxyNode(ctx context.Context, queryer queryRower, id int) (ProxyNode, 
 	`, id))
 }
 
-func LoadRuntimeSettings(ctx context.Context, queryer queryRower) (Settings, error) {
+type runtimeSettingsReader interface {
+	queryRower
+	queryer
+}
+
+func LoadRuntimeSettings(ctx context.Context, db runtimeSettingsReader) (Settings, error) {
 	var settings Settings
 	var columnWidths sql.NullString
-	err := queryer.QueryRowContext(ctx, `
+	err := db.QueryRowContext(ctx, `
 		SELECT `+runtimeSettingsSelectColumns+`
 		FROM settings
 		WHERE singleton_key = 1
@@ -151,5 +173,21 @@ func LoadRuntimeSettings(ctx context.Context, queryer queryRower) (Settings, err
 	if settings.NodeListColumnWidths == nil {
 		settings.NodeListColumnWidths = map[string]int{}
 	}
-	return settings, nil
+	rows, err := db.QueryContext(ctx, "SELECT id,upstream_enabled,upstream_type,upstream_config FROM node_groups WHERE upstream_enabled OR upstream_config<>''")
+	if err != nil {
+		return settings, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var id int
+		var upstream GroupUpstream
+		if err := rows.Scan(&id, &upstream.Enabled, &upstream.Type, &upstream.Config); err != nil {
+			return settings, err
+		}
+		if settings.GroupUpstreams == nil {
+			settings.GroupUpstreams = make(map[int]GroupUpstream)
+		}
+		settings.GroupUpstreams[id] = upstream
+	}
+	return settings, rows.Err()
 }

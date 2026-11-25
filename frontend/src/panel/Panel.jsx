@@ -3,10 +3,11 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { Alert, Button, Dropdown } from 'antd'
 import {
   Activity, ArrowLeft, ArrowRight, Command, Download, Link2Off, LogOut, Plus, RefreshCw,
-  RotateCcw, Rss, ScrollText, Server, Settings, SlidersHorizontal, SquareTerminal, Trash2, Zap,
+  RotateCcw, Route, Rss, ScrollText, Server, Settings, SlidersHorizontal, SquareTerminal, Trash2, Zap,
 } from 'lucide-react'
 import { buildColumnWidthStyle, calculateTableMinWidth, clampColumnWidth, NODE_LIST_COLUMN_LIMITS } from '../core/columnWidths'
 import { EMPTY_CRITERIA } from '../core/nodeFilters'
+import { protocolLabel } from '../core/nodeView'
 import { ActiveFilters, FilterButton, SearchBox, StatusFilter } from '../shared/filters'
 import { BulkBar, CheckProgress, NodesEmpty, RefreshButton, RepoLink, RuntimeBanner, RuntimePill, SelectAll, VersionBadge } from '../shared/chrome'
 import { useIncrementalList, useMediaQuery } from '../shared/hooks'
@@ -136,6 +137,15 @@ function GroupBar({ ctl, t, onSelectGroup }) {
                   <Link2Off size={12} strokeWidth={1.9} aria-hidden="true" />
                 </span>
               ) : null}
+              {group.upstream_enabled ? (
+                <span
+                  className="dusk-group-tab__badge is-upstream"
+                  data-tip={t('group_upstream_active_tip', { type: protocolLabel(group.upstream_type, t) })}
+                  aria-label={t('group_upstream_badge')}
+                >
+                  <Route size={12} strokeWidth={1.9} aria-hidden="true" />
+                </span>
+              ) : null}
               {groupHasSub ? (
                 <span
                   className={`dusk-group-tab__badge${subErr ? ' is-err' : ''}`}
@@ -163,6 +173,16 @@ function GroupBar({ ctl, t, onSelectGroup }) {
                 {t('group_no_port_badge')}
               </span>
             )}
+            {active.upstream_enabled ? (
+              <span
+                className="dusk-groups__pill is-upstream"
+                data-testid="active-group-upstream-pill"
+                data-tip={t('group_upstream_active_tip', { type: protocolLabel(active.upstream_type, t) })}
+              >
+                <Route size={11} strokeWidth={1.9} aria-hidden="true" />
+                {`${t('group_upstream_badge')} · ${protocolLabel(active.upstream_type, t)}`}
+              </span>
+            ) : null}
             {active.subscription_last_error ? (
               <span className="dusk-groups__pill is-err" data-tip={active.subscription_last_error}>
                 {t('group_sub_error_short')}

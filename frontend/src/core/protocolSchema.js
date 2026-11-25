@@ -21,6 +21,19 @@ const PROXY_AUTH_FIELDS = [
 
 const protocol = (label, shortLabel, fields = []) => ({ label, shortLabel, fields })
 
+const PROTOCOL_SHORT_KEYS = {
+  direct: 'protocol_direct_short',
+  failover: 'protocol_failover_short',
+  loadbalance: 'protocol_loadbalance_short',
+}
+
+const PROTOCOL_LABEL_KEYS = {
+  direct: 'protocol_direct_label',
+  failover: 'protocol_failover_label',
+  loadbalance: 'protocol_loadbalance_label',
+  http: 'protocol_http_label',
+}
+
 const PROTOCOLS = {
   direct: protocol('Direct (Local)', 'Direct'),
   failover: protocol('Failover (Policy)', 'Failover'),
@@ -166,7 +179,19 @@ export const POLICY_NODE_TYPES = new Set(['failover', 'loadbalance'])
 export const isPolicyType = (type) => POLICY_NODE_TYPES.has(String(type || '').toLowerCase())
 export const proxyTypes = Object.entries(PROTOCOLS).map(([value, { label }]) => ({ value, label }))
 export const upstreamProxyTypes = proxyTypes.filter((item) => !POLICY_NODE_TYPES.has(item.value))
-export const protocolLabel = (type) => PROTOCOLS[type]?.shortLabel || String(type || '-').toUpperCase()
+export const localizedProxyTypes = (t, { includePolicy = true } = {}) =>
+  Object.entries(PROTOCOLS)
+    .filter(([value]) => includePolicy || !POLICY_NODE_TYPES.has(value))
+    .map(([value, entry]) => ({
+      value,
+      label: typeof t === 'function' && Object.hasOwn(PROTOCOL_LABEL_KEYS, value) ? t(PROTOCOL_LABEL_KEYS[value]) : entry.label,
+    }))
+export const protocolLabel = (type, t) => {
+  const entry = PROTOCOLS[type]
+  if (!entry) return String(type || '-').toUpperCase()
+  if (typeof t === 'function' && Object.hasOwn(PROTOCOL_SHORT_KEYS, type)) return t(PROTOCOL_SHORT_KEYS[type])
+  return entry.shortLabel
+}
 
 const FIELD_GROUPS = ['main', 'transport', 'tls', 'advanced']
 

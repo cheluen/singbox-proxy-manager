@@ -16,6 +16,33 @@ import (
 	appdb "sb-proxy/backend/database"
 )
 
+func TestGroupUpstreamSchemaDialects(t *testing.T) {
+	for _, dialect := range []appdb.Dialect{appdb.DialectSQLite, appdb.DialectTurso, appdb.DialectPostgres, appdb.DialectMySQL} {
+		t.Run(string(dialect), func(t *testing.T) {
+			fields := make(map[string]string)
+			for _, field := range groupUpstreamColumns(dialect) {
+				name, definition, _ := strings.Cut(field, " ")
+				fields[name] = definition
+			}
+			if len(fields) != 9 || fields["upstream_enabled"] != "BOOLEAN NOT NULL DEFAULT FALSE" || fields["upstream_latency"] != "INTEGER NOT NULL DEFAULT 0" || fields["upstream_revision"] != "INTEGER NOT NULL DEFAULT 0" {
+				t.Errorf("unexpected group upstream schema %v", fields)
+			}
+			for name, mysqlType := range map[string]string{"type": "VARCHAR(32)", "config": "LONGTEXT", "ip": "VARCHAR(255)", "location": "VARCHAR(255)", "country_code": "VARCHAR(32)", "error": "VARCHAR(2048)"} {
+				want := "TEXT NOT NULL DEFAULT ''"
+				if dialect == appdb.DialectMySQL {
+					want = mysqlType + " NOT NULL"
+					if name != "config" {
+						want += " DEFAULT ''"
+					}
+				}
+				if got := fields["upstream_"+name]; got != want {
+					t.Errorf("%s: %q, want %q", name, got, want)
+				}
+			}
+		})
+	}
+}
+
 func TestGroupNodeRebuildWithoutSQLiteSequence(t *testing.T) {
 	db, err := sql.Open("sqlite", ":memory:")
 	if err != nil {

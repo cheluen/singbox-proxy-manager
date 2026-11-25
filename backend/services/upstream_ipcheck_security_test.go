@@ -33,7 +33,7 @@ func TestRealUpstreamCheckRejectsUnauthenticatedAndNonLoopbackClients(t *testing
 	var checkedAddress string
 	_, err := service.checkUpstreamIPContext(context.Background(), models.ProxyDefinition{
 		Type: "socks5", Config: fmt.Sprintf(`{"server":"127.0.0.1","server_port":%d}`, upstreamPort),
-	}, func(ctx context.Context, address, username, password string) (*IPInfo, error) {
+	}, nil, func(ctx context.Context, address, username, password string) (*IPInfo, error) {
 		checkedAddress = address
 		deadline := time.Now().Add(3 * time.Second)
 		for {

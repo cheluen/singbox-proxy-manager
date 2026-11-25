@@ -5,6 +5,7 @@ import { Activity, ArrowDown, ArrowUp, ChevronDown, ChevronUp, Pause, Play, Refr
 import { useTranslation } from 'react-i18next'
 import api from '../core/api'
 import { formatRate } from '../core/format'
+import { formatUpstreamLabel } from '../shared/labels'
 import { EmptyState } from '../shared/primitives'
 
 const COLLAPSE_THRESHOLD = 12
@@ -26,7 +27,8 @@ function cubicMidpoint(x1, y1, x2, y2) {
 }
 
 export default function ConnectionsPanel({ token }) {
-  const { t } = useTranslation()
+  const { t, i18n } = useTranslation()
+  const zh = Boolean(i18n.language?.startsWith('zh'))
   const [snapshot, setSnapshot] = useState(null)
   const [status, setStatus] = useState('connecting') // connecting | live | paused | error
   const [paused, setPaused] = useState(false)
@@ -528,10 +530,11 @@ export default function ConnectionsPanel({ token }) {
                   const inboundAria = route.inbound_port
                     ? (route.route_id ? `:${route.inbound_port} (${route.route_id})` : `:${route.inbound_port}`)
                     : (route.route_id || '—')
+                  const upstreamText = formatUpstreamLabel(route.upstream_label, t, { zh, source: route.upstream_source })
                   const routeSummary = t('conn_route_aria', {
                     client: route.client_ip || 'unknown',
                     inbound: inboundAria,
-                    target: route.upstream_label ? `${targetName} (${route.upstream_label})` : targetName,
+                    target: upstreamText ? `${targetName} (${upstreamText})` : targetName,
                     count: route.active_count,
                     up: formatRate(route.upload_bps),
                     down: formatRate(route.download_bps),
@@ -554,10 +557,10 @@ export default function ConnectionsPanel({ token }) {
                             {badgeText}
                           </span>
                         ) : null}
-                        {route.upstream_label ? (
-                          <span className="conn-outbound__upstream" data-tip={route.upstream_label}>
+                        {upstreamText ? (
+                          <span className="conn-outbound__upstream" data-tip={upstreamText}>
                             <Shield size={11} strokeWidth={2} aria-hidden="true" />
-                            <span className="truncate">{route.upstream_label}</span>
+                            <span className="truncate">{upstreamText}</span>
                           </span>
                         ) : null}
                       </div>

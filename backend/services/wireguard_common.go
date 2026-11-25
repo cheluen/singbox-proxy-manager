@@ -4,7 +4,7 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
-	"fmt"
+	"errors"
 	"net/netip"
 	"net/url"
 	"strconv"
@@ -143,7 +143,7 @@ func parseWireGuardReservedString(raw string) ([]uint8, error) {
 	if strings.HasPrefix(value, "[") {
 		var numbers []int
 		if err := json.Unmarshal([]byte(value), &numbers); err != nil {
-			return nil, fmt.Errorf("invalid reserved bytes: %w", err)
+			return nil, errors.New("invalid reserved bytes JSON: expected an array of integers")
 		}
 		return intsToReservedBytes(numbers)
 	}
@@ -156,7 +156,7 @@ func parseWireGuardReservedString(raw string) ([]uint8, error) {
 		for _, part := range parts {
 			number, err := strconv.Atoi(strings.TrimSpace(part))
 			if err != nil {
-				return nil, fmt.Errorf("invalid reserved byte %q", part)
+				return nil, errors.New("invalid reserved byte: expected an integer")
 			}
 			numbers = append(numbers, number)
 		}
@@ -186,7 +186,7 @@ func parseWireGuardReservedString(raw string) ([]uint8, error) {
 		return []uint8{decoded[0], decoded[1], decoded[2]}, nil
 	}
 
-	return nil, fmt.Errorf("invalid reserved bytes format")
+	return nil, errors.New("invalid reserved bytes format")
 }
 
 func parseWireGuardReservedAny(raw any) ([]uint8, error) {
@@ -211,14 +211,14 @@ func parseWireGuardReservedAny(raw any) ([]uint8, error) {
 			case float64:
 				numbers = append(numbers, int(typed))
 			default:
-				return nil, fmt.Errorf("invalid reserved byte value %T", item)
+				return nil, errors.New("invalid reserved byte value: expected an integer")
 			}
 		}
 		return intsToReservedBytes(numbers)
 	case string:
 		return parseWireGuardReservedString(value)
 	default:
-		return nil, fmt.Errorf("unsupported reserved value %T", raw)
+		return nil, errors.New("unsupported reserved value: expected bytes, integers, or an encoded string")
 	}
 }
 
@@ -229,7 +229,7 @@ func intsToReservedBytes(numbers []int) ([]uint8, error) {
 	result := make([]uint8, 0, len(numbers))
 	for _, number := range numbers {
 		if number < 0 || number > 255 {
-			return nil, fmt.Errorf("reserved byte out of range: %d", number)
+			return nil, errors.New("reserved byte out of range: expected 0 through 255")
 		}
 		result = append(result, uint8(number))
 	}

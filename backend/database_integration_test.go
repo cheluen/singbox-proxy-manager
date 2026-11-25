@@ -115,6 +115,7 @@ func runDatabaseIntegrationSuite(t *testing.T, allowed ...appdb.Dialect) {
 	t.Run("UpgradeFromV1_7_29", func(t *testing.T) {
 		verifyLegacyGroupMigration(t, func(verify func(*sql.DB)) { withDatabase(t, verify) })
 	})
+	t.Run("GroupUpstreamUpgradeFromV1_7_30", func(t *testing.T) { withDatabase(t, func(db *sql.DB) { verifyGroupUpstreamUpgrade(t, db) }) })
 }
 
 func runDatabaseIntegrationContract(t *testing.T, db *sql.DB) {
@@ -644,6 +645,7 @@ func verifyMySQLLongTextContract(t *testing.T, db *sql.DB) {
 		{table: "proxy_nodes", name: "config"},
 		{table: "proxy_nodes", name: "upstream_config"},
 		{table: "settings", name: "global_upstream_config"},
+		{table: "node_groups", name: "upstream_config"},
 	} {
 		var dataType, isNullable string
 		var defaultValue sql.NullString

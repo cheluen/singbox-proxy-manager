@@ -132,12 +132,16 @@ func normalizeIPInfoForStorage(info *services.IPInfo) {
 func NewHandler(db *sql.DB, singBoxService *services.SingBoxService) *Handler {
 	return &Handler{
 		refreshing: make(map[int]bool), fetchSubscription: services.ExpandBatchImportSourcesWithType,
-		db:              db,
-		singBoxService:  singBoxService,
-		loginLimiter:    newLoginRateLimiterFromEnv(),
-		nodeMutations:   newNodeMutationCoordinator(db, singBoxService),
-		checkProxyIP:    services.CheckProxyIPContext,
-		checkUpstreamIP: singBoxService.CheckUpstreamIPContext,
+		db:             db,
+		singBoxService: singBoxService,
+		loginLimiter:   newLoginRateLimiterFromEnv(),
+		nodeMutations:  newNodeMutationCoordinator(db, singBoxService),
+		checkProxyIP:   services.CheckProxyIPContext,
+		checkUpstreamIP: func(ctx context.Context, definition models.ProxyDefinition) (*services.IPInfo, error) {
+			return singBoxService.CheckUpstreamIPContext(ctx, definition, func(ctx context.Context) ([]models.ProxyNode, error) {
+				return models.LoadActiveInbounds(ctx, db)
+			})
+		},
 		comparePassword: bcrypt.CompareHashAndPassword,
 	}
 }
@@ -572,6 +576,7 @@ func (h *Handler) CreateNode(c *gin.Context) {
 type batchImportCandidate struct {
 	node   models.ProxyNode
 	result map[string]interface{}
+	link   string
 }
 
 // BatchImportNodes imports multiple nodes from share links, subscriptions, or
@@ -667,7 +672,7 @@ func (h *Handler) BatchImportNodes(c *gin.Context) {
 	for _, item := range items {
 		result := map[string]interface{}{"source": item.Source}
 		if item.Link != "" {
-			result["link"] = item.Link
+			result["source"] = item.Type + " share link"
 		}
 		parsedConfig, proxyType, name := item.Config, item.Type, item.Name
 
@@ -714,7 +719,7 @@ func (h *Handler) BatchImportNodes(c *gin.Context) {
 				UpstreamMode:    importedUpstreamMode(configJSON),
 				Enabled:         true,
 			},
-			result: result,
+			result: result, link: item.Link,
 		}
 		if err := validateNodeStorageFields(candidate.node); err != nil {
 			result["success"] = false
@@ -818,6 +823,9 @@ func (h *Handler) BatchImportNodes(c *gin.Context) {
 	}
 
 	for _, candidate := range validCandidates {
+		if candidate.link != "" {
+			candidate.result["source"], candidate.result["link"] = candidate.link, candidate.link
+		}
 		candidate.result["success"] = true
 		candidate.result["id"] = candidate.node.ID
 		candidate.result["name"] = candidate.node.Name
@@ -1685,11 +1693,13 @@ func (h *Handler) runUpstreamCheck(ctx context.Context, definition models.ProxyD
 	return upstreamCheckOutcome{info: info, err: err}
 }
 
-func (outcome upstreamCheckOutcome) storedValues() (services.IPInfo, string) {
+func (outcome upstreamCheckOutcome) storedValues(definition models.ProxyDefinition) (services.IPInfo, string) {
 	if outcome.err != nil {
-		return services.IPInfo{}, boundedCheckError(outcome.err)
+		return services.IPInfo{}, services.NodeIPCheckDiagnostic(outcome.err.Error(), models.ProxyNode{UpstreamConfig: definition.Config})
 	}
-	return *outcome.info, ""
+	info := *outcome.info
+	info.HTTPError = services.NodeIPCheckDiagnostic(info.HTTPError, models.ProxyNode{UpstreamConfig: definition.Config})
+	return info, ""
 }
 
 func verifyConditionalCheckUpdate(result sql.Result, targetStillMatches func() (bool, error)) error {
@@ -1732,14 +1742,10 @@ func ipInfoPayload(info *services.IPInfo) gin.H {
 	}
 }
 
-func boundedCheckError(err error) string {
-	if err == nil {
-		return ""
-	}
-	return services.SafeDiagnostic(err.Error())
-}
-
 func ipCheckFailureStatus(c *gin.Context, err error) int {
+	if services.IsUpstreamValidationError(err) || errors.Is(err, services.ErrConfigRejected) {
+		return http.StatusBadRequest
+	}
 	if !services.IsIPCheckRateLimited(err) {
 		return http.StatusBadGateway
 	}
@@ -1798,34 +1804,37 @@ func (h *Handler) loadIsolatedCheckInputs(ctx context.Context, target models.Pro
 	if err != nil {
 		return nil, settings, err
 	}
-	if mode == models.UpstreamModeLegacy || mode == models.UpstreamModeGlobal {
-		err := h.db.QueryRowContext(ctx, `SELECT global_upstream_enabled, global_upstream_type, global_upstream_config
-			FROM settings WHERE singleton_key = 1`).Scan(&settings.GlobalUpstreamEnabled, &settings.GlobalUpstreamType, &settings.GlobalUpstreamConfig)
+	if mode == models.UpstreamModeLegacy {
+		settings, err = models.LoadRuntimeSettings(ctx, h.db)
 		if err != nil {
 			return nil, settings, errors.New("failed to load settings for isolated IP check")
 		}
-	}
-	if mode == models.UpstreamModeLegacy {
 		nodes, err := models.LoadProxyNodes(ctx, h.db)
 		if err != nil {
 			return nil, settings, errors.New("failed to load dependencies for isolated IP check")
 		}
 		return nodes, settings, nil
 	}
-	nodes := []models.ProxyNode{target}
-	rows, err := h.db.QueryContext(ctx, `SELECT id, inbound_port, enabled FROM proxy_nodes WHERE inbound_port > 0 AND id <> ?`, target.ID)
+	if mode == models.UpstreamModeGlobal || mode == models.UpstreamModeGroup {
+		var group models.GroupUpstream
+		err := h.db.QueryRowContext(ctx, "SELECT upstream_enabled,upstream_type,upstream_config FROM node_groups WHERE id=?", target.GroupID).Scan(&group.Enabled, &group.Type, &group.Config)
+		if err != nil {
+			return nil, settings, errors.New("failed to load group for isolated IP check")
+		}
+		settings.GroupUpstreams = map[int]models.GroupUpstream{target.GroupID: group}
+	}
+	if mode == models.UpstreamModeGlobal {
+		err := h.db.QueryRowContext(ctx, `SELECT global_upstream_enabled, global_upstream_type, global_upstream_config
+			FROM settings WHERE singleton_key = 1`).Scan(&settings.GlobalUpstreamEnabled, &settings.GlobalUpstreamType, &settings.GlobalUpstreamConfig)
+		if err != nil {
+			return nil, settings, errors.New("failed to load settings for isolated IP check")
+		}
+	}
+	nodes, err := models.LoadActiveInbounds(ctx, h.db)
 	if err != nil {
 		return nil, settings, err
 	}
-	defer rows.Close()
-	for rows.Next() {
-		var listener models.ProxyNode
-		if err := rows.Scan(&listener.ID, &listener.InboundPort, &listener.Enabled); err != nil {
-			return nil, settings, err
-		}
-		nodes = append(nodes, listener)
-	}
-	return nodes, settings, rows.Err()
+	return append(nodes, target), settings, nil
 }
 
 func (h *Handler) persistNodeIPCheck(ctx context.Context, node models.ProxyNode, status string, checkedAt time.Time, final nodeIPCheckResult, upstream *nodeIPCheckResult) (bool, error) {
@@ -1851,12 +1860,20 @@ func (h *Handler) persistNodeIPCheck(ctx context.Context, node models.ProxyNode,
 }
 
 // CheckNodeIP checks the final node exit and its custom upstream, when present.
+func setIPCheckWriteDeadline(c *gin.Context, timeout time.Duration) {
+	deadline := time.Now().Add(timeout + 15*time.Second)
+	if err := http.NewResponseController(c.Writer).SetWriteDeadline(deadline); err != nil && !errors.Is(err, http.ErrNotSupported) {
+		_ = c.Error(err)
+	}
+}
+
 func (h *Handler) CheckNodeIP(c *gin.Context) {
 	id, ok := parseNodeID(c, false)
 	if !ok {
 		return
 	}
 
+	setIPCheckWriteDeadline(c, max(h.singBoxService.UpstreamCheckTimeout(), services.ProxyIPCheckTimeout))
 	ctx := c.Request.Context()
 	node, err := models.LoadProxyNode(ctx, h.db, id)
 	if err != nil {
@@ -2008,57 +2025,76 @@ func (h *Handler) GetSettings(c *gin.Context) {
 	})
 }
 
-func (h *Handler) loadGlobalUpstreamDefinition(ctx context.Context) (models.ProxyDefinition, error) {
-	var definition models.ProxyDefinition
-	err := h.db.QueryRowContext(ctx, `
-		SELECT global_upstream_type, global_upstream_config
-		FROM settings WHERE singleton_key = 1
-	`).Scan(&definition.Type, &definition.Config)
-	return definition, err
-}
-
 // CheckGlobalUpstreamIP checks the configured global upstream without changing
 // whether it is currently enabled for nodes.
 func (h *Handler) CheckGlobalUpstreamIP(c *gin.Context) {
+	h.checkSavedUpstreamIP(c, 0)
+}
+
+func (h *Handler) CheckGroupUpstreamIP(c *gin.Context) {
+	if id, ok := parseNodeID(c, true); ok {
+		h.checkSavedUpstreamIP(c, id)
+	}
+}
+
+func (h *Handler) checkSavedUpstreamIP(c *gin.Context, groupID int) {
+	setIPCheckWriteDeadline(c, h.singBoxService.UpstreamCheckTimeout())
 	ctx := c.Request.Context()
-	definition, err := h.loadGlobalUpstreamDefinition(ctx)
+	id := 1
+	read := `SELECT global_upstream_type,global_upstream_config,global_upstream_revision FROM settings WHERE singleton_key=?`
+	write := `UPDATE settings SET global_upstream_ip=?,global_upstream_location=?,global_upstream_country_code=?,global_upstream_latency=?,global_upstream_error=?,updated_at=CURRENT_TIMESTAMP
+		WHERE singleton_key=? AND global_upstream_type=? AND global_upstream_config=? AND global_upstream_revision=?`
+	if groupID != 0 {
+		id = groupID
+		read = `SELECT upstream_type,upstream_config,upstream_revision FROM node_groups WHERE id=?`
+		write = `UPDATE node_groups SET upstream_ip=?,upstream_location=?,upstream_country_code=?,upstream_latency=?,upstream_error=?,updated_at=CURRENT_TIMESTAMP
+			WHERE id=? AND upstream_type=? AND upstream_config=? AND upstream_revision=?`
+	}
+	type savedDefinition struct {
+		models.ProxyDefinition
+		revision int64
+	}
+	load := func() (savedDefinition, error) {
+		var def savedDefinition
+		err := h.db.QueryRowContext(ctx, read, id).Scan(&def.Type, &def.Config, &def.revision)
+		return def, err
+	}
+	definition, err := load()
+	if groupID != 0 && errors.Is(err, sql.ErrNoRows) {
+		c.JSON(http.StatusNotFound, gin.H{"error": "group not found"})
+		return
+	}
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "database error"})
 		return
 	}
 	if strings.TrimSpace(definition.Type) == "" || strings.TrimSpace(definition.Config) == "" {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "global upstream proxy is not configured"})
+		c.JSON(http.StatusBadRequest, gin.H{"error": "upstream proxy is not configured"})
 		return
 	}
-	outcome := h.runUpstreamCheck(ctx, definition)
+	outcome := h.runUpstreamCheck(ctx, definition.ProxyDefinition)
 	if ctx.Err() != nil {
 		return
 	}
 	h.nodeWriteMu.Lock()
 	defer h.nodeWriteMu.Unlock()
-	current, err := h.loadGlobalUpstreamDefinition(ctx)
-	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to verify global upstream configuration"})
-		return
-	}
-	if current != definition {
+	current, err := load()
+	if errors.Is(err, sql.ErrNoRows) || err == nil && current != definition {
 		c.JSON(http.StatusConflict, gin.H{"error": errUpstreamDefinitionChanged.Error()})
 		return
 	}
-	info, message := outcome.storedValues()
-	result, err := h.db.ExecContext(ctx, `
-		UPDATE settings
-		SET global_upstream_ip = ?, global_upstream_location = ?,
-		    global_upstream_country_code = ?, global_upstream_latency = ?,
-		    global_upstream_error = ?, updated_at = CURRENT_TIMESTAMP
-		WHERE singleton_key = 1 AND global_upstream_type = ? AND global_upstream_config = ?
-	`, info.IP, info.Location, info.CountryCode, info.Latency, message, definition.Type, definition.Config)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to update global upstream check result"})
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to verify upstream configuration"})
+		return
+	}
+	info, message := outcome.storedValues(definition.ProxyDefinition)
+	result, err := h.db.ExecContext(ctx, write, info.IP, info.Location, info.CountryCode, info.Latency, message, id, definition.Type, definition.Config, definition.revision)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to update upstream check result"})
 		return
 	}
 	if err := verifyConditionalCheckUpdate(result, func() (bool, error) {
-		current, err := h.loadGlobalUpstreamDefinition(ctx)
+		current, err := load()
 		if errors.Is(err, sql.ErrNoRows) {
 			return false, nil
 		}
@@ -2068,7 +2104,7 @@ func (h *Handler) CheckGlobalUpstreamIP(c *gin.Context) {
 			c.JSON(http.StatusConflict, gin.H{"error": err.Error()})
 			return
 		}
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to verify global upstream check result"})
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to verify upstream check result"})
 		return
 	}
 	if outcome.err != nil {
@@ -2138,7 +2174,7 @@ func (h *Handler) UpdateSettings(c *gin.Context) {
 	if err := c.ShouldBindJSON(&req); err != nil {
 		message := "invalid request"
 		var typeError *json.UnmarshalTypeError
-		if errors.As(err, &typeError) && typeError.Field == "node_list_column_widths" {
+		if errors.As(err, &typeError) && (typeError.Field == "node_list_column_widths" || strings.HasPrefix(typeError.Field, "node_list_column_widths.")) {
 			message = invalidColumnWidths
 		}
 		c.AbortWithStatusJSON(http.StatusBadRequest, gin.H{"error": message})
@@ -2283,7 +2319,7 @@ func (h *Handler) UpdateSettings(c *gin.Context) {
 			if globalDefinitionChanged {
 				if _, err := tx.ExecContext(ctx, `
 					UPDATE settings
-					SET global_upstream_ip = '', global_upstream_location = '',
+					SET global_upstream_revision = global_upstream_revision + 1, global_upstream_ip = '', global_upstream_location = '',
 					    global_upstream_country_code = '', global_upstream_latency = 0,
 					    global_upstream_error = ''
 					WHERE singleton_key = 1

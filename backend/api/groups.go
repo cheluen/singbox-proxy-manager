@@ -15,6 +15,7 @@ import (
 
 	appdb "sb-proxy/backend/database"
 	"sb-proxy/backend/models"
+	"sb-proxy/backend/services"
 )
 
 type groupConflict struct {
@@ -36,6 +37,13 @@ func groupError(c *gin.Context, err error) {
 		return
 	}
 	writeNodeMutationError(c, err, true)
+}
+
+func groupSaveError(c *gin.Context, err error, validatingUpstream bool) {
+	if validatingUpstream && errors.Is(err, services.ErrConfigRejected) {
+		err = invalidNodeRequest(err)
+	}
+	groupError(c, err)
 }
 
 func requestGroup(ctx context.Context, db sqlQueryRower, id *int) (models.NodeGroup, error) {
@@ -86,16 +94,21 @@ func (h *Handler) GetGroup(c *gin.Context) {
 }
 
 type groupInput struct {
-	Name        *string `json:"name"`
-	Allocate    *bool   `json:"allocate_port"`
-	Start       *int    `json:"start_port"`
-	URL         *string `json:"subscription_url"`
-	Auto        *bool   `json:"subscription_auto_update"`
-	Minutes     *int    `json:"subscription_interval_minutes"`
-	ReleasePins bool    `json:"release_pins"`
+	Name                     *string `json:"name"`
+	Allocate                 *bool   `json:"allocate_port"`
+	Start                    *int    `json:"start_port"`
+	URL                      *string `json:"subscription_url"`
+	Auto                     *bool   `json:"subscription_auto_update"`
+	Minutes                  *int    `json:"subscription_interval_minutes"`
+	ReleasePins              bool    `json:"release_pins"`
+	UpstreamEnabled          *bool   `json:"upstream_enabled"`
+	UpstreamType             *string `json:"upstream_type"`
+	UpstreamConfig           *string `json:"upstream_config"`
+	ExpectedUpstreamRevision *int64  `json:"expected_upstream_revision"`
+	ExpectedUpstreamEnabled  *bool   `json:"expected_upstream_enabled"`
 }
 
-func (input groupInput) apply(group *models.NodeGroup) error {
+func (input groupInput) apply(group *models.NodeGroup, service *services.SingBoxService) error {
 	if input.Name != nil {
 		group.Name = strings.TrimSpace(*input.Name)
 	}
@@ -132,6 +145,25 @@ func (input groupInput) apply(group *models.NodeGroup) error {
 	if group.SubscriptionAutoUpdate && group.SubscriptionURL == "" {
 		return invalidNodeRequest(errors.New("subscription URL required for automatic updates"))
 	}
+	previousType, previousConfig := group.UpstreamType, group.UpstreamConfig
+	if input.UpstreamEnabled != nil {
+		group.UpstreamEnabled = *input.UpstreamEnabled
+	}
+	if input.UpstreamType != nil {
+		group.UpstreamType = strings.ToLower(strings.TrimSpace(*input.UpstreamType))
+	}
+	if input.UpstreamConfig != nil {
+		group.UpstreamConfig = strings.TrimSpace(*input.UpstreamConfig)
+	}
+	definitionChanged := previousType != group.UpstreamType || previousConfig != group.UpstreamConfig
+	if group.UpstreamEnabled || definitionChanged && (group.UpstreamType != "" || group.UpstreamConfig != "") {
+		if err := validateCharacterLimit("upstream_type", group.UpstreamType, maxUpstreamTypeCharacters); err != nil {
+			return invalidNodeRequest(err)
+		}
+		if err := service.ValidateUpstreamDefinition(models.ProxyDefinition{Type: group.UpstreamType, Config: group.UpstreamConfig}); err != nil {
+			return invalidNodeRequest(err)
+		}
+	}
 	return nil
 }
 
@@ -141,18 +173,18 @@ func (h *Handler) CreateGroup(c *gin.Context) {
 		return
 	}
 	group := models.NodeGroup{StartPort: 30001, AllocatePort: true, SubscriptionIntervalMinutes: 60}
-	if err := input.apply(&group); err != nil {
+	if err := input.apply(&group, h.singBoxService); err != nil {
 		groupError(c, err)
 		return
 	}
 	h.nodeWriteMu.Lock()
 	defer h.nodeWriteMu.Unlock()
-	_, err := h.nodeMutations.execute(c.Request.Context(), nodeMutationOperation{Mutate: func(ctx context.Context, tx *sql.Tx) error {
+	_, err := h.nodeMutations.execute(c.Request.Context(), nodeMutationOperation{ApplyRuntime: group.UpstreamEnabled, ChangedGroupID: &group.ID, Mutate: func(ctx context.Context, tx *sql.Tx) error {
 		var nextOrder int
 		if err := tx.QueryRowContext(ctx, "SELECT COALESCE(MAX(sort_order),-1)+1 FROM node_groups").Scan(&nextOrder); err != nil {
 			return err
 		}
-		result, err := tx.ExecContext(ctx, `INSERT INTO node_groups(name,sort_order,allocate_port,start_port,subscription_url,subscription_auto_update,subscription_interval_minutes) VALUES (?,?,?,?,?,?,?)`, group.Name, nextOrder, group.AllocatePort, group.StartPort, group.SubscriptionURL, group.SubscriptionAutoUpdate, group.SubscriptionIntervalMinutes)
+		result, err := tx.ExecContext(ctx, `INSERT INTO node_groups(name,sort_order,allocate_port,start_port,subscription_url,subscription_auto_update,subscription_interval_minutes,upstream_enabled,upstream_type,upstream_config) VALUES (?,?,?,?,?,?,?,?,?,?)`, group.Name, nextOrder, group.AllocatePort, group.StartPort, group.SubscriptionURL, group.SubscriptionAutoUpdate, group.SubscriptionIntervalMinutes, group.UpstreamEnabled, group.UpstreamType, group.UpstreamConfig)
 		if err != nil {
 			return err
 		}
@@ -161,7 +193,7 @@ func (h *Handler) CreateGroup(c *gin.Context) {
 		return err
 	}})
 	if err != nil {
-		groupError(c, err)
+		groupSaveError(c, err, group.UpstreamEnabled)
 		return
 	}
 	h.respondGroup(c, group.ID, 201)
@@ -178,27 +210,42 @@ func (h *Handler) UpdateGroup(c *gin.Context) {
 	}
 	h.nodeWriteMu.Lock()
 	defer h.nodeWriteMu.Unlock()
-	previous, err := requestGroup(c.Request.Context(), h.db, &id)
+	ctx := c.Request.Context()
+	tx, err := h.db.BeginTx(ctx, nil)
 	if err != nil {
 		groupError(c, err)
 		return
 	}
+	defer tx.Rollback()
+	previous, err := requestGroup(ctx, tx, &id)
+	if err != nil {
+		groupError(c, err)
+		return
+	}
+	if (input.ExpectedUpstreamRevision != nil && *input.ExpectedUpstreamRevision != previous.UpstreamRevision) ||
+		(input.ExpectedUpstreamEnabled != nil && *input.ExpectedUpstreamEnabled != previous.UpstreamEnabled) {
+		groupError(c, groupConflict{"upstream_conflict", gin.H{"upstream_revision": previous.UpstreamRevision, "upstream_enabled": previous.UpstreamEnabled}})
+		return
+	}
 	group := previous
-	if err = input.apply(&group); err != nil {
+	if err = input.apply(&group, h.singBoxService); err != nil {
 		groupError(c, err)
 		return
 	}
 	allocateChanged := group.AllocatePort != previous.AllocatePort
 	reassign := allocateChanged && group.AllocatePort
 	if group.AllocatePort && !allocateChanged && group.StartPort != previous.StartPort {
-		preserve, err := getPreservePorts(c.Request.Context(), h.db)
+		preserve, err := getPreservePorts(ctx, tx)
 		if err != nil {
 			groupError(c, err)
 			return
 		}
 		reassign = !preserve
 	}
-	_, err = h.nodeMutations.execute(c.Request.Context(), nodeMutationOperation{ApplyRuntime: (reassign || allocateChanged) && group.NodeCount > 0, Mutate: func(ctx context.Context, tx *sql.Tx) error {
+	definitionChanged := group.UpstreamType != previous.UpstreamType || group.UpstreamConfig != previous.UpstreamConfig
+	upstreamChanged := group.UpstreamEnabled != previous.UpstreamEnabled || (group.UpstreamEnabled && definitionChanged)
+	applyRuntime := upstreamChanged || (reassign || allocateChanged) && group.NodeCount > 0
+	_, err = h.nodeMutations.executeTx(ctx, tx, nodeMutationOperation{ApplyRuntime: applyRuntime, ChangedGroupID: &id, Mutate: func(ctx context.Context, tx *sql.Tx) error {
 		if previous.AllocatePort && !group.AllocatePort {
 			pinned, err := readIDs(ctx, tx, "SELECT id FROM proxy_nodes WHERE group_id=? AND inbound_port_pinned ORDER BY id", id)
 			if err != nil {
@@ -211,12 +258,17 @@ func (h *Handler) UpdateGroup(c *gin.Context) {
 				return err
 			}
 		}
-		_, err := tx.ExecContext(ctx, `UPDATE node_groups SET name=?,allocate_port=?,start_port=?,subscription_url=?,subscription_auto_update=?,subscription_interval_minutes=?,revision=revision+1,updated_at=CURRENT_TIMESTAMP WHERE id=?`, group.Name, group.AllocatePort, group.StartPort, group.SubscriptionURL, group.SubscriptionAutoUpdate, group.SubscriptionIntervalMinutes, id)
+		_, err := tx.ExecContext(ctx, `UPDATE node_groups SET name=?,allocate_port=?,start_port=?,subscription_url=?,subscription_auto_update=?,subscription_interval_minutes=?,upstream_enabled=?,upstream_type=?,upstream_config=?,revision=revision+1,updated_at=CURRENT_TIMESTAMP WHERE id=?`, group.Name, group.AllocatePort, group.StartPort, group.SubscriptionURL, group.SubscriptionAutoUpdate, group.SubscriptionIntervalMinutes, group.UpstreamEnabled, group.UpstreamType, group.UpstreamConfig, id)
 		if err != nil {
 			return err
 		}
 		if group.SubscriptionURL != previous.SubscriptionURL {
 			if _, err = tx.ExecContext(ctx, "UPDATE node_groups SET subscription_last_updated_at=NULL,subscription_last_error='' WHERE id=?", id); err != nil {
+				return err
+			}
+		}
+		if definitionChanged {
+			if _, err = tx.ExecContext(ctx, "UPDATE node_groups SET upstream_revision=upstream_revision+1,upstream_ip='',upstream_location='',upstream_country_code='',upstream_latency=0,upstream_error='' WHERE id=?", id); err != nil {
 				return err
 			}
 		}
@@ -226,7 +278,7 @@ func (h *Handler) UpdateGroup(c *gin.Context) {
 		return nil
 	}})
 	if err != nil {
-		groupError(c, err)
+		groupSaveError(c, err, group.UpstreamEnabled && upstreamChanged)
 		return
 	}
 	h.respondGroup(c, id, 200)
@@ -391,7 +443,7 @@ func (h *Handler) DeleteGroup(c *gin.Context) {
 		groupError(c, err)
 		return
 	}
-	_, err = h.nodeMutations.execute(c.Request.Context(), nodeMutationOperation{ApplyRuntime: group.NodeCount > 0, Mutate: func(ctx context.Context, tx *sql.Tx) error {
+	_, err = h.nodeMutations.execute(c.Request.Context(), nodeMutationOperation{ApplyRuntime: group.NodeCount > 0, ChangedGroupID: &id, Mutate: func(ctx context.Context, tx *sql.Tx) error {
 		var total int
 		if err := tx.QueryRowContext(ctx, "SELECT COUNT(*) FROM node_groups").Scan(&total); err != nil {
 			return err
