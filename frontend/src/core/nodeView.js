@@ -3,10 +3,10 @@ import { protocolLabel } from './protocolSchema.js'
 
 export { protocolLabel }
 
-// 面板里的三态：已禁用 / 可用 / 未检测或失效。三者互斥且相加等于总数。
+// 面板里的四态：已禁用 / 可用 / 测速失败 / 未测。四者互斥且相加等于总数。
 export const nodeHealth = (node) => {
   if (node?.enabled === false) return 'disabled'
-  return getNodeStatusCode(node) === 'healthy' ? 'healthy' : 'unverified'
+  return getNodeStatusCode(node)
 }
 
 export const latencyTone = (latency) => {
@@ -18,10 +18,10 @@ export const latencyTone = (latency) => {
 }
 
 export const summarizeNodes = (nodes) => {
-  const summary = { total: nodes.length, healthy: 0, unverified: 0, disabled: 0 }
+  const summary = { total: nodes.length, healthy: 0, untested: 0, failed: 0, disabled: 0 }
   for (const node of nodes) {
     const health = nodeHealth(node)
-    summary[health] += 1
+    summary[health] = (summary[health] || 0) + 1
   }
   return summary
 }
@@ -50,7 +50,21 @@ const configEndpoint = (config) => {
   return formatEndpoint(config.server || peer?.server, config.server_port || peer?.server_port)
 }
 
-export const serverAddress = (node) => node?.type === 'direct' ? '' : configEndpoint(parsedConfig(node))
+export const serverAddress = (node) => {
+  if (!node || node.type === 'direct') return ''
+  if (node.type === 'failover' || node.type === 'loadbalance') {
+    const cfg = parsedConfig(node)
+    const count = Array.isArray(cfg.member_ids) ? cfg.member_ids.length : 0
+    if (node.type === 'loadbalance') {
+      const algo = cfg.strategy === 'consistent-hashing' ? 'hash' : 'rr'
+      return `${count} · ${algo}`
+    }
+    return `${count} · failover`
+  }
+  return configEndpoint(parsedConfig(node))
+}
+
+export const parsedNodeConfig = (node) => parsedConfig(node)
 
 export const upstreamAddress = (node) => {
   if (node?.upstream_mode !== 'custom' || !node.upstream_config) return ''
@@ -68,9 +82,9 @@ export const initialUpstreamMode = (node) => {
 
 export const hasInboundAuth = (node) => Boolean(node?.username && node?.password)
 
-// 后端规则（services/singbox.go）：开启 TCP 复用且配置了入站认证的节点，
+// 后端规则（services/singbox.go）：有入站端口、开启 TCP 复用且配置了入站认证的节点，
 // 会以「用户名+入站端口」作为附加用户注册到所有启用认证的入站上。
-export const reuseUsername = (node) => (hasInboundAuth(node) ? `${node.username}+${node.inbound_port}` : '')
+export const reuseUsername = (node) => (hasInboundAuth(node) && Number(node?.inbound_port) > 0 ? `${node.username}+${node.inbound_port}` : '')
 
 export const panelHost = () => (typeof window === 'undefined' ? 'localhost' : window.location.hostname || 'localhost')
 

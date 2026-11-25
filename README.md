@@ -5,7 +5,7 @@
   <p>将各类主流协议节点集中管理，一键转为独立的本地 HTTP / SOCKS5 混合代理端口</p>
 
   <p>
-    <a href="https://github.com/cheluen/singbox-proxy-manager/releases"><img src="https://img.shields.io/badge/version-1.7.29-blue.svg" alt="Version" /></a>
+    <a href="https://github.com/cheluen/singbox-proxy-manager/releases"><img src="https://img.shields.io/badge/version-1.7.30-blue.svg" alt="Version" /></a>
     <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-green.svg" alt="MIT License" /></a>
     <img src="https://img.shields.io/badge/sing--box-1.12.12-orange.svg" alt="sing-box 1.12.12" />
     <img src="https://img.shields.io/badge/Go-1.26.11-00ADD8.svg" alt="Go 1.26.11" />
@@ -52,16 +52,19 @@
 
 ### 为什么好用？核心功能一览
 
-- **开箱即用，零外部依赖**：官方发行版将前端面板与固定版本 `sing-box 1.12.12` 内核打包为**单个可执行文件**，下载后无需再单独安装 Node.js 或手动配置 `sing-box`。
-- **12 种主流协议统一接入**：支持 Direct、Shadowsocks、VLESS（含 Reality / XTLS-Vision）、VMess、Trojan、Hysteria2、TUIC、AnyTLS、SOCKS5 / SOCKS5H、HTTP / HTTPS 与 WireGuard（含 Cloudflare WARP 保留字节与多 Peer JSON）。
-- **「暮色」暗色指挥台面板**：紧凑列表截断超长节点名称，直接显示入站用户名，并以固定宽度的柔边毛玻璃掩码遮蔽入站密码，点击掩码区域即可查看完整密码；**每个数据列均支持拖拽自由调整宽度并持久化写入数据库**（双击手柄复位单列，表头一键恢复默认）。行内展开详情采用对称等高卡片布局，按「入站与连接 → 出站与链路 → 完整名称与备注」排布与列表顺序保持一致。支持 `Ctrl/⌘ + K` 命令面板、全键盘快捷键（`j/k`、`Enter`、`x`、`e`、`t`）及中英文切换。
-- **批量导入与一键出口检测**：支持一次性粘贴多行分享链接、Base64 订阅、远程订阅 URL 及 Clash YAML 节点列表；导入后自动分配端口与随机账密，并可一键并发检测出口 IP、国家/城市与延迟。
+- **开箱即用，轻量低占用**：官方发行版将前端面板与固定版本 `sing-box 1.12.12` 内核打包为**单个静态可执行文件**，容器镜像基于轻量 `Alpine 3.24`（`linux/amd64` 镜像层 gzip 压缩体积约 29 MiB，本地解压镜像约 104 MiB），下载后无需再单独安装 Node.js 或手动配置 `sing-box`。
+- **12 种主流协议 + 策略出站节点**：支持 Direct、Shadowsocks、VLESS（含 Reality / XTLS-Vision）、VMess、Trojan、Hysteria2、TUIC、AnyTLS、SOCKS5 / SOCKS5H、HTTP / HTTPS 与 WireGuard（含 Cloudflare WARP 保留字节与多 Peer JSON）；同时内置 **故障转移（Failover）** 与 **负载均衡（Load Balance，支持轮询 / 域名一致性哈希）** 策略节点，可跨组组合已有实体节点，支持自定义健康检查、失败即时切换与自动跳过停用成员。
+- **「暮色」暗色指挥台面板**：支持 **代理节点分组**（顶部组标签、独立端口分配开关与起始端口、无端口纯出站节点、分组独立订阅增量同步与跨组迁移）；列表直接显示入站用户名与柔边毛玻璃密码掩码，清晰区分出口测速的未检测 / 通过 / 失败（悬停展示脱敏原因）状态；**每个数据列均支持拖拽自由调整宽度并持久化写入数据库**（双击手柄复位单列，表头一键恢复默认）。行内展开详情采用对称等高卡片布局，支持 `Ctrl/⌘ + K` 命令面板、全键盘快捷键（`j/k`、`Enter`、`x`、`e`、`t`）及中英文切换。
+- **当前连接与日志 / 流量观测**：
+  - **当前连接**：基于本机隔离 `clash_api` 按需实时采集（空闲零后台轮询），通过三栏链路流图直观展示「客户端 IP → 入站端口 → 出站 / 策略成员 / 前置」的实时活跃连接、上下行速率与悬停路径高亮。
+  - **日志与流量统计**：默认保留 1000 条内存日志、零额外落盘；开启可选持久化后支持批量写入与分钟级路径流量汇总，可选存至本地独立 SQLite、主业务库或独立远程数据库（SQLite / Turso / MySQL / PostgreSQL），支持按天数与容量自动轮转及空间回收。
+- **批量导入与一键出口检测**：支持一次性粘贴多行分享链接、Base64 订阅、远程订阅 URL 及 Clash YAML 节点列表；导入后自动分配端口与随机账密，并可一键并发检测出口 IP、国家/城市与延迟（无端口纯出站节点同样支持临时隔离测 IP）。
 - **进阶转发与灵活管理**：
   - **链式前置代理**：支持配置「全局前置代理」或「单节点自定义前置代理」，内置防环路保护与前置独立测 IP。
-  - **TCP 复用单端口路由**：详情连接区可复制「路由号」`<用户名>+<目标端口>`。使用路由号和目标节点密码登录任意带认证的入站端口，即可转发至对应的已启用复用节点。
-  - **端口固定与保留模式**：支持自动顺延分配 + 单节点固定端口，也可开启「保留入站端口」确保拖拽排序与删除不影响客户端已有端口配置。
-  - **批量高效维护**：支持批量测 IP、批量设置或随机生成入站账密、批量导出分享链接、手动出站去重及批量删除。
-- **稳定可靠与安全底盘**：配置变更先经 `sing-box check` 校验再原子切换，异常退出支持指数退避自动恢复与 `last-good` 降级保护；默认开启登录防爆破与无默认密码强制初始化；除开箱即用的本地 SQLite 外，还支持 PostgreSQL、MySQL/TiDB 与 Turso/libSQL 远程存储。
+  - **TCP 复用单端口路由**：详情连接区可复制「路由号」`<用户名>+<目标端口>`。使用路由号和目标节点密码登录任意带认证的入站端口，即可转发至对应的已启用复用节点（含策略节点）。
+  - **端口固定与保留模式**：支持按分组自动顺延分配 + 单节点固定端口，也可开启「保留入站端口」确保拖拽排序与删除不影响客户端已有端口配置。
+  - **批量高效维护**：支持批量测 IP、批量跨组移动、批量设置或随机生成入站账密、批量导出分享链接（当前组或全部分组）、手动出站去重及批量删除。
+- **稳定可靠与安全底盘**：配置变更先经 `sing-box check` 校验再原子切换，异常退出支持指数退避自动恢复与 `last-good` 降级保护；内核认证失败日志在分流至控制台/文件前自动脱敏；默认开启登录防爆破与无默认密码强制初始化；除开箱即用的本地 SQLite 外，还支持 PostgreSQL、MySQL/TiDB 与 Turso/libSQL 远程存储。
 
 ### 真实操作演示
 
@@ -145,9 +148,9 @@ ADMIN_PASSWORD=请替换为你的高强度密码
 ```
 
 > 提示：
-> - 默认管理端口为 `30000`，节点入站端口默认从 `30001` 开始顺延分配，数据保存在同目录的 `./config`。如需调整管理端口，可在 `.env` 中修改 `PORT=30000`。
-> - 镜像已内置 Docker `HEALTHCHECK`（通过 `/app/singbox-proxy-manager --healthcheck` 探测 `/api/health`），可执行 `docker compose --profile ghcr ps` 直接查看容器 `healthy / unhealthy` 状态。
-> - 正式版 GHCR 多架构镜像提供精确版本（如 `1.7.29`）、次版本滚动（如 `1.7`）、主版本滚动（如 `1`）与 `latest` 标签，并附带构建来源证明（Provenance）和 SBOM；日常 `main` 分支未发版提交仅更新 `edge` 标签。
+> - 默认管理端口为 `30000`，默认分组入站端口从 `30001` 开始顺延分配（每个分组可独立配置是否分配端口及起始端口），数据保存在同目录的 `./config`。如需调整管理端口，可在 `.env` 中修改 `PORT=30000`。
+> - 镜像基于 `Alpine 3.24` 构建并内置 Docker `HEALTHCHECK`（通过 `/app/singbox-proxy-manager --healthcheck` 探测 `/api/health`），可执行 `docker compose --profile ghcr ps` 直接查看容器 `healthy / unhealthy` 状态。
+> - 正式版 GHCR 多架构镜像提供精确版本（如 `1.7.30`）、次版本滚动（如 `1.7`）、主版本滚动（如 `1`）与 `latest` 标签，并附带构建来源证明（Provenance）和 SBOM；日常 `main` 分支未发版且已存在对应版本标签的提交默认跳过完整 CI，仅在触发完整 CI 的未发版提交时更新 `edge` 标签。
 
 #### 第 3 步：启动服务
 
@@ -195,7 +198,7 @@ docker compose --profile ghcr logs --tail=50
 ```bash
 mkdir -p singbox-proxy-manager && cd singbox-proxy-manager
 
-APP_VERSION=1.7.29
+APP_VERSION=1.7.30
 OS=linux      # 可选：linux / darwin / freebsd
 ARCH=amd64    # 可选：amd64 / arm64
 
@@ -282,11 +285,11 @@ chmod 600 .env
 
 | 文档 | 说明 |
 | --- | --- |
-| [系统架构与核心机制](docs/architecture.md) | 单常驻内核模型、内置内核与预压缩前端、原子变更与自愈、端口与 TCP 复用、链式防环路及安全边界 |
-| [配置、数据库与运维指南](docs/configuration.md) | 全部环境变量参考、SQLite / PostgreSQL / MySQL / Turso 接入与单实例租约、数据目录与故障排查 |
-| [协议支持与导入导出规范](docs/protocols.md) | 12 种出站协议字段、15 种 URI Scheme 与 Clash 导入边界、导出限制及出站去重规则 |
-| [HTTP API 参考](docs/api.md) | 鉴权方式与全部 27 个接口的入参、出参与状态码说明 |
-| [本地开发、构建与测试指南](docs/development.md) | Go 1.26.11 + sing-box 1.12.12 安全重编译、本地联调、完整测试矩阵与 CI/CD 流水线 |
+| [系统架构与核心机制](docs/architecture.md) | 单常驻内核模型、节点分组与策略调度、当前连接/日志观测、内置内核与预压缩前端、原子变更与安全边界 |
+| [配置、数据库与运维指南](docs/configuration.md) | 全部环境变量参考、SQLite / PostgreSQL / MySQL / Turso 接入与单实例租约、日志存储轮转、数据目录与排障 |
+| [协议支持与导入导出规范](docs/protocols.md) | 12 种实体出站协议与 2 种策略节点、15 种 URI Scheme 与 Clash 导入边界、分组订阅同步及出站去重 |
+| [HTTP API 参考](docs/api.md) | 鉴权方式与全部 41 个接口（节点、分组、订阅、策略、当前连接、日志与流量统计、全局设置）的入参、出参与状态码说明 |
+| [本地开发、构建与测试指南](docs/development.md) | Go 1.26.11 + sing-box 1.12.12 安全重编译、本地联调、完整测试矩阵与按版本条件触发的 CI/CD 流水线 |
 
 ---
 

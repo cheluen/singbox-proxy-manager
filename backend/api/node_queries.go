@@ -18,18 +18,18 @@ const insertNodeSQL = `
 	INSERT INTO proxy_nodes (
 		name, remark, type, config, inbound_port, inbound_port_pinned,
 		username, password, tcp_reuse_enabled, upstream_mode, upstream_type,
-		upstream_config, sort_order, latency, enabled
+		upstream_config, sort_order, latency, enabled, group_id, subscription_key, subscription_name
 	)
-	VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+	VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 `
 
 const nodeExportColumns = "name, type, config"
 
 func nodeInsertArgs(node models.ProxyNode) []any {
 	return []any{
-		node.Name, node.Remark, node.Type, node.Config, node.InboundPort, node.InboundPortPinned,
+		node.Name, node.Remark, node.Type, node.Config, models.NullablePort(node.InboundPort), node.InboundPortPinned,
 		node.Username, node.Password, node.TCPReuseEnabled, node.UpstreamMode, node.UpstreamType,
-		node.UpstreamConfig, node.SortOrder, node.Latency, node.Enabled,
+		node.UpstreamConfig, node.SortOrder, node.Latency, node.Enabled, node.GroupID, node.SubscriptionKey, node.SubscriptionName,
 	}
 }
 
@@ -98,27 +98,25 @@ func requireNodeIDs(ctx context.Context, tx *sql.Tx, ids []int, reportMissingID 
 	return nil
 }
 
-func deleteNodesTx(ctx context.Context, tx *sql.Tx, ids []int, reportMissingID bool) error {
+func (h *Handler) deleteNodesTx(ctx context.Context, tx *sql.Tx, ids []int, reportMissingID bool) error {
 	if err := requireNodeIDs(ctx, tx, ids, reportMissingID); err != nil {
 		return err
 	}
+	groups := map[int]bool{}
 	for chunk := range slices.Chunk(ids, nodeIDsPerQuery) {
 		condition, args := nodeIDCondition(chunk)
+		groupIDs, err := readIDs(ctx, tx, "SELECT DISTINCT group_id FROM proxy_nodes"+condition, args...)
+		if err != nil {
+			return err
+		}
+		for _, id := range groupIDs {
+			groups[id] = true
+		}
 		if _, err := tx.ExecContext(ctx, "DELETE FROM proxy_nodes"+condition, args...); err != nil {
 			return err
 		}
 	}
-	if err := normalizeNodeSortOrderTx(ctx, tx); err != nil {
-		return err
-	}
-	startPort, preserveInboundPorts, err := getPortSettings(ctx, tx)
-	if err != nil {
-		return err
-	}
-	if !preserveInboundPorts {
-		return reassignAutomaticPortsTx(ctx, tx, startPort)
-	}
-	return nil
+	return h.normalizeGroups(ctx, tx, groups)
 }
 
 func loadNodeForMutation(ctx context.Context, tx *sql.Tx, id int) (models.ProxyNode, error) {

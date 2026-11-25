@@ -59,14 +59,18 @@ export function CommandPalette({ open, onClose, ctl, session, onJump }) {
     const needle = query.trim().toLowerCase()
     const matchedCommands = needle ? commands.filter((command) => command.label.toLowerCase().includes(needle)) : commands
     const matchedNodes = needle
-      ? ctl.nodes.filter((node) => matchesSearch(node, needle)).slice(0, MAX_NODE_RESULTS).map((node) => ({
-          id: `node-${node.id}`,
-          icon: Server,
-          label: node.name,
-          hint: `${protocolLabel(node.type)} · :${node.inbound_port || '—'}`,
-          group: 'nodes',
-          run: () => onJump(node.id),
-        }))
+      ? (ctl.allNodes || ctl.nodes).filter((node) => matchesSearch(node, needle)).slice(0, MAX_NODE_RESULTS).map((node) => {
+          const groupName = ctl.groupById?.get(node.group_id)?.name
+          const portText = node.inbound_port ? `:${node.inbound_port}` : t('group_no_port_badge')
+          return {
+            id: `node-${node.id}`,
+            icon: Server,
+            label: node.name,
+            hint: [groupName, protocolLabel(node.type), portText].filter(Boolean).join(' · '),
+            group: 'nodes',
+            run: () => onJump(node.id),
+          }
+        })
       : []
     return [...matchedNodes, ...matchedCommands.map((command) => ({ ...command, group: 'commands' }))]
   }, [ctl, onJump, query, selected, session, t])

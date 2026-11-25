@@ -16,11 +16,12 @@ const VERSION = JSON.parse(fs.readFileSync(path.join(FRONTEND, 'package.json'), 
 const TOKEN = 'dusk-regression-session'
 
 const makeNode = (id, patch = {}) => ({
-  id, name: `Node ${String(id).padStart(3, '0')}`, remark: '', type: 'ss',
+  id, group_id: 1, name: `Node ${String(id).padStart(3, '0')}`, remark: '', type: 'ss',
   config: JSON.stringify({ server: `n${id}.example.com`, server_port: 443, method: 'aes-128-gcm', password: 'protocol-secret' }),
   inbound_port: 30000 + id, inbound_port_pinned: false, sort_order: id - 1,
   username: 'alice', password: 'inbound-secret', enabled: true, tcp_reuse_enabled: true,
   upstream_mode: 'none', upstream_type: '', upstream_config: '',
+  check_status: 'ok', check_error: '',
   node_ip: '203.0.113.10', location: 'Tokyo, Japan', country_code: 'JP', latency: 40,
   ...patch,
 })
@@ -55,23 +56,50 @@ const readBody = async (request) => {
 
 function createFixture() {
   const state = {
-    nodes: [makeNode(1), makeNode(2, { type: 'vless', country_code: '', location: '', node_ip: '', latency: 0, tcp_reuse_enabled: false }), makeNode(3, { type: 'vmess', enabled: false, country_code: 'US', location: 'Boston, United States' }), makeNode(4)],
-    settings: { start_port: 30001, preserve_inbound_ports: false, global_upstream_enabled: false, global_upstream_type: '', global_upstream_config: '', node_list_column_widths: {} },
+    groups: [{ id: 1, name: 'Default', sort_order: 0, allocate_port: true, start_port: 30001, subscription_url: '', subscription_auto_update: false, subscription_interval_minutes: 60, subscription_last_error: '' }],
+    nodes: [makeNode(1), makeNode(2, { type: 'vless', check_status: 'untested', country_code: '', location: '', node_ip: '', latency: 0, tcp_reuse_enabled: false }), makeNode(3, { type: 'vmess', enabled: false, country_code: 'US', location: 'Boston, United States' }), makeNode(4)],
+    settings: { preserve_inbound_ports: false, global_upstream_enabled: false, global_upstream_type: '', global_upstream_config: '', node_list_column_widths: {} },
     runtime: { running: true, degraded: false, pid: 1234 }, version: VERSION, update: { available: false },
-    requests: [], loads: [], flags: [], orders: [], deletes: [], auth: [], imports: [], saves: [], upstreams: [], settingsSaves: [], checks: [],
+    connectionsSnapshot: {
+      runtime_epoch: '1234-1', sampled_at: new Date().toISOString(), active_connections: 3, client_count: 1, route_count: 2,
+      total_upload_bps: 18400, total_download_bps: 262144,
+      routes: [
+        { key: '10.0.0.5|30001|node:1', client_ip: '10.0.0.5', inbound_port: 30001, inbound_node_id: 1, inbound_node_name: 'Node 001', route_id: '', outbound_node_id: 1, outbound_node_name: 'Node 001', active_count: 2, upload_bps: 12000, download_bps: 200000 },
+        { key: '10.0.0.5|30002|node:4|member:1', client_ip: '10.0.0.5', inbound_port: 30002, inbound_node_id: 2, inbound_node_name: 'Node 002', route_id: 'alice+30004', outbound_node_id: 4, outbound_node_name: 'JP Failover', policy_member_id: 1, policy_member_name: 'Node 001', upstream_label: 'Custom · SOCKS5', active_count: 1, upload_bps: 6400, download_bps: 62144 },
+      ],
+    },
+    sseActive: 0, sseOpened: 0, sseClosed: 0,
+    logsSettings: { enabled: false, min_level: 'INFO', store_mode: 'local_sqlite', remote_driver: 'postgres', local_sqlite_path: '', remote_dsn_masked: '', remote_url_masked: '', has_remote_dsn: false, has_remote_token: false, retention_days: 7, max_size_mb: 200, status: { active: false, driver: 'memory', size_bytes: 0, dropped_events: 0, last_error: '' } },
+    logsEvents: [
+      { id: 'e2', ts: '2026-11-25T01:02:00Z', source: 'singbox', level: 'WARN', client_ip: '10.0.0.5', inbound_port: 30001, outbound_name: 'Node 001', message: 'connection reset by peer' },
+      { id: 'e1', ts: '2026-11-25T01:01:00Z', source: 'panel', level: 'INFO', client_ip: '', message: 'sing-box started successfully' },
+    ],
+    logsTraffic: { persisted: true, upload_bytes: 2048000, download_bytes: 10485760, total_bytes: 12533760, items: [{ client_ip: '10.0.0.5', inbound_port: 30001, route_id: '', outbound_node_id: 1, outbound_node_name: 'Node 001', policy_member_name: '', upload_bytes: 2048000, download_bytes: 10485760, total_bytes: 12533760 }] },
+    logSettingsFailMessage: '',
+    requests: [], loads: [], flags: [], orders: [], deletes: [], auth: [], imports: [], saves: [], upstreams: [], settingsSaves: [], checks: [], groupMutations: [], moves: [],
     expectedFailures: new Set(), activeChecks: 0, peakChecks: 0, checkDelay: 20, checkStatuses: {}, importDelay: 0,
     importResult: null, flagFailure: false, nextLoads: [], loginSecret: 'dusk-regression-admin', revoked: false,
   }
   const reorderPorts = () => {
     if (state.settings.preserve_inbound_ports) return
-    const pinned = new Set(state.nodes.filter((node) => node.inbound_port_pinned).map((node) => node.inbound_port))
-    let port = state.settings.start_port
-    state.nodes.forEach((node, index) => {
-      node.sort_order = index
-      if (node.inbound_port_pinned) return
-      while (pinned.has(port)) port += 1
-      node.inbound_port = port++
-    })
+    const used = new Set(state.nodes.filter((node) => node.inbound_port_pinned && node.inbound_port > 0).map((node) => node.inbound_port))
+    for (const group of state.groups) {
+      const groupNodes = state.nodes.filter((node) => (node.group_id ?? state.groups[0]?.id) === group.id)
+      let port = group.start_port || 30001
+      groupNodes.forEach((node, index) => {
+        node.sort_order = index
+        if (group.allocate_port === false) {
+          node.inbound_port = 0
+          node.inbound_port_pinned = false
+          return
+        }
+        if (node.inbound_port_pinned && node.inbound_port > 0) return
+        while (used.has(port)) port += 1
+        node.inbound_port = port
+        used.add(port)
+        port += 1
+      })
+    }
   }
   const server = http.createServer(async (request, response) => {
     const url = new URL(request.url, 'http://127.0.0.1')
@@ -98,6 +126,117 @@ function createFixture() {
       return send(401, { error: 'unauthorized' })
     }
     if (route === '/api/logout') { state.revoked = true; return send(200, {}) }
+    if (route === '/api/node-groups' && method === 'GET') {
+      const enriched = state.groups.map((group) => ({
+        ...group,
+        node_count: state.nodes.filter((node) => (node.group_id ?? state.groups[0]?.id) === group.id).length,
+        enabled_node_count: state.nodes.filter((node) => (node.group_id ?? state.groups[0]?.id) === group.id && node.enabled !== false).length,
+      }))
+      return send(200, enriched)
+    }
+    if (route === '/api/node-groups' && method === 'POST') {
+      const id = Math.max(0, ...state.groups.map((g) => g.id)) + 1
+      const created = { id, sort_order: state.groups.length, subscription_last_error: '', ...body }
+      state.groups.push(created)
+      state.groupMutations.push({ op: 'create', body })
+      return send(201, created)
+    }
+    if (route === '/api/node-groups/reorder' && method === 'POST') {
+      const byId = new Map(state.groups.map((g) => [g.id, g]))
+      state.groups = body.ids.map((id, idx) => ({ ...byId.get(id), sort_order: idx }))
+      return send(200, {})
+    }
+    const groupMatch = route.match(/^\/api\/node-groups\/(\d+)(?:\/(.*))?$/)
+    if (groupMatch) {
+      const gid = Number(groupMatch[1])
+      const action = groupMatch[2]
+      const group = state.groups.find((g) => g.id === gid)
+      if (!group) return send(404, { error: 'group not found' })
+      if (action === 'subscription/refresh' && method === 'POST') {
+        group.subscription_last_updated_at = new Date().toISOString()
+        group.subscription_last_error = ''
+        return send(200, { added: 1, updated: 0, removed: 0, unchanged: 0, warnings: [] })
+      }
+      if (method === 'PATCH') {
+        Object.assign(group, body)
+        reorderPorts()
+        state.groupMutations.push({ op: 'update', id: gid, body })
+        return send(200, group)
+      }
+      if (method === 'DELETE') {
+        if (state.groups.length <= 1) return send(409, { error: 'last group', code: 'last_group' })
+        const mode = url.searchParams.get('mode')
+        const targetId = Number(url.searchParams.get('target_group_id') || 0)
+        const members = state.nodes.filter((n) => n.group_id === gid)
+        if (members.length > 0 && !mode) return send(409, { error: 'group not empty', code: 'group_not_empty', node_count: members.length })
+        if (mode === 'move' && targetId) {
+          for (const node of members) node.group_id = targetId
+        } else if (mode === 'delete_nodes') {
+          state.nodes = state.nodes.filter((n) => n.group_id !== gid)
+        }
+        state.groups = state.groups.filter((g) => g.id !== gid)
+        reorderPorts()
+        state.groupMutations.push({ op: 'delete', id: gid, mode, targetId })
+        return send(200, {})
+      }
+    }
+    if (route === '/api/nodes/batch-move' && method === 'POST') {
+      state.moves.push(body)
+      for (const node of state.nodes) {
+        if (body.ids.includes(node.id)) node.group_id = body.group_id
+      }
+      reorderPorts()
+      return send(200, {})
+    }
+    if (route === '/api/connections' && method === 'GET') {
+      return send(200, state.connectionsSnapshot)
+    }
+    if (route === '/api/connections/stream' && method === 'GET') {
+      state.sseActive += 1
+      state.sseOpened += 1
+      response.writeHead(200, { 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-cache', Connection: 'keep-alive' })
+      response.write(`event: snapshot\ndata: ${JSON.stringify(state.connectionsSnapshot)}\n\n`)
+      const timer = setInterval(() => {
+        if (!response.writableEnded) response.write(`event: snapshot\ndata: ${JSON.stringify(state.connectionsSnapshot)}\n\n`)
+      }, 600)
+      response.once('close', () => {
+        clearInterval(timer)
+        state.sseActive = Math.max(0, state.sseActive - 1)
+        state.sseClosed += 1
+      })
+      return
+    }
+    if (route === '/api/logs/settings' && method === 'GET') return send(200, state.logsSettings)
+    if (route === '/api/logs/settings' && method === 'PUT') {
+      if (state.logSettingsFailMessage) {
+        state.expectedFailures.add(route)
+        return send(400, { error: state.logSettingsFailMessage })
+      }
+      const next = { ...state.logsSettings, enabled: Boolean(body.enabled), min_level: body.min_level || 'INFO', store_mode: body.store_mode || 'local_sqlite', remote_driver: body.remote_driver || 'postgres', retention_days: body.retention_days ?? 7, max_size_mb: body.max_size_mb ?? 200 }
+      if (body.store_mode === 'independent' && body.remote_dsn) {
+        next.remote_dsn_masked = body.remote_dsn.replace(/:\/\/([^:@]+):([^@]+)@/, '://$1:***@')
+        next.has_remote_dsn = true
+      }
+      next.status = { active: next.enabled, driver: next.enabled ? next.store_mode : 'memory', size_bytes: next.enabled ? 4096 : 0, dropped_events: 0, last_error: '' }
+      state.logsSettings = next
+      return send(200, next)
+    }
+    if (route === '/api/logs/traffic' && method === 'GET') {
+      return send(200, { ...state.logsTraffic, persisted: state.logsSettings.enabled })
+    }
+    if (route === '/api/logs' && method === 'GET') {
+      const src = url.searchParams.get('source') || ''
+      const lvl = url.searchParams.get('level') || ''
+      const q = (url.searchParams.get('q') || '').toLowerCase()
+      const ip = url.searchParams.get('client_ip') || ''
+      const items = state.logsEvents.filter((item) =>
+        (!src || item.source === src) &&
+        (!lvl || item.level === lvl) &&
+        (!ip || item.client_ip === ip) &&
+        (!q || item.message.toLowerCase().includes(q))
+      )
+      return send(200, { items, next_cursor: '', storage_mode: state.logsSettings.enabled ? state.logsSettings.store_mode : 'memory', persisted: state.logsSettings.enabled, dropped_events: 0 })
+    }
     if (route === '/api/nodes' && method === 'GET') {
       const plan = state.nextLoads.shift()
       const snapshot = structuredClone(plan?.nodes || state.nodes)
@@ -127,7 +266,14 @@ function createFixture() {
     if (route === '/api/nodes/reorder') {
       state.orders.push(body)
       const byID = new Map(state.nodes.map((node) => [node.id, node]))
-      state.nodes = body.nodes.map((item) => byID.get(item.id))
+      if (body.group_id != null) {
+        const reordered = body.nodes.map((item) => byID.get(item.id)).filter(Boolean)
+        const ids = new Set(reordered.map((node) => node.id))
+        let cursor = 0
+        state.nodes = state.nodes.map((node) => (ids.has(node.id) ? reordered[cursor++] : node))
+      } else {
+        state.nodes = body.nodes.map((item) => byID.get(item.id))
+      }
       reorderPorts()
       return send(200, {})
     }
@@ -161,7 +307,8 @@ function createFixture() {
     if (route === '/api/parse-link') return send(200, { type: 'socks5', name: 'Parsed link', config: '{"server":"127.0.0.1","server_port":1080}' })
     if (route === '/api/nodes' && method === 'POST') {
       const id = Math.max(0, ...state.nodes.map((node) => node.id)) + 1
-      const node = makeNode(id, body)
+      const groupId = body.group_id || state.groups[0]?.id || 1
+      const node = makeNode(id, { ...body, group_id: groupId })
       state.saves.push(body)
       state.nodes.push(node)
       reorderPorts()
@@ -183,10 +330,14 @@ function createFixture() {
         const status = state.checkStatuses[id] || 200
         if (status >= 400) {
           state.expectedFailures.add(route)
-          return send(status, { error: `check failed ${status}`, upstream: { error: 'upstream failed' } })
+          const failedPayload = status === 429 || status >= 500
+            ? { error: `check failed ${status}`, check_status: 'failed', check_error: `check failed ${status}`, upstream: { error: 'upstream failed' } }
+            : { error: `check failed ${status}`, upstream: { error: 'upstream failed' } }
+          if (status === 429 || status >= 500) Object.assign(node, { check_status: 'failed', check_error: `check failed ${status}`, node_ip: '', location: '', country_code: '', latency: 0 })
+          return send(status, failedPayload)
         }
-        Object.assign(node, { node_ip: '198.51.100.8', country_code: 'US', location: 'Boston, United States', latency: 50 })
-        return send(200, { ip: node.node_ip, country_code: node.country_code, location: node.location, latency: node.latency })
+        Object.assign(node, { check_status: 'ok', check_error: '', node_ip: '198.51.100.8', country_code: 'US', location: 'Boston, United States', latency: 50 })
+        return send(200, { ip: node.node_ip, country_code: node.country_code, location: node.location, latency: node.latency, check_status: 'ok', check_error: '' })
       }
       if (action === 'remark') { node.remark = body.remark; return send(200, {}) }
       if (action === 'port-pin') { node.inbound_port_pinned = body.pinned; return send(200, { pinned: body.pinned }) }
@@ -692,11 +843,20 @@ const scenarios = {
   },
 
   async 'version-update'({ page, state }) {
-    state.update = { available: true, latest_version: '9.0.2', release_url: 'https://github.com/cheluen/singbox-proxy-manager/releases/tag/v9.0.2' }
+    state.update = {
+      available: true,
+      latest_version: '9.0.2',
+      release_url: 'https://github.com/cheluen/singbox-proxy-manager/releases/tag/v1.7.29',
+      latest_release_url: 'https://github.com/cheluen/singbox-proxy-manager/releases/latest',
+    }
     await page.reload({ waitUntil: 'networkidle2' })
     await page.waitForSelector('a[data-testid="version-badge"].is-update', { visible: true })
-    assert.equal(await page.$eval('[data-testid="version-badge"]', (element) => element.href), state.update.release_url)
+    assert.equal(await page.$eval('[data-testid="version-badge"]', (element) => element.href), 'https://github.com/cheluen/singbox-proxy-manager/releases/latest')
     assert.ok((await page.$eval('[data-testid="version-badge"]', (element) => element.textContent)).includes('9.0.2'))
+    state.update = { available: true, latest_version: '9.0.3', release_url: 'https://github.com/cheluen/singbox-proxy-manager/releases/tag/v1.7.29' }
+    await page.reload({ waitUntil: 'networkidle2' })
+    await page.waitForSelector('a[data-testid="version-badge"].is-update', { visible: true })
+    assert.equal(await page.$eval('[data-testid="version-badge"]', (element) => element.href), 'https://github.com/cheluen/singbox-proxy-manager/releases/latest')
     state.update = { available: false }
     await page.reload({ waitUntil: 'networkidle2' })
     await page.waitForSelector('span[data-testid="version-badge"]', { visible: true })
@@ -949,6 +1109,43 @@ const scenarios = {
     assert.deepEqual(state.settings.node_list_column_widths, {})
     await page.waitForSelector('[data-testid="reset-column-widths"]', { hidden: true })
 
+    // 验证缩窄后的端口与延迟列在三个断点、中英文双语下容纳 5 位固定端口与 4 位延迟不换行且不裁切表头
+    state.nodes[0].inbound_port = 65535
+    state.nodes[0].inbound_port_pinned = true
+    state.nodes[0].latency = 9999
+    await refresh()
+    for (const lang of ['English', '中文']) {
+      await clickControl(page, `button[title="${lang}"]`)
+      for (const width of [1440, 1200, 1000]) {
+        await page.setViewport({ width, height: 1000 })
+        await assertUnclippedTableHeaders(page)
+        await assertColumnOrder(page)
+        const fit = await page.evaluate(() => {
+          const portHead = document.querySelector('.dusk-head [data-col-key="port"]')?.getBoundingClientRect()
+          const latHead = document.querySelector('.dusk-head [data-col-key="latency"]')?.getBoundingClientRect()
+          const portChip = document.querySelector('[data-row-id="1"] .sb-port')
+          const latEl = document.querySelector('[data-row-id="1"] .sb-latency')
+          const portRect = portChip?.getBoundingClientRect()
+          const latRect = latEl?.getBoundingClientRect()
+          return {
+            portHeadW: Math.round(portHead?.width || 0),
+            latHeadW: Math.round(latHead?.width || 0),
+            portOverflow: portRect ? portRect.right > (portHead?.right || 0) + 1 : true,
+            portWrapped: portRect ? portRect.height > 28 : true,
+            latOverflow: latRect ? latRect.right > (latHead?.right || 0) + 1 : true,
+            latWrapped: latRect ? latRect.height > 24 : true,
+          }
+        })
+        assert.ok(fit.portHeadW <= 82, `${lang}/${width} 端口列过宽：${fit.portHeadW}px`)
+        assert.ok(fit.latHeadW <= 66, `${lang}/${width} 延迟列过宽：${fit.latHeadW}px`)
+        assert.equal(fit.portOverflow, false, `${lang}/${width} 5位固定端口溢出`)
+        assert.equal(fit.portWrapped, false, `${lang}/${width} 5位固定端口换行`)
+        assert.equal(fit.latOverflow, false, `${lang}/${width} 4位延迟溢出`)
+        assert.equal(fit.latWrapped, false, `${lang}/${width} 4位延迟换行`)
+      }
+    }
+    await clickControl(page, 'button[title="English"]')
+
     // 验证直连与自定义前置代理节点在三种视口下的展开布局对称性与入站优先顺序
     for (const width of [1440, 1080, 390]) {
       await page.setViewport({ width, height: 1000 })
@@ -959,6 +1156,82 @@ const scenarios = {
         await clickControl(page, `[data-testid="node-open-${nodeId}"]`)
       }
     }
+  },
+
+  async 'check-failed-ui'({ page, state, refresh }) {
+    state.nodes[1].check_status = 'untested'
+    state.nodes[3].check_status = 'failed'
+    state.nodes[3].check_error = 'dial tcp 198.51.100.4:443: i/o timeout'
+    state.nodes[3].node_ip = ''
+    state.nodes[3].latency = 0
+    await refresh()
+    assert.equal(await page.$eval('[data-testid="node-health-1"]', (el) => el.dataset.health), 'healthy')
+    assert.equal(await page.$eval('[data-testid="node-health-2"]', (el) => el.dataset.health), 'untested')
+    assert.equal(await page.$eval('[data-testid="node-health-4"]', (el) => el.dataset.health), 'failed')
+    const failTip = await page.$eval('[data-row-id="4"] [data-testid="latency-failed"]', (el) => el.getAttribute('data-tip'))
+    assert.ok(failTip.includes('i/o timeout'), `失败叉号缺少错误原因提示：${failTip}`)
+    const failColor = await page.$eval('[data-row-id="4"] [data-testid="latency-failed"]', (el) => getComputedStyle(el).color)
+    const badColor = await page.$eval('[data-testid="node-health-4"] svg', (el) => getComputedStyle(el).color)
+    assert.notEqual(failColor, badColor, '延迟失败叉号应使用中性色而非红色')
+    await clickControl(page, '[data-testid="status-filter"] [data-value="failed"]')
+    await expectRows(page, [4])
+    await clickControl(page, '[data-testid="status-filter"] [data-value="untested"]')
+    await expectRows(page, [2])
+  },
+
+  async 'groups-policy-ui'({ page, state }) {
+    await selectNodes(page, [1, 2])
+    await page.waitForSelector('[data-testid="nodes-selected-count"]', { visible: true })
+    await clickControl(page, '[data-testid="group-create-button"]')
+    await setInput(page, '[data-testid="group-name-input"]', 'Pool NoPort')
+    await toggle(page, '[data-testid="group-allocate-port"]', false)
+    assert.equal(await page.$eval('[data-testid="group-start-port"]', (el) => el.disabled), true)
+    await clickControl(page, '[data-testid="group-form-submit"]')
+    await waitOverlaysClosed(page)
+    await page.waitForSelector('[data-testid="active-group-noport-pill"]', { visible: true })
+    assert.equal(await page.$('[data-testid="nodes-selected-count"]'), null, '切换分组未重置选中态')
+
+    await clickControl(page, '[data-testid="group-tab-1"]')
+    await expectRows(page, [1, 2, 3, 4])
+    await selectNodes(page, [2])
+    await clickControl(page, '[data-testid="nodes-batch-move"]')
+    await clickControl(page, '[data-testid="move-group-confirm"]')
+    await waitOverlaysClosed(page)
+    await eventually(() => state.moves.length === 1, '跨分组移动未提交')
+    assert.equal(state.nodes.find((n) => n.id === 2).inbound_port, 0)
+
+    await clickControl(page, '[data-testid="nodes-add-node"]')
+    await selectOption(page, 'proxy_type', 'Failover (Policy)')
+    await setInput(page, '#name', 'JP Policy')
+    assert.equal(await page.$eval('#server', (el) => el.closest('.ant-form-item')?.hidden || el.offsetParent === null), true, '策略节点不应显示服务器地址输入框')
+    await closeOverlay(page)
+  },
+
+  async 'connections-logs-ui'({ page, state }) {
+    assert.equal(state.sseOpened, 0, '未打开当前连接面板不应开启采集')
+    await clickControl(page, '[data-testid="nav-tab-connections"]')
+    await page.waitForSelector('[data-testid="connections-topology"]', { visible: true })
+    await eventually(() => state.sseOpened >= 1 && state.sseActive >= 1, '打开连接面板未启动按需采集')
+    assert.equal(await page.$$eval('[data-testid="conn-outbound-row"]', (els) => els.length), 2)
+    assert.equal(await page.$$eval('[data-testid^="conn-client-"]', (els) => els.length), 1, '同客户端 IP 应合并为一张卡片')
+    await clickControl(page, '[data-testid="nav-tab-logs"]')
+    await page.waitForSelector('[data-testid="logs-panel"]', { visible: true })
+    await eventually(() => state.sseActive === 0 && state.sseClosed >= 1, '离开当前连接面板后未立即释放采集')
+
+    await page.waitForSelector('[data-testid="logs-events-list"]', { visible: true })
+    await clickControl(page, '[data-testid="logs-settings-open"]')
+    await toggle(page, '[data-testid="log-persist-switch"]', true)
+    assert.equal(state.logsSettings.enabled, false, '未点击保存前不应立即生效')
+    state.logSettingsFailMessage = 'connection refused'
+    await clickControl(page, '[data-testid="log-settings-save"]')
+    await page.waitForSelector('[data-testid="log-settings-error"]', { visible: true })
+    assert.equal(state.logsSettings.enabled, false, '校验失败不应影响当前运行状态')
+    state.logSettingsFailMessage = ''
+    await clickControl(page, '[data-testid="log-settings-save"]')
+    await waitOverlaysClosed(page)
+    assert.equal(state.logsSettings.enabled, true)
+    await clickControl(page, '[data-testid="logs-subtab"] [data-value="traffic"]')
+    await page.waitForSelector('[data-testid="traffic-summary"]', { visible: true })
   },
 }
 

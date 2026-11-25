@@ -1,7 +1,7 @@
 import { memo, useEffect, useLayoutEffect, useRef, useState } from 'react'
 import { ChevronRight } from 'lucide-react'
 import { useTranslation } from 'react-i18next'
-import { hasInboundAuth, serverAddress } from '../core/nodeView'
+import { hasInboundAuth, nodeHealth, serverAddress } from '../core/nodeView'
 import { CheckBox, Toggle } from '../shared/controls'
 import { isInteractive } from '../shared/labels'
 import { NodeMenuButton } from '../shared/menus'
@@ -107,6 +107,7 @@ export const DuskRow = memo(function DuskRow({ node, index, selected, expanded, 
   const { t } = useTranslation()
   const off = node.enabled === false
   const server = serverAddress(node)
+  const health = nodeHealth(node)
   return (
     <SortableItem
       id={node.id}
@@ -154,7 +155,7 @@ export const DuskRow = memo(function DuskRow({ node, index, selected, expanded, 
         <span className="dusk-col--server dusk-row__server mono truncate" data-tip={server || undefined}>{server || t('direct_local')}</span>
         <span className="dusk-col--region"><Region node={node} showName={false} /></span>
         <span className="dusk-col--ip dusk-row__ip mono truncate">{node.node_ip || '—'}</span>
-        <span className="dusk-col--latency"><Latency value={node.latency} /></span>
+        <span className="dusk-col--latency"><Latency value={node.latency} failed={health === 'failed'} healthy={health === 'healthy'} untested={health === 'untested'} error={node.check_error} /></span>
       </div>
       <Toggle checked={!off} busy={flagBusy} label={t('node_enabled_label')} onChange={() => act.toggleEnabled(node)} testId={`node-enabled-${node.id}`} />
       <NodeMenuButton node={node} act={act} canReorder={canReorder} size="sm" />

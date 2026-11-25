@@ -9,14 +9,22 @@ import { PinGlyph } from './icons'
 import { upstreamModeLabel } from './labels'
 import { CopyButton, IconButton, Spinner } from './primitives'
 
-// 入站端口 + 固定开关。开启「保留入站端口」后端口本身不会被重排，因此不再显示固定开关。
+// 入站端口 + 固定开关。开启「保留入站端口」后或无端口分组节点不显示固定开关。
 export const PortChip = memo(function PortChip({ node, act, pinBusy = false, preservePorts = false, copyable = false }) {
   const { t } = useTranslation()
-  const pinned = Boolean(node.inbound_port_pinned)
+  const hasPort = Number(node.inbound_port) > 0
+  const pinned = hasPort && Boolean(node.inbound_port_pinned)
   const busy = Boolean(pinBusy)
+  if (!hasPort) {
+    return (
+      <span className="sb-port sb-dim" onClick={(event) => event.stopPropagation()} data-tip={t('group_no_port_node_tip')}>
+        <span className="mono sb-port__value">—</span>
+      </span>
+    )
+  }
   return (
     <span className={`sb-port${pinned ? ' is-pinned' : ''}`} onClick={(event) => event.stopPropagation()}>
-      <span className="mono sb-port__value">{node.inbound_port || '—'}</span>
+      <span className="mono sb-port__value">{node.inbound_port}</span>
       {!preservePorts && (
         <button
           type="button"
@@ -31,7 +39,7 @@ export const PortChip = memo(function PortChip({ node, act, pinBusy = false, pre
           {busy ? <Spinner size={12} /> : <PinGlyph pinned={pinned} size={13} />}
         </button>
       )}
-      {copyable && node.inbound_port ? <CopyButton text={buildHostPort(node)} label={`${t('copy')} ${buildHostPort(node)}`} /> : null}
+      {copyable ? <CopyButton text={buildHostPort(node)} label={`${t('copy')} ${buildHostPort(node)}`} /> : null}
     </span>
   )
 })

@@ -41,6 +41,9 @@ func TestNodeFlagsPreserveLatestConfigurationAndCredentials(t *testing.T) {
 			t.Fatal(err)
 		}
 		if value, ok := patch["enabled"]; ok {
+			if previous.Enabled != value {
+				previous.CheckRevision++
+			}
 			previous.Enabled = value
 		}
 		if value, ok := patch["tcp_reuse_enabled"]; ok {

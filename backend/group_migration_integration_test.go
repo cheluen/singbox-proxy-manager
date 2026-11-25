@@ -1,0 +1,296 @@
+package main
+
+import (
+	"context"
+	"crypto/sha256"
+	"database/sql"
+	"embed"
+	"encoding/hex"
+	"reflect"
+	"strings"
+	"testing"
+	"time"
+
+	"golang.org/x/crypto/bcrypt"
+
+	appdb "sb-proxy/backend/database"
+	"sb-proxy/backend/models"
+)
+
+//go:embed testdata/legacy-v1.7.29/*.sql
+var legacyGroupSchemas embed.FS
+
+const legacyGroupStartPort = 36773
+const legacyPinnedPort = 31237
+
+func seedLegacyGroupDatabase(t *testing.T, db *sql.DB) int {
+	t.Helper()
+	dialect := appdb.DialectFor(db)
+	if dialect == appdb.DialectTurso {
+		dialect = appdb.DialectSQLite
+	}
+	ddl, err := legacyGroupSchemas.ReadFile("testdata/legacy-v1.7.29/" + string(dialect) + ".sql")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for statement := range strings.SplitSeq(string(ddl), ";") {
+		if strings.TrimSpace(statement) != "" {
+			if _, err := db.Exec(statement); err != nil {
+				t.Fatalf("创建 1.7.29 历史表失败：%v", err)
+			}
+		}
+	}
+	adminHash, err := bcrypt.GenerateFromPassword([]byte("migration-login-fixture"), bcrypt.MinCost)
+	if err != nil {
+		t.Fatal(err)
+	}
+	envHash, err := bcrypt.GenerateFromPassword([]byte("migration-env-fixture"), bcrypt.MinCost)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`INSERT INTO settings (
+		admin_password, admin_password_env_fingerprint, auth_generation, start_port, preserve_inbound_ports,
+		global_upstream_enabled, global_upstream_type, global_upstream_config, global_upstream_ip,
+		global_upstream_location, global_upstream_country_code, global_upstream_latency, global_upstream_error,
+		node_list_column_widths, created_at, updated_at
+	) VALUES (?, ?, 7, ?, TRUE, TRUE, 'socks5', '{"server":"192.0.2.2","server_port":1080}',
+		'192.0.2.2', 'Global location', 'GB', 39, 'previous upstream result', '{"name":211}',
+		'2025-08-11 12:01:02', '2025-09-12 13:02:03')`, string(adminHash), string(envHash), legacyGroupStartPort); err != nil {
+		t.Fatal(err)
+	}
+	sessionHash := sha256.Sum256([]byte("historical-session-fixture"))
+	if _, err := db.Exec(`INSERT INTO admin_sessions (token_hash, auth_generation, expires_at, user_agent, ip, created_at)
+		VALUES (?, 7, ?, 'Migration client', '192.0.2.17', '2025-10-13 14:03:04')`, hex.EncodeToString(sessionHash[:]), time.Now().Add(24*time.Hour).Unix()); err != nil {
+		t.Fatal(err)
+	}
+	seeds := []struct {
+		name, ip string
+		latency  int
+	}{
+		{"healthy-pinned", "198.51.100.2", 48},
+		{"purged-middle", "", 0},
+		{"ip-only", "198.51.100.3", 0},
+		{"latency-only", "", 62},
+		{"never-checked", "", 0},
+		{"purged-high", "", 0},
+	}
+	for index, seed := range seeds {
+		if _, err := db.Exec(`INSERT INTO proxy_nodes (
+			name, remark, type, config, inbound_port, inbound_port_pinned, username, password, tcp_reuse_enabled,
+			upstream_mode, upstream_type, upstream_config, upstream_ip, upstream_location, upstream_country_code,
+			upstream_latency, upstream_error, sort_order, node_ip, location, country_code, latency, enabled, created_at, updated_at
+		) VALUES (?, ?, 'socks5h', '{"server":"192.0.2.5","server_port":1080,"username":"remote","password":"outbound-fixture"}',
+			?, ?, ?, ?, ?, 'custom', 'http', '{"server":"192.0.2.8","server_port":8080}',
+			'192.0.2.8', 'Upstream location', 'NZ', 34, 'upstream check detail', ?, ?, 'Node location', 'CA', ?, ?,
+			'2025-04-11 10:20:30', '2025-05-12 11:21:31')`,
+			seed.name, "历史备注 "+seed.name, legacyPinnedPort+index*11, index == 0, "user-"+seed.name, "pass-"+seed.name,
+			index%2 != 0, (len(seeds)-index)*3, seed.ip, seed.latency, seed.name != "ip-only"); err != nil {
+			t.Fatalf("写入历史节点 %q 失败：%v", seed.name, err)
+		}
+	}
+	var highID int
+	if err := db.QueryRow("SELECT id FROM proxy_nodes WHERE name = 'purged-high'").Scan(&highID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec("UPDATE proxy_nodes SET inbound_port = NULL WHERE id = ?", highID); err == nil {
+		t.Fatal("1.7.29 的入口端口应当拒绝 NULL")
+	}
+	if _, err := db.Exec("DELETE FROM proxy_nodes WHERE name IN ('purged-middle', 'purged-high')"); err != nil {
+		t.Fatal(err)
+	}
+	return highID
+}
+
+type legacyGroupProjection struct {
+	table, columns string
+	rows           [][]sql.NullString
+}
+
+func (projection legacyGroupProjection) read(t *testing.T, db *sql.DB) [][]sql.NullString {
+	t.Helper()
+	rows, err := db.Query("SELECT " + projection.columns + " FROM " + projection.table + " ORDER BY id")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rows.Close()
+	columns, err := rows.Columns()
+	if err != nil {
+		t.Fatal(err)
+	}
+	var records [][]sql.NullString
+	for rows.Next() {
+		record := make([]sql.NullString, len(columns))
+		destinations := make([]any, len(columns))
+		for index := range record {
+			destinations[index] = &record[index]
+		}
+		if err := rows.Scan(destinations...); err != nil {
+			t.Fatalf("读取 %s 历史字段失败：%v", projection.table, err)
+		}
+		records = append(records, record)
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatal(err)
+	}
+	return records
+}
+
+func verifyLegacyGroupMigration(t *testing.T, withDatabase func(func(*sql.DB))) {
+	t.Helper()
+	projections := []legacyGroupProjection{
+		{table: "proxy_nodes", columns: `id, name, remark, type, config, inbound_port, inbound_port_pinned, username, password,
+			tcp_reuse_enabled, upstream_mode, upstream_type, upstream_config, upstream_ip, upstream_location, upstream_country_code,
+			upstream_latency, upstream_error, sort_order, node_ip, location, country_code, latency, enabled, created_at, updated_at`},
+		{table: "settings", columns: `id, singleton_key, admin_password, admin_password_env_fingerprint, auth_generation,
+			preserve_inbound_ports, global_upstream_enabled, global_upstream_type, global_upstream_config, global_upstream_ip,
+			global_upstream_location, global_upstream_country_code, global_upstream_latency, global_upstream_error,
+			node_list_column_widths, created_at, updated_at`},
+		{table: "admin_sessions", columns: "id, token_hash, auth_generation, expires_at, user_agent, ip, created_at"},
+	}
+	t.Cleanup(func() { withDatabase(func(db *sql.DB) { resetApplicationTables(t, db) }) })
+	var highID int
+	withDatabase(func(db *sql.DB) {
+		resetApplicationTables(t, db)
+		highID = seedLegacyGroupDatabase(t, db)
+		for index, projection := range projections {
+			expected := projection
+			if projection.table == "proxy_nodes" {
+				expected.columns = strings.Replace(projection.columns, "country_code, latency, enabled", "country_code, CASE WHEN COALESCE(node_ip,'')='' AND latency>0 THEN 0 ELSE latency END, enabled", 1)
+			}
+			projections[index].rows = expected.read(t, db)
+		}
+	})
+	var beforeGroups []models.NodeGroup
+	var beforeNodes []models.ProxyNode
+	withDatabase(func(db *sql.DB) {
+		if err := models.InitDB(db); err != nil {
+			t.Fatalf("升级 1.7.29 数据库失败：%v", err)
+		}
+		var logSettings string
+		if err := db.QueryRow("SELECT COALESCE(log_settings_json,'{}') FROM settings WHERE singleton_key=1").Scan(&logSettings); err != nil || logSettings != "{}" {
+			t.Fatalf("升级后的日志设置 %q, %v", logSettings, err)
+		}
+		if _, err := db.Exec(`UPDATE settings SET log_settings_json='{"enabled":false}' WHERE singleton_key=1`); err != nil {
+			t.Fatal(err)
+		}
+		for _, projection := range projections {
+			if !reflect.DeepEqual(projection.read(t, db), projection.rows) {
+				t.Fatalf("升级改变了 %s 的历史字段或行", projection.table)
+			}
+		}
+		groups, nodes := migratedGroupState(t, db)
+		if len(groups) != 1 || groups[0].ID <= 0 || groups[0].Name == "" || groups[0].SortOrder != 0 ||
+			!groups[0].AllocatePort || groups[0].StartPort != legacyGroupStartPort || groups[0].NodeCount != 4 || groups[0].EnabledNodeCount != 3 {
+			t.Fatalf("默认分组未继承旧端口和全部节点：%+v", groups)
+		}
+		if len(nodes) != 4 {
+			t.Fatalf("迁移后节点数量为 %d，预期 4", len(nodes))
+		}
+		for _, node := range nodes {
+			if node.Name == "latency-only" && node.Latency != 0 {
+				t.Fatal("无 IP 的旧测速应清零")
+			}
+			status := "untested"
+			if node.Name == "healthy-pinned" {
+				status = "ok"
+			}
+			if node.GroupID != groups[0].ID || node.CheckStatus != status || node.CheckError != "" || node.CheckRevision != 0 ||
+				node.SubscriptionKey != "" || node.SubscriptionName != "" || (status == "untested" && node.CheckedAt != nil) {
+				t.Fatalf("历史节点 %d 分组或检测状态错误，分组 %d，状态 %q", node.ID, node.GroupID, node.CheckStatus)
+			}
+		}
+		advanceMigratedGroupState(t, db, groups[0].ID, highID)
+		beforeGroups, beforeNodes = migratedGroupState(t, db)
+	})
+	withDatabase(func(db *sql.DB) {
+		if err := models.InitDB(db); err != nil {
+			t.Fatalf("重新打开已迁移数据库失败：%v", err)
+		}
+		var logSettings string
+		if err := db.QueryRow("SELECT log_settings_json FROM settings WHERE singleton_key=1").Scan(&logSettings); err != nil || logSettings != `{"enabled":false}` {
+			t.Fatalf("重新迁移改变了日志设置 %q, %v", logSettings, err)
+		}
+		groups, nodes := migratedGroupState(t, db)
+		if !reflect.DeepEqual(groups, beforeGroups) || !reflect.DeepEqual(nodes, beforeNodes) {
+			t.Fatal("重启后分组、端口或显式检测结果发生变化")
+		}
+		byName := make(map[string]models.ProxyNode, len(nodes))
+		for _, node := range nodes {
+			byName[node.Name] = node
+		}
+		pinned := byName["healthy-pinned"]
+		if !pinned.InboundPortPinned || pinned.InboundPort != legacyPinnedPort || pinned.CheckStatus != "failed" ||
+			pinned.CheckError != "probe timed out" || pinned.CheckedAt == nil || pinned.CheckRevision != 9 {
+			t.Fatal("重启后无法读回固定端口和最近一次失败检测的完整状态")
+		}
+		if partial := byName["ip-only"]; partial.NodeIP == "" || partial.Latency != 75 || partial.CheckStatus != "untested" {
+			t.Fatal("历史指标补全后，重启覆盖了显式未检测状态")
+		}
+		if _, err := db.Exec("UPDATE proxy_nodes SET inbound_port = ? WHERE id = ?", legacyPinnedPort, byName["latency-only"].ID); err == nil {
+			t.Fatal("重启后入口端口丢失唯一约束")
+		}
+		for _, projection := range projections[1:] {
+			if !reflect.DeepEqual(projection.read(t, db), projection.rows) {
+				t.Fatalf("重启改变了 %s 的历史字段或行", projection.table)
+			}
+		}
+		var nullPorts int
+		if err := db.QueryRow("SELECT COUNT(*) FROM proxy_nodes WHERE inbound_port IS NULL").Scan(&nullPorts); err != nil || nullPorts != 2 {
+			t.Fatalf("无端口分组的 SQL NULL 数量为 %d，预期 2，%v", nullPorts, err)
+		}
+	})
+}
+
+func migratedGroupState(t *testing.T, db *sql.DB) ([]models.NodeGroup, []models.ProxyNode) {
+	t.Helper()
+	groups, err := models.LoadGroups(context.Background(), db)
+	if err != nil {
+		t.Fatal(err)
+	}
+	nodes, err := models.LoadProxyNodes(context.Background(), db)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return groups, nodes
+}
+
+func advanceMigratedGroupState(t *testing.T, db *sql.DB, defaultID, highID int) {
+	t.Helper()
+	if _, err := db.Exec(`UPDATE node_groups SET name = 'Retained group', start_port = 38200 WHERE id = ?`, defaultID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`UPDATE proxy_nodes SET check_status = 'failed', check_error = 'probe timed out',
+		checked_at = '2025-12-01 23:41:55', check_revision = 9 WHERE name = 'healthy-pinned'`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`UPDATE proxy_nodes SET latency = 75 WHERE name = 'ip-only'`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`INSERT INTO node_groups (name, sort_order, allocate_port, start_port) VALUES ('Second group', 1, TRUE, 41200)`); err != nil {
+		t.Fatal(err)
+	}
+	var secondID int
+	if err := db.QueryRow("SELECT id FROM node_groups WHERE name = 'Second group'").Scan(&secondID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`INSERT INTO proxy_nodes (name, type, config, upstream_config, sort_order, group_id, inbound_port)
+		VALUES ('new-first', 'direct', '{}', '', 0, ?, 41200), ('new-second', 'direct', '{}', '', 1, ?, 41201)`, secondID, secondID); err != nil {
+		t.Fatal(err)
+	}
+	var firstNewID, secondNewID int
+	if err := db.QueryRow("SELECT MIN(id), MAX(id) FROM proxy_nodes WHERE group_id = ?", secondID).Scan(&firstNewID, &secondNewID); err != nil || firstNewID <= highID || secondNewID <= firstNewID {
+		t.Fatalf("迁移重用了已分配 ID，历史最大值 %d，新值 %d 和 %d，%v", highID, firstNewID, secondNewID, err)
+	}
+	if _, err := db.Exec("UPDATE proxy_nodes SET inbound_port = ? WHERE id = ?", legacyPinnedPort, firstNewID); err == nil {
+		t.Fatal("不同分组的节点占用了同一个非空入口端口")
+	}
+	if _, err := db.Exec("UPDATE proxy_nodes SET group_id = NULL WHERE id = ?", firstNewID); err == nil {
+		t.Fatal("分组外键允许 NULL")
+	}
+	if _, err := db.Exec("UPDATE proxy_nodes SET inbound_port = NULL WHERE group_id = ?", secondID); err != nil {
+		t.Fatalf("数据库拒绝了同组两个 NULL 端口：%v", err)
+	}
+	if _, err := db.Exec("UPDATE node_groups SET allocate_port = FALSE WHERE id = ?", secondID); err != nil {
+		t.Fatal(err)
+	}
+}

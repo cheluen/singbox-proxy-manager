@@ -1,5 +1,5 @@
 import { forwardRef, memo, useEffect, useRef, useState } from 'react'
-import { Check, Copy, Eye, EyeOff, Loader } from 'lucide-react'
+import { Check, Copy, Eye, EyeOff, Loader, X } from 'lucide-react'
 import { useTranslation } from 'react-i18next'
 import { normalizeCountryCode } from '../core/nodeModel'
 import { copyText, latencyTone, nodeHealth, protocolLabel } from '../core/nodeView'
@@ -35,17 +35,29 @@ export const HealthBadge = memo(function HealthBadge({ node, checking, compact =
   const { t } = useTranslation()
   const health = nodeHealth(node)
   const label = checking ? t('checking') : healthLabel(health, t)
-  // 「未验证」需要解释：可能是还没测过，也可能是上次检测失败。
-  const tip = health === 'unverified' && !checking ? t('status_unverified_tip') : undefined
+  const tip = checking
+    ? undefined
+    : health === 'failed'
+      ? (node?.check_error ? `${label} · ${node.check_error}` : t('check_failed'))
+      : health === 'untested'
+        ? `${label} · ${t('status_untested_tip')}`
+        : undefined
   if (compact) {
     return (
-      <span className={`sb-health-dot sb-health--${health}`} role="img" aria-label={label} data-tip={tip ? `${label} · ${tip}` : label}>
+      <span
+        className={`sb-health-dot sb-health--${health}`}
+        role="img"
+        aria-label={label}
+        data-health={health}
+        data-tip={tip || label}
+        data-testid={node?.id ? `node-health-${node.id}` : undefined}
+      >
         {checking ? <Spinner size={12} /> : <HealthGlyph health={health} />}
       </span>
     )
   }
   return (
-    <span className={`sb-badge sb-health sb-health--${health}`} data-tip={tip}>
+    <span className={`sb-badge sb-health sb-health--${health}`} data-health={health} data-tip={tip}>
       {checking ? <Spinner size={12} /> : <HealthGlyph health={health} />}
       <span>{label}</span>
     </span>
@@ -56,9 +68,36 @@ export const ProtocolTag = memo(function ProtocolTag({ type }) {
   return <span className="sb-tag sb-tag--protocol">{protocolLabel(type)}</span>
 })
 
-export const Latency = memo(function Latency({ value }) {
+export const Latency = memo(function Latency({ value, failed = false, healthy = false, untested = false, error = '' }) {
+  const { t } = useTranslation()
+  if (failed) {
+    const tip = String(error || '').trim() || t('check_failed')
+    return (
+      <span
+        className="sb-latency sb-latency--failed"
+        role="img"
+        aria-label={tip}
+        data-tip={tip}
+        data-testid="latency-failed"
+      >
+        <X size={13} strokeWidth={2.2} aria-hidden="true" />
+      </span>
+    )
+  }
+  if (untested) return <span className="sb-dim">—</span>
   const tone = latencyTone(value)
-  if (tone === 'none') return <span className="sb-dim">—</span>
+  if (tone === 'none') {
+    if (healthy) {
+      return (
+        <span className="sb-latency" data-tone="fast">
+          <SignalBars tone="fast" />
+          <span className="mono">&lt;1</span>
+          <span className="sb-latency__unit">ms</span>
+        </span>
+      )
+    }
+    return <span className="sb-dim">—</span>
+  }
   return (
     <span className="sb-latency" data-tone={tone}>
       <SignalBars tone={tone} />

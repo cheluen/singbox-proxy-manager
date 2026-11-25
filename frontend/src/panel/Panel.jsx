@@ -1,13 +1,17 @@
 // 设计 4「暮色 · 暗色指挥台」：暗色莫兰迪 + 高密度列表 + 行内展开 + 命令面板，偏键盘操作。
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import { Button } from 'antd'
-import { Command, LogOut, RotateCcw, Settings, SquareTerminal, Zap } from 'lucide-react'
+import { Alert, Button, Dropdown } from 'antd'
+import {
+  Activity, ArrowLeft, ArrowRight, Command, Download, Link2Off, LogOut, Plus, RefreshCw,
+  RotateCcw, Rss, ScrollText, Server, Settings, SlidersHorizontal, SquareTerminal, Trash2, Zap,
+} from 'lucide-react'
 import { buildColumnWidthStyle, calculateTableMinWidth, clampColumnWidth, NODE_LIST_COLUMN_LIMITS } from '../core/columnWidths'
 import { EMPTY_CRITERIA } from '../core/nodeFilters'
 import { ActiveFilters, FilterButton, SearchBox, StatusFilter } from '../shared/filters'
 import { BulkBar, CheckProgress, NodesEmpty, RefreshButton, RepoLink, RuntimeBanner, RuntimePill, SelectAll, VersionBadge } from '../shared/chrome'
 import { useIncrementalList, useMediaQuery } from '../shared/hooks'
 import { BrandLogo, BrandWordmark } from '../shared/Brand'
+import { MenuIcon } from '../shared/icons'
 import { AddMenu } from '../shared/menus'
 import { DetailActions, DetailSections } from '../shared/NodeDetail'
 import { Overlays } from '../shared/Overlays'
@@ -16,6 +20,8 @@ import { SortableList } from '../shared/sortable'
 import { usePanel } from '../shared/usePanel'
 import { CommandPalette } from './Palette'
 import { DuskRow } from './Row'
+import ConnectionsPanel from './ConnectionsPanel'
+import LogsPanel from './LogsPanel'
 
 const isMac = /Mac|iPhone|iPad/.test(navigator.platform)
 const typingInField = () => {
@@ -64,8 +70,139 @@ function ResizableHeaderCell({ colKey, label, t, className = '', active, current
   )
 }
 
+function GroupBar({ ctl, t, onSelectGroup }) {
+  const groups = ctl.groups || []
+  const active = ctl.activeGroup
+  const activeIndex = groups.findIndex((item) => item.id === active?.id)
+  const hasSub = Boolean(String(active?.subscription_url || '').trim())
+  const subBusy = Boolean(active?.id && ctl.refreshingGroupId === active.id)
+
+  const shiftGroup = (delta) => {
+    if (activeIndex < 0) return
+    const target = activeIndex + delta
+    if (target < 0 || target >= groups.length) return
+    const ids = groups.map((item) => item.id)
+    ;[ids[activeIndex], ids[target]] = [ids[target], ids[activeIndex]]
+    void ctl.reorderGroups(ids)
+  }
+
+  const groupMenu = {
+    items: [
+      { key: 'edit', icon: <MenuIcon icon={SlidersHorizontal} />, label: t('group_edit'), disabled: !active },
+      ...(hasSub ? [{ key: 'refresh-sub', icon: <MenuIcon icon={RefreshCw} />, label: t('group_subscription_refresh') }] : []),
+      { type: 'divider' },
+      { key: 'move-left', icon: <MenuIcon icon={ArrowLeft} />, label: t('group_move_left'), disabled: activeIndex <= 0 },
+      { key: 'move-right', icon: <MenuIcon icon={ArrowRight} />, label: t('group_move_right'), disabled: activeIndex < 0 || activeIndex >= groups.length - 1 },
+      { type: 'divider' },
+      { key: 'delete', icon: <MenuIcon icon={Trash2} />, label: t('group_delete'), danger: true, disabled: !active || groups.length <= 1 },
+    ],
+    onClick: ({ key }) => {
+      if (!active) return
+      if (key === 'edit') ctl.open({ kind: 'group-form', group: active })
+      else if (key === 'refresh-sub') void ctl.refreshGroupSubscription(active)
+      else if (key === 'move-left') shiftGroup(-1)
+      else if (key === 'move-right') shiftGroup(1)
+      else if (key === 'delete') ctl.open({ kind: 'group-delete', group: active })
+    },
+  }
+
+  if (groups.length === 0) return null
+
+  return (
+    <div className="dusk-groups" role="region" aria-label={t('groups_bar_label')} data-testid="node-groups-bar">
+      <div className="dusk-groups__tabs" role="tablist" aria-label={t('groups_bar_label')}>
+        {groups.map((group) => {
+          const selected = group.id === active?.id
+          const count = typeof group.node_count === 'number'
+            ? group.node_count
+            : ctl.allNodes.filter((node) => node.group_id === group.id).length
+          const groupHasSub = Boolean(String(group.subscription_url || '').trim())
+          const subErr = Boolean(group.subscription_last_error)
+          return (
+            <button
+              key={group.id}
+              type="button"
+              role="tab"
+              aria-selected={selected}
+              className={`dusk-group-tab${selected ? ' is-active' : ''}`}
+              data-testid={`group-tab-${group.id}`}
+              data-group-id={group.id}
+              onClick={() => onSelectGroup(group.id)}
+            >
+              <span className="dusk-group-tab__name">{group.name}</span>
+              <span className="dusk-group-tab__count mono">{count}</span>
+              {group.allocate_port === false ? (
+                <span className="dusk-group-tab__badge" data-tip={t('group_no_port_badge')} aria-label={t('group_no_port_badge')}>
+                  <Link2Off size={12} strokeWidth={1.9} aria-hidden="true" />
+                </span>
+              ) : null}
+              {groupHasSub ? (
+                <span
+                  className={`dusk-group-tab__badge${subErr ? ' is-err' : ''}`}
+                  data-tip={subErr ? `${t('group_subscription_last_error')}: ${group.subscription_last_error}` : t('group_subscription')}
+                  aria-label={t('group_subscription')}
+                >
+                  <Rss size={12} strokeWidth={1.9} aria-hidden="true" />
+                </span>
+              ) : null}
+            </button>
+          )
+        })}
+      </div>
+
+      <div className="dusk-groups__actions">
+        {active ? (
+          <span className="dusk-groups__meta">
+            {active.allocate_port !== false ? (
+              <span className="dusk-groups__pill mono" data-testid="active-group-port-pill" data-tip={t('start_port')}>
+                :{active.start_port}
+              </span>
+            ) : (
+              <span className="dusk-groups__pill is-noport" data-testid="active-group-noport-pill">
+                <Link2Off size={11} strokeWidth={1.9} aria-hidden="true" />
+                {t('group_no_port_badge')}
+              </span>
+            )}
+            {active.subscription_last_error ? (
+              <span className="dusk-groups__pill is-err" data-tip={active.subscription_last_error}>
+                {t('group_sub_error_short')}
+              </span>
+            ) : null}
+          </span>
+        ) : null}
+        {hasSub ? (
+          <IconButton
+            size="sm"
+            label={t('group_subscription_refresh')}
+            icon={RefreshCw}
+            busy={subBusy}
+            onClick={() => void ctl.refreshGroupSubscription(active)}
+            data-testid="group-sub-refresh"
+          />
+        ) : null}
+        <Dropdown menu={groupMenu} trigger={['click']} placement="bottomRight">
+          <IconButton
+            size="sm"
+            label={t('group_manage')}
+            icon={SlidersHorizontal}
+            data-testid="group-settings-button"
+          />
+        </Dropdown>
+        <IconButton
+          size="sm"
+          label={t('group_create')}
+          icon={Plus}
+          onClick={() => ctl.open({ kind: 'group-form', group: null })}
+          data-testid="group-create-button"
+        />
+      </div>
+    </div>
+  )
+}
+
 export default function DuskPanel({ session }) {
   const { ctl, act, t } = usePanel(session)
+  const [activeTab, setActiveTab] = useState('nodes')
   const [expandedId, setExpandedId] = useState(null)
   const [focusedId, setFocusedId] = useState(null)
   const [paletteOpen, setPaletteOpen] = useState(false)
@@ -73,6 +210,7 @@ export default function DuskPanel({ session }) {
   const [resizingCol, setResizingCol] = useState(null)
   const [viewportWidth, setViewportWidth] = useState(() => (typeof window === 'undefined' ? 1440 : window.innerWidth))
   const [tableClientWidth, setTableClientWidth] = useState(0)
+  const [pendingJump, setPendingJump] = useState(null)
   const tableRef = useRef(null)
   const dragCleanupRef = useRef(null)
   const desktop = useMediaQuery('(min-width: 900px)')
@@ -87,9 +225,9 @@ export default function DuskPanel({ session }) {
     [desktop, effectiveWidths, viewportWidth]
   )
   // 键盘监听只注册一次，通过 ref 读取最新状态。
-  const stateRef = useRef({ ctl, shown, focusedId })
+  const stateRef = useRef({ ctl, shown, focusedId, activeTab })
   useEffect(() => {
-    stateRef.current = { ctl, shown, focusedId }
+    stateRef.current = { ctl, shown, focusedId, activeTab }
   })
 
   useEffect(() => {
@@ -182,16 +320,52 @@ export default function DuskPanel({ session }) {
     void stateRef.current.ctl.saveColumnWidths({})
   }, [])
 
+  const handleSelectGroup = useCallback((groupId) => {
+    setExpandedId(null)
+    setFocusedId(null)
+    ctl.selectGroup(groupId)
+  }, [ctl])
+
   const toggleExpand = useCallback((id) => setExpandedId((prev) => (prev === id ? null : id)), [])
   const jumpTo = useCallback((id) => {
+    setActiveTab('nodes')
+    const currentCtl = stateRef.current.ctl
+    const pool = currentCtl.allNodes || currentCtl.nodes
+    const targetNode = pool.find((node) => node.id === id)
+    const fallbackGroupId = currentCtl.groups?.[0]?.id ?? null
+    const targetGroupId = targetNode?.group_id ?? currentCtl.activeGroupId ?? fallbackGroupId
+    if (targetGroupId != null && targetGroupId !== currentCtl.activeGroupId) {
+      currentCtl.selectGroup(targetGroupId)
+    }
     // 目标节点可能被当前筛选隐藏，跳转前先清空筛选。
-    stateRef.current.ctl.setCriteria(EMPTY_CRITERIA)
-    const index = stateRef.current.ctl.nodes.findIndex((node) => node.id === id)
+    currentCtl.setCriteria(EMPTY_CRITERIA)
+    const targetGroupNodes = targetGroupId == null
+      ? pool
+      : pool.filter((node) => (node.group_id == null ? targetGroupId === fallbackGroupId : node.group_id === targetGroupId))
+    const index = targetGroupNodes.findIndex((node) => node.id === id)
     if (index >= 0) reveal(index)
+    setPendingJump((prev) => ({ id, groupId: targetGroupId, seq: (prev?.seq || 0) + 1 }))
     setFocusedId(id)
     setExpandedId(id)
-    window.setTimeout(() => document.querySelector(`[data-row-id="${id}"]`)?.scrollIntoView({ block: 'center', behavior: 'smooth' }), 80)
   }, [reveal])
+
+  useEffect(() => {
+    if (!pendingJump || activeTab !== 'nodes') return
+    if (pendingJump.groupId != null && ctl.activeGroupId !== pendingJump.groupId) return
+    const index = ctl.visibleNodes.findIndex((node) => node.id === pendingJump.id)
+    if (index < 0) return
+    if (index >= shown.length) {
+      reveal(index)
+      return
+    }
+    const targetId = pendingJump.id
+    const targetSeq = pendingJump.seq
+    const frame = window.requestAnimationFrame(() => {
+      document.querySelector(`[data-row-id="${targetId}"]`)?.scrollIntoView({ block: 'center', behavior: 'smooth' })
+      setPendingJump((current) => (current?.seq === targetSeq ? null : current))
+    })
+    return () => window.cancelAnimationFrame(frame)
+  }, [activeTab, ctl.activeGroupId, ctl.visibleNodes, pendingJump, reveal, shown.length])
 
   // 键盘操作：Ctrl/⌘K 命令面板；j/k 或方向键移动；Enter 展开；x 选择；e 编辑；t 测 IP。
   useEffect(() => {
@@ -203,6 +377,7 @@ export default function DuskPanel({ session }) {
         setPaletteOpen((prev) => !prev)
         return
       }
+      if (stateRef.current.activeTab !== 'nodes') return
       if (event.metaKey || event.ctrlKey || event.altKey || typingInField() || overlayOpen()) return
       const { ctl: current, shown: rows, focusedId: focus } = stateRef.current
       const index = rows.findIndex((node) => node.id === focus)
@@ -233,6 +408,18 @@ export default function DuskPanel({ session }) {
   }, [toggleExpand])
 
   const dragLabel = ctl.canReorder || ctl.visibleNodes.length < 2 ? t('drag_sort_hint_short') : t('drag_sort_disabled_filtered')
+  const navItems = [
+    { key: 'nodes', icon: Server, label: t('nav_nodes') },
+    { key: 'connections', icon: Activity, label: t('nav_connections') },
+    { key: 'logs', icon: ScrollText, label: t('nav_logs') },
+  ]
+  const exportMenu = {
+    items: [
+      { key: 'group', icon: <MenuIcon icon={Download} />, label: t('export_current_group') },
+      { key: 'all', icon: <MenuIcon icon={Download} />, label: t('export_all_groups') },
+    ],
+    onClick: ({ key }) => void ctl.exportScope(key),
+  }
 
   return (
     <div className="dusk">
@@ -242,6 +429,26 @@ export default function DuskPanel({ session }) {
           <strong className="dusk-top__title" lang="en" data-testid="project-brand"><BrandWordmark /></strong>
         </div>
         <RuntimePill ctl={ctl} showLabel={desktop} />
+        {desktop ? (
+          <nav className="dusk-nav" aria-label={t('main_nav')} data-testid="main-nav">
+            {navItems.map((item) => {
+              const Icon = item.icon
+              return (
+                <button
+                  key={item.key}
+                  type="button"
+                  className={`dusk-nav__btn${activeTab === item.key ? ' is-active' : ''}`}
+                  aria-current={activeTab === item.key ? 'page' : undefined}
+                  data-testid={`nav-tab-${item.key}`}
+                  onClick={() => setActiveTab(item.key)}
+                >
+                  <Icon size={14} strokeWidth={1.8} aria-hidden="true" />
+                  <span>{item.label}</span>
+                </button>
+              )
+            })}
+          </nav>
+        ) : null}
         <button type="button" className="dusk-cmd" aria-label={t('cmd_open')} onClick={() => setPaletteOpen(true)} data-testid="open-palette">
           <Command size={14} strokeWidth={1.75} aria-hidden="true" />
           <span className="truncate">{t('cmd_open')}</span>
@@ -255,136 +462,187 @@ export default function DuskPanel({ session }) {
         <IconButton label={t('logout')} icon={LogOut} onClick={() => session.logout()} data-testid="logout" />
       </header>
 
-      <div className="dusk-bar">
-        <StatusFilter ctl={ctl} size="sm" className="dusk-bar__status" />
-        <SearchBox ctl={ctl} className="dusk-bar__search" />
-        <FilterButton ctl={ctl} compact={!desktop} />
-        <span className="dusk-top__spacer" />
-        <Button icon={<Zap size={15} strokeWidth={1.75} />} aria-label={t('check_all_visible')} loading={Boolean(ctl.checks.progress)} disabled={ctl.visibleNodes.length === 0} onClick={ctl.checkVisible} data-testid="check-visible">
-          {desktop ? t('check_all_visible') : null}
-        </Button>
-        <RefreshButton ctl={ctl} />
-        <AddMenu act={ctl} compact={!desktop} />
-      </div>
-
-      <div className="dusk__scroll">
-        <RuntimeBanner ctl={ctl} />
-        <CheckProgress ctl={ctl} />
-        <ActiveFilters ctl={ctl} />
-
-        <section
-          ref={tableRef}
-          className={`dusk-table${hasCustomWidths ? ' has-custom-widths' : ''}${tableScrollable ? ' is-scrollable' : ''}`}
-          style={tableStyle}
-          aria-label={t('node_list')}
-        >
-          <div className="dusk-table__canvas">
-          <div className="dusk-head">
-            <span />
-            <SelectAll ctl={ctl} />
-            <span>#</span>
-            <span />
-            <ResizableHeaderCell
-              colKey="name"
-              label={t('node_name')}
-              t={t}
-              className="dusk-col--name"
-              active={resizingCol === 'name'}
-              currentWidth={effectiveWidths.name}
-              onResizeStart={startColumnResize}
-              onReset={resetColumnWidth}
-              onStep={stepColumnWidth}
-            />
-            <span />
-            {/*
-              有意设计（切勿随意移除或打乱）：
-              1. 列表直接展示入站用户名（明文）与入站密码（默认固定宽度柔边毛玻璃掩码，直接点击掩码区域展开完整值），
-                 目的是方便高频快速核对各入站凭据，请勿以安全为由移除或折叠回详情。
-              2. 列顺序按「基础标识（#、节点名称）→ 入站信息（入站端口、入站用户名、入站密码）→ 出站信息（节点类型、服务器地址、地区、节点IP、延迟）」
-                 从左到右分组排列，明确分隔入站与出站信息。
-            */}
-            <div className="dusk-row__meta">
-              <ResizableHeaderCell colKey="port" label={t('inbound_port')} t={t} className="dusk-col--port" active={resizingCol === 'port'} currentWidth={effectiveWidths.port} onResizeStart={startColumnResize} onReset={resetColumnWidth} onStep={stepColumnWidth} />
-              <ResizableHeaderCell colKey="user" label={t('inbound_username')} t={t} className="dusk-col--user" active={resizingCol === 'user'} currentWidth={effectiveWidths.user} onResizeStart={startColumnResize} onReset={resetColumnWidth} onStep={stepColumnWidth} />
-              <ResizableHeaderCell colKey="pass" label={t('inbound_password')} t={t} className="dusk-col--pass" active={resizingCol === 'pass'} currentWidth={effectiveWidths.pass} onResizeStart={startColumnResize} onReset={resetColumnWidth} onStep={stepColumnWidth} />
-              <ResizableHeaderCell colKey="type" label={t('node_type')} t={t} className="dusk-col--type" active={resizingCol === 'type'} currentWidth={effectiveWidths.type} onResizeStart={startColumnResize} onReset={resetColumnWidth} onStep={stepColumnWidth} />
-              <ResizableHeaderCell colKey="server" label={t('server_address')} t={t} className="dusk-col--server" active={resizingCol === 'server'} currentWidth={effectiveWidths.server} onResizeStart={startColumnResize} onReset={resetColumnWidth} onStep={stepColumnWidth} />
-              <ResizableHeaderCell colKey="region" label={t('region')} t={t} className="dusk-col--region" active={resizingCol === 'region'} currentWidth={effectiveWidths.region} onResizeStart={startColumnResize} onReset={resetColumnWidth} onStep={stepColumnWidth} />
-              <ResizableHeaderCell colKey="ip" label={t('node_ip')} t={t} className="dusk-col--ip" active={resizingCol === 'ip'} currentWidth={effectiveWidths.ip} onResizeStart={startColumnResize} onReset={resetColumnWidth} onStep={stepColumnWidth} />
-              <ResizableHeaderCell colKey="latency" label={t('latency')} t={t} className="dusk-col--latency" active={resizingCol === 'latency'} currentWidth={effectiveWidths.latency} onResizeStart={startColumnResize} onReset={resetColumnWidth} onStep={stepColumnWidth} />
-            </div>
-            <span />
-            <span className="dusk-head__actions">
-              {hasCustomWidths ? (
+      {!desktop ? (
+        <div className="dusk-mobile-nav">
+          <nav className="dusk-nav" aria-label={t('main_nav')} data-testid="main-nav">
+            {navItems.map((item) => {
+              const Icon = item.icon
+              return (
                 <button
+                  key={item.key}
                   type="button"
-                  className="dusk-head__reset"
-                  aria-label={t('reset_column_widths')}
-                  data-tip={t('reset_column_widths')}
-                  data-testid="reset-column-widths"
-                  onClick={resetAllColumnWidths}
+                  className={`dusk-nav__btn${activeTab === item.key ? ' is-active' : ''}`}
+                  aria-current={activeTab === item.key ? 'page' : undefined}
+                  data-testid={`nav-tab-${item.key}`}
+                  onClick={() => setActiveTab(item.key)}
                 >
-                  <RotateCcw size={12} strokeWidth={1.9} aria-hidden="true" />
+                  <Icon size={14} strokeWidth={1.8} aria-hidden="true" />
+                  <span>{item.label}</span>
                 </button>
-              ) : null}
-            </span>
-          </div>
-          {!ctl.loaded ? (
-            <SkeletonRows rows={12} height={32} />
-          ) : ctl.visibleNodes.length === 0 ? (
-            <NodesEmpty ctl={ctl} icon={SquareTerminal} />
-          ) : (
-            <SortableList ids={ids} disabled={!ctl.canReorder} onReorder={ctl.reorder}>
-              <div role="list" data-testid="nodes-list">
-                {shown.map((node, index) => (
-                  <DuskRow
-                    key={node.id}
-                    node={node}
-                    index={index}
-                    selected={ctl.selectedIds.has(node.id)}
-                    expanded={node.id === expandedId}
-                    focused={node.id === focusedId}
-                    checking={ctl.checks.checkingIds.has(node.id)}
-                    flagBusy={Boolean(ctl.flagBusy[node.id])}
-                    pinBusy={Boolean(ctl.pinBusy[node.id])}
-                    preservePorts={ctl.preservePorts}
-                    canReorder={ctl.canReorder}
-                    dragLabel={dragLabel}
-                    act={act}
-                    onToggle={toggleExpand}
-                    onFocus={setFocusedId}
-                  >
-                    {node.id === expandedId ? (
-                      <div className="dusk-expand" data-testid="node-inspector" data-node-id={node.id}>
-                        <div className="dusk-expand__actions">
-                          <DetailActions node={node} act={act} checking={ctl.checks.checkingIds.has(node.id)} canReorder={ctl.canReorder} />
-                        </div>
-                        <div className="dusk-expand__grid">
-                          <DetailSections node={node} ctl={ctl} act={act} />
-                        </div>
-                      </div>
-                    ) : null}
-                  </DuskRow>
-                ))}
-              </div>
-            </SortableList>
-          )}
-          {hasMore ? <div ref={sentinelRef} className="dusk-more">{t('loading_more', { shown: shown.length, total: ctl.visibleNodes.length })}</div> : null}
-          </div>
-        </section>
-      </div>
-
-      {desktop ? (
-        <footer className="dusk-foot">
-          <span>{t('count_nodes', { count: ctl.visibleNodes.length })}</span>
-          <span className="dusk-foot__stat"><i className="dusk-dot dusk-dot--ok" />{ctl.summary.healthy} {t('status_healthy')}</span>
-          <span className="dusk-foot__stat"><i className="dusk-dot dusk-dot--warn" />{ctl.summary.unverified} {t('status_unverified_short')}</span>
-          <span className="dusk-foot__stat"><i className="dusk-dot dusk-dot--muted" />{ctl.summary.disabled} {t('disabled')}</span>
-          <span className="dusk-top__spacer" />
-          <span className="dusk-foot__keys"><Kbd>j</Kbd><Kbd>k</Kbd>{t('key_move')}<Kbd>↵</Kbd>{t('key_expand')}<Kbd>x</Kbd>{t('key_select')}<Kbd>e</Kbd>{t('edit')}<Kbd>t</Kbd>{t('check_ip')}<Kbd>/</Kbd>{t('search')}</span>
-        </footer>
+              )
+            })}
+          </nav>
+        </div>
       ) : null}
-      <BulkBar ctl={ctl} />
+
+      {activeTab === 'nodes' ? (
+        <>
+          <GroupBar ctl={ctl} t={t} onSelectGroup={handleSelectGroup} />
+
+          <div className="dusk-bar">
+            <StatusFilter ctl={ctl} size="sm" className="dusk-bar__status" />
+            <SearchBox ctl={ctl} className="dusk-bar__search" />
+            <FilterButton ctl={ctl} compact={!desktop} />
+            <span className="dusk-top__spacer" />
+            <Dropdown menu={exportMenu} trigger={['click']} placement="bottomRight">
+              <IconButton label={t('export')} icon={Download} busy={Boolean(ctl.working.export)} data-testid="nodes-export-menu" />
+            </Dropdown>
+            <Button icon={<Zap size={15} strokeWidth={1.75} />} aria-label={t('check_all_visible')} loading={Boolean(ctl.checks.progress)} disabled={ctl.visibleNodes.length === 0} onClick={ctl.checkVisible} data-testid="check-visible">
+              {desktop ? t('check_all_visible') : null}
+            </Button>
+            <RefreshButton ctl={ctl} />
+            <AddMenu act={ctl} compact={!desktop} />
+          </div>
+
+          <div className="dusk__scroll">
+            <RuntimeBanner ctl={ctl} />
+            {ctl.groupsError ? (
+              <Alert
+                type="error"
+                showIcon
+                className="sb-gap"
+                message={t('groups_load_failed')}
+                description={ctl.groupsError}
+                action={<Button size="small" onClick={() => void ctl.loadGroups()} data-testid="groups-retry">{t('retry_load')}</Button>}
+                data-testid="groups-load-error"
+              />
+            ) : null}
+            <CheckProgress ctl={ctl} />
+            <ActiveFilters ctl={ctl} />
+
+            <section
+              ref={tableRef}
+              className={`dusk-table${hasCustomWidths ? ' has-custom-widths' : ''}${tableScrollable ? ' is-scrollable' : ''}`}
+              style={tableStyle}
+              aria-label={t('node_list')}
+            >
+              <div className="dusk-table__canvas">
+                <div className="dusk-head">
+                  <span />
+                  <SelectAll ctl={ctl} />
+                  <span>#</span>
+                  <span />
+                  <ResizableHeaderCell
+                    colKey="name"
+                    label={t('node_name')}
+                    t={t}
+                    className="dusk-col--name"
+                    active={resizingCol === 'name'}
+                    currentWidth={effectiveWidths.name}
+                    onResizeStart={startColumnResize}
+                    onReset={resetColumnWidth}
+                    onStep={stepColumnWidth}
+                  />
+                  <span />
+                  {/*
+                    有意设计（切勿随意移除或打乱）：
+                    1. 列表直接展示入站用户名（明文）与入站密码（默认固定宽度柔边毛玻璃掩码，直接点击掩码区域展开完整值），
+                       目的是方便高频快速核对各入站凭据，请勿以安全为由移除或折叠回详情。
+                    2. 列顺序按「基础标识（#、节点名称）→ 入站信息（入站端口、入站用户名、入站密码）→ 出站信息（节点类型、服务器地址、地区、节点IP、延迟）」
+                       从左到右分组排列，明确分隔入站与出站信息。
+                  */}
+                  <div className="dusk-row__meta">
+                    <ResizableHeaderCell colKey="port" label={t('col_inbound_port')} t={t} className="dusk-col--port" active={resizingCol === 'port'} currentWidth={effectiveWidths.port} onResizeStart={startColumnResize} onReset={resetColumnWidth} onStep={stepColumnWidth} />
+                    <ResizableHeaderCell colKey="user" label={t('inbound_username')} t={t} className="dusk-col--user" active={resizingCol === 'user'} currentWidth={effectiveWidths.user} onResizeStart={startColumnResize} onReset={resetColumnWidth} onStep={stepColumnWidth} />
+                    <ResizableHeaderCell colKey="pass" label={t('inbound_password')} t={t} className="dusk-col--pass" active={resizingCol === 'pass'} currentWidth={effectiveWidths.pass} onResizeStart={startColumnResize} onReset={resetColumnWidth} onStep={stepColumnWidth} />
+                    <ResizableHeaderCell colKey="type" label={t('node_type')} t={t} className="dusk-col--type" active={resizingCol === 'type'} currentWidth={effectiveWidths.type} onResizeStart={startColumnResize} onReset={resetColumnWidth} onStep={stepColumnWidth} />
+                    <ResizableHeaderCell colKey="server" label={t('server_address')} t={t} className="dusk-col--server" active={resizingCol === 'server'} currentWidth={effectiveWidths.server} onResizeStart={startColumnResize} onReset={resetColumnWidth} onStep={stepColumnWidth} />
+                    <ResizableHeaderCell colKey="region" label={t('region')} t={t} className="dusk-col--region" active={resizingCol === 'region'} currentWidth={effectiveWidths.region} onResizeStart={startColumnResize} onReset={resetColumnWidth} onStep={stepColumnWidth} />
+                    <ResizableHeaderCell colKey="ip" label={t('node_ip')} t={t} className="dusk-col--ip" active={resizingCol === 'ip'} currentWidth={effectiveWidths.ip} onResizeStart={startColumnResize} onReset={resetColumnWidth} onStep={stepColumnWidth} />
+                    <ResizableHeaderCell colKey="latency" label={t('latency')} t={t} className="dusk-col--latency" active={resizingCol === 'latency'} currentWidth={effectiveWidths.latency} onResizeStart={startColumnResize} onReset={resetColumnWidth} onStep={stepColumnWidth} />
+                  </div>
+                  <span />
+                  <span className="dusk-head__actions">
+                    {hasCustomWidths ? (
+                      <button
+                        type="button"
+                        className="dusk-head__reset"
+                        aria-label={t('reset_column_widths')}
+                        data-tip={t('reset_column_widths')}
+                        data-testid="reset-column-widths"
+                        onClick={resetAllColumnWidths}
+                      >
+                        <RotateCcw size={12} strokeWidth={1.9} aria-hidden="true" />
+                      </button>
+                    ) : null}
+                  </span>
+                </div>
+                {!ctl.loaded || (!ctl.groupsLoaded && !ctl.groupsError) ? (
+                  <SkeletonRows rows={12} height={32} />
+                ) : ctl.groupsError && ctl.groups.length === 0 ? (
+                  <NodesEmpty ctl={ctl} icon={SquareTerminal} />
+                ) : ctl.visibleNodes.length === 0 ? (
+                  <NodesEmpty ctl={ctl} icon={SquareTerminal} />
+                ) : (
+                  <SortableList ids={ids} disabled={!ctl.canReorder} onReorder={ctl.reorder}>
+                    <div role="list" data-testid="nodes-list">
+                      {shown.map((node, index) => (
+                        <DuskRow
+                          key={node.id}
+                          node={node}
+                          index={index}
+                          selected={ctl.selectedIds.has(node.id)}
+                          expanded={node.id === expandedId}
+                          focused={node.id === focusedId}
+                          checking={ctl.checks.checkingIds.has(node.id)}
+                          flagBusy={Boolean(ctl.flagBusy[node.id])}
+                          pinBusy={Boolean(ctl.pinBusy[node.id])}
+                          preservePorts={ctl.preservePorts}
+                          canReorder={ctl.canReorder}
+                          dragLabel={dragLabel}
+                          act={act}
+                          onToggle={toggleExpand}
+                          onFocus={setFocusedId}
+                        >
+                          {node.id === expandedId ? (
+                            <div className="dusk-expand" data-testid="node-inspector" data-node-id={node.id}>
+                              <div className="dusk-expand__actions">
+                                <DetailActions node={node} act={act} checking={ctl.checks.checkingIds.has(node.id)} canReorder={ctl.canReorder} />
+                              </div>
+                              <div className="dusk-expand__grid">
+                                <DetailSections node={node} ctl={ctl} act={act} />
+                              </div>
+                            </div>
+                          ) : null}
+                        </DuskRow>
+                      ))}
+                    </div>
+                  </SortableList>
+                )}
+                {hasMore ? <div ref={sentinelRef} className="dusk-more">{t('loading_more', { shown: shown.length, total: ctl.visibleNodes.length })}</div> : null}
+              </div>
+            </section>
+          </div>
+
+          {desktop ? (
+            <footer className="dusk-foot">
+              <span>{t('count_nodes', { count: ctl.visibleNodes.length })}</span>
+              <span className="dusk-foot__stat"><i className="dusk-dot dusk-dot--ok" />{ctl.summary.healthy} {t('status_healthy')}</span>
+              <span className="dusk-foot__stat"><i className="dusk-dot dusk-dot--warn" />{ctl.summary.untested} {t('status_untested_short')}</span>
+              <span className="dusk-foot__stat"><i className="dusk-dot dusk-dot--bad" />{ctl.summary.failed} {t('status_failed_short')}</span>
+              <span className="dusk-foot__stat"><i className="dusk-dot dusk-dot--muted" />{ctl.summary.disabled} {t('disabled')}</span>
+              <span className="dusk-top__spacer" />
+              <span className="dusk-foot__keys"><Kbd>j</Kbd><Kbd>k</Kbd>{t('key_move')}<Kbd>↵</Kbd>{t('key_expand')}<Kbd>x</Kbd>{t('key_select')}<Kbd>e</Kbd>{t('edit')}<Kbd>t</Kbd>{t('check_ip')}<Kbd>/</Kbd>{t('search')}</span>
+            </footer>
+          ) : null}
+          <BulkBar ctl={ctl} />
+        </>
+      ) : (
+        <div className="dusk__scroll" data-testid={`panel-view-${activeTab}`}>
+          <RuntimeBanner ctl={ctl} />
+          {activeTab === 'connections' ? <ConnectionsPanel token={session.token} /> : <LogsPanel ctl={ctl} />}
+        </div>
+      )}
       <CommandPalette open={paletteOpen} onClose={() => setPaletteOpen(false)} ctl={ctl} session={session} onJump={jumpTo} />
       <Overlays ctl={ctl} />
     </div>

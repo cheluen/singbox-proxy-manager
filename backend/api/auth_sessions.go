@@ -53,7 +53,10 @@ func (h *Handler) verifiedAdminSessionHash(ctx context.Context, token string) (s
 		return "", nil
 	}
 
-	tokenHash := hashSessionToken(token)
+	return h.checkAdminSessionHash(ctx, hashSessionToken(token))
+}
+
+func (h *Handler) checkAdminSessionHash(ctx context.Context, tokenHash string) (string, error) {
 	var expiresAt int64
 	err := h.db.QueryRowContext(ctx, `
 		SELECT session.expires_at

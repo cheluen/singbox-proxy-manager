@@ -1,5 +1,5 @@
-const restartReads = new Set(['/api/nodes', '/api/settings', '/api/runtime/status', '/api/version'])
-const revokedReads = new Set(['/api/nodes', '/api/settings', '/api/runtime/status'])
+const restartReads = new Set(['/api/nodes', '/api/node-groups', '/api/settings', '/api/runtime/status', '/api/version'])
+const revokedReads = new Set(['/api/nodes', '/api/node-groups', '/api/settings', '/api/runtime/status'])
 
 export function isExpectedSystemBrowserError({ text, url }, { origin, restarting = false, revoking = false }) {
   let resource

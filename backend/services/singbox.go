@@ -22,6 +22,7 @@ import (
 )
 
 type SingBoxService struct {
+	features             liveFeatures
 	configDir            string
 	binaryPath           string
 	validationSlots      chan struct{}
@@ -191,12 +192,13 @@ func NewSingBoxService(configDir string, options ...SingBoxServiceOption) *SingB
 
 // SingBoxConfig represents sing-box configuration structure
 type SingBoxConfig struct {
-	Log       LogConfig        `json:"log"`
-	DNS       *DNSConfig       `json:"dns,omitempty"`
-	Endpoints []EndpointConfig `json:"endpoints,omitempty"`
-	Inbounds  []InboundConfig  `json:"inbounds"`
-	Outbounds []OutboundConfig `json:"outbounds"`
-	Route     RouteConfig      `json:"route,omitempty"`
+	Experimental map[string]any   `json:"experimental,omitempty"`
+	Log          LogConfig        `json:"log"`
+	DNS          *DNSConfig       `json:"dns,omitempty"`
+	Endpoints    []EndpointConfig `json:"endpoints,omitempty"`
+	Inbounds     []InboundConfig  `json:"inbounds"`
+	Outbounds    []OutboundConfig `json:"outbounds"`
+	Route        RouteConfig      `json:"route,omitempty"`
 }
 
 // EndpointConfig represents a sing-box endpoint (sing-box 1.11+). Endpoints are
@@ -287,19 +289,27 @@ func (s *SingBoxService) BuildGlobalConfigContext(
 	nodes []models.ProxyNode,
 	settings ...models.Settings,
 ) ([]byte, error) {
-	parsedNodes, needsLocalDNS, err := prepareEnabledNodes(nodes)
-	if err != nil {
-		return nil, err
-	}
 	var runtimeSettings models.Settings
 	if len(settings) > 0 {
 		runtimeSettings = settings[0]
+	}
+	w, err := newWiring(nodes, runtimeSettings)
+	if err != nil {
+		return nil, err
+	}
+	return s.buildWiredConfig(ctx, nodes, runtimeSettings, w)
+}
+
+func (s *SingBoxService) buildWiredConfig(ctx context.Context, nodes []models.ProxyNode, runtimeSettings models.Settings, w *runtimeWiring) ([]byte, error) {
+	parsedNodes, needsLocalDNS, err := prepareEnabledNodes(nodes)
+	if err != nil {
+		return nil, err
 	}
 	upstreams, upstreamNeedsLocalDNS, err := s.prepareManagedUpstreams(ctx, parsedNodes, runtimeSettings)
 	if err != nil {
 		return nil, err
 	}
-	return s.renderGlobalConfig(parsedNodes, upstreams, "::", needsLocalDNS || upstreamNeedsLocalDNS)
+	return s.renderGlobalConfig(parsedNodes, upstreams, "::", needsLocalDNS || upstreamNeedsLocalDNS, w)
 }
 
 func (s *SingBoxService) renderGlobalConfig(
@@ -307,6 +317,7 @@ func (s *SingBoxService) renderGlobalConfig(
 	upstreams []parsedUpstreamProxy,
 	listenAddress string,
 	needsLocalDNS bool,
+	wiring ...*runtimeWiring,
 ) ([]byte, error) {
 	config := SingBoxConfig{
 		Log: LogConfig{
@@ -321,6 +332,9 @@ func (s *SingBoxService) renderGlobalConfig(
 		},
 	}
 
+	if len(wiring) > 0 {
+		wiring[0].addControls(&config)
+	}
 	if needsLocalDNS {
 		config.DNS = &DNSConfig{
 			Servers: []DNSServer{{Type: "local", Tag: "local"}},
@@ -330,7 +344,7 @@ func (s *SingBoxService) renderGlobalConfig(
 	reuseRoutes := make([]tcpReuseRoute, 0, len(parsedNodes))
 	for _, parsedNode := range parsedNodes {
 		node := parsedNode.Node
-		if !node.TCPReuseEnabled || node.Username == "" || node.Password == "" {
+		if node.InboundPort == 0 || !node.TCPReuseEnabled || node.Username == "" || node.Password == "" {
 			continue
 		}
 		authUser := fmt.Sprintf("%s+%d", node.Username, node.InboundPort)
@@ -356,37 +370,46 @@ func (s *SingBoxService) renderGlobalConfig(
 		inboundTag := parsedNode.InboundTag
 		outboundTag := parsedNode.OutboundTag
 
-		inbound := InboundConfig{
-			Type:   "mixed",
-			Tag:    inboundTag,
-			Listen: listenAddress,
-			Port:   node.InboundPort,
-			Extra: map[string]interface{}{
-				"sniff":                      true,
-				"sniff_override_destination": true,
-			},
-		}
-
-		hasInboundAuth := node.Username != "" && node.Password != ""
-		if hasInboundAuth {
-			inbound.Users = append(inbound.Users, InboundUser{
-				Username: node.Username,
-				Password: node.Password,
-			})
-			for _, route := range reuseRoutes {
-				inbound.Users = append(inbound.Users, InboundUser{
-					Username: route.AuthUser,
-					Password: route.Password,
-				})
+		if node.InboundPort > 0 {
+			inbound := InboundConfig{
+				Type:   "mixed",
+				Tag:    inboundTag,
+				Listen: listenAddress,
+				Port:   node.InboundPort,
+				Extra: map[string]interface{}{
+					"sniff":                      true,
+					"sniff_override_destination": true,
+				},
 			}
-		}
 
-		config.Inbounds = append(config.Inbounds, inbound)
+			hasInboundAuth := node.Username != "" && node.Password != ""
+			if hasInboundAuth {
+				inbound.Users = append(inbound.Users, InboundUser{
+					Username: node.Username,
+					Password: node.Password,
+				})
+				for _, route := range reuseRoutes {
+					inbound.Users = append(inbound.Users, InboundUser{
+						Username: route.AuthUser,
+						Password: route.Password,
+					})
+				}
+			}
+
+			config.Inbounds = append(config.Inbounds, inbound)
+			directInboundRoutes = append(directInboundRoutes, RouteRule{Inbound: []string{inboundTag}, Outbound: outboundTag})
+		}
 
 		// A direct outbound cannot use detour in sing-box. A single-choice
 		// selector preserves the node's stable outbound tag while delegating
 		// its traffic to the managed upstream.
-		if parsedNode.ManagedUpstreamTag != "" {
+		if models.IsPolicy(node.Type) {
+			if len(wiring) == 0 {
+				return nil, fmt.Errorf("policy wiring is missing")
+			}
+			w := wiring[0]
+			config.Outbounds = append(config.Outbounds, OutboundConfig{Type: "socks", Tag: outboundTag, Server: "127.0.0.1", Port: w.scheduler, Extra: map[string]any{"version": "5", "username": fmt.Sprintf("policy-%d", node.ID), "password": w.policySecret, "network": "tcp"}})
+		} else if parsedNode.ManagedUpstreamTag != "" {
 			config.Outbounds = append(config.Outbounds, OutboundConfig{
 				Type: "selector",
 				Tag:  outboundTag,
@@ -415,10 +438,6 @@ func (s *SingBoxService) renderGlobalConfig(
 			}
 			config.Outbounds = append(config.Outbounds, outbound)
 		}
-		directInboundRoutes = append(directInboundRoutes, RouteRule{
-			Inbound:  []string{inboundTag},
-			Outbound: outboundTag,
-		})
 	}
 
 	// Route username+route-number users first so they can override inbound->outbound defaults.
@@ -589,6 +608,9 @@ func marshalConfig(config SingBoxConfig) ([]byte, error) {
 		"outbounds": configObjects(config.Outbounds),
 		"route":     route,
 	}
+	if config.Experimental != nil {
+		result["experimental"] = config.Experimental
+	}
 	if config.DNS != nil {
 		result["dns"] = config.DNS
 	}
@@ -671,10 +693,10 @@ func prepareEnabledNodes(nodes []models.ProxyNode) ([]parsedEnabledNode, bool, e
 		if usernameSet != passwordSet {
 			return nil, false, fmt.Errorf("node %d inbound username and password must be provided together", node.ID)
 		}
-		if node.InboundPort <= 0 || node.InboundPort > 65535 {
+		if node.InboundPort < 0 || node.InboundPort > 65535 {
 			return nil, false, fmt.Errorf("node %d inbound port out of range", node.ID)
 		}
-		if previousID, exists := inboundPortToID[node.InboundPort]; exists {
+		if previousID, exists := inboundPortToID[node.InboundPort]; node.InboundPort != 0 && exists {
 			return nil, false, fmt.Errorf(
 				"duplicate enabled inbound port %d (nodes %d and %d)",
 				node.InboundPort,
@@ -744,6 +766,9 @@ func prepareEnabledNodes(nodes []models.ProxyNode) ([]parsedEnabledNode, bool, e
 				}
 				if targetIndex == index {
 					return nil, false, fmt.Errorf("node %d detour must not reference itself (%q)", parsedNode.Node.ID, detour)
+				}
+				if models.IsPolicy(parsedNodes[targetIndex].Node.Type) {
+					return nil, false, fmt.Errorf("physical node %d cannot detour through a policy", parsedNode.Node.ID)
 				}
 				if parsedNode.Node.Type == "direct" {
 					setConfigDetour(parsedNode.Config, "")
@@ -909,7 +934,9 @@ func (s *SingBoxService) prepareManagedUpstreams(
 	upstreams := make([]parsedUpstreamProxy, 0, len(nodes)+1)
 	inboundPorts := make(map[int]*models.ProxyNode, len(nodes))
 	for index := range nodes {
-		inboundPorts[nodes[index].Node.InboundPort] = nodes[index].Node
+		if port := nodes[index].Node.InboundPort; port > 0 {
+			inboundPorts[port] = nodes[index].Node
+		}
 	}
 	needsLocalDNS := false
 
@@ -2811,19 +2838,29 @@ func (s *SingBoxService) Start() error {
 }
 
 func (s *SingBoxService) startProcessLocked(configHash string) error {
-	configPath := s.ConfigPath()
-	if _, err := os.Stat(configPath); err != nil {
-		return fmt.Errorf("failed to access config file: %w", err)
-	}
-	if err := os.Chmod(configPath, 0o600); err != nil {
-		return fmt.Errorf("failed to secure config file permissions: %w", err)
-	}
-
 	s.mu.RLock()
 	processExists := s.process != nil
 	s.mu.RUnlock()
 	if processExists {
 		return fmt.Errorf("sing-box process is already running")
+	}
+	configPath := s.ConfigPath()
+	data, err := os.ReadFile(configPath)
+	if err != nil {
+		return fmt.Errorf("failed to access config file: %w", err)
+	}
+	if runtimeConfigHash(data) != configHash {
+		return fmt.Errorf("runtime configuration changed before start")
+	}
+	wiring, err := s.preservedWiring(data, configHash)
+	if err != nil {
+		return err
+	}
+	s.features.mu.Lock()
+	s.features.wiring = wiring
+	s.features.mu.Unlock()
+	if err := os.Chmod(configPath, 0o600); err != nil {
+		return fmt.Errorf("failed to secure config file permissions: %w", err)
 	}
 
 	singBoxBinary, err := s.resolveSingBoxBinary()
@@ -2842,8 +2879,14 @@ func (s *SingBoxService) startProcessLocked(configHash string) error {
 	}
 	cmd.Stdout = stdout
 	cmd.Stderr = stderr
+	if err := s.startFeatures(); err != nil {
+		_ = processGuard.Close()
+		_ = logCloser.Close()
+		return err
+	}
 
 	if err := cmd.Start(); err != nil {
+		s.stopFeatures()
 		_ = processGuard.Close()
 		_ = logCloser.Close()
 		return err
@@ -2926,6 +2969,8 @@ func (s *SingBoxService) watchProcess(
 ) {
 	err := cmd.Wait()
 	_ = processGuard.Close()
+	_ = logCloser.Close()
+	s.stopFeatures()
 	exited := time.Now()
 	exitedAt := exited.Unix()
 	shouldRecover := false
@@ -2968,7 +3013,6 @@ func (s *SingBoxService) watchProcess(
 	}
 	s.mu.Unlock()
 
-	_ = logCloser.Close()
 	close(done)
 	if shouldRecover {
 		s.scheduleRecovery()
@@ -2976,6 +3020,12 @@ func (s *SingBoxService) watchProcess(
 }
 
 func (s *SingBoxService) stopProcessLocked() error {
+	s.features.mu.RLock()
+	flush := s.features.beforeStop
+	s.features.mu.RUnlock()
+	if flush != nil {
+		flush()
+	}
 	s.mu.Lock()
 	cmd := s.process
 	done := s.processDone
@@ -3019,6 +3069,33 @@ func (s *SingBoxService) Stop() error {
 	s.operationMu.Unlock()
 	s.recoveryWG.Wait()
 	return err
+}
+
+func (s *SingBoxService) ActiveInboundPorts() map[int]bool {
+	status := s.RuntimeStatus()
+	if !status.Running || status.ActiveConfigHash == "" {
+		return nil
+	}
+	data, err := os.ReadFile(s.ConfigPath())
+	if err != nil || runtimeConfigHash(data) != status.ActiveConfigHash {
+		return nil
+	}
+	var config struct {
+		Inbounds []struct {
+			Port int    `json:"listen_port"`
+			Tag  string `json:"tag"`
+		} `json:"inbounds"`
+	}
+	if json.Unmarshal(data, &config) != nil {
+		return nil
+	}
+	ports := make(map[int]bool, len(config.Inbounds))
+	for _, inbound := range config.Inbounds {
+		if inbound.Tag != dispatchTag {
+			ports[inbound.Port] = true
+		}
+	}
+	return ports
 }
 
 func (s *SingBoxService) RuntimeStatus() SingBoxRuntimeStatus {
@@ -3065,6 +3142,9 @@ func (s *SingBoxService) StartPreservedConfig() error {
 			return fmt.Errorf("config file not found: %s: %w", path, os.ErrNotExist)
 		}
 		plan := RuntimePlan{configJSON: candidate.content, hash: runtimeConfigHash(candidate.content)}
+		if snapshot.wiring != nil && snapshot.wiring.hash == plan.hash {
+			plan.wiring = snapshot.wiring
+		}
 		stage, err := s.applyRuntimeCandidateLocked(plan)
 		currentChanged = currentChanged || stage != "write"
 		if err != nil {
@@ -3257,26 +3337,34 @@ func (s *SingBoxService) markConfigMismatch(action string) {
 }
 
 func (s *SingBoxService) recoverProcessLocked() error {
-	current, err := os.ReadFile(s.ConfigPath())
-	if err != nil {
-		return fmt.Errorf("read current config: %w", err)
-	}
-	currentErr := s.startProcessLocked(runtimeConfigHash(current))
+	s.features.mu.RLock()
+	previous := s.features.wiring
+	s.features.mu.RUnlock()
+	current, currentErr := os.ReadFile(s.ConfigPath())
 	if currentErr == nil {
-		return nil
+		currentErr = s.startProcessLocked(runtimeConfigHash(current))
+		if currentErr == nil {
+			return nil
+		}
 	}
 
 	lastGood, err := os.ReadFile(s.lastGoodConfigPath())
 	if err != nil {
 		return fmt.Errorf("current config failed: %v; read last-good: %w", currentErr, err)
 	}
-	if runtimeConfigHash(lastGood) == runtimeConfigHash(current) {
+	if bytes.Equal(lastGood, current) {
 		return currentErr
 	}
 	if err := s.writeConfigFile(lastGood); err != nil {
 		return fmt.Errorf("current config failed: %v; restore last-good: %w", currentErr, err)
 	}
-	if err := s.startProcessLocked(runtimeConfigHash(lastGood)); err != nil {
+	fallbackHash := runtimeConfigHash(lastGood)
+	if previous != nil && previous.hash == fallbackHash {
+		s.features.mu.Lock()
+		s.features.wiring = previous
+		s.features.mu.Unlock()
+	}
+	if err := s.startProcessLocked(fallbackHash); err != nil {
 		return fmt.Errorf("current config failed: %v; last-good failed: %w", currentErr, err)
 	}
 	return nil

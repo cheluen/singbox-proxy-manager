@@ -177,11 +177,14 @@ try {
   steps.push('real-login-empty-database')
 
   const inboundStart = await findTestPortRange()
-  await clickControl(page, '[data-testid="open-settings"]')
-  await setInput(page, '#start_port', inboundStart)
-  await submit('PUT', '/settings', () => clickText(page, 'Save Settings'))
+  const initialGroups = await api('GET', '/node-groups')
+  assert.ok(Array.isArray(initialGroups) && initialGroups.length >= 1, '未返回默认分组')
+  await clickControl(page, '[data-testid="group-settings-button"]')
+  await clickText(page, 'Group Settings', { root: '.ant-dropdown:not(.ant-dropdown-hidden)' })
+  await setInput(page, '[data-testid="group-start-port"]', inboundStart)
+  await submit('PATCH', `/node-groups/${initialGroups[0].id}`, () => clickControl(page, '[data-testid="group-form-submit"]'))
   await waitOverlaysClosed(page)
-  assert.equal((await api('GET', '/settings')).start_port, inboundStart)
+  assert.equal((await api('GET', '/node-groups'))[0].start_port, inboundStart)
 
   await clickControl(page, '[data-testid="nodes-add-node"]')
   await selectOption(page, 'proxy_type', 'Direct (Local)')

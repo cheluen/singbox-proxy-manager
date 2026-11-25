@@ -205,9 +205,11 @@ try {
   await page.waitForSelector('[data-testid="nodes-add-menu"]', { visible: true, timeout: 15000 })
   assert(legacyAuthRequests.length === 0, `legacy auth requests: ${legacyAuthRequests.join(', ')}`)
 
-  await clickControl(page, '[data-testid="open-settings"]')
-  await setControlInput(page, '#start_port', await findTestPortRange())
-  await clickVisibleButton(page, 'Save Settings')
+  const initialStartPort = await findTestPortRange()
+  await clickControl(page, '[data-testid="group-settings-button"]')
+  await clickVisibleButton(page, 'Group Settings')
+  await setControlInput(page, '[data-testid="group-start-port"]', initialStartPort)
+  await clickControl(page, '[data-testid="group-form-submit"]')
   await waitOverlaysClosed(page)
 
   await clickVisibleButton(page, 'Batch Import')
@@ -328,8 +330,9 @@ try {
   await clickVisibleButton(page, 'Cancel')
 
   const occupiedPort = await listen(occupiedPortServer)
-  const settings = await apiRequest('GET', '/settings')
-  await apiRequest('PUT', '/settings', { ...settings, start_port: occupiedPort })
+  const defaultGroup = (await apiRequest('GET', '/node-groups'))[0]
+  assert(defaultGroup?.id, 'default node group missing')
+  await apiRequest('PATCH', `/node-groups/${defaultGroup.id}`, { start_port: occupiedPort })
   const portBatch = await apiRequest('POST', '/nodes/batch-import', {
     content: ['one', 'two', 'three'].map((name) => `socks5://127.0.0.1:1080#occupied-${name}`).join('\n'),
     enabled: false,
@@ -339,7 +342,7 @@ try {
   assert(occupiedNodes.every((node) => node.inbound_port > occupiedPort), 'occupied port was assigned')
   await closeServer(occupiedPortServer)
   // 占用端口测试使用系统临时端口范围，后续协议测试恢复原范围以避免客户端源端口竞争。
-  await apiRequest('PUT', '/settings', settings)
+  await apiRequest('PATCH', `/node-groups/${defaultGroup.id}`, { start_port: defaultGroup.start_port })
 
   const socksPort = await reservePort()
   const vmessPort = await reservePort()

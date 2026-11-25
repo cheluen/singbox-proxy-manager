@@ -12,7 +12,35 @@ import (
 
 	"golang.org/x/crypto/bcrypt"
 	_ "modernc.org/sqlite"
+
+	appdb "sb-proxy/backend/database"
 )
+
+func TestGroupNodeRebuildWithoutSQLiteSequence(t *testing.T) {
+	db, err := sql.Open("sqlite", ":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	if _, err = db.Exec(strings.Replace(schemaStatements(appdb.DialectSQLite)[0], "PRIMARY KEY AUTOINCREMENT", "PRIMARY KEY", 1)); err != nil {
+		t.Fatal(err)
+	}
+	var sequence int
+	if err = db.QueryRow("SELECT COUNT(*) FROM sqlite_master WHERE name='sqlite_sequence'").Scan(&sequence); err != nil || sequence != 0 {
+		t.Fatalf("unexpected sequence table: %d %v", sequence, err)
+	}
+	tx, err := db.Begin()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer tx.Rollback()
+	if err = rebuildGroupNodes(tx, appdb.DialectSQLite); err != nil {
+		t.Fatal(err)
+	}
+	if err = tx.Commit(); err != nil {
+		t.Fatal(err)
+	}
+}
 
 func TestValidateNodeListColumnWidths(t *testing.T) {
 	if err := ValidateNodeListColumnWidths(map[string]int{
@@ -55,9 +83,13 @@ func TestNodeListColumnWidthsLegacySQLiteMigration(t *testing.T) {
 	assertWidths := func(expected map[string]int) {
 		t.Helper()
 		settings, err := LoadRuntimeSettings(context.Background(), db)
-		if err != nil || settings.StartPort != 32047 || settings.NodeListColumnWidths == nil || !maps.Equal(settings.NodeListColumnWidths, expected) {
+		if err != nil || settings.NodeListColumnWidths == nil || !maps.Equal(settings.NodeListColumnWidths, expected) {
 			t.Fatalf("migrated settings = %+v, %v, want widths %v", settings, err, expected)
 		}
+	}
+	group, err := LoadGroup(context.Background(), db, 0)
+	if err != nil || group.StartPort != 32047 || !group.AllocatePort {
+		t.Fatalf("默认分组未继承旧起始端口：%+v，%v", group, err)
 	}
 	assertWidths(map[string]int{})
 	if _, err := db.Exec(`UPDATE settings SET node_list_column_widths = '{"name":170}' WHERE singleton_key = 1`); err != nil {
@@ -366,8 +398,8 @@ func TestInitDBProxyNodeTCPReuseEnabledDefaultsToTrue(t *testing.T) {
 	}
 
 	if _, err := db.Exec(`
-		INSERT INTO proxy_nodes (name, type, config, inbound_port, username, password, sort_order, latency, enabled)
-		VALUES ('node1', 'direct', '{}', 30001, 'u', 'p', 0, 0, 1)
+		INSERT INTO proxy_nodes (name, type, config, inbound_port, username, password, sort_order, latency, enabled, group_id)
+		SELECT 'node1', 'direct', '{}', 30001, 'u', 'p', 0, 0, 1, id FROM node_groups ORDER BY sort_order, id LIMIT 1
 	`); err != nil {
 		t.Fatalf("insert proxy node: %v", err)
 	}
@@ -392,8 +424,8 @@ func TestInitDBProxyNodeUpstreamModeDefaultsToDirect(t *testing.T) {
 		t.Fatalf("init db: %v", err)
 	}
 	if _, err := db.Exec(`
-		INSERT INTO proxy_nodes (name, type, config, inbound_port, sort_order, enabled)
-		VALUES ('node1', 'direct', '{}', 30001, 0, 1)
+		INSERT INTO proxy_nodes (name, type, config, inbound_port, sort_order, enabled, group_id)
+		SELECT 'node1', 'direct', '{}', 30001, 0, 1, id FROM node_groups ORDER BY sort_order, id LIMIT 1
 	`); err != nil {
 		t.Fatalf("insert proxy node: %v", err)
 	}
@@ -527,16 +559,16 @@ func TestInitDBMigratesDuplicateLegacySettingsToSingleton(t *testing.T) {
 		singletonKey   int
 		storedHash     string
 		authGeneration int64
-		startPort      int
 	)
 	if err := db.QueryRow(`
-		SELECT id, singleton_key, admin_password, auth_generation, start_port
+		SELECT id, singleton_key, admin_password, auth_generation
 		FROM settings
-	`).Scan(&id, &singletonKey, &storedHash, &authGeneration, &startPort); err != nil {
+	`).Scan(&id, &singletonKey, &storedHash, &authGeneration); err != nil {
 		t.Fatalf("query migrated settings: %v", err)
 	}
-	if id != 1 || singletonKey != 1 || startPort != 31000 {
-		t.Fatalf("expected first legacy row to be retained, got id=%d singleton_key=%d start_port=%d", id, singletonKey, startPort)
+	group, err := LoadGroup(context.Background(), db, 0)
+	if err != nil || id != 1 || singletonKey != 1 || group.StartPort != 31000 {
+		t.Fatalf("默认分组未继承首条旧设置：id=%d singleton_key=%d group=%+v err=%v", id, singletonKey, group, err)
 	}
 	if authGeneration != 0 {
 		t.Fatalf("unexpected migrated auth generation: %d", authGeneration)
@@ -547,9 +579,8 @@ func TestInitDBMigratesDuplicateLegacySettingsToSingleton(t *testing.T) {
 
 	if _, err := db.Exec(`
 		INSERT INTO settings (
-			singleton_key, admin_password, auth_generation,
-			start_port, preserve_inbound_ports
-		) VALUES (1, '', 0, 33000, 0)
+			singleton_key, admin_password, auth_generation, preserve_inbound_ports
+		) VALUES (1, '', 0, 0)
 	`); err == nil {
 		t.Fatal("expected singleton unique index to reject a second settings row")
 	}

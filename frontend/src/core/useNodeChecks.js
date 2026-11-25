@@ -13,8 +13,8 @@ const readConcurrency = () => {
 const isCanceled = (error, controller) =>
   controller.signal.aborted || error?.code === 'ERR_CANCELED' || error?.name === 'CanceledError'
 
-// onResult(id, data, { updateFinal })：写回出口信息；onClear(id)：清空出口信息。
-export function useNodeChecks({ onResult, onClear, onFinished }) {
+// onResult(id, data, { updateFinal })：写回出口信息；onFail(id, data, status)：写回失败状态。
+export function useNodeChecks({ onResult, onFail, onFinished }) {
   const [concurrency] = useState(readConcurrency)
   const [checkingIds, setCheckingIds] = useState(() => new Set())
   const [progress, setProgress] = useState(null)
@@ -23,10 +23,10 @@ export function useNodeChecks({ onResult, onClear, onFinished }) {
   const activeCountRef = useRef(0)
   const progressRunRef = useRef(null)
   const mountedRef = useRef(false)
-  const callbacksRef = useRef({ onResult, onClear, onFinished })
+  const callbacksRef = useRef({ onResult, onFail, onFinished })
 
   useEffect(() => {
-    callbacksRef.current = { onResult, onClear, onFinished }
+    callbacksRef.current = { onResult, onFail, onFinished }
   })
 
   const markChecking = useCallback((id, active) => {
@@ -91,11 +91,13 @@ export function useNodeChecks({ onResult, onClear, onFinished }) {
         }
         const { status, data } = error.response || {}
         if (mountedRef.current && !run.cancelled) {
-          if (status === 429 || status >= 500) callbacksRef.current.onClear(id)
+          if (data?.check_status === 'failed') {
+            callbacksRef.current.onFail?.(id, data, status)
+          }
           if (Object.prototype.hasOwnProperty.call(data || {}, 'upstream')) {
             callbacksRef.current.onResult(id, data, { updateFinal: false })
           }
-          run.failures.push({ id, error: data?.error || '' })
+          run.failures.push({ id, error: data?.check_error || data?.error || '' })
         }
       } finally {
         run.controllers.delete(controller)

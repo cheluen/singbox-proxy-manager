@@ -220,6 +220,10 @@ func isMySQLNativeDSN(dsn string) bool {
 }
 
 func normalizeMySQLDSN(raw string) (string, error) {
+	return mysqlDSNForTarget(raw, true)
+}
+
+func mysqlDSNForTarget(raw string, primary bool) (string, error) {
 	dsn := raw
 	if strings.HasPrefix(strings.ToLower(raw), "mysql://") || !isMySQLNativeDSN(raw) {
 		var err error
@@ -232,22 +236,29 @@ func normalizeMySQLDSN(raw string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	config.DBName = normalizeMySQLDatabaseName(config.DBName)
-	config.ClientFoundRows = true
-	_, options, _ := strings.Cut(dsn[strings.LastIndexByte(dsn, '/')+1:], "?")
-	parseTimeSpecified := false
-	tlsSpecified := false
-	for option := range strings.SplitSeq(options, "&") {
-		if strings.HasPrefix(option, "parseTime=") {
-			parseTimeSpecified = true
-		} else if strings.HasPrefix(option, "tls=") {
-			tlsSpecified = true
+	if primary {
+		config.DBName = normalizeMySQLDatabaseName(config.DBName)
+	} else {
+		switch strings.ToLower(config.DBName) {
+		case "", "sys", "mysql", "performance_schema", "information_schema":
+			return "", fmt.Errorf("select a dedicated application database")
 		}
 	}
-	if !parseTimeSpecified {
+	config.ClientFoundRows = true
+	_, options, _ := strings.Cut(dsn[strings.LastIndexByte(dsn, '/')+1:], "?")
+	specified := make(map[string]bool)
+	for option := range strings.SplitSeq(options, "&") {
+		if name, _, ok := strings.Cut(option, "="); ok {
+			specified[name] = true
+		}
+	}
+	if !primary {
+		setMySQLLogTimeouts(config, specified)
+	}
+	if !specified["parseTime"] {
 		config.ParseTime = true
 	}
-	if !tlsSpecified && config.TLSConfig == "" && shouldDefaultMySQLTLS(hostFromMySQLAddr(config.Addr)) {
+	if !specified["tls"] && config.TLSConfig == "" && shouldDefaultMySQLTLS(hostFromMySQLAddr(config.Addr)) {
 		config.TLSConfig = "true"
 	}
 	return config.FormatDSN(), nil

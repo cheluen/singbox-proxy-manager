@@ -1,6 +1,11 @@
 // 文案映射（纯函数）。与组件分开放置，保证组件文件只导出组件。
 export const healthLabel = (health, t) =>
-  ({ healthy: t('status_healthy'), unverified: t('status_unverified_short'), disabled: t('disabled') })[health]
+  ({
+    healthy: t('status_healthy'),
+    untested: t('status_untested_short'),
+    failed: t('status_failed_short'),
+    disabled: t('disabled'),
+  })[health]
 
 export const upstreamModeLabel = (mode, t) =>
   ({ global: t('upstream_follow_global'), custom: t('upstream_custom'), none: t('upstream_direct'), legacy: t('upstream_legacy') })[mode] || mode
@@ -8,7 +13,8 @@ export const upstreamModeLabel = (mode, t) =>
 export const statusOptions = (summary, t) => [
   { value: 'all', label: t('all'), count: summary.total },
   { value: 'healthy', label: t('status_healthy'), count: summary.healthy },
-  { value: 'unverified', label: t('status_unverified_short'), count: summary.unverified },
+  { value: 'untested', label: t('status_untested_short'), count: summary.untested },
+  { value: 'failed', label: t('status_failed_short'), count: summary.failed },
   { value: 'disabled', label: t('disabled'), count: summary.disabled },
 ]
 

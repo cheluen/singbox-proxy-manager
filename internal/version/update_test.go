@@ -94,7 +94,7 @@ func TestUpdateCheckerCheckUsesLatestRelease(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Check failed: %v", err)
 	}
-	if !info.Available || info.CurrentVersion != Version() || info.LatestVersion != "99.0.0" || info.ReleaseURL == "" || info.CheckedAt == "" {
+	if !info.Available || info.CurrentVersion != Version() || info.LatestVersion != "99.0.0" || info.ReleaseURL != "https://github.com/owner/repo/releases/v99.0.0" || info.LatestReleaseURL != "https://github.com/owner/repo/releases/latest" || info.CheckedAt == "" {
 		t.Fatalf("unexpected update info: %+v", info)
 	}
 }
@@ -109,6 +109,9 @@ func TestUpdateCheckerFailureSharesTimestampAndErrorWithCache(t *testing.T) {
 	checker.now = func() time.Time { return now }
 	ctx := context.Background()
 	first, err := checker.Check(ctx)
+	if first.LatestReleaseURL != "https://github.com/owner/repo/releases/latest" {
+		t.Fatalf("missing repository link: %+v", first)
+	}
 	if err == nil || first.Error != err.Error() || first.CheckedAt != now.Format(time.RFC3339) || first.Available || first.CurrentVersion != Version() {
 		t.Fatalf("unexpected first failure: %+v, %v", first, err)
 	}
@@ -121,6 +124,15 @@ func TestUpdateCheckerFailureSharesTimestampAndErrorWithCache(t *testing.T) {
 	expired, err := checker.Check(ctx)
 	if err == nil || expired.CheckedAt != now.Format(time.RFC3339) || requests != 2 {
 		t.Fatalf("expired failure was not refreshed: %+v, %v, requests=%d", expired, err, requests)
+	}
+}
+
+func TestLatestReleaseURLWhenDisabled(t *testing.T) {
+	t.Setenv("SBPM_UPDATE_CHECK_DISABLED", "true")
+	t.Setenv("SBPM_UPDATE_CHECK_REPO", "org/fork")
+	info, err := NewUpdateCheckerFromEnv().Check(context.Background())
+	if err != nil || info.LatestReleaseURL != "https://github.com/org/fork/releases/latest" || info.ReleaseURL != "" {
+		t.Fatalf("disabled check: %+v, %v", info, err)
 	}
 }
 

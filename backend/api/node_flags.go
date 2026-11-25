@@ -59,7 +59,7 @@ func (h *Handler) UpdateNodeFlags(c *gin.Context) {
 	}
 	for _, node := range nodes {
 		if node.ID == id {
-			c.JSON(http.StatusOK, node)
+			c.JSON(http.StatusOK, h.singBoxService.WithPolicyStatus(node))
 			return
 		}
 	}

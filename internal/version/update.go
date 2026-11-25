@@ -20,13 +20,14 @@ const (
 )
 
 type UpdateInfo struct {
-	CurrentVersion string `json:"current_version"`
-	LatestVersion  string `json:"latest_version"`
-	Available      bool   `json:"available"`
-	ReleaseURL     string `json:"release_url,omitempty"`
-	PublishedAt    string `json:"published_at,omitempty"`
-	CheckedAt      string `json:"checked_at,omitempty"`
-	Error          string `json:"error,omitempty"`
+	CurrentVersion   string `json:"current_version"`
+	LatestVersion    string `json:"latest_version"`
+	Available        bool   `json:"available"`
+	ReleaseURL       string `json:"release_url,omitempty"`
+	LatestReleaseURL string `json:"latest_release_url,omitempty"`
+	PublishedAt      string `json:"published_at,omitempty"`
+	CheckedAt        string `json:"checked_at,omitempty"`
+	Error            string `json:"error,omitempty"`
 }
 
 type UpdateChecker struct {
@@ -60,7 +61,7 @@ func NewUpdateCheckerFromEnv() *UpdateChecker {
 }
 
 func (c *UpdateChecker) Check(ctx context.Context) (UpdateInfo, error) {
-	info := UpdateInfo{CurrentVersion: Version()}
+	info := UpdateInfo{CurrentVersion: Version(), LatestReleaseURL: fmt.Sprintf("https://github.com/%s/%s/releases/latest", urlPathEscape(c.owner), urlPathEscape(c.repo))}
 	if c.disabled {
 		info.CheckedAt = c.now().UTC().Format(time.RFC3339)
 		return info, nil

@@ -20,6 +20,23 @@ func writeRuntimeConfigFixture(t *testing.T, service *SingBoxService) {
 	}
 }
 
+func TestColdPreservedPolicyRequiresScheduler(t *testing.T) {
+	service := NewSingBoxService(t.TempDir())
+	data := []byte(`{"inbounds":[{"type":"socks","tag":"internal-policy-dispatch-in","listen":"127.0.0.1","listen_port":32500}]}`)
+	if err := service.saveLastGoodBytes(data); err != nil {
+		t.Fatal(err)
+	}
+	err := service.StartPreservedConfig()
+	status := service.RuntimeStatus()
+	if err == nil || !strings.Contains(err.Error(), "matching scheduler") || status.Running || !status.Degraded || service.features.dispatcher != nil {
+		t.Fatalf("cold policy restore: %+v, %v", status, err)
+	}
+	last, err := os.ReadFile(service.lastGoodConfigPath())
+	if err != nil || string(last) != string(data) {
+		t.Fatal("recovery changed the saved policy configuration")
+	}
+}
+
 func TestSingBoxWatcherReportsUnexpectedExitAndSecuresFiles(t *testing.T) {
 	configDir := t.TempDir()
 	stableMarker := filepath.Join(t.TempDir(), "stable")
@@ -40,6 +57,7 @@ exit 17
 	t.Setenv("SINGBOX_BINARY", fakeBinary)
 	t.Setenv("SBPM_SINGBOX_STARTUP_GRACE", "10ms")
 	t.Setenv("SBPM_SINGBOX_RECOVERY_MAX_ATTEMPTS", "3")
+	t.Setenv("SBPM_SINGBOX_LOG_OUTPUT", "file")
 	t.Setenv("SBPM_SINGBOX_RECOVERY_BASE_DELAY", "10ms")
 	t.Setenv("SBPM_SINGBOX_RECOVERY_MAX_DELAY", "20ms")
 	t.Setenv("SBPM_SINGBOX_RECOVERY_STABLE_WINDOW", "1s")

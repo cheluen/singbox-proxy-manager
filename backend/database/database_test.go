@@ -5,9 +5,40 @@ import (
 	"log"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/go-sql-driver/mysql"
 )
+
+func TestIndependentMySQLLogTimeouts(t *testing.T) {
+	for _, address := range []string{"mysql://user@127.0.0.1:3306/logs", "user@tcp(127.0.0.1:3306)/logs"} {
+		for _, test := range []struct {
+			query             string
+			dial, read, write time.Duration
+		}{
+			{"", 5 * time.Second, 5 * time.Second, 5 * time.Second},
+			{"?readTimeout=13s", 5 * time.Second, 13 * time.Second, 5 * time.Second},
+			{"?timeout=1s&readTimeout=0s&writeTimeout=3s", time.Second, 0, 3 * time.Second},
+		} {
+			dsn, err := mysqlDSNForTarget(address+test.query, false)
+			if err != nil {
+				t.Fatal(err)
+			}
+			cfg, err := mysql.ParseDSN(dsn)
+			if err != nil || cfg.Timeout != test.dial || cfg.ReadTimeout != test.read || cfg.WriteTimeout != test.write {
+				t.Fatalf("independent log timeouts %s: %v", test.query, err)
+			}
+		}
+		dsn, err := normalizeMySQLDSN(address)
+		if err != nil {
+			t.Fatal(err)
+		}
+		cfg, err := mysql.ParseDSN(dsn)
+		if err != nil || cfg.Timeout != 0 || cfg.ReadTimeout != 0 || cfg.WriteTimeout != 0 {
+			t.Fatal("independent logger changed primary database defaults")
+		}
+	}
+}
 
 func TestLogSelectedDatabaseDoesNotExposeTursoCredentials(t *testing.T) {
 	originalWriter := log.Writer()

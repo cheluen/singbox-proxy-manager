@@ -1,6 +1,6 @@
 # 配置、数据库与运维指南
 
-本文档提供 SingBox Proxy Manager（`1.7.29`）完整的环境变量参考、多数据库配置、数据持久化、健康检查、安全加固与故障排查指南。
+本文档提供 SingBox Proxy Manager（`1.7.30`）完整的环境变量参考、多数据库配置、数据持久化、健康检查、安全加固与故障排查指南。
 
 ---
 
@@ -23,11 +23,11 @@
 | `PORT` | `30000` | 端口号字符串 | R | 管理后台 HTTP 监听端口 |
 | `BIND_ADDRESS` | `0.0.0.0` | IPv4 / IPv6 地址（自动剥离 IPv6 方括号） | R | **仅控制管理后台 HTTP 监听地址**；节点入站始终写为 `::` |
 | `CONFIG_DIR` | 二进制 `./config`<br/>容器 `/app/config` | 目录路径 | R | 存放 SQLite 数据库、`config.json`、`last-good`、内置内核与日志文件 |
-| `TZ` | `UTC+8` | IANA 时区或 `UTC/GMT` 偏移 | R | 全局时区；解析失败时回退 `Asia/Shanghai` 或固定 `UTC+08` |
+| `TZ` | `Asia/Shanghai`（容器） | IANA 时区或 `UTC/GMT` 偏移 | R | 兼容已有的 `UTC+8` 配置，解析失败时回退 `Asia/Shanghai` 或固定 `UTC+08`。 |
 | `ACCEPT_USER_AGREEMENT` | `false` | `true` / `yes` / `y` / `1`（不区分大小写） | R | 位于 `.env` 中 `ADMIN_PASSWORD` 上方。二进制首次在交互式终端运行时会打印 `USER_AGREEMENT.md` 并要求输入 `y` 同意（同意哈希保存至 `<CONFIG_DIR>/user-agreement.accepted`）；Docker 或非交互式运行须显式设为 `true`，否则在建库与释放内核前直接退出 |
 | `ADMIN_PASSWORD` | 无默认密码 | 非空，上限 `72` UTF-8 字节 | R | 新库首次启动必填；老库已有有效密码时可留空；老库已有有效密码但尚未记录环境指纹时，首次设置仅登记指纹、不会覆盖旧密码或吊销会话；此后更改为新非空值并重启才会覆盖密码并吊销全部会话 |
 | `TRUSTED_PROXIES` | 空（不信任任何代理） | 逗号分隔 IP / CIDR | R | 反向代理可信列表（如 `127.0.0.1,10.0.0.0/8`），供 Gin 获取真实客户端 IP 用于登录限流 |
-| `CORS_ALLOWED_ORIGINS` | 空（关闭跨域） | 逗号分隔精确 Origin | R | 跨域白名单（忽略 `*`）；允许方法为 `GET/POST/PUT/DELETE/OPTIONS`（不含 `PATCH`） |
+| `CORS_ALLOWED_ORIGINS` | 空（关闭跨域） | 逗号分隔精确 Origin | R | 跨域白名单（忽略 `*`）；允许方法为 `GET/POST/PUT/PATCH/DELETE/OPTIONS` |
 | `API_MAX_BODY_BYTES` | `1048576`（1 MiB） | 整数；`<= 0` 关闭限制 | R | API 请求正文最大字节数 |
 | `HTTP_READ_HEADER_TIMEOUT` | `5s` | Go duration | R | HTTP 读取请求头超时 |
 | `HTTP_READ_TIMEOUT` | `15s` | Go duration | R | HTTP 完整请求读取超时 |
@@ -59,7 +59,7 @@
 | `SBPM_UPSTREAM_CHECK_TIMEOUT` | `30s` | `1s–5m` | R | 前置代理测 IP 总时限（含等待槽位时间） |
 | `SBPM_BATCH_IMPORT_VALIDATION_TIMEOUT` | `45s` | `100ms–2m` | R | 批量导入从候选预检到最终提交的校验总时限（不含订阅抓取展开耗时） |
 | `SBPM_SINGBOX_STARTUP_GRACE` | `1s` | `10ms–30s` | R | `sing-box` 启动后判定存活稳定的观察窗口 |
-| `SBPM_SINGBOX_LOG_OUTPUT` | 二进制 `file`<br/>Docker `stdout` | `file` / `stdout` / `both` | R | `sing-box` 日志输出目标；设为 `file` 或 `both` 时写入 `<CONFIG_DIR>/singbox.log`（权限 `0600`） |
+| `SBPM_SINGBOX_LOG_OUTPUT` | `stdout` | `file` / `stdout` / `both` | R | 内核进程输出目标。显式选择 `file` 或 `both` 会另存 `<CONFIG_DIR>/singbox.log`（权限 `0600`）。 |
 | `SBPM_SINGBOX_LOG_MAX_BYTES` | `10485760`（10 MiB） | 正整数 | R | 单个 `singbox.log` 轮转阈值 |
 | `SBPM_SINGBOX_LOG_BACKUPS` | `3` | `1–100` | R | 历史轮转日志保留份数 |
 | `SBPM_SINGBOX_RECOVERY_MAX_ATTEMPTS` | `5` | `1–100` | R | 异常退出后的最大自动恢复重试次数 |
@@ -131,11 +131,13 @@
 - **MySQL / TiDB**：支持 `mysql://` 与标准 `@tcp/@unix` DSN；未显式配置时默认开启 `parseTime`（不覆盖显式 `parseTime=false`），强制开启 `clientFoundRows`；连接公网主机在未显式指定 `tls` 参数时默认启用 TLS（显式 `tls=false` 或空 `tls=` 均会被保留），节点/配置字段自动使用 `LONGTEXT NOT NULL`。
 - **Turso / libSQL**：固定 1 打开 / 0 空闲 / 1ns 连接寿命以规避驱动会话复用异常。
 
-数据库启动后自动创建并增量补齐四张应用表（无独立 `schema_version` 表）：
-- `proxy_nodes`：节点出站配置、入站端口/认证/复用、前置代理定义、检测结果与排序。
-- `settings`：全局单例配置、管理员密码与环境指纹、`auth_generation`、端口策略、全局前置代理及前端节点列表自定义列宽（`node_list_column_widths`）。
+数据库启动后自动创建并增量补齐核心应用表（无独立 `schema_version` 表）：
+- `node_groups`：节点分组定义、分组排序、端口分配开关（`allocate_port`）、分组起始端口（`start_port`）、独立订阅链接/定时周期与同步状态。
+- `proxy_nodes`：节点所属分组（`group_id`）、出站/策略配置、入站端口（无端口存 `NULL`）/认证/复用、前置代理定义、出口检测状态（`check_status` / `check_error`）与订阅同步标识（`subscription_key` / `subscription_name`）。
+- `settings`：全局单例配置、管理员密码与环境指纹、`auth_generation`、保留端口策略、全局前置代理、前端节点列表自定义列宽（`node_list_column_widths`）及日志持久化配置（`log_settings_json`）。
 - `admin_sessions`：登录会话 SHA-256 哈希、密码代次、有效期、登录 IP 与 User-Agent。
 - `manager_instance_lock`：单实例数据库租约锁。
+- `log_events` / `traffic_buckets`（按需创建）：仅当管理员显式启用日志持久化并选择 `store_mode=primary` 时在主库自动创建；选择 `local_sqlite` 或 `independent` 时创建在对应日志目标库中。
 
 ### 3.2 单实例约束（重要）
 
@@ -154,15 +156,16 @@
 ```text
 config/
 ├── user-agreement.accepted   # 交互式首次同意用户协议后的 SHA-256 校验记录（权限 0600）
-├── proxy.db                  # 本地 SQLite 数据库（仅 SQLite 模式生成）
-├── config.json               # 当前生效的 sing-box 运行配置（权限 0600）
+├── proxy.db                  # 本地 SQLite 主数据库（仅 SQLite 模式生成）
+├── logs.db                   # 本地独立日志/流量 SQLite 数据库（仅启用 local_sqlite 持久化时生成，权限 0600）
+├── config.json               # 当前生效的 sing-box 运行配置（含本机控制凭证，权限 0600）
 ├── config.json.last-good     # 最近一次成功启动的配置备份（权限 0600）
 ├── singbox.log               # sing-box 文件日志（仅 LOG_OUTPUT=file/both 时生成，权限 0600）
 └── kernels/
     └── sing-box-<sha256>     # 统一发行版自动释放并校验的内核（权限 0700）
 ```
 
-> **容器健康检查（Docker `HEALTHCHECK`）**：`Dockerfile` 与 `Dockerfile.release` 均内置 `HEALTHCHECK --interval=30s --timeout=5s --start-period=15s --retries=3 CMD ["/app/singbox-proxy-manager", "--healthcheck"]`。探针绕过环境代理直接探测本机管理服务 `GET /api/health`（验证 HTTP 服务响应及数据库连接池存活），无需在容器内额外安装 `curl` / `wget`。
+> **容器基础镜像与健康检查（Docker `HEALTHCHECK`）**：`Dockerfile` 与 `Dockerfile.release` 均基于轻量 `alpine:3.24` 构建，内置 `ca-certificates`、`tzdata` 与 `HEALTHCHECK --interval=30s --timeout=5s --start-period=15s --retries=3 CMD ["/app/singbox-proxy-manager", "--healthcheck"]`。探针绕过环境代理直接探测本机管理服务 `GET /api/health`（验证 HTTP 服务响应及数据库连接池存活），无需在容器内额外安装 `curl` / `wget`。
 
 > **数据敏感性提示**：除管理员密码、环境指纹（bcrypt）与会话 Token（SHA-256）外，数据库与 `config.json` 中的节点出站密钥、前置代理凭据及入站账密均以可读取形式存储。请务必妥善管控宿主机文件权限（`chmod 600 .env`、`chmod 700 config`）并避免将其提交到任何仓库或公开备份。
 
@@ -178,7 +181,9 @@ config/
 
 ### 5.1 版本升级与模式切换
 
-> **从 `1.7.27` 及更早版本升级必读**：自 `1.7.28` 起新增用户协议首次确认门禁。升级前请先阅读 [`USER_AGREEMENT.md`](../USER_AGREEMENT.md)，并在原有 `.env` 的 `ADMIN_PASSWORD` 上方补充 `ACCEPT_USER_AGREEMENT=true`（独立二进制也可在交互式终端首次启动时输入 `y` 同意），否则 Docker 或 `systemd` 等非交互无人值守启动会拒绝启动并退出。
+> **版本原地升级说明**：
+> - **从 `1.7.29` 升级至 `1.7.30`**：四类数据库均支持自动原地升级——系统会创建默认分组并继承原全局 `start_port`，完整保留全部节点的 ID、端口、固定标记、账密、备注与排序；无端口节点在数据库中以 `NULL` 存储，API 层统一返回 `0`。
+> - **从 `1.7.27` 及更早版本升级必读**：自 `1.7.28` 起新增用户协议首次确认门禁。升级前请先阅读 [`USER_AGREEMENT.md`](../USER_AGREEMENT.md)，并在原有 `.env` 的 `ADMIN_PASSWORD` 上方补充 `ACCEPT_USER_AGREEMENT=true`（独立二进制也可在交互式终端首次启动时输入 `y` 同意），否则 Docker 或 `systemd` 等非交互无人值守启动会拒绝启动并退出。
 
 - **Docker Compose（GHCR 预构建镜像）**：
   ```bash
@@ -213,3 +218,23 @@ GitHub Release 提供 `LICENSE`、`THIRD_PARTY_NOTICES.md`、`USER_AGREEMENT.md`
 | 代理端口无法连接 | 1) 检查节点是否处于「启用」状态；2) 宿主机使用 `ss -tulpn` 确认对应入站端口已监听；3) 检查云安全组与宿主机防火墙规则；4) 如开启了入站认证，确认账密匹配。 |
 | 出口 IP 检测超时或报 `429` | 1) 确认节点自身出站链路连通；2) 单个检测默认先走 HTTP 入站失败再回退 SOCKS5，内置 7 个公共检测接口在高并发时可能触发上游限流，可调低 `SBPM_BATCH_CHECK_IP_CONCURRENCY` 或通过 `SBPM_IPCHECK_URLS` 指定自建检测接口。 |
 | 远程订阅链接导入失败 | 本程序强制拒绝指向内网/回环/保留 IP 的订阅地址，并拦截返回 HTML 登录页/错误页的链接；若源链接本身是 HTTP 代理而非订阅，请在批量导入弹窗将来源类型切换为「HTTP 代理」或在 URL 参数中附带 `proxy=1`。 |
+
+### 策略与连接采集
+
+故障转移与负载均衡使用本机 SOCKS5 调度器承载 TCP CONNECT，支持 IPv4、IPv6 和域名。启用策略后才启动调度器和健康探测。调度器通过单个认证回环入口选择实体成员，优先尝试健康成员。若备选成员连通同一目标，调度器立即对之前失败的成员发起健康探测，再按探测结果更新成员状态。若所有成员均失败，则保留已有健康状态，交由下一次探测更新。未指定健康 URL 时探测 `1.1.1.1:443` 的 TCP 连通性。自定义 HTTP(S) 健康端点须对 `HEAD` 返回 200 至 399。
+
+内核 Clash 控制接口监听随机 `127.0.0.1` 端口并使用随机令牌。仅查看当前连接、调用快照或启用日志持久化时采集。`config.json` 和恢复快照包含本机控制凭证，请保持其权限为 `0600`。内核重载会产生新的采样周期。
+
+### 日志存储
+
+默认在内存中保留最近 1000 条面板和内核日志。内核子进程输出在分流至控制台、轮转文件与面板缓冲前会先执行行级脱敏（拦截认证失败凭据、非实时时间戳续行及已配置的节点/内部控制密钥）。管理员在日志面板显式保存后才能启用批量落盘和分钟级流量采样。`min_level` 可选 `INFO`、`WARN`、`ERROR`。默认保留 7 天、上限 200 MiB，两项均可设为 `0` 以取消对应限制。
+
+| `store_mode` | 存放位置 |
+| --- | --- |
+| `local_sqlite` | 默认为 `<CONFIG_DIR>/logs.db`，可指定配置目录内的专用 SQLite 文件。首次创建权限为 `0600`。 |
+| `primary` | 在现有业务数据库中建立 `log_events`、`traffic_buckets`。轮转仅清理这两个表。 |
+| `independent` | 提供 `sqlite` 文件路径、`mysql` 或 `postgres` DSN，或使用 `turso` URL 和令牌。MySQL 的库名取自该连接串。 |
+
+本地专用 SQLite 根据文件实际大小清理并回收空闲页，主库和远程库按保留天数和日志表估算容量清理。本地 SQLite 主库在清理后截断 WAL，已启用增量回收时也释放空闲页。目标库需要连接、建表、建索引、读写和删除权限。日志库凭据保存在主库，管理接口只回显掩码。退出、重载、停用或切库时会刷新缓冲区。旧日志库不可写时仍可切换或停用，丢弃的缓冲记录计入 `dropped_events` 并产生面板警告。
+
+开启持久化后的首份成功快照为已有连接建立计数基线。后续快照按增量计入分钟桶，新出现的连接从其当前累计字节开始计数。官方内核仅在 `/connections` 暴露当前活跃连接。采样间隙内已经结束的短连接及结束前的尾部字节可能漏计。日志库提交结果未知时，该批次计入 `dropped_events` 并停止重试，避免流量重复累加。统计适用于运行观察。

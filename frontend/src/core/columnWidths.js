@@ -5,14 +5,14 @@ export const NODE_LIST_COLUMN_KEYS = ['name', 'port', 'user', 'pass', 'type', 's
 
 export const NODE_LIST_COLUMN_LIMITS = {
   name: { min: 84, max: 520, fallbackMin: 108 },
-  port: { min: 72, max: 240, fallbackMin: 98 },
+  port: { min: 68, max: 180, fallbackMin: 78 },
   user: { min: 64, max: 420, fallbackMin: 88 },
   pass: { min: 84, max: 480, fallbackMin: 108 },
   type: { min: 60, max: 220, fallbackMin: 78 },
   server: { min: 72, max: 560, fallbackMin: 90 },
   region: { min: 44, max: 200, fallbackMin: 54 },
   ip: { min: 72, max: 360, fallbackMin: 88 },
-  latency: { min: 52, max: 200, fallbackMin: 68 },
+  latency: { min: 58, max: 160, fallbackMin: 64 },
 }
 
 export function clampColumnWidth(key, raw) {
@@ -44,9 +44,9 @@ export function columnWidthsEqual(a, b) {
 }
 
 const FALLBACK_MIN_BY_BREAKPOINT = {
-  wide: { name: 108, port: 98, user: 88, pass: 108, type: 78, server: 90, region: 54, ip: 88, latency: 68 },
-  medium: { name: 96, port: 96, user: 88, pass: 112, type: 76, server: 90, region: 52, latency: 64 },
-  compact: { name: 80, port: 94, user: 88, pass: 104, type: 76, region: 50, latency: 60 },
+  wide: { name: 108, port: 78, user: 88, pass: 108, type: 78, server: 90, region: 54, ip: 88, latency: 64 },
+  medium: { name: 96, port: 76, user: 88, pass: 112, type: 76, server: 90, region: 52, latency: 62 },
+  compact: { name: 80, port: 74, user: 88, pass: 104, type: 76, region: 50, latency: 60 },
 }
 
 // 依据当前视口断点计算可见列组合及表格最小总宽，确保自定义列宽超出视口时可水平滚动而不挤压重叠。

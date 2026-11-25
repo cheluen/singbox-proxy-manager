@@ -3,6 +3,7 @@ package services
 import (
 	"context"
 	"crypto/sha256"
+	"encoding/json"
 	"fmt"
 	"os"
 	"sync"
@@ -15,6 +16,7 @@ type RuntimeApplier struct {
 }
 
 type RuntimePlan struct {
+	wiring     *runtimeWiring
 	configJSON []byte
 	hash       string
 }
@@ -25,6 +27,7 @@ type runtimeFileState struct {
 }
 
 type runtimeApplySnapshot struct {
+	wiring         *runtimeWiring
 	current        runtimeFileState
 	lastGood       runtimeFileState
 	status         SingBoxRuntimeStatus
@@ -56,14 +59,24 @@ func (a *RuntimeApplier) PrepareContext(
 	if a == nil || a.service == nil {
 		return nil, fmt.Errorf("runtime applier is not configured")
 	}
-	configJSON, err := a.service.BuildGlobalConfigContext(ctx, nodes, settings...)
+	var cfg models.Settings
+	if len(settings) > 0 {
+		cfg = settings[0]
+	}
+	w, err := newWiring(nodes, cfg)
+	if err != nil {
+		return nil, err
+	}
+	configJSON, err := a.service.buildWiredConfig(ctx, nodes, cfg, w)
 	if err != nil {
 		return nil, fmt.Errorf("runtime build stage failed: %w", err)
 	}
 	if err := a.service.ValidateConfigContext(ctx, configJSON); err != nil {
 		return nil, fmt.Errorf("runtime validation stage failed: %w", err)
 	}
+	w.hash = runtimeConfigHash(configJSON)
 	return &RuntimePlan{
+		wiring:     w,
 		configJSON: configJSON,
 		hash:       runtimeConfigHash(configJSON),
 	}, nil
@@ -138,6 +151,9 @@ func (s *SingBoxService) captureRuntimeApplySnapshot() (runtimeApplySnapshot, er
 		processRunning: s.process != nil,
 	}
 	s.mu.RUnlock()
+	s.features.mu.RLock()
+	snapshot.wiring = s.features.wiring
+	s.features.mu.RUnlock()
 	return snapshot, nil
 }
 
@@ -175,6 +191,13 @@ func (s *SingBoxService) beginRuntimeApply(plan RuntimePlan) (*RuntimeApplyTrans
 }
 
 func (s *SingBoxService) applyRuntimeCandidateLocked(plan RuntimePlan) (string, error) {
+	if plan.wiring == nil {
+		var err error
+		plan.wiring, err = s.preservedWiring(plan.configJSON, plan.hash)
+		if err != nil {
+			return "write", err
+		}
+	}
 	s.setApplyStage("writing", plan.hash)
 	if err := s.writeConfigFile(plan.configJSON); err != nil {
 		return "write", err
@@ -183,6 +206,9 @@ func (s *SingBoxService) applyRuntimeCandidateLocked(plan RuntimePlan) (string, 
 	if err := s.stopProcessLocked(); err != nil {
 		return "stop", err
 	}
+	s.features.mu.Lock()
+	s.features.wiring = plan.wiring
+	s.features.mu.Unlock()
 	if err := s.startProcessLocked(plan.hash); err != nil {
 		return "start", err
 	}
@@ -194,6 +220,28 @@ func (s *SingBoxService) applyRuntimeCandidateLocked(plan RuntimePlan) (string, 
 
 	s.setApplyStage("ready", plan.hash)
 	return "", nil
+}
+
+func (s *SingBoxService) preservedWiring(data []byte, hash string) (*runtimeWiring, error) {
+	s.features.mu.RLock()
+	wiring := s.features.wiring
+	s.features.mu.RUnlock()
+	if wiring != nil && wiring.hash == hash {
+		return wiring, nil
+	}
+	var config struct {
+		Inbounds []struct {
+			Tag string `json:"tag"`
+		} `json:"inbounds"`
+	}
+	if json.Unmarshal(data, &config) == nil {
+		for _, inbound := range config.Inbounds {
+			if inbound.Tag == dispatchTag {
+				return nil, fmt.Errorf("preserved policy configuration requires its matching scheduler; reapply nodes from the database")
+			}
+		}
+	}
+	return nil, nil
 }
 
 func (s *SingBoxService) setApplyStage(stage string, desiredHash string) {
@@ -237,6 +285,9 @@ func (s *SingBoxService) rollbackRuntimeApplyLocked(
 	}
 
 	fallback := selectRuntimeFallback(snapshot)
+	s.features.mu.Lock()
+	s.features.wiring = snapshot.wiring
+	s.features.mu.Unlock()
 	if err := restoreRuntimeFile(s.ConfigPath(), fallback); err != nil {
 		rollbackErr = combineRuntimeErrors(rollbackErr, fmt.Errorf("restore live config: %w", err))
 	}

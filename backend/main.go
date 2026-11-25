@@ -8,6 +8,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"io"
 	"io/fs"
 	"log"
 	"mime"
@@ -272,6 +273,12 @@ func main() {
 
 	// Initialize handler
 	handler := api.NewHandler(db, singBoxService)
+	observability := services.NewObservability(db, singBoxService)
+	panelOutput := log.Writer()
+	log.SetOutput(io.MultiWriter(panelOutput, observability.Writer("panel")))
+	if err := observability.Restore(context.Background()); err != nil {
+		log.Printf("Failed to activate saved log storage: %v", err)
+	}
 
 	apiGroup := r.Group("/api")
 
@@ -281,9 +288,18 @@ func main() {
 	// Protected routes
 	authorized := apiGroup.Group("")
 	authorized.Use(handler.AuthMiddleware())
+	handler.RegisterObservabilityRoutes(authorized, observability)
 	{
 		// Node management
 		authorized.GET("/nodes", handler.GetNodes)
+		authorized.GET("/node-groups", handler.GetGroups)
+		authorized.GET("/node-groups/:id", handler.GetGroup)
+		authorized.POST("/node-groups", handler.CreateGroup)
+		authorized.PATCH("/node-groups/:id", handler.UpdateGroup)
+		authorized.DELETE("/node-groups/:id", handler.DeleteGroup)
+		authorized.POST("/node-groups/reorder", handler.ReorderGroups)
+		authorized.POST("/node-groups/:id/subscription/refresh", handler.RefreshSubscription)
+		authorized.POST("/nodes/batch-move", handler.BatchMoveNodes)
 		authorized.GET("/nodes/:id", handler.GetNode)
 		authorized.POST("/nodes", handler.CreateNode)
 		authorized.POST("/nodes/batch-import", handler.BatchImportNodes)
@@ -321,11 +337,15 @@ func main() {
 	// Start sing-box only after the web stack is fully prepared.
 	startSingBoxFromDatabase(db, singBoxService, configDir)
 
+	workCtx, stopWork := context.WithCancel(leaseMonitorCtx)
+	schedulerCtx, stopScheduler := context.WithCancel(workCtx)
+	schedulerDone := handler.StartSubscriptionScheduler(schedulerCtx)
 	listenAddress := net.JoinHostPort(bindAddress, configuredPort())
 	log.Printf("Server starting on %s", listenAddress)
 	srv := &http.Server{
 		Addr:              listenAddress,
 		Handler:           r,
+		BaseContext:       func(net.Listener) context.Context { return workCtx },
 		ReadHeaderTimeout: readDurationEnv("HTTP_READ_HEADER_TIMEOUT", 5*time.Second),
 		ReadTimeout:       readDurationEnv("HTTP_READ_TIMEOUT", 15*time.Second),
 		WriteTimeout:      readDurationEnv("HTTP_WRITE_TIMEOUT", 2*time.Minute),
@@ -346,6 +366,7 @@ func main() {
 	shutdownHTTP := true
 	select {
 	case err := <-serverErr:
+		stopWork()
 		shutdownHTTP = false
 		if err != nil && err != http.ErrServerClosed {
 			log.Printf("Failed to start server: %v", err)
@@ -354,12 +375,15 @@ func main() {
 	case sig := <-quit:
 		log.Printf("Received signal %s, shutting down gracefully", sig)
 	case leaseErr, ok := <-leaseErrors:
+		stopWork()
 		if !ok {
 			leaseErr = errors.New("database lease monitor stopped unexpectedly")
 		}
 		log.Printf("Lost single-instance database lease, shutting down: %v", leaseErr)
 		exitCode = 1
 	}
+	stopScheduler()
+	stopWork()
 	if shutdownHTTP {
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		if err := srv.Shutdown(shutdownCtx); err != nil {
@@ -367,6 +391,7 @@ func main() {
 		}
 		cancel()
 	}
+	<-schedulerDone
 
 	// Stop the sing-box child after the HTTP server has drained: in-flight API
 	// requests may restart sing-box, so stopping it first could resurrect it.
@@ -374,6 +399,11 @@ func main() {
 		log.Printf("Failed to stop sing-box: %v", err)
 	} else {
 		log.Println("Sing-box stopped")
+	}
+	log.SetOutput(panelOutput)
+	if err := observability.Close(); err != nil {
+		log.Printf("Failed to flush log storage: %v", err)
+		exitCode = 1
 	}
 	cancelLeaseMonitor()
 	leaseReleaseCtx, cancelLeaseRelease := context.WithTimeout(context.Background(), 5*time.Second)
@@ -703,7 +733,7 @@ func apiCorsMiddlewareFromEnv() gin.HandlerFunc {
 			if _, ok := allowedSet[origin]; ok {
 				c.Writer.Header().Set("Access-Control-Allow-Origin", origin)
 				c.Writer.Header().Add("Vary", "Origin")
-				c.Writer.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
+				c.Writer.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, PATCH, DELETE, OPTIONS")
 				c.Writer.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization")
 			}
 		}

@@ -18,15 +18,23 @@ import (
 
 // ProxyNode represents a proxy node configuration
 type ProxyNode struct {
-	ID                int    `json:"id"`
-	Name              string `json:"name"`
-	Remark            string `json:"remark"`
-	Type              string `json:"type"`   // ss, vless, vmess, hy2, tuic, trojan, anytls, socks5, socks5h, http, wireguard, direct
-	Config            string `json:"config"` // JSON string of protocol-specific config
-	InboundPort       int    `json:"inbound_port"`
-	InboundPortPinned bool   `json:"inbound_port_pinned"`
-	Username          string `json:"username"`
-	Password          string `json:"password"`
+	*PolicyStatus
+	ID                int        `json:"id"`
+	GroupID           int        `json:"group_id"`
+	SubscriptionKey   string     `json:"-"`
+	SubscriptionName  string     `json:"-"`
+	CheckStatus       string     `json:"check_status"`
+	CheckError        string     `json:"check_error"`
+	CheckedAt         *time.Time `json:"checked_at,omitempty"`
+	CheckRevision     int        `json:"-"`
+	Name              string     `json:"name"`
+	Remark            string     `json:"remark"`
+	Type              string     `json:"type"`   // ss, vless, vmess, hy2, tuic, trojan, anytls, socks5, socks5h, http, wireguard, direct
+	Config            string     `json:"config"` // JSON string of protocol-specific config
+	InboundPort       int        `json:"inbound_port"`
+	InboundPortPinned bool       `json:"inbound_port_pinned"`
+	Username          string     `json:"username"`
+	Password          string     `json:"password"`
 	// TCPReuseEnabled controls whether username+route-number routing can target this node.
 	TCPReuseEnabled     bool      `json:"tcp_reuse_enabled"`
 	UpstreamMode        string    `json:"upstream_mode"`
@@ -446,7 +454,6 @@ type WireGuardConfig struct {
 
 // Settings contains the settings used by the runtime and the admin panel.
 type Settings struct {
-	StartPort                 int            `json:"start_port"`
 	PreserveInboundPorts      bool           `json:"preserve_inbound_ports"`
 	GlobalUpstreamEnabled     bool           `json:"global_upstream_enabled"`
 	GlobalUpstreamType        string         `json:"global_upstream_type"`
@@ -485,6 +492,9 @@ var ErrAdminPasswordRequired = errors.New("ADMIN_PASSWORD is required when the d
 // InitDB initializes the database
 func InitDB(db *sql.DB) error {
 	dialect := appdb.DialectFor(db)
+	if err := createGroupTable(db, dialect); err != nil {
+		return err
+	}
 	if err := createSchema(db, dialect); err != nil {
 		return err
 	}
@@ -509,6 +519,9 @@ func InitDB(db *sql.DB) error {
 		}
 	}
 
+	if err := migrateGroupNodes(db, dialect); err != nil {
+		return fmt.Errorf("migrate grouped nodes: %w", err)
+	}
 	// Clean up expired or password-generation-invalidated sessions opportunistically.
 	now := time.Now().Unix()
 	_, _ = db.Exec(`
@@ -640,6 +653,15 @@ func createSchema(db *sql.DB, dialect appdb.Dialect) error {
 			continue
 		}
 		if _, err := db.Exec(migration.AlterSQL); err != nil {
+			return err
+		}
+	}
+	if _, ok := columnsByTable["settings"]["log_settings_json"]; !ok {
+		definition := "TEXT NOT NULL DEFAULT '{}'"
+		if dialect == appdb.DialectMySQL {
+			definition = "TEXT NULL"
+		}
+		if _, err := db.Exec("ALTER TABLE settings ADD COLUMN log_settings_json " + definition); err != nil {
 			return err
 		}
 	}
@@ -777,10 +799,14 @@ func schemaStatements(dialect appdb.Dialect) []string {
 			`CREATE TABLE IF NOT EXISTS proxy_nodes (
 				id BIGSERIAL PRIMARY KEY,
 				name TEXT NOT NULL,
+				group_id BIGINT NOT NULL CONSTRAINT fk_proxy_group REFERENCES node_groups(id),
+				subscription_key VARCHAR(64) NOT NULL DEFAULT '', subscription_name VARCHAR(255) NOT NULL DEFAULT '',
+				check_status VARCHAR(16) NOT NULL DEFAULT 'untested', check_error VARCHAR(2048) NOT NULL DEFAULT '',
+				checked_at TIMESTAMPTZ NULL, check_revision BIGINT NOT NULL DEFAULT 0,
 				remark TEXT NOT NULL DEFAULT '',
 				type TEXT NOT NULL,
 				config TEXT NOT NULL,
-				inbound_port INTEGER NOT NULL,
+				inbound_port INTEGER,
 				inbound_port_pinned BOOLEAN NOT NULL DEFAULT FALSE,
 				username TEXT NOT NULL DEFAULT '',
 				password TEXT NOT NULL DEFAULT '',
@@ -837,10 +863,14 @@ func schemaStatements(dialect appdb.Dialect) []string {
 			`CREATE TABLE IF NOT EXISTS proxy_nodes (
 				id BIGINT NOT NULL AUTO_INCREMENT PRIMARY KEY,
 				name VARCHAR(255) NOT NULL,
+				group_id BIGINT NOT NULL, CONSTRAINT fk_proxy_group FOREIGN KEY (group_id) REFERENCES node_groups(id),
+				subscription_key VARCHAR(64) NOT NULL DEFAULT '', subscription_name VARCHAR(255) NOT NULL DEFAULT '',
+				check_status VARCHAR(16) NOT NULL DEFAULT 'untested', check_error VARCHAR(2048) NOT NULL DEFAULT '',
+				checked_at DATETIME(6) NULL, check_revision BIGINT NOT NULL DEFAULT 0,
 				remark VARCHAR(1024) NOT NULL DEFAULT '',
 				type VARCHAR(64) NOT NULL,
 				config LONGTEXT NOT NULL,
-				inbound_port INTEGER NOT NULL,
+				inbound_port INTEGER,
 				inbound_port_pinned BOOLEAN NOT NULL DEFAULT FALSE,
 				username VARCHAR(255) NOT NULL DEFAULT '',
 				password VARCHAR(255) NOT NULL DEFAULT '',
@@ -897,10 +927,14 @@ func schemaStatements(dialect appdb.Dialect) []string {
 			`CREATE TABLE IF NOT EXISTS proxy_nodes (
 				id INTEGER PRIMARY KEY AUTOINCREMENT,
 				name TEXT NOT NULL,
+				group_id INTEGER NOT NULL REFERENCES node_groups(id),
+				subscription_key TEXT NOT NULL DEFAULT '', subscription_name TEXT NOT NULL DEFAULT '',
+				check_status TEXT NOT NULL DEFAULT 'untested', check_error TEXT NOT NULL DEFAULT '',
+				checked_at DATETIME NULL, check_revision INTEGER NOT NULL DEFAULT 0,
 				remark TEXT DEFAULT '',
 				type TEXT NOT NULL,
 				config TEXT NOT NULL,
-				inbound_port INTEGER NOT NULL,
+				inbound_port INTEGER,
 				inbound_port_pinned INTEGER NOT NULL DEFAULT 0,
 				username TEXT DEFAULT '',
 				password TEXT DEFAULT '',
@@ -1050,7 +1084,7 @@ func loadSchemaColumns(db *sql.DB, dialect appdb.Dialect, table string) (map[str
 	switch dialect {
 	case appdb.DialectPostgres:
 		rows, err = db.Query(`
-			SELECT column_name
+			SELECT column_name, is_nullable
 			FROM information_schema.columns
 			WHERE table_schema = current_schema()
 			  AND table_name = ?
@@ -1076,12 +1110,16 @@ func loadSchemaColumns(db *sql.DB, dialect appdb.Dialect, table string) (map[str
 		var metadata schemaColumn
 		switch dialect {
 		case appdb.DialectPostgres:
-			err = rows.Scan(&name)
+			err = rows.Scan(&name, &metadata.isNullable)
 		case appdb.DialectMySQL:
 			err = rows.Scan(&name, &metadata.dataType, &metadata.isNullable, &metadata.defaultValue)
 		default:
 			var columnID, notNull, primaryKey int
 			err = rows.Scan(&columnID, &name, &metadata.dataType, &notNull, &metadata.defaultValue, &primaryKey)
+			metadata.isNullable = "YES"
+			if notNull != 0 {
+				metadata.isNullable = "NO"
+			}
 		}
 		if err != nil {
 			return nil, err
@@ -1128,6 +1166,8 @@ func (p ProxyDefinition) ParseConfig() (interface{}, error) {
 	var config interface{}
 	proxyType := strings.ToLower(strings.TrimSpace(p.Type))
 	switch proxyType {
+	case "failover", "loadbalance":
+		config = &PolicyConfig{}
 	case "direct":
 		config = &DirectConfig{}
 	case "ss":
@@ -1166,6 +1206,9 @@ func (p ProxyDefinition) ParseConfig() (interface{}, error) {
 		return nil, fmt.Errorf("invalid %s config: %w", proxyType, err)
 	}
 
+	if policy, ok := config.(*PolicyConfig); ok {
+		return policy, policy.normalize(proxyType)
+	}
 	switch config.(type) {
 	case *DirectConfig, *SSConfig, *SOCKS5Config, *WireGuardConfig:
 		return config, nil

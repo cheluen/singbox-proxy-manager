@@ -11,10 +11,14 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"regexp"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"golang.org/x/net/proxy"
+
+	"sb-proxy/backend/models"
 )
 
 type IPInfo struct {
@@ -30,6 +34,117 @@ type IPInfo struct {
 }
 
 var ErrProxyNotReady = errors.New("proxy not ready")
+
+type ipCheckDiagnosticError struct {
+	cause   error
+	message string
+}
+
+func (err ipCheckDiagnosticError) Error() string { return err.message }
+
+func (err ipCheckDiagnosticError) Unwrap() error { return err.cause }
+
+const maxIPCheckDiagnosticBytes = 2000
+
+const ipCheckCredentialField = `(?:[\w-]*(?:password|passwd|token|secret|[_-]key)|privatekey|presharedkey|apikey|key|pass|pwd|user(?:name)?|uuid|auth|(?:proxy-)?authorization|cookie)`
+
+var (
+	ipCheckURL        = regexp.MustCompile(`(?i)[a-z][a-z0-9+.\-]*:(?://|\\/\\/)\S+`)
+	ipCheckUserinfo   = regexp.MustCompile(`[^\s"'@,:]+:[^\s"'@]+@[^\s"']+`)
+	ipCheckSecretKey  = regexp.MustCompile(`(?i)^` + ipCheckCredentialField + `$`)
+	ipCheckAssignment = regexp.MustCompile(`(?i)(["']?` + ipCheckCredentialField + `["']?\s*[:=]\s*)(?:"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|(?:basic\s+|bearer\s+)?[^\s,;}]+)`)
+	ipCheckAuthScheme = regexp.MustCompile(`(?i)\b(basic|bearer)\s+[^\s,;"']+`)
+	ipCheckWord       = regexp.MustCompile(`[\pL\pN_]+`)
+)
+
+func NodeIPCheckDiagnostic(message string, node models.ProxyNode) string {
+	if message == "" {
+		return ""
+	}
+	credentials := appendIPCheckConfigCredentials([]string{node.Username, node.Password}, node.Config, node.UpstreamConfig)
+	return boundIPCheckDiagnostic(redactIPCheckDiagnostic(message, credentials...))
+}
+
+func SafeDiagnostic(message string) string {
+	return boundIPCheckDiagnostic(redactIPCheckDiagnostic(message))
+}
+
+func appendIPCheckConfigCredentials(credentials []string, configs ...string) []string {
+	var collect func(any, bool)
+	collect = func(value any, sensitive bool) {
+		switch typed := value.(type) {
+		case map[string]any:
+			for key, item := range typed {
+				collect(item, sensitive || ipCheckSecretKey.MatchString(key))
+			}
+		case []any:
+			for _, item := range typed {
+				collect(item, sensitive)
+			}
+		case string:
+			if sensitive && typed != "" {
+				credentials = append(credentials, typed)
+			}
+		}
+	}
+	for _, config := range configs {
+		var fields map[string]any
+		if config != "" && json.Unmarshal([]byte(config), &fields) == nil {
+			collect(fields, false)
+		}
+	}
+	return credentials
+}
+
+func redactIPCheckError(err error, credentials []string) error {
+	if err != nil {
+		if message := redactIPCheckDiagnostic(err.Error(), credentials...); message != err.Error() {
+			return ipCheckDiagnosticError{cause: err, message: message}
+		}
+	}
+	return err
+}
+
+func redactIPCheckDiagnostic(message string, credentials ...string) string {
+	message = strings.ToValidUTF8(strings.ReplaceAll(message, "\x00", ""), "?")
+	message = ipCheckURL.ReplaceAllString(message, "[redacted]")
+	message = ipCheckUserinfo.ReplaceAllString(message, "[redacted]")
+	message = ipCheckAssignment.ReplaceAllString(message, "${1}[redacted]")
+	message = ipCheckAuthScheme.ReplaceAllString(message, "${1} [redacted]")
+	var short []string
+	for _, credential := range credentials {
+		if credential == "" {
+			continue
+		}
+		if len(credential) < 4 && ipCheckWord.FindString(credential) == credential {
+			short = append(short, credential)
+		} else {
+			message = strings.ReplaceAll(message, credential, "[redacted]")
+		}
+	}
+	if len(short) > 0 {
+		message = ipCheckWord.ReplaceAllStringFunc(message, func(word string) string {
+			for _, credential := range short {
+				if word == credential {
+					return "[redacted]"
+				}
+			}
+			return word
+		})
+	}
+	return message
+}
+
+func boundIPCheckDiagnostic(message string) string {
+	if len(message) > maxIPCheckDiagnosticBytes {
+		end := maxIPCheckDiagnosticBytes
+		for !utf8.RuneStart(message[end]) {
+			end--
+		}
+		message = message[:end]
+	}
+	return message
+}
 
 type IPCheckHTTPStatusError struct {
 	Service    string
@@ -56,8 +171,8 @@ func (e *IPCheckHTTPStatusError) Error() string {
 			message += " " + status
 		}
 		message += ")"
-		if e.RetryAfter != "" {
-			message += "; retry after " + e.RetryAfter
+		if retry := validIPCheckRetryAfter(e.RetryAfter); retry != "" {
+			message += "; retry after " + retry
 		}
 		return message
 	}
@@ -68,14 +183,45 @@ func (e *IPCheckHTTPStatusError) Error() string {
 }
 
 func IsIPCheckRateLimited(err error) bool {
-	var statusErr *IPCheckHTTPStatusError
-	return errors.As(err, &statusErr) && statusErr.StatusCode == http.StatusTooManyRequests
+	return ipCheckRateLimitError(err) != nil
 }
 
 func IPCheckRetryAfter(err error) string {
-	var statusErr *IPCheckHTTPStatusError
-	if errors.As(err, &statusErr) && statusErr.StatusCode == http.StatusTooManyRequests {
-		return statusErr.RetryAfter
+	if status := ipCheckRateLimitError(err); status != nil {
+		return validIPCheckRetryAfter(status.RetryAfter)
+	}
+	return ""
+}
+
+func ipCheckRateLimitError(err error) *IPCheckHTTPStatusError {
+	for err != nil {
+		switch typed := err.(type) {
+		case *IPCheckHTTPStatusError:
+			if typed != nil && typed.StatusCode == http.StatusTooManyRequests {
+				return typed
+			}
+		case interface{ Unwrap() []error }:
+			for _, child := range typed.Unwrap() {
+				if status := ipCheckRateLimitError(child); status != nil {
+					return status
+				}
+			}
+		}
+		err = errors.Unwrap(err)
+	}
+	return nil
+}
+
+func validIPCheckRetryAfter(value string) string {
+	value = strings.TrimSpace(value)
+	if value == "" || len(value) > 128 {
+		return ""
+	}
+	if strings.Trim(value, "0123456789") == "" {
+		return value
+	}
+	if _, err := http.ParseTime(value); err == nil {
+		return value
 	}
 	return ""
 }
@@ -226,18 +372,19 @@ func CheckProxyIPContext(
 	httpErr := fmt.Errorf("all HTTP IP check services failed: %w", err)
 
 	// Try with SOCKS5 if HTTP fails
-	log.Printf("[IPCheck] HTTP proxy failed (%v), trying SOCKS5...", httpErr)
+	httpMessage := redactIPCheckDiagnostic(httpErr.Error(), username, password)
+	log.Printf("[IPCheck] HTTP proxy failed (%s), trying SOCKS5...", boundIPCheckDiagnostic(httpMessage))
 	result, socksErr := runIPCheckAttempt(ctx, ipCheckTotalDeadline, func(attemptCtx context.Context) (*IPInfo, error) {
 		return checkWithSOCKS5(attemptCtx, proxyAddr, username, password, services)
 	})
 	if socksErr == nil {
 		result.Transport = "socks5"
-		result.HTTPError = httpErr.Error()
-		log.Printf("[IPCheck] SOCKS5 success! IP: %s, Location: %s (HTTP failed: %v)", result.IP, result.Location, httpErr)
+		result.HTTPError = httpMessage
+		log.Printf("[IPCheck] SOCKS5 success! IP: %s, Location: %s", result.IP, result.Location)
 		return result, nil
 	}
 
-	log.Printf("[IPCheck] All methods failed. Last error: %v", socksErr)
+	log.Printf("[IPCheck] All methods failed. Last error: %s", boundIPCheckDiagnostic(redactIPCheckDiagnostic(socksErr.Error(), username, password)))
 	return nil, fmt.Errorf("all IP check methods failed: %w", errors.Join(httpErr, socksErr))
 }
 
@@ -261,7 +408,6 @@ func checkWithSOCKS5(ctx context.Context, proxyAddr string, username string, pas
 			User:     username,
 			Password: password,
 		}
-		log.Printf("[IPCheck] Using SOCKS5 with authentication (user: %s)", username)
 	}
 
 	// Create SOCKS5 dialer
@@ -469,14 +615,18 @@ func checkWithServicesRacingLimited(
 func checkWithService(ctx context.Context, client *http.Client, serviceURL string) (*IPInfo, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, serviceURL, nil)
 	if err != nil {
-		return nil, fmt.Errorf("failed to create request: %v", err)
+		return nil, errors.New("invalid IP check service URL")
 	}
 	req.Header.Set("User-Agent", "sb-proxy-manager/1.0")
 	req.Header.Set("Accept", "application/json")
 
 	resp, err := client.Do(req)
 	if err != nil {
-		return nil, fmt.Errorf("request failed: %v", err)
+		var requestErr *url.Error
+		if errors.As(err, &requestErr) {
+			err = requestErr.Err
+		}
+		return nil, fmt.Errorf("request failed: %w", err)
 	}
 	defer resp.Body.Close()
 
@@ -485,15 +635,11 @@ func checkWithService(ctx context.Context, client *http.Client, serviceURL strin
 		if parsed, parseErr := url.Parse(serviceURL); parseErr == nil && parsed.Hostname() != "" {
 			service = parsed.Hostname()
 		}
-		retryAfter := strings.TrimSpace(resp.Header.Get("Retry-After"))
-		if len(retryAfter) > 128 {
-			retryAfter = retryAfter[:128]
-		}
 		return nil, &IPCheckHTTPStatusError{
 			Service:    service,
 			StatusCode: resp.StatusCode,
 			Status:     http.StatusText(resp.StatusCode),
-			RetryAfter: retryAfter,
+			RetryAfter: validIPCheckRetryAfter(resp.Header.Get("Retry-After")),
 		}
 	}
 

@@ -27,6 +27,11 @@ def free_port():
         return sock.getsockname()[1]
 
 
+def assert_retained_fields(before, after, label):
+    for field, value in before.items():
+        assert field in after and after[field] == value, f"升级改变了{label}的 {field} 字段"
+
+
 class Target(http.server.BaseHTTPRequestHandler):
     def do_GET(self):
         body = b"unified-release-proxy-ok"
@@ -239,18 +244,29 @@ def main():
             start(Path(sys.argv[2]).resolve(strict=True) if legacy else binary)
             previous_version = request("/api/version")["version"]
             login(env["ADMIN_PASSWORD"])
-            request("/api/settings", {"start_port": free_port(), "preserve_inbound_ports": True}, "PUT")
+            start_port = free_port()
+            if legacy:
+                request("/api/settings", {"start_port": start_port, "preserve_inbound_ports": True}, "PUT")
+            else:
+                default_group, = request("/api/node-groups")
+                group = request(f"/api/node-groups/{default_group['id']}", {"start_port": start_port}, "PATCH")
+                assert group["start_port"] == start_port and group["allocate_port"] is True
+                request("/api/settings", {"preserve_inbound_ports": True}, "PUT")
             node = request("/api/nodes", {
                 "name": "release-persistent-direct", "remark": "upgrade-preserves-data",
                 "type": "direct", "config": "{}", "username": "release-proxy-user",
                 "password": "release-proxy-password", "enabled": True,
                 "tcp_reuse_enabled": True})
+            assert node["inbound_port"] == start_port, "节点未使用配置的起始端口"
             proxy(node)
             request("/api/settings", {"admin_password": "release-retained-password"}, "PUT")
             env.pop("ADMIN_PASSWORD")
             login("release-retained-password")
             before_nodes = request("/api/nodes")
             before_settings = request("/api/settings")
+            if legacy:
+                assert before_settings.pop("start_port") == start_port, "旧版未保存全局起始端口"
+            before_groups = None if legacy else request("/api/node-groups")
             before_settings.setdefault("node_list_column_widths", {})
             dbpath = config / "proxy.db"
             assert dbpath.exists()
@@ -269,8 +285,23 @@ def main():
             start(binary)
             assert request("/api/version")["version"] == expected_version, "发行文件版本不匹配"
             login("release-retained-password")
-            assert request("/api/nodes") == before_nodes, "升级改变了节点数据"
-            assert request("/api/settings") == before_settings, "升级改变了设置"
+            groups = request("/api/node-groups")
+            default_group, = groups
+            assert default_group["id"] > 0 and default_group["allocate_port"] is True
+            assert default_group["start_port"] == start_port, "分组未继承起始端口"
+            assert default_group["node_count"] == default_group["enabled_node_count"] == len(before_nodes) == 1
+            if before_groups is not None:
+                assert groups == before_groups, "重启改变了分组数据"
+            upgraded_settings = request("/api/settings")
+            assert "start_port" not in upgraded_settings, "起始端口仍通过全局设置返回"
+            assert_retained_fields(before_settings, upgraded_settings, "设置")
+            upgraded_nodes = request("/api/nodes")
+            assert len(upgraded_nodes) == len(before_nodes), "升级改变了节点数量"
+            for previous, upgraded in zip(before_nodes, upgraded_nodes):
+                assert_retained_fields(previous, upgraded, f"节点 {previous['id']}")
+                assert upgraded["group_id"] == default_group["id"], "节点未归入默认分组"
+                assert upgraded["check_status"] == "untested" and upgraded["check_error"] == ""
+                assert upgraded.get("checked_at") is None, "未检测节点具有检测时间"
             assert dbpath.stat().st_ino == inode, "升级替换了数据库文件"
             html = request("/")
             assert b"stale-frontend" not in html and b"<html" in html
@@ -291,7 +322,9 @@ def main():
                 login("release-retained-password")
                 assert kernel_path() == current
                 assert hashlib.sha256(current.read_bytes()).hexdigest() == original_hash
-                assert request("/api/nodes") == before_nodes
+                assert request("/api/nodes") == upgraded_nodes, "重启改变了升级后的节点数据"
+                assert request("/api/node-groups") == groups, "重启改变了升级后的分组数据"
+                assert request("/api/settings") == upgraded_settings, "重启改变了升级后的设置"
                 proxy(node)
                 stop()
 
@@ -321,7 +354,8 @@ def main():
                               "previous_version": previous_version, "version": expected_version,
                               "custom_config": custom_config,
                               "checks": ["single-file", "embedded-frontend", "sqlite-retention",
-                                         "password-retention", "kernel-priority", "kernel-repair",
+                                         "group-port-retention", "check-state-retention", "password-retention",
+                                         "kernel-priority", "kernel-repair",
                                          "http-proxy", "socks5-proxy", "crash-recovery", "CRUD",
                                          "user-agreement", "healthcheck"]}))
         except Exception:

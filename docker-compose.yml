@@ -11,7 +11,7 @@ x-sb-proxy-common: &sb-proxy-common
     - PORT=${PORT:-30000}
     - BIND_ADDRESS=${BIND_ADDRESS:-0.0.0.0}
     - CONFIG_DIR=${CONFIG_DIR:-/app/config}
-    - TZ=${TZ:-UTC+8}
+    - TZ=${TZ:-Asia/Shanghai}
     - ACCEPT_USER_AGREEMENT=${ACCEPT_USER_AGREEMENT:-false}
     - ADMIN_PASSWORD=${ADMIN_PASSWORD:-}
     - SINGBOX_ENV_ALLOWLIST=${SINGBOX_ENV_ALLOWLIST:-}

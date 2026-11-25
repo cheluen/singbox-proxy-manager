@@ -11,6 +11,12 @@ export async function assertInboundUsername(page, id, username) {
 export async function assertMaskedInboundPassword(page, id, secret, toggleLabel = 'Click to show inbound password') {
   const selector = `${byTestId(`node-password-${id}`)}[data-masked="true"]`
   await page.waitForSelector(selector, { visible: true })
+  await page.evaluate(async (target, maskSelector) => {
+    await new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve)))
+    const glyphs = document.querySelector(target)?.querySelector(`${maskSelector} .sb-pass-mask__glyphs`)
+    const animations = glyphs?.getAnimations?.() || []
+    await Promise.allSettled(animations.map((anim) => anim.finished))
+  }, selector, byTestId(`node-password-mask-${id}`))
   const result = await page.$eval(selector, (element, expected, maskSelector) => {
     const row = element.closest('[data-row-id]')
     const mask = element.querySelector(maskSelector)

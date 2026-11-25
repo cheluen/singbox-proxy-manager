@@ -1,4 +1,4 @@
-export { proxyTypes } from './protocolSchema.js'
+export { proxyTypes, upstreamProxyTypes, isPolicyType } from './protocolSchema.js'
 
 const splitMultilineList = (rawValue) => {
   if (typeof rawValue !== 'string') {
@@ -364,6 +364,10 @@ export function createProtocolFormModel(node, { isUpstreamEditor = false, isFiel
       : true,
     server: normalizedConfig.server || '',
     server_port: normalizedConfig.server_port || 443,
+    policy_member_ids: Array.isArray(normalizedConfig.member_ids) ? normalizedConfig.member_ids.map(Number).filter((id) => Number.isInteger(id) && id > 0) : [],
+    policy_strategy: normalizedConfig.strategy || 'round-robin',
+    policy_health_check_url: normalizedConfig.health_check_url || '',
+    policy_health_check_interval: normalizedConfig.health_check_interval || 30,
     ...normalizedConfig,
     vmess_security: node?.type === 'vmess' ? normalizedConfig.security || 'auto' : 'auto',
     ss_password: node?.type === 'ss' ? protocolPassword : '',
@@ -443,6 +447,23 @@ export function createProtocolFormModel(node, { isUpstreamEditor = false, isFiel
   const buildConfigFromForm = (type, values) => {
     if (type === 'direct') {
       return {}
+    }
+    if (type === 'failover' || type === 'loadbalance') {
+      const memberIds = Array.isArray(values.policy_member_ids)
+        ? [...new Set(values.policy_member_ids.map(Number).filter((id) => Number.isInteger(id) && id > 0))]
+        : []
+      const base = {
+        member_ids: memberIds,
+        ...(values.policy_health_check_url ? { health_check_url: String(values.policy_health_check_url).trim() } : {}),
+        ...(Number(values.policy_health_check_interval) > 0 ? { health_check_interval: Number(values.policy_health_check_interval) } : {}),
+      }
+      if (type === 'loadbalance') {
+        return {
+          ...base,
+          strategy: values.policy_strategy === 'consistent-hashing' ? 'consistent-hashing' : 'round-robin',
+        }
+      }
+      return base
     }
 
     const config = {

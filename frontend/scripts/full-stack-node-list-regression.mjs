@@ -59,7 +59,9 @@ try {
   base = `http://127.0.0.1:${await findTestPortRange(1)}`
   await startBackend()
   token = (await api('POST', '/login', { password: secret })).token
-  await api('PUT', '/settings', { start_port: await findTestPortRange(202) })
+  const groups = await api('GET', '/node-groups')
+  assert.ok(Array.isArray(groups) && groups.length > 0, '未返回默认节点分组')
+  await api('PATCH', `/node-groups/${groups[0].id}`, { start_port: await findTestPortRange(202) })
   const imported = await api('POST', '/nodes/batch-import', {
     links: Array.from({ length: 202 }, (_, index) => `socks5://127.0.0.1:9#${index === 201 ? finalName : `ThresholdCase_${String(index + 1).padStart(3, '0')}`}`), enabled: false,
   })

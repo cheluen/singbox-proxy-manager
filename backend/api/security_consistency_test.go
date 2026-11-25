@@ -80,6 +80,26 @@ func TestNodeCredentialMutationsRejectUnpairedValues(t *testing.T) {
 	}
 }
 
+func TestNodeCredentialsRejectLineBreaks(t *testing.T) {
+	handler := newTestHandler(t, nil)
+	nodeID := insertTestNode(t, handler.db)
+	for _, field := range []string{"username", "password"} {
+		for _, lineBreak := range []string{"\r", "\n"} {
+			payload := gin.H{"name": "credential-test", "type": "direct", "config": "{}", "username": "user", "password": "pass", "node_ids": []int{nodeID}}
+			payload[field] = "first" + lineBreak + "second"
+			for _, action := range []struct {
+				handler gin.HandlerFunc
+				method  string
+			}{{handler.CreateNode, http.MethodPost}, {handler.UpdateNode, http.MethodPut}, {handler.BatchSetAuth, http.MethodPost}} {
+				response := postJSON(t, action.handler, action.method, "/nodes", payload, gin.Params{{Key: "id", Value: strconv.Itoa(nodeID)}})
+				if response.Code != http.StatusBadRequest || !bytes.Contains(response.Body.Bytes(), []byte("line breaks")) {
+					t.Fatalf("%s %s: HTTP %d", action.method, field, response.Code)
+				}
+			}
+		}
+	}
+}
+
 func TestDeleteReferencedNodeLeavesDatabaseUnchanged(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	handler := newTestHandler(t, nil)
@@ -294,18 +314,7 @@ exec sleep 300
 	}
 }
 
-func TestSettingsValidationFailureDoesNotPartiallyChangePasswordOrPorts(t *testing.T) {
-	gin.SetMode(gin.TestMode)
-	db, err := sql.Open("sqlite", ":memory:")
-	if err != nil {
-		t.Fatalf("open db: %v", err)
-	}
-	if err := models.InitDB(db); err != nil {
-		t.Fatalf("init db: %v", err)
-	}
-
-	fakeBinary := filepath.Join(t.TempDir(), "fake-sing-box")
-	script := `#!/bin/sh
+const rejectPort41000Kernel = `#!/bin/sh
 if [ "$1" = "check" ]; then
   if grep -q '"listen_port": 41000' "$3"; then
     echo "requested port rejected" >&2
@@ -315,28 +324,39 @@ if [ "$1" = "check" ]; then
 fi
 exec sleep 300
 `
-	if err := os.WriteFile(fakeBinary, []byte(script), 0o755); err != nil {
-		t.Fatalf("write fake sing-box: %v", err)
-	}
-	t.Setenv("SINGBOX_BINARY", fakeBinary)
-	t.Setenv("SBPM_SINGBOX_STARTUP_GRACE", "10ms")
 
-	service := services.NewSingBoxService(t.TempDir())
-	handler := NewHandler(db, service)
-	handler.skipPortAvailabilityCheck = true
-	t.Cleanup(func() {
-		_ = service.Stop()
-		_ = db.Close()
-	})
+func TestGroupPortValidationFailureRollsBackGroupAndNode(t *testing.T) {
+	handler := newTestHandlerWithKernelScript(t, rejectPort41000Kernel)
+	nodeID := insertTestNode(t, handler.db)
+	before := firstTestGroup(t, handler.db)
+	id := strconv.Itoa(before.ID)
+	response := postJSON(t, handler.UpdateGroup, http.MethodPatch, "/api/node-groups/"+id,
+		map[string]any{"name": "candidate", "start_port": 41000}, ginParams("id", id))
+	if response.Code != http.StatusInternalServerError || !bytes.Contains(response.Body.Bytes(), []byte("requested port rejected")) {
+		t.Fatalf("expected kernel rejection, got %d %s", response.Code, response.Body.String())
+	}
+	group := firstTestGroup(t, handler.db)
+	if group.Name != before.Name || group.StartPort != before.StartPort || group.Revision != before.Revision {
+		t.Fatalf("failed group update changed name, port, or revision: %+v", group)
+	}
+	node, err := models.LoadProxyNode(t.Context(), handler.db, nodeID)
+	if err != nil || node.InboundPort != 30001 {
+		t.Fatalf("failed group update changed node port: port=%d err=%v", node.InboundPort, err)
+	}
+}
+
+func TestSettingsValidationFailureDoesNotPartiallyChangePasswordOrPorts(t *testing.T) {
+	handler := newTestHandlerWithKernelScript(t, rejectPort41000Kernel)
+	db := handler.db
 	nodeID := insertTestNode(t, db)
+	setTestGroupStartPort(t, db, 41000)
 	oldHash, err := bcrypt.GenerateFromPassword([]byte("old-password-123"), bcrypt.DefaultCost)
 	if err != nil {
 		t.Fatalf("hash old password: %v", err)
 	}
 	if _, err := db.Exec(`
 		UPDATE settings
-		SET admin_password = ?, auth_generation = 7,
-		    start_port = 30001, preserve_inbound_ports = 0
+		SET admin_password = ?, auth_generation = 7, preserve_inbound_ports = 1
 		WHERE singleton_key = 1
 	`, string(oldHash)); err != nil {
 		t.Fatalf("seed settings: %v", err)
@@ -347,25 +367,25 @@ exec sleep 300
 	}
 
 	payload := map[string]interface{}{
-		"admin_password": "new-password-456",
-		"start_port":     41000,
+		"admin_password":         "new-password-456",
+		"preserve_inbound_ports": false,
 	}
 	recorder := postJSON(t, handler.UpdateSettings, http.MethodPut, "/api/settings", payload, nil)
-	if recorder.Code != http.StatusInternalServerError {
+	if recorder.Code != http.StatusInternalServerError || !bytes.Contains(recorder.Body.Bytes(), []byte("requested port rejected")) {
 		t.Fatalf("expected settings validation failure, got %d body=%s", recorder.Code, recorder.Body.String())
 	}
 
 	var currentHash string
 	var generation int64
-	var startPort int
+	var preserve bool
 	if err := db.QueryRow(`
-		SELECT admin_password, auth_generation, start_port
+		SELECT admin_password, auth_generation, preserve_inbound_ports
 		FROM settings WHERE singleton_key = 1
-	`).Scan(&currentHash, &generation, &startPort); err != nil {
+	`).Scan(&currentHash, &generation, &preserve); err != nil {
 		t.Fatalf("query settings: %v", err)
 	}
-	if currentHash != string(oldHash) || generation != 7 || startPort != 30001 {
-		t.Fatalf("failed settings request changed state: generation=%d start_port=%d", generation, startPort)
+	if currentHash != string(oldHash) || generation != 7 || !preserve || firstTestGroup(t, db).StartPort != 41000 {
+		t.Fatalf("failed settings request changed password, generation, port policy, or group start port")
 	}
 	var inboundPort int
 	if err := db.QueryRow("SELECT inbound_port FROM proxy_nodes WHERE id = ?", nodeID).Scan(&inboundPort); err != nil {
@@ -552,9 +572,9 @@ func TestGetNodesReturnsErrorOnScanFailure(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	handler := newTestHandler(t, nil)
 	if _, err := handler.db.Exec(`
-		INSERT INTO proxy_nodes (name, type, config, inbound_port, sort_order, enabled)
-		VALUES ('corrupt', 'direct', '{}', 'not-a-port', 0, 1)
-	`); err != nil {
+		INSERT INTO proxy_nodes (name, type, config, inbound_port, sort_order, enabled, group_id)
+		VALUES ('corrupt', 'direct', '{}', 'not-a-port', 0, 1, ?)
+	`, firstTestGroup(t, handler.db).ID); err != nil {
 		t.Fatalf("seed corrupt row: %v", err)
 	}
 

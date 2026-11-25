@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log"
@@ -11,6 +12,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"time"
 
@@ -20,6 +22,15 @@ import (
 type upstreamIPChecker func(context.Context, string, string, string) (*IPInfo, error)
 
 const upstreamIPCheckMaxAttempts = 3
+
+type isolatedIPCheckPlan struct {
+	nodes         []parsedEnabledNode
+	upstreams     []parsedUpstreamProxy
+	target        *models.ProxyNode
+	usedPorts     map[int]struct{}
+	needsLocalDNS bool
+	credentials   []string
+}
 
 // CheckUpstreamIPContext checks a managed upstream in an isolated sing-box
 // process, leaving the primary runtime and its configuration untouched.
@@ -35,11 +46,26 @@ func (s *SingBoxService) checkUpstreamIPContext(
 	definition models.ProxyDefinition,
 	checker upstreamIPChecker,
 ) (*IPInfo, error) {
+	target := models.ProxyNode{
+		ID: 1, Enabled: true, Type: "direct", Config: `{}`, UpstreamMode: models.UpstreamModeCustom,
+		UpstreamType: definition.Type, UpstreamConfig: definition.Config,
+	}
+	return s.CheckIsolatedNodeIPContext(ctx, target.ID, func(context.Context) ([]models.ProxyNode, models.Settings, error) {
+		return []models.ProxyNode{target}, models.Settings{}, nil
+	}, checker)
+}
+
+func (s *SingBoxService) CheckIsolatedNodeIPContext(
+	ctx context.Context,
+	targetID int,
+	load func(context.Context) ([]models.ProxyNode, models.Settings, error),
+	checker func(context.Context, string, string, string) (*IPInfo, error),
+) (*IPInfo, error) {
 	if s == nil {
 		return nil, fmt.Errorf("sing-box service is unavailable")
 	}
-	if checker == nil {
-		return nil, fmt.Errorf("upstream IP checker is unavailable")
+	if checker == nil || load == nil {
+		return nil, fmt.Errorf("isolated IP checker is unavailable")
 	}
 	if ctx == nil {
 		ctx = context.Background()
@@ -50,32 +76,27 @@ func (s *SingBoxService) checkUpstreamIPContext(
 	}
 	checkCtx, cancelCheck := context.WithTimeout(ctx, checkTimeout)
 	defer cancelCheck()
-	upstream, err := s.parseManagedUpstreamDefinition(definition, "node-1-upstream")
-	if err != nil {
-		return nil, err
-	}
-	upstream.Scope = "node 1 custom upstream proxy"
-	release, err := acquireExecutionSlot(checkCtx, s.upstreamCheckSlots, "upstream IP check")
+	release, err := acquireExecutionSlot(checkCtx, s.upstreamCheckSlots, "isolated IP check")
 	if err != nil {
 		return nil, err
 	}
 	defer release()
 
+	nodes, settings, err := load(checkCtx)
+	if err != nil {
+		return nil, err
+	}
+	plan, err := s.prepareIsolatedIPCheck(checkCtx, targetID, nodes, settings)
+	if err != nil {
+		return nil, fmt.Errorf("build isolated IP check config: %w", err)
+	}
 	binary, err := s.resolveSingBoxBinary()
 	if err != nil {
 		return nil, err
 	}
-	usesLocalDNS, err := upstream.usesLocalDNS()
-	if err != nil {
-		return nil, fmt.Errorf("build isolated upstream check config: %w", err)
-	}
-	if upstream.Definition.Type == "direct" && directUpstreamIsEmpty(upstream.Config) {
-		return nil, fmt.Errorf("build isolated upstream check config: %w", upstreamValidationErrorf("node 1 custom upstream proxy must not be identical to its outbound"))
-	}
 	var lastErr error
-	usedPorts := make(map[int]struct{}, upstreamIPCheckMaxAttempts)
 	for attempt := 1; attempt <= upstreamIPCheckMaxAttempts; attempt++ {
-		info, attemptErr, retryable := s.runUpstreamIPCheckAttempt(checkCtx, upstream, usesLocalDNS, checker, binary, usedPorts)
+		info, attemptErr, retryable := s.runIsolatedIPCheckAttempt(checkCtx, plan, checker, binary)
 		if attemptErr == nil {
 			return info, nil
 		}
@@ -84,39 +105,161 @@ func (s *SingBoxService) checkUpstreamIPContext(
 			return nil, attemptErr
 		}
 	}
-	return nil, fmt.Errorf("isolated upstream check failed after %d startup attempts: %w", upstreamIPCheckMaxAttempts, lastErr)
+	return nil, fmt.Errorf("isolated IP check failed after %d startup attempts: %w", upstreamIPCheckMaxAttempts, lastErr)
 }
 
-func (s *SingBoxService) runUpstreamIPCheckAttempt(
+func isolatedNodeDependencies(targetID int, nodes []models.ProxyNode) ([]models.ProxyNode, error) {
+	byTag := make(map[string]int)
+	byName := make(map[string][]int)
+	var pending []int
+	for index, node := range nodes {
+		if !node.Enabled {
+			continue
+		}
+		byTag[fmt.Sprintf("node-%d-out", node.ID)] = index
+		name := strings.TrimSpace(node.Name)
+		byName[name] = append(byName[name], index)
+		if node.ID == targetID {
+			pending = append(pending, index)
+		}
+	}
+	if len(pending) == 0 {
+		return nil, fmt.Errorf("enabled node %d not found", targetID)
+	}
+	seen := make(map[int]bool)
+	var selected []models.ProxyNode
+	for len(pending) != 0 {
+		index := pending[len(pending)-1]
+		pending = pending[:len(pending)-1]
+		if seen[index] {
+			continue
+		}
+		seen[index] = true
+		node := nodes[index]
+		node.InboundPort, node.Username, node.Password, node.TCPReuseEnabled = 0, "", "", false
+		selected = append(selected, node)
+		mode, err := models.NormalizeUpstreamMode(node.UpstreamMode)
+		if err != nil {
+			return nil, err
+		}
+		if mode != models.UpstreamModeLegacy {
+			continue
+		}
+		var reference struct {
+			Detour string `json:"detour"`
+		}
+		if err := json.Unmarshal([]byte(node.Config), &reference); err != nil {
+			return nil, fmt.Errorf("read node %d detour: %w", node.ID, err)
+		}
+		detour := strings.TrimSpace(reference.Detour)
+		if detour == "" || detour == "direct" {
+			continue
+		}
+		if other, exists := byTag[detour]; exists {
+			pending = append(pending, other)
+		} else {
+			pending = append(pending, byName[detour]...)
+		}
+	}
+	return selected, nil
+}
+
+func (s *SingBoxService) prepareIsolatedIPCheck(ctx context.Context, targetID int, nodes []models.ProxyNode, settings models.Settings) (_ *isolatedIPCheckPlan, err error) {
+	selected, err := isolatedNodeDependencies(targetID, nodes)
+	if err != nil {
+		return nil, err
+	}
+	var usesGlobal bool
+	var credentials []string
+	for _, node := range selected {
+		mode, _ := models.NormalizeUpstreamMode(node.UpstreamMode)
+		usesGlobal = usesGlobal || mode == models.UpstreamModeGlobal
+		credentials = appendIPCheckConfigCredentials(credentials, node.Config, node.UpstreamConfig)
+	}
+	settings.GlobalUpstreamEnabled = settings.GlobalUpstreamEnabled && usesGlobal
+	if settings.GlobalUpstreamEnabled {
+		credentials = appendIPCheckConfigCredentials(credentials, settings.GlobalUpstreamConfig)
+	}
+	defer func() { err = redactIPCheckError(err, credentials) }()
+	parsed, localDNS, err := prepareEnabledNodes(selected)
+	if err != nil {
+		return nil, err
+	}
+	upstreams, upstreamDNS, err := s.prepareManagedUpstreams(ctx, parsed, settings)
+	if err != nil {
+		return nil, err
+	}
+	referenced := make(map[string]bool, len(parsed))
+	for _, node := range parsed {
+		referenced[node.ManagedUpstreamTag] = true
+		referenced[configDetour(node.Config)] = true
+	}
+	upstreams = slices.DeleteFunc(upstreams, func(upstream parsedUpstreamProxy) bool { return !referenced[upstream.Tag] })
+	plan := &isolatedIPCheckPlan{
+		nodes: parsed, target: parsed[0].Node, upstreams: upstreams,
+		usedPorts: make(map[int]struct{}), needsLocalDNS: localDNS || upstreamDNS, credentials: credentials,
+	}
+	inbounds := make(map[int]*models.ProxyNode)
+	for index := range nodes {
+		node := &nodes[index]
+		if node.InboundPort > 0 {
+			plan.usedPorts[node.InboundPort] = struct{}{}
+			if node.Enabled {
+				inbounds[node.InboundPort] = node
+			}
+		}
+	}
+	if err := s.validateManagedUpstreamInboundCollisions(ctx, upstreams, inbounds); err != nil {
+		return nil, err
+	}
+	for _, node := range parsed {
+		if wireguard, ok := node.Config.(*models.WireGuardConfig); ok {
+			wireguard.SystemInterface, wireguard.InterfaceName, wireguard.ListenPort = false, "", 0
+		}
+	}
+	for _, upstream := range upstreams {
+		if endpoint := upstream.Endpoint; endpoint != nil {
+			delete(endpoint.Extra, "system")
+			delete(endpoint.Extra, "name")
+			delete(endpoint.Extra, "listen_port")
+		}
+	}
+	return plan, nil
+}
+
+func (s *SingBoxService) runIsolatedIPCheckAttempt(
 	ctx context.Context,
-	upstream parsedUpstreamProxy,
-	usesLocalDNS bool,
+	plan *isolatedIPCheckPlan,
 	checker upstreamIPChecker,
 	binary string,
-	usedPorts map[int]struct{},
-) (*IPInfo, error, bool) {
-	port, err := reserveFreshLoopbackPort(usedPorts)
+) (info *IPInfo, err error, retryable bool) {
+	reservation, err := reserveFreshLoopbackPort(plan.usedPorts)
 	if err != nil {
 		return nil, fmt.Errorf("reserve upstream check port: %w", err), true
 	}
-	usedPorts[port] = struct{}{}
+	defer reservation.Close()
+	port := reservation.Addr().(*net.TCPAddr).Port
+	plan.usedPorts[port] = struct{}{}
 	credentialBytes := make([]byte, 32)
 	if _, err := rand.Read(credentialBytes); err != nil {
 		return nil, fmt.Errorf("generate upstream check credentials: %w", err), false
 	}
-	username := "upstream-ip-check"
-	password := hex.EncodeToString(credentialBytes)
-	node := models.ProxyNode{ID: 1, Type: "direct", InboundPort: port, Username: username, Password: password}
-	upstreams := []parsedUpstreamProxy{upstream}
-	if err := s.validateManagedUpstreamInboundCollisions(ctx, upstreams, map[int]*models.ProxyNode{port: &node}); err != nil {
+	username := hex.EncodeToString(credentialBytes[:8])
+	password := hex.EncodeToString(credentialBytes[8:])
+	credentials := append([]string{username, password}, plan.credentials...)
+	defer func() {
+		err = redactIPCheckError(err, credentials)
+		if info != nil && info.HTTPError != "" {
+			clean := *info
+			clean.HTTPError = redactIPCheckDiagnostic(info.HTTPError, credentials...)
+			info = &clean
+		}
+	}()
+	plan.target.InboundPort, plan.target.Username, plan.target.Password = port, username, password
+	if err := s.validateManagedUpstreamInboundCollisions(ctx, plan.upstreams, map[int]*models.ProxyNode{port: plan.target}); err != nil {
 		return nil, fmt.Errorf("build isolated upstream check config: %w", err), false
 	}
-	configJSON, err := s.renderGlobalConfig([]parsedEnabledNode{{
-		Node:               &node,
-		InboundTag:         "node-1-in",
-		OutboundTag:        "node-1-out",
-		ManagedUpstreamTag: upstream.Tag,
-	}}, upstreams, "127.0.0.1", usesLocalDNS)
+	configJSON, err := s.renderGlobalConfig(plan.nodes, plan.upstreams, "127.0.0.1", plan.needsLocalDNS)
 	if err != nil {
 		return nil, fmt.Errorf("build isolated upstream check config: %w", err), false
 	}
@@ -147,6 +290,10 @@ func (s *SingBoxService) runUpstreamIPCheckAttempt(
 	stderr := newBoundedCommandOutput()
 	cmd.Stdout = stdout
 	cmd.Stderr = stderr
+	if err := reservation.Close(); err != nil {
+		_ = processGuard.Close()
+		return nil, fmt.Errorf("release isolated IP check port: %w", err), true
+	}
 	if err := cmd.Start(); err != nil {
 		_ = processGuard.Close()
 		return nil, fmt.Errorf("start isolated upstream check process: %w", err), true
@@ -200,14 +347,14 @@ func (s *SingBoxService) runUpstreamIPCheckAttempt(
 		cancelAttempt()
 		return nil, upstreamProcessExitError(processErr, stdout.String(), stderr.String()), true
 	case result := <-checkDone:
-		if result.err == nil {
-			return result.info, nil, false
-		}
 		select {
 		case processErr = <-processDone:
 			processExited = true
 			return nil, upstreamProcessExitError(processErr, stdout.String(), stderr.String()), true
 		default:
+		}
+		if result.err == nil {
+			return result.info, nil, false
 		}
 		stopProcess()
 		checkErr := appendUpstreamProcessDetail(result.err, stderr.String())
@@ -231,35 +378,25 @@ func upstreamProcessExitError(processErr error, stdout, stderr string) error {
 }
 
 func appendUpstreamProcessDetail(base error, detail string) error {
-	detail = strings.TrimSpace(detail)
-	if detail == "" {
-		return base
+	detail = strings.ToLower(detail)
+	for _, cause := range []string{"address already in use", "permission denied", "connection refused", "network is unreachable", "i/o timeout", "invalid key", "authentication failed"} {
+		if strings.Contains(detail, cause) {
+			return fmt.Errorf("%w; sing-box: %s", base, cause)
+		}
 	}
-	return fmt.Errorf("%w; sing-box: %s", base, detail)
+	return base
 }
 
-func reserveLoopbackPort() (int, error) {
-	listener, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		return 0, err
-	}
-	defer listener.Close()
-	address, ok := listener.Addr().(*net.TCPAddr)
-	if !ok || address.Port <= 0 {
-		return 0, fmt.Errorf("unexpected listener address %q", listener.Addr())
-	}
-	return address.Port, nil
-}
-
-func reserveFreshLoopbackPort(used map[int]struct{}) (int, error) {
+func reserveFreshLoopbackPort(used map[int]struct{}) (*net.TCPListener, error) {
 	for attempt := 0; attempt < 10; attempt++ {
-		port, err := reserveLoopbackPort()
+		listener, err := net.ListenTCP("tcp4", &net.TCPAddr{IP: net.IPv4(127, 0, 0, 1)})
 		if err != nil {
-			return 0, err
+			return nil, err
 		}
-		if _, exists := used[port]; !exists {
-			return port, nil
+		if _, exists := used[listener.Addr().(*net.TCPAddr).Port]; !exists {
+			return listener, nil
 		}
+		_ = listener.Close()
 	}
-	return 0, fmt.Errorf("operating system repeatedly returned a previously attempted port")
+	return nil, fmt.Errorf("operating system repeatedly returned an excluded port")
 }

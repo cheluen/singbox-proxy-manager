@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"sync"
 
 	"sb-proxy/backend/models"
 	"sb-proxy/backend/services"
@@ -11,6 +12,7 @@ import (
 
 type nodeMutationOperation struct {
 	ApplyRuntime bool
+	ReplacedID   int
 	Mutate       func(context.Context, *sql.Tx) error
 }
 
@@ -73,11 +75,22 @@ func (coordinator *nodeMutationCoordinator) execute(
 	}
 	defer tx.Rollback()
 	var before []nodeMutationTable
+	var previousPaths map[int]checkPath
 	if operation.ApplyRuntime {
 		before, err = captureNodeMutationTables(ctx, tx)
 		if err != nil {
 			return nil, err
 		}
+		previous, err := models.LoadProxyNodes(ctx, tx)
+		if err != nil {
+			return nil, err
+		}
+		settings, err := models.LoadRuntimeSettings(ctx, tx)
+		if err != nil {
+			return nil, err
+		}
+		previousPaths = nodeCheckPaths(previous, settings)
+		ctx = context.WithValue(ctx, ownedPortKey{}, sync.OnceValue(coordinator.singBoxService.ActiveInboundPorts))
 	}
 
 	if err := operation.Mutate(ctx, tx); err != nil {
@@ -93,6 +106,12 @@ func (coordinator *nodeMutationCoordinator) execute(
 	}
 	settings, err := models.LoadRuntimeSettings(ctx, tx)
 	if err != nil {
+		return nil, err
+	}
+	if err := reconcilePolicyReferences(ctx, tx, candidateNodes); err != nil {
+		return nil, err
+	}
+	if err := resetChangedChecks(ctx, tx, previousPaths, candidateNodes, settings, operation.ReplacedID); err != nil {
 		return nil, err
 	}
 	after, err := captureNodeMutationTables(ctx, tx)
@@ -131,8 +150,8 @@ func (coordinator *nodeMutationCoordinator) execute(
 	return candidateNodes, nil
 }
 
-func normalizeNodeSortOrderTx(ctx context.Context, tx *sql.Tx) error {
-	rows, err := tx.QueryContext(ctx, "SELECT id, sort_order FROM proxy_nodes ORDER BY sort_order ASC, id ASC")
+func normalizeNodeSortOrderTx(ctx context.Context, tx *sql.Tx, groupID int) error {
+	rows, err := tx.QueryContext(ctx, "SELECT id, sort_order FROM proxy_nodes WHERE group_id=? ORDER BY sort_order ASC, id ASC", groupID)
 	if err != nil {
 		return err
 	}
@@ -174,16 +193,20 @@ func normalizeNodeSortOrderTx(ctx context.Context, tx *sql.Tx) error {
 }
 
 // reassignAutomaticPortsTx 按排序重分配未固定节点的端口，预留并跳过所有固定端口。
-func reassignAutomaticPortsTx(ctx context.Context, tx *sql.Tx, startPort int) error {
+func (h *Handler) reassignAutomaticPortsTx(ctx context.Context, tx *sql.Tx, group models.NodeGroup) error {
+	if !group.AllocatePort {
+		return nil
+	}
+	startPort := group.StartPort
 	if err := validateStartPort(startPort); err != nil {
 		return err
 	}
 
 	rows, err := tx.QueryContext(ctx, `
-		SELECT id, inbound_port, inbound_port_pinned
-		FROM proxy_nodes
+		SELECT id, COALESCE(inbound_port,0), inbound_port_pinned
+		FROM proxy_nodes WHERE group_id=?
 		ORDER BY sort_order ASC, id ASC
-	`)
+	`, group.ID)
 	if err != nil {
 		return err
 	}
@@ -209,7 +232,14 @@ func reassignAutomaticPortsTx(ctx context.Context, tx *sql.Tx, startPort int) er
 		return err
 	}
 
-	used := make(map[int]struct{}, len(states))
+	otherPorts, err := readIDs(ctx, tx, "SELECT inbound_port FROM proxy_nodes WHERE group_id<>? AND inbound_port IS NOT NULL", group.ID)
+	if err != nil {
+		return err
+	}
+	used := make(map[int]struct{}, len(otherPorts)+len(states))
+	for _, port := range otherPorts {
+		used[port] = struct{}{}
+	}
 	for _, state := range states {
 		if !state.pinned {
 			continue
@@ -224,30 +254,31 @@ func reassignAutomaticPortsTx(ctx context.Context, tx *sql.Tx, startPort int) er
 	}
 
 	nextPort := startPort
+	var changed []portState
 	for _, state := range states {
 		if state.pinned {
 			continue
 		}
-		for nextPort <= 65535 {
-			if _, occupied := used[nextPort]; !occupied {
-				break
-			}
-			nextPort++
-		}
-		if err := validateInboundPort(nextPort); err != nil {
+		nextPort, err = h.nextBindablePort(ctx, nextPort, used)
+		if err != nil {
 			return fmt.Errorf("node %d: %w", state.id, err)
 		}
 		if state.port != nextPort {
-			if _, err := tx.ExecContext(ctx, `
-				UPDATE proxy_nodes
-				SET inbound_port = ?, updated_at = CURRENT_TIMESTAMP
-				WHERE id = ?
-			`, nextPort, state.id); err != nil {
-				return err
-			}
+			state.port = nextPort
+			changed = append(changed, state)
 		}
 		used[nextPort] = struct{}{}
 		nextPort++
+	}
+	for _, state := range changed {
+		if _, err := tx.ExecContext(ctx, "UPDATE proxy_nodes SET inbound_port=NULL WHERE id=?", state.id); err != nil {
+			return err
+		}
+	}
+	for _, state := range changed {
+		if _, err := tx.ExecContext(ctx, "UPDATE proxy_nodes SET inbound_port=?,updated_at=CURRENT_TIMESTAMP WHERE id=?", state.port, state.id); err != nil {
+			return err
+		}
 	}
 	return nil
 }

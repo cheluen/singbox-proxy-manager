@@ -110,12 +110,11 @@ export default {
   // Settings
   admin_password: 'Admin Password',
   start_port: 'Start Port',
-  start_port_desc: 'The starting port number for inbound connections. Auto-assigned ports will skip occupied ports.',
   start_port_required: 'Please enter start port',
   start_port_range: 'Port must be between 1024 and 65535',
   preserve_inbound_ports: 'Preserve Inbound Ports',
   preserve_inbound_ports_desc: 'When enabled, drag sorting, delete reindexing, and start-port changes will not rewrite existing node ports. Only manual edits change a node port.',
-  preserve_inbound_ports_disable_warning: 'Disabling this will reassign inbound ports for all nodes based on order (ports may change) and restart sing-box. Continue?',
+  preserve_inbound_ports_disable_warning: 'Disabling this will reassign unpinned inbound ports per group start port (ports may change) and restart sing-box. Continue?',
   upstream_global: 'Global Upstream Proxy',
   upstream_global_desc: 'When enabled, every node set to Follow Global establishes its outbound connection through this proxy.',
   upstream_global_proxy: 'Global Upstream Configuration',

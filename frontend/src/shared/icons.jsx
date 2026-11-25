@@ -12,10 +12,10 @@ export function GithubMark({ size = 16 }) {
   )
 }
 
-// 三种健康状态用「形状」区分而不只靠颜色：实心圆 = 可用，空心环 = 未检测/失效，带斜线的环 = 已禁用。
+// 四种健康状态用「形状 + 颜色」区分：实心圆(绿)=可用，空心环(黄)=未测，实心圆(红)=失败，带斜线的环(灰)=已禁用。
 export function HealthGlyph({ health, size = 10 }) {
   const common = { width: size, height: size, viewBox: '0 0 10 10', 'aria-hidden': true, className: `sb-health-glyph sb-health-glyph--${health}` }
-  if (health === 'healthy') {
+  if (health === 'healthy' || health === 'failed') {
     return <svg {...common}><circle cx="5" cy="5" r="4.2" fill="currentColor" /></svg>
   }
   if (health === 'disabled') {

@@ -19,6 +19,7 @@ type nodeMutationTable struct {
 
 func captureNodeMutationTables(ctx context.Context, tx *sql.Tx) ([]nodeMutationTable, error) {
 	tables := []struct{ name, columns string }{
+		{"node_groups", models.GroupColumns},
 		{"proxy_nodes", models.ProxyNodeSelectColumns},
 		{"settings", models.SettingsSnapshotColumns},
 	}
@@ -84,22 +85,48 @@ func (coordinator *nodeMutationCoordinator) commitCandidate(
 		return fmt.Errorf("node or settings data changed while preparing runtime; retry the request")
 	}
 	for index := range before {
+		if before[index].name == "proxy_nodes" {
+			if err := releaseChangedPorts(ctx, tx, before[index], after[index]); err != nil {
+				return err
+			}
+		}
+	}
+	for index := range before {
 		if err := applyNodeMutationTable(ctx, tx, before[index], after[index]); err != nil {
 			return err
+		}
+	}
+	for index := len(before) - 1; index >= 0; index-- {
+		for _, id := range before[index].ids {
+			if _, exists := after[index].rows[id]; !exists {
+				if _, err := tx.ExecContext(ctx, "DELETE FROM "+before[index].name+" WHERE id=?", id); err != nil {
+					return err
+				}
+			}
 		}
 	}
 	return tx.Commit()
 }
 
-func applyNodeMutationTable(ctx context.Context, tx *sql.Tx, before, after nodeMutationTable) error {
-	for _, id := range before.ids {
-		if _, exists := after.rows[id]; exists {
+func releaseChangedPorts(ctx context.Context, tx *sql.Tx, before, after nodeMutationTable) error {
+	for index, column := range before.columns {
+		if column != "inbound_port" {
 			continue
 		}
-		if _, err := tx.ExecContext(ctx, "DELETE FROM "+before.name+" WHERE id = ?", id); err != nil {
-			return err
+		for _, id := range before.ids {
+			next, exists := after.rows[id]
+			old := before.rows[id][index]
+			if old != nil && (!exists || !reflect.DeepEqual(next[index], old)) {
+				if _, err := tx.ExecContext(ctx, "UPDATE proxy_nodes SET inbound_port=NULL WHERE id=?", id); err != nil {
+					return err
+				}
+			}
 		}
 	}
+	return nil
+}
+
+func applyNodeMutationTable(ctx context.Context, tx *sql.Tx, before, after nodeMutationTable) error {
 	for _, id := range after.ids {
 		values := after.rows[id]
 		previous, exists := before.rows[id]

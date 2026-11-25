@@ -1,22 +1,21 @@
-FROM debian:bookworm-slim AS selector
+FROM alpine:3.24 AS selector
 
 ARG TARGETARCH
 
 COPY release-binaries/ /tmp/release-binaries/
 
-RUN ARCH="${TARGETARCH:-$(dpkg --print-architecture)}" \
+RUN ARCH="${TARGETARCH:-$(uname -m)}" \
     && case "${ARCH}" in \
-      amd64|arm64) cp "/tmp/release-binaries/singbox-proxy-manager-linux-${ARCH}" /tmp/singbox-proxy-manager ;; \
+      amd64|x86_64) ARCH="amd64" ;; \
+      arm64|aarch64) ARCH="arm64" ;; \
       *) echo "Unsupported TARGETARCH: ${ARCH}" >&2; exit 1 ;; \
     esac \
+    && cp "/tmp/release-binaries/singbox-proxy-manager-linux-${ARCH}" /tmp/singbox-proxy-manager \
     && chmod +x /tmp/singbox-proxy-manager
 
-FROM debian:bookworm-slim
+FROM alpine:3.24
 
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    ca-certificates \
-    && apt-get clean \
-    && rm -rf /var/lib/apt/lists/*
+RUN apk add --no-cache ca-certificates tzdata
 
 WORKDIR /app
 COPY --from=selector /tmp/singbox-proxy-manager /app/singbox-proxy-manager
@@ -27,7 +26,7 @@ RUN mkdir -p /app/config
 ENV PORT=30000
 ENV BIND_ADDRESS=0.0.0.0
 ENV CONFIG_DIR=/app/config
-ENV TZ=UTC+8
+ENV TZ=Asia/Shanghai
 ENV ACCEPT_USER_AGREEMENT=false
 ENV ADMIN_PASSWORD=
 ENV SBPM_SINGBOX_LOG_OUTPUT=stdout

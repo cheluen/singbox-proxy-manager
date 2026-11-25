@@ -1,6 +1,6 @@
 # 系统架构与核心机制
 
-本文档基于 `1.7.29` 源码梳理 SingBox Proxy Manager 的核心架构、运行时生命周期与安全边界。
+本文档基于 `1.7.30` 源码梳理 SingBox Proxy Manager 的核心架构、运行时生命周期与安全边界。
 
 ## 1. 总体定位与架构
 
@@ -40,7 +40,8 @@ flowchart LR
 
 | 组件 | 固定基线 | 源码依据 |
 | --- | --- | --- |
-| 应用版本 | `1.7.29`（后端嵌入 `version.txt`） | `internal/version/version.txt` |
+| 应用版本 | `1.7.30`（后端嵌入 `version.txt`） | `internal/version/version.txt` |
+| 容器基础镜像 | `alpine:3.24`（多架构静态二进制运行环境） | `Dockerfile`、`Dockerfile.release` |
 | Go 工具链 | **精确 `1.26.11`**（发行与内核构建强校验） | `go.mod`、`scripts/verify-go-build.sh` |
 | sing-box 内核 | **固定 `1.12.12`**（Go 1.26.11 重编译） | `scripts/build-sing-box.sh` |
 | 前端技术栈 | React 18、Ant Design 5、Axios、i18next、dnd-kit、Lucide、Vite 6（Node `>=22.12.0`） | `frontend/package.json` |
@@ -51,10 +52,10 @@ flowchart LR
 | 路径 | 职责说明 |
 | --- | --- |
 | `backend/` | HTTP 服务入口（`main.go`）、自探针健康检查（`healthcheck.go`）、静态预压缩分发（`static_assets.go`）及各业务子包 |
-| `backend/api/` | 路由处理器、会话认证、登录防爆破限流、节点与设置的变更协调（`node_mutation*.go`） |
-| `backend/models/` | 节点与协议结构体、严格 JSON 校验、DDL 建表、自动迁移、查询与环境密码指纹同步 |
-| `backend/database/` | 多数据库驱动选择、连接池、MySQL DSN 规范化、PostgreSQL 占位符转换（`rebind.go`）、单实例数据库租约（`instance_lease.go`） |
-| `backend/services/` | `sing-box` 配置生成与进程生命周期、原子应用（`runtime_applier.go`）、日志轮转、资源/环境隔离、15 种协议链接编解码、批量导入与订阅 SSRF 防护、出口与前置 IP 检测、前置防环路 |
+| `backend/api/` | 路由处理器、会话认证、登录防爆破限流、节点/分组/订阅/策略/观测接口与变更协调（`node_mutation*.go`、`groups.go`、`subscriptions.go`、`policy_nodes.go`、`observability.go`） |
+| `backend/models/` | 节点、分组、策略与协议结构体、严格 JSON 校验、DDL 建表、分组迁移（`group_migration.go`）、查询与环境密码指纹同步 |
+| `backend/database/` | 多数据库驱动选择、连接池、MySQL DSN 规范化、独立日志库连接器（`log_target.go`）、PostgreSQL 占位符转换（`rebind.go`）、单实例数据库租约（`instance_lease.go`） |
+| `backend/services/` | `sing-box` 配置生成与进程生命周期、原子应用（`runtime_applier.go`）、脱敏与日志轮转（`singbox_log.go`）、策略 SOCKS5 调度器（`policy_dispatch.go`）、按需连接监控与日志/流量持久化（`connections.go`、`observability.go`、`log_store.go`、`log_query.go`）、资源/环境隔离、15 种协议链接编解码、批量导入与订阅 SSRF 防护、出口与前置 IP 检测、前置防环路 |
 | `internal/agreement/` | 嵌入 `USER_AGREEMENT.md` 正文，负责首次启动终端交互确认、同意哈希落盘与 `ACCEPT_USER_AGREEMENT` 环境变量门禁 |
 | `internal/kernel/` | 统一发行版内置内核嵌入、SHA-256 校验释放（`bundled_kernel` tag）；开发构建回退为空路径 |
 | `internal/version/` | 应用版本读取与 GitHub Release 按需更新查询（带互斥缓存） |
@@ -103,9 +104,11 @@ flowchart LR
 
 ### 3.1 `sing-box` 配置生成规则（`backend/services/singbox.go`）
 
-- **单进程多入站**：每个已启用节点生成一个 `mixed` 类型入站（标签 `node-<ID>-in`），同时承载 HTTP 与 SOCKS5 协议；入站监听地址固定写入 `::`（双栈监听），默认开启 `sniff` 与目标地址覆盖。
+- **单进程多入站与无端口出站**：每个已启用且分配了入站端口的节点生成一个 `mixed` 类型入站（标签 `node-<ID>-in`），同时承载 HTTP 与 SOCKS5 协议；入站监听地址固定写入 `::`（双栈监听），默认开启 `sniff` 与目标地址覆盖。位于不分配端口分组内的已启用实体节点（数据库 `inbound_port IS NULL`、API 返回 `0`）不生成独立 `mixed` 入站，但仍保留出站以供策略节点引用或隔离测 IP。
   > 注意：环境变量 `BIND_ADDRESS` **仅控制管理后台 HTTP 服务**，不影响节点代理入站的 `::` 监听地址。
-- **出站映射**：常规协议生成对应 `outbounds`（标签 `node-<ID>-out`）；`wireguard` 协议按 `sing-box 1.12` 规范写入顶层 `endpoints` 而非旧版 `wireguard` outbound；配置末尾固定附加内置 `direct` 出站作为 `route.final`。
+- **出站映射与策略调度**：常规实体协议直接生成对应 `outbounds`（标签 `node-<ID>-out`，零额外跳转）；`wireguard` 协议按 `sing-box 1.12` 规范写入顶层 `endpoints`；配置末尾固定附加内置 `direct` 出站作为 `route.final`。仅当存在已启用策略节点（`failover` / `loadbalance`）时，才会额外启动管理进程内置的本机 SOCKS5 策略调度器（`127.0.0.1` 随机端口 + 随机认证密钥）并生成单个内部认证回环入站 `internal-policy-dispatch-in`，将策略出站映射到成员实体出站。
+- **本机控制接口**：配置内置 `experimental.clash_api`（监听随机 `127.0.0.1` 端口与随机 Bearer 密钥），仅在面板打开「当前连接」、调用连接快照或开启日志持久化时按需采集。
+- **日志分流前脱敏**：`sing-box` 子进程 stdout/stderr 在写入控制台、轮转文件及日志观测缓冲之前先经行级脱敏处理器，自动拦截 HTTP/SOCKS5 认证失败错误中携带的明文密码与本机内部控制凭据。
 - **托管前置代理（链式转发）**：
   - 全局前置标签为 `managed-upstream-global`，节点自定义前置标签为 `node-<ID>-upstream`。
   - 普通出站通过 `detour` 串联至前置代理；`direct` 节点无法直接设 `detour`，由系统自动生成单选 `selector` 桥接至前置代理。
@@ -139,8 +142,8 @@ flowchart LR
 
 | 策略模式 | 端口行为 | 端口固定按钮（Pin） |
 | --- | --- | --- |
-| **自动分配模式**（`preserve_inbound_ports = false`，默认） | 新库默认起始端口为 `30001`（可配置 `1024–65535`）；新建节点自动跳过已被系统 TCP 占用及已固定的端口；删除节点、拖拽排序或部分编辑会按新顺序自动重排未固定节点的入站端口，已固定端口保持不动。 | 可用。切换固定状态仅更新数据库元数据，不立即重启内核；有筛选条件时禁用拖拽重排。 |
-| **保留入站端口模式**（`preserve_inbound_ports = true`） | 排序、删除补位或修改起始端口均不会改写既有节点端口；新建/编辑允许手动指定端口（填 `0` 表示自动分配）。 | 隐藏且后端拒绝修改固定状态（返回 `409`）；允许在筛选子集内排序，由前端合并完整排列提交。 |
+| **自动分配模式**（`preserve_inbound_ports = false`，默认） | 按分组配置生效：每个分组可独立设置 `allocate_port`（是否分配端口）与 `start_port`（默认首组 `30001`，范围 `1024–65535`）；开启分配时全局保持 `inbound_port` 唯一，自动跳过已被系统 TCP 占用及已固定/其他组占用的端口；关闭分配时组内节点端口置空（SQL `NULL`、API `0`）。删除、拖拽排序或组设置变更会按新顺序自动重排未固定节点的入站端口，已固定端口保持不动。 | 可用。切换固定状态仅更新数据库元数据，不立即重启内核；有筛选条件时禁用拖拽重排；关闭分组端口分配时若组内存在固定端口，需显式传入 `release_pins: true`。 |
+| **保留入站端口模式**（`preserve_inbound_ports = true`） | 排序、删除补位或修改分组起始端口均不会改写既有节点端口；开启分配的分组在新建/编辑时允许手动指定端口（填 `0` 表示自动分配）。 | 隐藏且后端拒绝修改固定状态（返回 `409`）；允许在筛选子集内排序，由前端合并完整排列提交。 |
 
 > 从「保留入站端口」切回「自动分配模式」会重排未固定节点端口并重启 `sing-box`，前端会弹出危险操作二次确认。
 
@@ -164,6 +167,17 @@ flowchart LR
 1. 禁止前置代理定义与节点自身出站完全相同，禁止在前置定义内再次嵌套 `detour`。
 2. 若前置目标端口命中本机任一启用入站端口，系统会解析目标主机（DNS 超时 `5s`、并发上限 `8`），一旦命中回环地址、未指定地址或本机网卡地址，直接拒绝保存（使用 TCP 复用账号同样无法绕过）。
 
+### 4.4 节点分组、策略节点与观测边界
+
+- **节点分组与分组独立订阅**：四类数据库均在迁移时自动创建 `node_groups` 表并将 `1.7.29` 及更早版本的既有节点无损归入首组（继承原 `start_port`，保留全部节点 ID、端口、固定状态、账密、备注与顺序）。分组支持独立配置 `subscription_url` 与定时刷新周期，增量同步通过四层匹配规则（含同协议唯一订阅名换服原地匹配）尽可能保留本地端口、固定标记、入站账密、自定义名称/备注与策略成员引用；拉取失败或空订阅绝不清空已有节点。
+- **策略节点（`failover` / `loadbalance`）**：
+  - 仅允许引用实体节点（支持跨组与无端口成员，禁止嵌套策略节点），前置模式固定为 `none`（转发至成员后沿用成员自身前置）。
+  - 调度器优先尝试健康成员，全部健康成员失败时仍按顺序回退尝试其余成员；单次请求中若后续备选成员成功连通同一目标，调度器立即异步触发对先前失败成员的独立健康探测并按探测结果更新健康状态，避免单个不可达目标地址误伤健康成员。
+  - 删除实体成员会自动剔除策略引用，停用成员则保留引用并在运行时跳过并展示告警，确保 `sing-box check` 永不因成员变动失败。
+- **当前连接与日志/流量观测边界**：
+  - 空闲无订阅者且未启用持久化时，后端停止全部 `clash_api` 定时采样并回收计数器状态（单次快照轮询最多保留 5 秒基线）。SSE 连接逐帧校验管理员会话，登出、过期或改密后自动断开。
+  - 两个来自官方 `sing-box v1.12.12` 内核的诚实边界：① 同一策略节点同时有多个不同成员并发访问完全相同的目标主机端口时，官方 `/connections` 响应未携带外层与内层连接关联 ID，系统在无法唯一配对时将 `policy_member_id` 显式置 `0` 而不做错误归因；② `/connections` 仅暴露当前活跃连接，完全落在采样间隔内的极短连接或连接关闭前最后一次采样后的尾量字节可能未计入分钟流量桶，流量统计定位于运维观测而非精确计费。
+
 ---
 
 ## 5. 安全设计与运行边界
@@ -186,7 +200,7 @@ flowchart LR
   - 拒绝 `localhost`、回环、私有内网、链路本地、云元数据段、保留与文档网段等全部非公网地址；DNS 返回多条记录时任一地址不安全即整体拒绝；每次重定向重新校验并直接拨号至已校验 IP。
   - 硬限制：单次请求 `15s`、整次展开 `70s`、最多 `20` 个 URL、抓取并发 `5`、单响应最大 `5 MiB`、展开深度上限 `3`、单次导入节点与错误项合计上限 `2000`，自动拦截 HTML 页面正文；订阅内容内部嵌套的 URL 禁止再次发起联网抓取。
 - **内核环境变量隔离**（`backend/services/singbox_command.go`）：启动 `sing-box` 子进程时仅白名单透传 `HOME / LANG / LC_ALL / PATH / SSL_CERT_DIR / SSL_CERT_FILE / TMPDIR / TZ` 及 `SINGBOX_ENV_ALLOWLIST` 显式指定的非敏感变量；任何包含密码、Token、数据库 URL、DSN、私钥、API Key 特征的变量名即使写入白名单也会被强行剔除。
-- **HTTP 安全头与 CORS 边界**：所有响应自动附加 CSP、`X-Frame-Options`、`X-Content-Type-Options: nosniff`、`Permissions-Policy`，识别 HTTPS 或反代 HTTPS 头时附加 HSTS。CORS 默认关闭，仅在配置 `CORS_ALLOWED_ORIGINS` 时做精确 Origin 匹配（忽略 `*`）；注意其允许方法列表为 `GET, POST, PUT, DELETE, OPTIONS`（不含 `PATCH`），正式前端默认以同源 `/api` 方式部署。
+- **HTTP 安全头与 CORS 边界**：所有响应自动附加 CSP、`X-Frame-Options`、`X-Content-Type-Options: nosniff`、`Permissions-Policy`，识别 HTTPS 或反代 HTTPS 头时附加 HSTS。CORS 默认关闭，仅在配置 `CORS_ALLOWED_ORIGINS` 时做精确 Origin 匹配（忽略 `*`），允许方法列表为 `GET, POST, PUT, PATCH, DELETE, OPTIONS`；正式前端默认以同源 `/api` 方式部署。
 
 ### 5.3 安全重编译保障（Go 1.26.11 + sing-box 1.12.12）
 

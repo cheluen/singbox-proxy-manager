@@ -6,8 +6,8 @@ const BATCH_IMPORT_TIMEOUT_MS = 120000
 
 export function useNodeActions(manager) {
   const {
-    helpers, nodesRef, visibleRef, loadNodes, loadSettings, setNodes, selectedNodesRef, clearSelection,
-    checks, checkNodes, filtersActive, preservePorts, setWorking, setRuntime, setRuntimeRestarting, setOverlay,
+    helpers, allNodesRef, nodesRef, visibleRef, activeGroupIdRef, loadGroups, loadNodes, loadSettings, setNodes, selectedNodesRef, clearSelection,
+    checks, checkNodes, filtersActive, preservePorts, activeGroup, setWorking, setRuntime, setRuntimeRestarting, setOverlay,
   } = manager
   const { t, notify, confirm, onPasswordChanged, errorText, outboundSignature, isNodeExportable } = helpers
   const importBusyRef = useRef(false)
@@ -34,22 +34,27 @@ export function useNodeActions(manager) {
 
   const commitOrder = useCallback(async (ordered) => {
     setNodes(ordered)
+    const groupId = activeGroupIdRef.current
+    const payload = {
+      nodes: ordered.map((node, index) => ({ id: node.id, sort_order: index })),
+      ...(groupId != null ? { group_id: groupId } : {}),
+    }
     try {
-      await api.post('/nodes/reorder', { nodes: ordered.map((node, index) => ({ id: node.id, sort_order: index })) })
+      await api.post('/nodes/reorder', payload)
       notify.success(t('nodes_reordered'))
     } catch {
       notify.error(t('server_error'))
     }
     await loadNodes({ silent: true })
-  }, [loadNodes, notify, setNodes, t])
+  }, [activeGroupIdRef, loadNodes, notify, setNodes, t])
 
-  // 把 activeId 移到 overId 所在位置。筛选状态下只调整可见子集在完整列表中的相对顺序。
+  // 把 activeId 移到 overId 所在位置。筛选状态下只调整可见子集在当前分组列表中的相对顺序。
   const reorder = useCallback(async (activeId, overId) => {
     const visible = visibleRef.current
     const from = visible.findIndex((node) => node.id === activeId)
     const to = visible.findIndex((node) => node.id === overId)
     if (from < 0 || to < 0 || from === to) return
-    if (filtersActive && !preservePorts) {
+    if (filtersActive && !preservePorts && activeGroup?.allocate_port !== false) {
       notify.warning(t('drag_sort_disabled_filtered'))
       return
     }
@@ -64,7 +69,7 @@ export function useNodeActions(manager) {
       return moved[cursor - 1]
     })
     await commitOrder(merged)
-  }, [commitOrder, filtersActive, nodesRef, notify, preservePorts, t, visibleRef])
+  }, [activeGroup?.allocate_port, commitOrder, filtersActive, nodesRef, notify, preservePorts, t, visibleRef])
 
   // 不依赖拖拽的排序方式（键盘、触屏更友好）：where = 'up' | 'down' | 'top' | 'bottom'
   const moveNode = useCallback((id, where) => {
@@ -91,9 +96,9 @@ export function useNodeActions(manager) {
       } catch (error) {
         notify.error(errorText(error, t('server_error')))
       }
-      await loadNodes({ silent: true })
+      await Promise.all([loadNodes({ silent: true }), loadGroups()])
     })
-  }, [clearSelection, confirm, errorText, loadNodes, notify, selectedNodesRef, t, track])
+  }, [clearSelection, confirm, errorText, loadGroups, loadNodes, notify, selectedNodesRef, t, track])
 
   const dedupeSelected = useCallback(async () => {
     const seen = new Set()
@@ -116,9 +121,9 @@ export function useNodeActions(manager) {
       } catch (error) {
         notify.error(errorText(error, t('server_error')))
       }
-      await loadNodes({ silent: true })
+      await Promise.all([loadNodes({ silent: true }), loadGroups()])
     })
-  }, [confirm, errorText, loadNodes, notify, outboundSignature, selectedNodesRef, t, track])
+  }, [confirm, errorText, loadGroups, loadNodes, notify, outboundSignature, selectedNodesRef, t, track])
 
   const applyBatchAuth = useCallback(async (auth) => {
     if (auth.auth_enabled === false) {
@@ -156,8 +161,7 @@ export function useNodeActions(manager) {
     }
   }), [errorText, isNodeExportable, notify, setOverlay, t, track])
 
-  const exportSelected = useCallback(() => track('export', async () => {
-    const ids = selectedNodesRef.current.filter(isNodeExportable).map((node) => node.id)
+  const exportIds = useCallback((ids) => track('export', async () => {
     if (ids.length === 0) {
       notify.warning(t('no_exportable_nodes'))
       return
@@ -171,7 +175,18 @@ export function useNodeActions(manager) {
     } catch (error) {
       notify.error(errorText(error, t('server_error')))
     }
-  }), [errorText, isNodeExportable, notify, selectedNodesRef, setOverlay, t, track])
+  }), [errorText, notify, setOverlay, t, track])
+
+  const exportSelected = useCallback(() => {
+    const ids = selectedNodesRef.current.filter(isNodeExportable).map((node) => node.id)
+    return exportIds(ids)
+  }, [exportIds, isNodeExportable, selectedNodesRef])
+
+  const exportScope = useCallback((scope) => {
+    const pool = scope === 'all' ? allNodesRef.current : nodesRef.current
+    const ids = pool.filter(isNodeExportable).map((node) => node.id)
+    return exportIds(ids)
+  }, [allNodesRef, exportIds, isNodeExportable, nodesRef])
 
   /* ---------- 导入 ---------- */
 
@@ -186,21 +201,22 @@ export function useNodeActions(manager) {
     }
   }, [errorText, t])
 
-  const importBatch = useCallback(async ({ content, sourceType, enabled }) => {
+  const importBatch = useCallback(async ({ content, sourceType, enabled, groupId }) => {
     if (importBusyRef.current || !mountedRef.current) return null
     importBusyRef.current = true
     const controller = new AbortController()
     importRequestRef.current = controller
+    const targetGroupId = groupId ?? activeGroupIdRef.current
     try {
       const response = await api.post(
         '/nodes/batch-import',
-        { content, source_type: sourceType, enabled },
+        { content, source_type: sourceType, enabled, ...(targetGroupId != null ? { group_id: targetGroupId } : {}) },
         { timeout: BATCH_IMPORT_TIMEOUT_MS, signal: controller.signal }
       )
       if (!mountedRef.current) return null
       const { success, failed, results } = response.data
       const importedIds = results.filter((item) => item.success).map((item) => item.id)
-      await loadNodes({ silent: true })
+      await Promise.all([loadNodes({ silent: true }), loadGroups()])
       if (mountedRef.current && enabled && importedIds.length > 0) checks.runChecks(importedIds)
       return { success, failed, errors: results.filter((item) => item.success === false) }
     } catch (error) {
@@ -214,7 +230,7 @@ export function useNodeActions(manager) {
       importRequestRef.current = null
       importBusyRef.current = false
     }
-  }, [checks, errorText, loadNodes, t])
+  }, [activeGroupIdRef, checks, errorText, loadGroups, loadNodes, t])
 
   /* ---------- 系统 ---------- */
 
@@ -261,6 +277,6 @@ export function useNodeActions(manager) {
 
   return {
     reorder, moveNode, deleteSelected, dedupeSelected, applyBatchAuth, checkSelected, checkVisible,
-    exportNode, exportSelected, parseLink, importBatch, restartRuntime, saveSettings, checkGlobalUpstream,
+    exportNode, exportSelected, exportScope, parseLink, importBatch, restartRuntime, saveSettings, checkGlobalUpstream,
   }
 }

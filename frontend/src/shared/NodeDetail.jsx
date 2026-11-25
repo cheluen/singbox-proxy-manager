@@ -1,7 +1,8 @@
 import { Button } from 'antd'
-import { Pencil, Route, Zap } from 'lucide-react'
+import { Pencil, Route, TriangleAlert, Zap } from 'lucide-react'
 import { useTranslation } from 'react-i18next'
-import { formatDateTime, initialUpstreamMode, protocolLabel, serverAddress, upstreamAddress } from '../core/nodeView'
+import { isPolicyNode } from '../core/nodeModel'
+import { formatDateTime, initialUpstreamMode, nodeHealth, parsedNodeConfig, protocolLabel, serverAddress, upstreamAddress } from '../core/nodeView'
 import { Toggle } from './controls'
 import { NodeMenuButton } from './menus'
 import { upstreamModeLabel } from './labels'
@@ -24,16 +25,19 @@ function Section({ title, action, children, className = '' }) {
 
 function ExitSection({ node, checking }) {
   const { t } = useTranslation()
+  const health = nodeHealth(node)
+  const failed = health === 'failed'
   return (
     <Section title={t('section_exit')}>
       <dl className="sb-fields">
         <Field label={t('status')}><HealthBadge node={node} checking={checking} /></Field>
-        <Field label={t('latency')}><Latency value={node.latency} /></Field>
+        <Field label={t('latency')}><Latency value={node.latency} failed={failed} healthy={health === 'healthy'} untested={health === 'untested'} error={node.check_error} /></Field>
         <Field label={t('node_ip')}>
           {node.node_ip ? <span className="sb-inline"><span className="mono">{node.node_ip}</span><CopyButton text={node.node_ip} /></span> : dash}
         </Field>
         <Field label={t('location')}><Region node={node} /></Field>
       </dl>
+      {failed && node.check_error ? <p className="sb-callout sb-callout--bad sb-section__note" data-testid={`node-check-error-${node.id}`}>{node.check_error}</p> : null}
       {node.enabled === false ? <p className="sb-dim sb-section__note">{t('check_disabled_hint')}</p> : null}
     </Section>
   )
@@ -50,14 +54,15 @@ function ConnectSection({ node }) {
 
 function InboundSection({ node, act, pinBusy, flagBusy, preservePorts }) {
   const { t } = useTranslation()
+  const hasPort = Number(node.inbound_port) > 0
   return (
     <Section title={t('section_inbound')}>
       <dl className="sb-fields">
         <Field label={t('inbound_port')}><PortChip node={node} act={act} pinBusy={pinBusy} preservePorts={preservePorts} copyable /></Field>
         <Field label={t('tcp_reuse')}>
           <span className="sb-inline">
-            <Toggle checked={node.tcp_reuse_enabled !== false} busy={flagBusy} label={t('tcp_reuse')} onChange={() => act.toggleTcpReuse(node)} testId={`node-tcp-reuse-${node.id}`} />
-            <span className="sb-dim">{node.tcp_reuse_enabled !== false ? t('enabled') : t('disabled')}</span>
+            <Toggle checked={hasPort && node.tcp_reuse_enabled !== false} busy={flagBusy} disabled={!hasPort} label={t('tcp_reuse')} onChange={() => act.toggleTcpReuse(node)} testId={`node-tcp-reuse-${node.id}`} />
+            <span className="sb-dim">{!hasPort ? t('group_no_port_badge') : node.tcp_reuse_enabled !== false ? t('enabled') : t('disabled')}</span>
           </span>
         </Field>
         <Field label={t('username')}>
@@ -69,16 +74,76 @@ function InboundSection({ node, act, pinBusy, flagBusy, preservePorts }) {
   )
 }
 
+function PolicyMembersSection({ node, ctl }) {
+  const { t } = useTranslation()
+  const cfg = parsedNodeConfig(node)
+  const memberIds = Array.isArray(cfg.member_ids) ? cfg.member_ids : []
+  const nodeMap = new Map((ctl.allNodes || ctl.nodes || []).map((item) => [item.id, item]))
+  const healthMap = new Map((node.policy_member_health || []).map((item) => [item.node_id, item]))
+  const warnings = Array.isArray(node.policy_warnings) ? node.policy_warnings : []
+  return (
+    <Section title={t('policy_members_status')}>
+      {warnings.map((warn, idx) => (
+        <p key={idx} className="sb-callout sb-callout--warn sb-section__note" style={{ marginTop: 0, marginBottom: 8 }}>
+          <TriangleAlert size={14} strokeWidth={1.8} />
+          <span>{warn}</span>
+        </p>
+      ))}
+      {memberIds.length === 0 ? (
+        <p className="sb-dim">{t('policy_no_members')}</p>
+      ) : (
+        <ul className="sb-policy-status-list" data-testid={`policy-members-status-${node.id}`}>
+          {memberIds.map((id, index) => {
+            const member = nodeMap.get(id)
+            const health = healthMap.get(id)
+            const isActive = node.policy_active_member_id === id
+            const tone = !member || member.enabled === false
+              ? 'muted'
+              : health
+                ? (health.healthy ? 'ok' : 'bad')
+                : 'warn'
+            return (
+              <li key={id} className={`sb-policy-status-item${isActive ? ' is-active' : ''}`}>
+                <span className="mono sb-dim">{index + 1}</span>
+                <i className={`dusk-dot dusk-dot--${tone}`} />
+                <span className="truncate">{member ? member.name : `#${id}`}</span>
+                {isActive ? <span className="sb-tag sb-tag--protocol">{t('policy_active_tag')}</span> : null}
+                <span className="sb-policy-status-item__right mono">
+                  {!member || member.enabled === false
+                    ? t('disabled')
+                    : health
+                      ? (health.healthy ? (health.latency > 0 ? `${health.latency} ms` : t('status_healthy')) : t('status_failed_short'))
+                      : t('status_untested_short')}
+                </span>
+              </li>
+            )
+          })}
+        </ul>
+      )}
+    </Section>
+  )
+}
+
 function OutboundSection({ node }) {
   const { t, i18n } = useTranslation()
+  const policy = isPolicyNode(node)
+  const cfg = policy ? parsedNodeConfig(node) : null
   const address = serverAddress(node)
   const locale = i18n.language?.startsWith('zh') ? 'zh' : 'en'
   return (
     <Section title={t('section_outbound')}>
       <dl className="sb-fields">
-        <Field label={t('server_address')} wide>
-          {address ? <span className="sb-inline"><span className="mono truncate">{address}</span><CopyButton text={address} /></span> : dash}
-        </Field>
+        {policy ? (
+          <Field label={t('policy_lb_strategy')} wide>
+            {node.type === 'failover'
+              ? t('policy_mode_failover')
+              : (cfg?.strategy === 'consistent-hashing' ? t('policy_strategy_hash') : t('policy_strategy_rr'))}
+          </Field>
+        ) : (
+          <Field label={t('server_address')} wide>
+            {address ? <span className="sb-inline"><span className="mono truncate">{address}</span><CopyButton text={address} /></span> : dash}
+          </Field>
+        )}
         <Field label={t('node_type')}>{protocolLabel(node.type)}</Field>
         <Field label={t('updated_at')}>{formatDateTime(node.updated_at, locale)}</Field>
       </dl>
@@ -159,7 +224,7 @@ export function DetailSections({ node, ctl, act }) {
       <div className="sb-detail-card" data-detail-group="outbound">
         <OutboundSection node={node} />
         <ExitSection node={node} checking={checking} />
-        <UpstreamSection node={node} act={act} />
+        {isPolicyNode(node) ? <PolicyMembersSection node={node} ctl={ctl} /> : <UpstreamSection node={node} act={act} />}
       </div>
       <RemarkSection node={node} act={act} />
     </>

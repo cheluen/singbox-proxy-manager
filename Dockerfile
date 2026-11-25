@@ -5,7 +5,8 @@ RUN npm ci
 COPY frontend/ ./
 RUN npm run build
 
-FROM golang:1.26.11 AS backend-builder
+FROM golang:1.26.11-alpine3.24 AS backend-builder
+RUN apk add --no-cache git ca-certificates
 ENV GOTOOLCHAIN=local
 ARG GOPROXY=https://proxy.golang.org,direct
 ARG GOSUMDB=sum.golang.org
@@ -21,11 +22,8 @@ COPY --from=frontend-builder /app/frontend/dist ./frontend/dist
 COPY internal/ ./internal/
 RUN ./scripts/build-release.sh /app/singbox-proxy-manager
 
-FROM debian:bookworm-slim
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    ca-certificates \
-    && apt-get clean \
-    && rm -rf /var/lib/apt/lists/*
+FROM alpine:3.24
+RUN apk add --no-cache ca-certificates tzdata
 
 WORKDIR /app
 COPY --from=backend-builder /app/singbox-proxy-manager ./singbox-proxy-manager
@@ -36,7 +34,7 @@ RUN mkdir -p /app/config
 ENV PORT=30000
 ENV BIND_ADDRESS=0.0.0.0
 ENV CONFIG_DIR=/app/config
-ENV TZ=UTC+8
+ENV TZ=Asia/Shanghai
 ENV ACCEPT_USER_AGREEMENT=false
 ENV ADMIN_PASSWORD=
 ENV SINGBOX_ENV_ALLOWLIST=

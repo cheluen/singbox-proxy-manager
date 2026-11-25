@@ -68,7 +68,15 @@ export const stableConfigSignature = (rawConfig) => {
   }
 }
 
-export const isNodeExportable = (node) => String(node?.type || '').toLowerCase() !== 'direct'
+export const isPolicyNode = (node) => {
+  const type = String(node?.type || '').toLowerCase()
+  return type === 'failover' || type === 'loadbalance'
+}
+
+export const isNodeExportable = (node) => {
+  const type = String(node?.type || '').toLowerCase()
+  return type !== 'direct' && type !== 'failover' && type !== 'loadbalance'
+}
 
 export const parseInboundPortFilterExpression = (value) => {
   const tokens = String(value ?? '')
@@ -103,8 +111,12 @@ export const matchInboundPortFilter = (port, ranges) =>
   ranges.some(({ start, end }) => port >= start && port <= end)
 
 export const getNodeStatusCode = (node) => {
+  const status = String(node?.check_status || '').trim().toLowerCase()
+  if (status === 'failed') return 'failed'
+  if (status === 'ok') return 'healthy'
+  if (status === 'untested') return 'untested'
   const hasIP = Boolean(String(node?.node_ip || '').trim())
   const latencyRaw = Number(node?.latency)
   const latency = Number.isFinite(latencyRaw) ? latencyRaw : 0
-  return hasIP && latency > 0 ? 'healthy' : 'unverified'
+  return hasIP && latency > 0 ? 'healthy' : 'untested'
 }

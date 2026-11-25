@@ -1,10 +1,10 @@
 import { useMemo } from 'react'
 import { App } from 'antd'
 import {
-  ArrowDown, ArrowDownToLine, ArrowLeftRight, ArrowUp, ArrowUpToLine, Copy, Download, Pencil, Route, Trash2, Zap,
+  ArrowDown, ArrowDownToLine, ArrowLeftRight, ArrowUp, ArrowUpToLine, Copy, Download, FolderInput, Pencil, Route, Trash2, Zap,
 } from 'lucide-react'
 import { useTranslation } from 'react-i18next'
-import { isNodeExportable } from '../core/nodeModel'
+import { isNodeExportable, isPolicyNode } from '../core/nodeModel'
 import { buildProxyUrl, copyText } from '../core/nodeView'
 import { MenuIcon } from './icons'
 
@@ -20,6 +20,7 @@ export function useNodeMenu(node, { act, canReorder }) {
       edit: () => act.open({ kind: 'node', node }),
       upstream: () => act.open({ kind: 'upstream', node }),
       replace: () => act.open({ kind: 'replace', node }),
+      'move-group': () => act.open({ kind: 'move-group', nodeIds: [node.id] }),
       export: () => act.exportNode(node),
       top: () => act.moveNode(node.id, 'top'),
       up: () => act.moveNode(node.id, 'up'),
@@ -28,6 +29,7 @@ export function useNodeMenu(node, { act, canReorder }) {
       delete: () => act.removeNode(node),
     }
     const hasPort = Boolean(node.inbound_port)
+    const policy = isPolicyNode(node)
     return {
       items: [
         { key: 'copy-http', icon: <MenuIcon icon={Copy} />, label: t('copy_proxy_http'), disabled: !hasPort },
@@ -35,8 +37,11 @@ export function useNodeMenu(node, { act, canReorder }) {
         { type: 'divider' },
         { key: 'check', icon: <MenuIcon icon={Zap} />, label: t('check_ip'), disabled: node.enabled === false },
         { key: 'edit', icon: <MenuIcon icon={Pencil} />, label: t('edit') },
-        { key: 'upstream', icon: <MenuIcon icon={Route} />, label: t('upstream_mode') },
-        { key: 'replace', icon: <MenuIcon icon={ArrowLeftRight} />, label: t('replace_with_link') },
+        ...(!policy ? [
+          { key: 'upstream', icon: <MenuIcon icon={Route} />, label: t('upstream_mode') },
+          { key: 'replace', icon: <MenuIcon icon={ArrowLeftRight} />, label: t('replace_with_link') },
+        ] : []),
+        { key: 'move-group', icon: <MenuIcon icon={FolderInput} />, label: t('move_to_group') },
         { key: 'export', icon: <MenuIcon icon={Download} />, label: t('export_share_link'), disabled: !isNodeExportable(node) },
         { type: 'divider' },
         { key: 'top', icon: <MenuIcon icon={ArrowUpToLine} />, label: t('move_top'), disabled: !canReorder },

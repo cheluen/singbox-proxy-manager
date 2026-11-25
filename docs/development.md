@@ -1,6 +1,6 @@
 # 本地开发、构建发布与测试指南
 
-本文档以 `1.7.29` 为基线，说明工具链、本地联调、单文件发行、许可证分发和 CI 测试矩阵。
+本文档以 `1.7.30` 为基线，说明工具链、本地联调、单文件与 Alpine 镜像发行、许可证分发和 CI 测试矩阵。
 
 ---
 
@@ -101,7 +101,7 @@ SINGBOX_TEST_BINARY="$PWD/sing-box" go test -race -count=1 ./backend/... ./inter
 | `npm run test:version-sync` | 校验六处版本号（`version.txt`、`package.json`、`package-lock.json`、`README.md` 徽章与 `APP_VERSION` 行）完全一致 |
 | `npm run build` | Vite 构建并生成 Brotli / Gzip 预压缩资源 |
 | `npm audit --omit=dev --audit-level=moderate` | 生产依赖漏洞审计（CI 独立运行，非 `npm run audit`） |
-| `npm run test:e2e:all` | 运行 21 项共享 Mock API 浏览器回归（含 `column-resize` 列表列宽拖拽持久化与展开对称布局）+ `nodeform-config-preservation`（注：含 `live` 字样的共享场景仍基于 Mock 状态，**不包含** `full-stack` 真实后端测试） |
+| `npm run test:e2e:all` | 运行 24 项共享 Mock API 浏览器回归（含 `column-resize`、`check-failed-ui`、`groups-policy-ui`、`connections-logs-ui` 等）+ `nodeform-config-preservation`（注：含 `live` 字样的共享场景仍基于 Mock 状态，**不包含** `full-stack` 真实后端测试） |
 
 节点列表回归覆盖节点名截断、列表列宽拖拽缩放与恢复默认持久化、三栏等高对称且入站优先的节点展开布局、备注上方显示及复制完整名称、入站用户名、固定宽度毛玻璃密码掩码、键盘切换及改密复位。连接区回归核对「路由号」双语标签、复制值与 TCP 复用开关。
 
@@ -134,6 +134,10 @@ SBPM_RELEASE_TEST_CUSTOM_CONFIG=1 python3 scripts/test-release.py "$PWD/release-
     SINGBOX_TEST_BINARY="$PWD/../sing-box" \
     npm run test:e2e:full-stack-protocol-import
 
+  SBPM_E2E_BACKEND_BINARY="$PWD/../release-binaries/singbox-proxy-manager-linux-amd64" \
+    SINGBOX_TEST_BINARY="$PWD/../sing-box" \
+    npm run test:e2e:full-stack-features
+
   SBPM_TEST_BINARY="$PWD/../release-binaries/singbox-proxy-manager-linux-amd64" \
     npm run test:e2e:precompressed-static
 )
@@ -160,25 +164,28 @@ rm -f /tmp/sbpm-upstream-e2e-backend
 
 触发条件：推送至 `main`、推送 `v*` Git Tag 或面向 `main` 的 Pull Request。
 
-1. **发布计划判定与静态检查**：`release-plan` 自动判定本次属于正式稳定发版（`v*` 稳定 tag 或 `main` 分支递进了尚未打标的新版本号）、预发布发版（版本号含 `-` 后缀如 `v1.8.0-beta.1`）或日常 `main` 非发版提交；随后重编译 `sing-box 1.12.12`，并行执行 `golangci-lint`、`govulncheck`、Go `-race` 测试、发布说明与 GHCR 清理脚本单测、前端 ESLint、生产依赖 `npm audit`、`test:core`、`audit`、`test:version-sync`、`build` 以及 22 项前端 E2E 矩阵。
-2. **全栈与容器系统测试**：复用 `frontend-dist` 与测试内核执行真实上游与协议导入全栈回归、`docker compose --profile local` 源码构建系统测试（验证未同意协议拒绝启动、`HEALTHCHECK` 达到 `healthy`、Shadowsocks 与 Direct 真实 HTTP/SOCKS5 转发）、单文件发行回归（覆盖非交互/伪终端协议门禁与原地升级）、`full-stack-system`（含跨进程重启列宽持久化与 `/api/health`） / `full-stack-node-list` / `precompressed-static` 浏览器验证，以及 `Dockerfile.release` 多架构构建验证。
+1. **发布计划与条件触发判定**：`release-plan` 自动判定是否执行完整流水线（`run_full`）以及是否发版（`should_release`）：
+   - Pull Request 与 `v*` Git Tag 始终执行完整 CI；
+   - 推送至 `main` 时，若 `internal/version/version.txt` 内容未变且对应 `v<版本号>` 标签已存在（如仅更新文档或注释），自动跳过重量级测试与构建作业；若版本号递增或对应标签尚不存在，则执行完整 CI 与发版校验。
+   - 完整 CI 会重编译 `sing-box 1.12.12`，并行执行 `golangci-lint`、`govulncheck`（同时扫描管理程序源码与二进制及固定内核二进制）、Go `-race` 测试、四库真实服务集成测试（`postgres:17-alpine`、`mysql:8.4`、`libsql-server` 覆盖旧库升级、批量导入与独立日志库）、发布说明与 GHCR 清理脚本单测、前端 ESLint、生产依赖 `npm audit`、`test:core`、`audit`、`test:version-sync`、`build` 以及 25 项前端 E2E 矩阵。
+2. **全栈与容器系统测试**：复用 `frontend-dist` 与测试内核执行真实上游与协议导入全栈回归、`docker compose --profile local`（基于 `alpine:3.24`）源码构建系统测试（验证未同意协议拒绝启动、`HEALTHCHECK` 达到 `healthy`、Shadowsocks 与 Direct 真实 HTTP/SOCKS5 转发）、单文件发行回归（覆盖非交互/伪终端协议门禁与 `v1.7.29` 原地升级）、`full-stack-system` / `full-stack-node-list` / `full-stack-features` / `precompressed-static` 浏览器验证，以及 `Dockerfile.release`（`alpine:3.24`）多架构构建、镜像体积报告与容器实际启动探活验证。
    - 源码构建和发行镜像均验证 `/app/LICENSE`、`/app/THIRD_PARTY_NOTICES.md`、`/app/USER_AGREEMENT.md`、`/app/licenses/SING-BOX-GPL-3.0.txt` 存在且匹配仓库文件 SHA-256，且校验镜像内置 `HEALTHCHECK`。
 3. **自动发布与规范化 GHCR 打标（含 SBOM）**：
-   - 流水线通过工作流级 `concurrency` 串行化发布分支/Tag，避免并发竞态；镜像推送（`build-ghcr`）先于 Release 打标执行，防止出现仅有 Git Tag/二进制而缺失 GHCR 镜像的半发布状态。
-   - **GHCR 多架构镜像（`linux/amd64`, `linux/arm64`）**：`build-ghcr` 启用 `provenance: mode=max` 与 `sbom: true` 同时附带构建来源证明与 SBOM：
-     - 正式稳定版（如 `v1.7.29`）：推送精确标签 `1.7.29`，并仅在版本号不低于同主/次/全局既有稳定版时同步推进 `1.7`、`1`、`latest` 滚动标签（旧维护分支补丁不会倒退 `latest`）；
+   - 工作流顶层对 PR 按编号去重、对 push 按 `run_id` 独立隔离（避免后续纯文档提交取消正在执行的发版流水线）；`build-ghcr` 按版本标签隔离并发并仅推送不可变的精确版本镜像（或 `edge`），`create-release` 在全局发布锁内先核对同版本标签未指向其他提交，创建 GitHub Release 后再基于最新远端标签通过 `scripts/publish_tags.py` 推进共享滚动镜像标签（`1.7`、`1`、`latest`），保障并发发布不覆盖、不倒退。
+   - **GHCR 多架构镜像（`linux/amd64`, `linux/arm64`）**：`build-ghcr` 启用 `provenance: mode=max` 与 `sbom: true` 同时附带构建来源证明与 SBOM，推送精确版本或 `edge`；正式稳定版由 `create-release` 在创建 Release 后同步推进滚动标签：
+     - 正式稳定版（如 `v1.7.30`）：推送精确标签 `1.7.30`，并仅在版本号不低于同主/次/全局既有稳定版时同步推进 `1.7`、`1`、`latest` 滚动标签（旧维护分支补丁不会倒退 `latest`）；
      - 预发布版（如 `v1.8.0-beta.1`）：仅推送精确预发布标签 `1.8.0-beta.1`（不覆盖滚动标签与 `latest`）；
-     - 日常 `main` 非发版提交：跳过 `create-release`，仅覆盖更新 `edge` 标签。
+     - 触发了完整 CI 的日常 `main` 非发版提交：跳过 `create-release`，仅覆盖更新 `edge` 标签。
    - **正式/预发布发版时**：`build-binaries` 补齐 FreeBSD / macOS 4 平台单文件并汇总 **6 平台统一单文件**与 `checksums.txt`；待 `build-ghcr` 成功后，`create-release` 调用 `scripts/generate-release-notes.py` 基于上一版本 tag 到当前提交的 commit 历史自动生成分类 Changelog 发布至 GitHub Releases，并附带 `LICENSE`、`THIRD_PARTY_NOTICES.md`、`USER_AGREEMENT.md`、`SING-BOX-GPL-3.0.txt`。
    - 推送完成后自动运行 `scripts/cleanup-ghcr-packages.py` 安全清理历史纯 40 位 SHA 镜像与无任何保留索引引用的孤立未打标层；末尾按消费结果条件清理本次运行产生的临时 Artifacts。
 
 ### 4.2 GitLab CI（`.gitlab-ci.yml`）
 
-包含 `lint / test / build / release` 四个阶段，共享校验后的测试内核产物，覆盖 Go lint、漏洞扫描、race 测试、前端构建与版本一致性检查、GitLab Registry 镜像推送及 `linux/amd64`、`freebsd/amd64` 单文件构建。相比 GitHub Actions，GitLab 流水线不包含同等的浏览器全栈、Compose 实测、单文件运行回归链及 6 平台完整发布矩阵。
+包含 `lint / test / build / release` 四个阶段，共享校验后的测试内核产物，覆盖 Go lint、漏洞扫描、race 测试、前端构建与版本一致性检查、GitLab Registry 镜像推送及 `linux/amd64`、`freebsd/amd64` 单文件构建。相比 GitHub Actions，GitLab 流水线不包含同等的浏览器全栈、PostgreSQL / MySQL / libSQL 实时服务矩阵、Compose 实测、单文件运行回归链及 6 平台完整发布矩阵。
 
 GitLab 使用同一个源码构建 Dockerfile 分发许可证文件与用户协议，`auto-release` 校验并附带 `LICENSE`、`THIRD_PARTY_NOTICES.md`、`USER_AGREEMENT.md`、`SING-BOX-GPL-3.0.txt` 附件链接，同时在描述中包含内核许可与对应源码链接。
 
-> 两条流水线均未内置外部 PostgreSQL / MySQL / Turso 实例，远程数据库集成测试需按需在独立测试库手动触发。
+> GitHub Actions 的 `test-backend` 作业已内置 PostgreSQL 17、MySQL 8.4 与 libSQL 服务容器自动执行多数据库集成测试；若需针对外部托管云数据库（如 Prisma / TiDB / Turso Cloud）手工验证，仍可通过对应 `SBPM_*INTEGRATION*` 环境变量在独立测试库触发。
 
 ---
 

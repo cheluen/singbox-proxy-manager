@@ -1,8 +1,8 @@
-// 节点管理控制器（无 UI）：数据加载、筛选、选择、排序与全部节点操作。
+// 节点与分组管理控制器（无 UI）：分组加载/切换、节点数据加载、筛选、选择、排序与单节点操作。
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import api, { EXTERNAL_CHANGE_EVENT } from './api'
 import { columnWidthsEqual, normalizeColumnWidths } from './columnWidths'
-import { isNodeExportable, stableConfigSignature, stableJSONStringify } from './nodeModel'
+import { isNodeExportable, isPolicyNode, stableConfigSignature, stableJSONStringify } from './nodeModel'
 import { EMPTY_CRITERIA, collectFacets, filterNodes, hasActiveCriteria } from './nodeFilters'
 import { summarizeNodes } from './nodeView'
 import { useNodeChecks } from './useNodeChecks'
@@ -44,7 +44,11 @@ const restrictSelection = (selected, visibleIds) => {
 }
 
 export function useNodeManager({ t, notify, confirm, onPasswordChanged }) {
-  const [nodes, setNodeState] = useState([])
+  const [allNodes, setAllNodeState] = useState([])
+  const [groups, setGroups] = useState([])
+  const [groupsLoaded, setGroupsLoaded] = useState(false)
+  const [groupsError, setGroupsError] = useState('')
+  const [activeGroupId, setActiveGroupIdState] = useState(null)
   const [loading, setLoading] = useState(false)
   const [loaded, setLoaded] = useState(false)
   const [criteria, setCriteria] = useState(EMPTY_CRITERIA)
@@ -55,10 +59,13 @@ export function useNodeManager({ t, notify, confirm, onPasswordChanged }) {
   const [version, setVersion] = useState({ server: '', update: null })
   const [flagBusy, setFlagBusy] = useState({})
   const [pinBusy, setPinBusy] = useState({})
+  const [refreshingGroupId, setRefreshingGroupId] = useState(null)
   const [overlay, setOverlay] = useState(null)
   const [working, setWorking] = useState({})
 
-  const nodesRef = useRef(nodes)
+  const allNodesRef = useRef(allNodes)
+  const groupsRef = useRef(groups)
+  const activeGroupIdRef = useRef(activeGroupId)
   const runtimeRequest = useRef(null)
   const columnWidthsRef = useRef({})
   const persistedColumnWidthsRef = useRef({})
@@ -66,6 +73,7 @@ export function useNodeManager({ t, notify, confirm, onPasswordChanged }) {
   const columnWidthQueuedRef = useRef(null)
   const columnWidthWaitersRef = useRef([])
   const [resources] = useState(createLatestRequestCoordinator)
+
   const invalidateRuntime = useCallback(() => {
     resources.invalidate('runtime')
     runtimeRequest.current = null
@@ -75,6 +83,25 @@ export function useNodeManager({ t, notify, confirm, onPasswordChanged }) {
     setRuntimeState(next)
   }, [invalidateRuntime])
 
+  const effectiveGroupId = useMemo(() => {
+    if (groups.length === 0) return null
+    if (activeGroupId != null && groups.some((group) => group.id === activeGroupId)) return activeGroupId
+    return groups[0].id
+  }, [activeGroupId, groups])
+
+  const groupById = useMemo(() => new Map(groups.map((group) => [group.id, group])), [groups])
+  const activeGroup = effectiveGroupId != null ? (groupById.get(effectiveGroupId) || null) : null
+  const firstGroupId = groups[0]?.id ?? null
+
+  const nodes = useMemo(() => {
+    // 后端保证至少存在 1 个分组；分组未确定时绝不回退全量节点，避免全选/批量操作越界跨组。
+    if (effectiveGroupId == null) return []
+    return allNodes.filter((node) => {
+      if (node.group_id == null) return effectiveGroupId === firstGroupId
+      return node.group_id === effectiveGroupId
+    })
+  }, [allNodes, effectiveGroupId, firstGroupId])
+
   const preservePorts = Boolean(settings?.preserve_inbound_ports)
   const columnWidths = useMemo(
     () => normalizeColumnWidths(settings?.node_list_column_widths),
@@ -83,39 +110,90 @@ export function useNodeManager({ t, notify, confirm, onPasswordChanged }) {
   useEffect(() => {
     columnWidthsRef.current = columnWidths
   }, [columnWidths])
+
   const visibleNodes = useMemo(() => filterNodes(nodes, criteria), [nodes, criteria])
   const visibleIds = useMemo(() => new Set(visibleNodes.map((node) => node.id)), [visibleNodes])
   const summary = useMemo(() => summarizeNodes(nodes), [nodes])
   const facets = useMemo(() => collectFacets(nodes), [nodes])
   const filtersActive = hasActiveCriteria(criteria)
-  const canReorder = (!filtersActive || preservePorts) && visibleNodes.length > 1
+  const canReorder = (!filtersActive || preservePorts || activeGroup?.allocate_port === false) && visibleNodes.length > 1
   const scopedSelectedIds = useMemo(() => restrictSelection(selectedIds, visibleIds), [selectedIds, visibleIds])
-  const selectedNodes = useMemo(() => scopedSelectedIds.size > 0
+  const selectedNodes = useMemo(() => (scopedSelectedIds.size > 0
     ? visibleNodes.filter((node) => scopedSelectedIds.has(node.id))
-    : [], [visibleNodes, scopedSelectedIds])
+    : []), [visibleNodes, scopedSelectedIds])
+
+  const nodesRef = useRef(nodes)
   const visibleRef = useRef(visibleNodes)
   const selectedNodesRef = useRef(selectedNodes)
   useEffect(() => {
+    allNodesRef.current = allNodes
+    groupsRef.current = groups
+    activeGroupIdRef.current = effectiveGroupId
     nodesRef.current = nodes
     visibleRef.current = visibleNodes
     selectedNodesRef.current = selectedNodes
-  }, [nodes, visibleNodes, selectedNodes])
+  }, [allNodes, effectiveGroupId, groups, nodes, selectedNodes, visibleNodes])
 
-  // 选择只对当前可见的节点有效：筛选变化后自动丢弃不可见的选中项，避免误操作看不见的节点。
+  // 选择只对当前可见的节点有效：筛选或分组变化后自动丢弃不可见的选中项，避免误操作看不见的节点。
   useEffect(() => {
     if (scopedSelectedIds === selectedIds) return
-    setSelectedIds((prev) => prev === selectedIds ? scopedSelectedIds : restrictSelection(prev, visibleIds))
+    setSelectedIds((prev) => (prev === selectedIds ? scopedSelectedIds : restrictSelection(prev, visibleIds)))
   }, [scopedSelectedIds, selectedIds, visibleIds])
 
-  const setNodes = useCallback((next) => {
+  const selectGroup = useCallback((nextGroupId) => {
+    setActiveGroupIdState(nextGroupId)
+    setSelectedIds(new Set())
+  }, [])
+
+  const setAllNodes = useCallback((next) => {
     resources.invalidate('nodes')
     setLoading(false)
-    setNodeState(next)
+    setAllNodeState(next)
+  }, [resources])
+
+  // 兼容旧调用：只更新当前组节点顺序时合并回全量节点数组。
+  const setNodes = useCallback((updater) => {
+    resources.invalidate('nodes')
+    setLoading(false)
+    setAllNodeState((prev) => {
+      const currentGroupId = activeGroupIdRef.current
+      const fallbackGroupId = groupsRef.current[0]?.id ?? null
+      const belongs = (node) => currentGroupId == null || (node.group_id == null ? currentGroupId === fallbackGroupId : node.group_id === currentGroupId)
+      const currentSlice = prev.filter(belongs)
+      const nextSlice = typeof updater === 'function' ? updater(currentSlice) : updater
+      if (currentGroupId == null) return nextSlice
+      let cursor = 0
+      const replaced = prev.map((node) => (belongs(node) ? (nextSlice[cursor++] ?? null) : node)).filter(Boolean)
+      while (cursor < nextSlice.length) replaced.push(nextSlice[cursor++])
+      return replaced
+    })
   }, [resources])
 
   const patchNode = useCallback((id, patch) => {
-    setNodes((prev) => prev.map((node) => (node.id === id ? { ...node, ...patch } : node)))
-  }, [setNodes])
+    setAllNodes((prev) => prev.map((node) => (node.id === id ? { ...node, ...patch } : node)))
+  }, [setAllNodes])
+
+  const loadGroups = useCallback(() => resources.run(
+    'groups',
+    (signal) => api.get('/node-groups', { signal }),
+    (response) => {
+      const list = Array.isArray(response.data) ? response.data : null
+      if (!list || list.length === 0) {
+        setGroupsError(t('groups_load_failed'))
+        return
+      }
+      setGroups(list)
+      setGroupsLoaded(true)
+      setGroupsError('')
+      setActiveGroupIdState((prev) => (prev != null && list.some((group) => group.id === prev) ? prev : (list[0]?.id ?? null)))
+    },
+    {
+      onError: (error) => {
+        if (error?.code === 'ERR_CANCELED') return
+        setGroupsError(errorText(error, t('groups_load_failed')))
+      },
+    }
+  ), [resources, t])
 
   const loadNodes = useCallback(({ silent = false } = {}) => {
     if (!silent) setLoading(true)
@@ -123,7 +201,7 @@ export function useNodeManager({ t, notify, confirm, onPasswordChanged }) {
       'nodes',
       (signal) => api.get('/nodes', { signal }),
       (response) => {
-        setNodeState((prev) => reconcile(prev, response.data || []))
+        setAllNodeState((prev) => reconcile(prev, response.data || []))
         setLoaded(true)
       },
       {
@@ -140,7 +218,6 @@ export function useNodeManager({ t, notify, confirm, onPasswordChanged }) {
     (signal) => api.get('/settings', { signal }),
     (response) => {
       const next = response.data || null
-      // 若有列宽保存请求在途或排队中，保留本地最新乐观列宽，防止旧的 GET 覆盖刚拖好的宽度。
       if (columnWidthInFlightRef.current || columnWidthQueuedRef.current !== null) {
         const activeWidths = columnWidthsRef.current
         setSettings(next ? { ...next, node_list_column_widths: activeWidths } : null)
@@ -241,8 +318,8 @@ export function useNodeManager({ t, notify, confirm, onPasswordChanged }) {
   ), [notify, resources, t])
 
   const refreshAll = useCallback(async () => {
-    await Promise.all([loadNodes(), loadSettings(), loadRuntime(), loadVersion()])
-  }, [loadNodes, loadRuntime, loadSettings, loadVersion])
+    await Promise.all([loadGroups(), loadNodes(), loadSettings(), loadRuntime(), loadVersion()])
+  }, [loadGroups, loadNodes, loadRuntime, loadSettings, loadVersion])
 
   useEffect(() => {
     let timer
@@ -265,6 +342,7 @@ export function useNodeManager({ t, notify, confirm, onPasswordChanged }) {
         void pollRuntime()
       }
     }
+    loadGroups()
     loadNodes()
     loadSettings()
     loadVersion()
@@ -279,7 +357,7 @@ export function useNodeManager({ t, notify, confirm, onPasswordChanged }) {
       runtimeRequest.current = null
       resources.abortAll()
     }
-  }, [invalidateRuntime, loadNodes, loadRuntime, loadSettings, loadVersion, refreshAll, resources])
+  }, [invalidateRuntime, loadGroups, loadNodes, loadRuntime, loadSettings, loadVersion, refreshAll, resources])
 
   /* ---------- 测 IP ---------- */
 
@@ -289,7 +367,15 @@ export function useNodeManager({ t, notify, confirm, onPasswordChanged }) {
       const upstream = data?.upstream
       patchNode(id, {
         ...(updateFinal
-          ? { node_ip: data?.ip || '', location: data?.location || '', country_code: data?.country_code || '', latency: Number(data?.latency) || 0 }
+          ? {
+              node_ip: data?.ip || '',
+              location: data?.location || '',
+              country_code: data?.country_code || '',
+              latency: Number(data?.latency) || 0,
+              check_status: data?.check_status || 'ok',
+              check_error: data?.check_error || '',
+              checked_at: data?.checked_at || new Date().toISOString(),
+            }
           : {}),
         ...(hasUpstream
           ? {
@@ -302,7 +388,17 @@ export function useNodeManager({ t, notify, confirm, onPasswordChanged }) {
           : {}),
       })
     },
-    onClear: (id) => patchNode(id, { node_ip: '', location: '', country_code: '', latency: 0 }),
+    onFail: (id, data) => {
+      patchNode(id, {
+        node_ip: '',
+        location: '',
+        country_code: '',
+        latency: 0,
+        check_status: data?.check_status || 'failed',
+        check_error: data?.check_error || data?.error || t('check_failed'),
+        checked_at: data?.checked_at || new Date().toISOString(),
+      })
+    },
     onFinished: (outcome, { silent }) => {
       if (silent) return
       if (outcome.stopped) {
@@ -319,9 +415,8 @@ export function useNodeManager({ t, notify, confirm, onPasswordChanged }) {
   })
   const { runChecks } = checks
 
-  // 已禁用的节点后端会直接拒绝检测，这里提前过滤并给出明确提示。
   const checkNodes = useCallback((ids) => {
-    const enabled = new Set(nodesRef.current.filter((node) => node.enabled !== false).map((node) => node.id))
+    const enabled = new Set(allNodesRef.current.filter((node) => node.enabled !== false).map((node) => node.id))
     const runnable = ids.filter((id) => enabled.has(id))
     if (runnable.length === 0) {
       notify.warning(t('check_none_enabled'))
@@ -347,6 +442,125 @@ export function useNodeManager({ t, notify, confirm, onPasswordChanged }) {
   }, [visibleIds])
   const clearSelection = useCallback(() => setSelectedIds(new Set()), [])
 
+  /* ---------- 分组操作 ---------- */
+
+  const createGroup = useCallback(async (payload) => {
+    try {
+      const response = await api.post('/node-groups', payload)
+      await loadGroups()
+      if (response.data?.id) selectGroup(response.data.id)
+      notify.success(t('group_created'))
+      return true
+    } catch (error) {
+      notify.error(errorText(error, t('server_error')))
+      return false
+    }
+  }, [loadGroups, notify, selectGroup, t])
+
+  const updateGroup = useCallback(async (group, payload) => {
+    try {
+      await api.patch(`/node-groups/${group.id}`, payload)
+      await Promise.all([loadGroups(), loadNodes({ silent: true })])
+      notify.success(t('group_updated'))
+      return true
+    } catch (error) {
+      const data = error?.response?.data
+      if (error?.response?.status === 409 && data?.code === 'pinned_ports_exist') {
+        const count = Array.isArray(data.pinned_node_ids) ? data.pinned_node_ids.length : 0
+        const confirmed = await confirm({
+          title: t('group_release_pins_title'),
+          content: t('group_release_pins_desc', { count }),
+          okText: t('confirm'),
+          danger: true,
+        })
+        if (!confirmed) return false
+        try {
+          await api.patch(`/node-groups/${group.id}`, { ...payload, release_pins: true })
+          await Promise.all([loadGroups(), loadNodes({ silent: true })])
+          notify.success(t('group_updated'))
+          return true
+        } catch (retryError) {
+          notify.error(errorText(retryError, t('server_error')))
+          return false
+        }
+      }
+      notify.error(errorText(error, t('server_error')))
+      return false
+    }
+  }, [confirm, loadGroups, loadNodes, notify, t])
+
+  const deleteGroup = useCallback(async (group, { mode, targetGroupId } = {}) => {
+    try {
+      const params = {}
+      if (mode) params.mode = mode
+      if (mode === 'move' && targetGroupId) params.target_group_id = targetGroupId
+      await api.delete(`/node-groups/${group.id}`, { params })
+      setSelectedIds(new Set())
+      if (activeGroupIdRef.current === group.id) {
+        const fallback = (mode === 'move' && targetGroupId)
+          ? targetGroupId
+          : (groupsRef.current.find((item) => item.id !== group.id)?.id ?? null)
+        setActiveGroupIdState(fallback)
+      }
+      await Promise.all([loadGroups(), loadNodes({ silent: true })])
+      notify.success(t('group_deleted'))
+      return true
+    } catch (error) {
+      notify.error(errorText(error, t('server_error')))
+      return false
+    }
+  }, [loadGroups, loadNodes, notify, t])
+
+  const reorderGroups = useCallback(async (ids) => {
+    try {
+      await api.post('/node-groups/reorder', { ids })
+      await loadGroups()
+      return true
+    } catch (error) {
+      notify.error(errorText(error, t('server_error')))
+      return false
+    }
+  }, [loadGroups, notify, t])
+
+  const refreshGroupSubscription = useCallback(async (group) => {
+    if (!group?.id || refreshingGroupId === group.id) return false
+    setRefreshingGroupId(group.id)
+    try {
+      const response = await api.post(`/node-groups/${group.id}/subscription/refresh`, null, { timeout: 120000 })
+      const data = response.data || {}
+      await Promise.all([loadGroups(), loadNodes({ silent: true })])
+      notify.success(t('group_sub_refreshed', {
+        added: data.added ?? 0,
+        updated: data.updated ?? 0,
+        removed: data.removed ?? 0,
+      }))
+      return true
+    } catch (error) {
+      await loadGroups()
+      notify.error(errorText(error, t('server_error')))
+      return false
+    } finally {
+      setRefreshingGroupId(null)
+    }
+  }, [loadGroups, loadNodes, notify, refreshingGroupId, t])
+
+  const moveNodesToGroup = useCallback(async (ids, groupId) => {
+    if (!Array.isArray(ids) || ids.length === 0 || !groupId) return false
+    setWorking((prev) => ({ ...prev, move: true }))
+    try {
+      await api.post('/nodes/batch-move', { ids, group_id: groupId })
+      clearSelection()
+      await Promise.all([loadGroups(), loadNodes({ silent: true })])
+      notify.success(t('move_to_group_success', { count: ids.length }))
+      return true
+    } catch (error) {
+      notify.error(errorText(error, t('server_error')))
+      return false
+    } finally {
+      setWorking((prev) => ({ ...prev, move: false }))
+    }
+  }, [clearSelection, loadGroups, loadNodes, notify, t])
+
   /* ---------- 单节点操作 ---------- */
 
   const toggleFlag = useCallback(async (node, field) => {
@@ -361,16 +575,20 @@ export function useNodeManager({ t, notify, confirm, onPasswordChanged }) {
     try {
       const response = await api.patch(`/nodes/${node.id}`, { [field]: next })
       patchNode(node.id, response.data || {})
+      if (field === 'enabled') {
+        void loadGroups()
+        if (allNodesRef.current.some(isPolicyNode)) void loadNodes({ silent: true })
+      }
     } catch (error) {
       patchNode(node.id, { [field]: current })
       notify.error(errorText(error, t('server_error')))
     } finally {
       setFlagBusy((prev) => ({ ...prev, [node.id]: false }))
     }
-  }, [flagBusy, notify, patchNode, t])
+  }, [flagBusy, loadGroups, loadNodes, notify, patchNode, t])
 
   const togglePortPin = useCallback(async (node) => {
-    if (preservePorts || pinBusy[node.id]) return
+    if (preservePorts || pinBusy[node.id] || !node.inbound_port) return
     const pinned = !node.inbound_port_pinned
     setPinBusy((prev) => ({ ...prev, [node.id]: true }))
     try {
@@ -403,30 +621,38 @@ export function useNodeManager({ t, notify, confirm, onPasswordChanged }) {
     if (!confirmed) return false
     try {
       await api.delete(`/nodes/${node.id}`)
-      setNodes((prev) => prev.filter((item) => item.id !== node.id))
+      setAllNodes((prev) => prev.filter((item) => item.id !== node.id))
       notify.success(t('node_deleted'))
-      await loadNodes({ silent: true })
+      await Promise.all([loadNodes({ silent: true }), loadGroups()])
       return true
     } catch (error) {
       notify.error(errorText(error, t('server_error')))
       return false
     }
-  }, [confirm, loadNodes, notify, setNodes, t])
+  }, [confirm, loadGroups, loadNodes, notify, setAllNodes, t])
 
   const saveNode = useCallback(async (values, editing, { autoCheck = false } = {}) => {
-    if (values.auth_enabled === false && (!editing || (editing.username && editing.password))) {
+    const targetGroup = editing?.id
+      ? groupById.get(values.group_id ?? editing.group_id)
+      : activeGroup
+    const needsPort = targetGroup ? targetGroup.allocate_port !== false : true
+    if (needsPort && values.auth_enabled === false && (!editing || (editing.username && editing.password))) {
       const confirmed = await confirm({ title: t('batch_auth_disable_action'), content: t('auth_open_warning'), okText: t('confirm'), danger: true })
       if (!confirmed) return false
     }
     try {
       if (editing?.id) {
-        await api.put(`/nodes/${editing.id}`, values)
+        const payload = values.group_id ? values : { ...values, group_id: editing.group_id }
+        await api.put(`/nodes/${editing.id}`, payload)
         notify.success(t('node_updated'))
-        await loadNodes({ silent: true })
+        await Promise.all([loadNodes({ silent: true }), loadGroups()])
       } else {
-        const response = await api.post('/nodes', values)
+        const payload = effectiveGroupId != null && !values.group_id
+          ? { ...values, group_id: effectiveGroupId }
+          : values
+        const response = await api.post('/nodes', payload)
         notify.success(t('node_created'))
-        await loadNodes({ silent: true })
+        await Promise.all([loadNodes({ silent: true }), loadGroups()])
         const createdId = response.data?.id
         if (autoCheck && createdId && values.enabled !== false) runChecks([createdId], { silent: true })
       }
@@ -435,7 +661,7 @@ export function useNodeManager({ t, notify, confirm, onPasswordChanged }) {
       notify.error(errorText(error, t('server_error')))
       return false
     }
-  }, [confirm, loadNodes, notify, runChecks, t])
+  }, [activeGroup, confirm, effectiveGroupId, groupById, loadGroups, loadNodes, notify, runChecks, t])
 
   const replaceNode = useCallback(async (node, link, updateName) => {
     try {
@@ -463,11 +689,14 @@ export function useNodeManager({ t, notify, confirm, onPasswordChanged }) {
   }, [loadNodes, notify, patchNode, t])
 
   return {
-    nodes, loading, loaded, criteria, setCriteria, visibleNodes, summary, facets, filtersActive,
+    allNodes, nodes, groups, groupsLoaded, groupsError, groupById, activeGroupId: effectiveGroupId, activeGroup, selectGroup,
+    loading, loaded, criteria, setCriteria, visibleNodes, summary, facets, filtersActive,
     selectedIds: scopedSelectedIds, selectedNodes, toggleSelect, selectAllVisible, clearSelection,
     settings, preservePorts, columnWidths, saveColumnWidths, loadSettings, runtime, setRuntime, runtimeRestarting, setRuntimeRestarting, version,
-    flagBusy, pinBusy, working, setWorking, overlay, setOverlay, canReorder,
-    checks, checkNodes, loadNodes, refreshAll, patchNode, setNodes, nodesRef, visibleRef, selectedNodesRef,
+    flagBusy, pinBusy, refreshingGroupId, working, setWorking, overlay, setOverlay, canReorder,
+    checks, checkNodes, loadGroups, loadNodes, refreshAll, patchNode, setNodes,
+    allNodesRef, nodesRef, visibleRef, selectedNodesRef, activeGroupIdRef,
+    createGroup, updateGroup, deleteGroup, reorderGroups, refreshGroupSubscription, moveNodesToGroup,
     toggleEnabled: (node) => toggleFlag(node, 'enabled'),
     toggleTcpReuse: (node) => toggleFlag(node, 'tcp_reuse_enabled'),
     togglePortPin, saveRemark, removeNode, saveNode, replaceNode, saveUpstream,

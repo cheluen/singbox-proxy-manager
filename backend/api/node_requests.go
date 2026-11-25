@@ -35,9 +35,9 @@ func writeNodeMutationError(c *gin.Context, err error, validateUpstream bool) {
 	var requestErr nodeRequestError
 	switch {
 	case errors.As(err, &requestErr):
-		c.JSON(requestErr.status, gin.H{"error": requestErr.Error()})
+		c.JSON(requestErr.status, gin.H{"error": services.SafeDiagnostic(requestErr.Error())})
 	case validateUpstream && services.IsUpstreamValidationError(err):
-		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		c.JSON(http.StatusBadRequest, gin.H{"error": services.SafeDiagnostic(err.Error())})
 	default:
 		c.JSON(http.StatusInternalServerError, singboxUpdateError(err))
 	}

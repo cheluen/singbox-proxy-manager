@@ -95,30 +95,40 @@ func writeTestRuntimeConfig(t *testing.T, service *services.SingBoxService, node
 	}
 }
 
+func firstTestGroup(t *testing.T, db *sql.DB) models.NodeGroup {
+	t.Helper()
+	group, err := models.LoadGroup(t.Context(), db, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return group
+}
+
+func setTestGroupStartPort(t *testing.T, db *sql.DB, port int) {
+	t.Helper()
+	if _, err := db.Exec("UPDATE node_groups SET start_port = ? WHERE id = ?", port, firstTestGroup(t, db).ID); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func insertTestNode(t *testing.T, db *sql.DB) int {
 	t.Helper()
-	res, err := db.Exec(`
-		INSERT INTO proxy_nodes (name, type, config, inbound_port, username, password, sort_order, latency, enabled)
-		VALUES ('node1', 'ss', '{"server":"example.com","server_port":443,"method":"aes-128-gcm","password":"p"}',
-		        30001, 'user', 'pass', 0, 0, 1)
-	`)
-	if err != nil {
-		t.Fatalf("insert node: %v", err)
-	}
-	id, _ := res.LastInsertId()
-	return int(id)
+	return insertTestNodeWithPortAndOrder(t, db, "node1", 30001, 0)
 }
 
 func insertTestNodeWithPortAndOrder(t *testing.T, db *sql.DB, name string, inboundPort int, sortOrder int) int {
 	t.Helper()
 	res, err := db.Exec(`
-		INSERT INTO proxy_nodes (name, type, config, inbound_port, username, password, sort_order, latency, enabled)
-		VALUES (?, 'ss', '{"server":"example.com","server_port":443,"method":"aes-128-gcm","password":"p"}', ?, 'user', 'pass', ?, 0, 1)
-	`, name, inboundPort, sortOrder)
+		INSERT INTO proxy_nodes (name, type, config, inbound_port, username, password, sort_order, latency, enabled, group_id)
+		VALUES (?, 'ss', '{"server":"example.com","server_port":443,"method":"aes-128-gcm","password":"p"}', ?, 'user', 'pass', ?, 0, 1, ?)
+	`, name, models.NullablePort(inboundPort), sortOrder, firstTestGroup(t, db).ID)
 	if err != nil {
 		t.Fatalf("insert node: %v", err)
 	}
-	id, _ := res.LastInsertId()
+	id, err := res.LastInsertId()
+	if err != nil {
+		t.Fatal(err)
+	}
 	return int(id)
 }
 
@@ -399,11 +409,14 @@ func TestRestartRuntimeReappliesDatabaseState(t *testing.T) {
 	if err != nil {
 		t.Fatalf("load expected database state: %v", err)
 	}
-	expectedConfig, err := handler.singBoxService.BuildGlobalConfigContext(context.Background(), nodes)
+	expectedConfig, err := os.ReadFile(handler.singBoxService.ConfigPath())
 	if err != nil {
 		t.Fatalf("build expected runtime config: %v", err)
 	}
 	expectedSum := sha256.Sum256(expectedConfig)
+	if len(nodes) != 1 || !bytes.Contains(expectedConfig, []byte(fmt.Sprintf("node-%d-out", nodes[0].ID))) {
+		t.Fatal("restarted config omitted database node")
+	}
 	expectedHash := fmt.Sprintf("%x", expectedSum[:8])
 	status := handler.singBoxService.RuntimeStatus()
 	if !status.Running || status.Degraded || status.ActiveConfigHash != expectedHash {
@@ -746,9 +759,7 @@ func TestUpdateNodeInboundPortZeroUsesStartPortWhenAvailable(t *testing.T) {
 	})
 	nodeID := insertTestNode(t, handler.db)
 
-	if _, err := handler.db.Exec("UPDATE settings SET start_port = 41000"); err != nil {
-		t.Fatalf("set start_port: %v", err)
-	}
+	setTestGroupStartPort(t, handler.db, 41000)
 
 	payload := map[string]interface{}{
 		"name":         "node1-updated",
@@ -789,8 +800,8 @@ func TestCreateNodeAutoAssignSkipsUsedInboundPorts(t *testing.T) {
 		return nil, fmt.Errorf("not used")
 	})
 
-	if _, err := handler.db.Exec("UPDATE settings SET start_port = 30001, preserve_inbound_ports = 1"); err != nil {
-		t.Fatalf("set start_port: %v", err)
+	if _, err := handler.db.Exec("UPDATE settings SET preserve_inbound_ports = 1"); err != nil {
+		t.Fatal(err)
 	}
 	insertTestNodeWithPortAndOrder(t, handler.db, "node-a", 30001, 0)
 	insertTestNodeWithPortAndOrder(t, handler.db, "node-b", 30005, 1)
@@ -878,7 +889,8 @@ func TestCreateNodeAutoAssignSkipsSystemOccupiedPort(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = listener.Close() })
 	startPort := listener.Addr().(*net.TCPAddr).Port
-	if _, err := handler.db.Exec("UPDATE settings SET start_port = ?, preserve_inbound_ports = 1", startPort); err != nil {
+	setTestGroupStartPort(t, handler.db, startPort)
+	if _, err := handler.db.Exec("UPDATE settings SET preserve_inbound_ports = 1"); err != nil {
 		t.Fatal(err)
 	}
 	payload := map[string]interface{}{
@@ -909,9 +921,7 @@ func TestBatchImportNodesAutoAssignSkipsSystemOccupiedPorts(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = listener.Close() })
 	startPort := listener.Addr().(*net.TCPAddr).Port
-	if _, err := handler.db.Exec("UPDATE settings SET start_port = ?", startPort); err != nil {
-		t.Fatal(err)
-	}
+	setTestGroupStartPort(t, handler.db, startPort)
 	recorder := postJSON(t, handler.BatchImportNodes, http.MethodPost, "/api/nodes/batch-import", map[string]interface{}{
 		"content": "socks5://127.0.0.1:1080#one\nsocks5://127.0.0.1:1080#two\nsocks5://127.0.0.1:1080#three",
 		"enabled": true,
@@ -945,7 +955,7 @@ func TestBatchImportNodesAutoAssignSkipsUsedInboundPorts(t *testing.T) {
 		return nil, fmt.Errorf("not used")
 	})
 
-	if _, err := handler.db.Exec("UPDATE settings SET start_port = 30001, preserve_inbound_ports = 1"); err != nil {
+	if _, err := handler.db.Exec("UPDATE settings SET preserve_inbound_ports = 1"); err != nil {
 		t.Fatalf("set settings: %v", err)
 	}
 	insertTestNodeWithPortAndOrder(t, handler.db, "node-a", 30001, 0)
@@ -1369,8 +1379,8 @@ exec sleep 300
 		t.Fatalf("column widths invalidated the active session: %v", err)
 	}
 
-	put(map[string]any{"start_port": 32035, "node_list_column_widths": widths}, widths, true)
-	put(map[string]any{"start_port": 32036}, widths, true)
+	put(map[string]any{"preserve_inbound_ports": true, "node_list_column_widths": widths}, widths, true)
+	put(map[string]any{"preserve_inbound_ports": false}, widths, true)
 	get(widths)
 }
 
@@ -1395,45 +1405,29 @@ func TestUpdateSettingsRejectsInvalidNodeListColumnWidths(t *testing.T) {
 	}
 }
 
-func TestUpdateSettingsPreserveModeStartPortDoesNotRewritePorts(t *testing.T) {
+func TestUpdateGroupPreserveModeStartPortDoesNotRewritePorts(t *testing.T) {
 	gin.SetMode(gin.TestMode)
-	handler := newTestHandler(t, func(proxyAddr, username, password string) (*services.IPInfo, error) {
-		return nil, fmt.Errorf("not used")
-	})
+	handler := newTestHandler(t, nil)
 
-	if _, err := handler.db.Exec("UPDATE settings SET start_port = 30001, preserve_inbound_ports = 1"); err != nil {
+	if _, err := handler.db.Exec("UPDATE settings SET preserve_inbound_ports = 1"); err != nil {
 		t.Fatalf("set settings: %v", err)
 	}
 	nodeID := insertTestNodeWithPortAndOrder(t, handler.db, "node-a", 30010, 0)
-
-	payload := map[string]interface{}{
-		"start_port": 35000,
-	}
-	body, _ := json.Marshal(payload)
-
-	rec := httptest.NewRecorder()
-	ctx, _ := gin.CreateTestContext(rec)
-	req, _ := http.NewRequest(http.MethodPut, "/api/settings", bytes.NewReader(body))
-	req.Header.Set("Content-Type", "application/json")
-	ctx.Request = req
-
-	handler.UpdateSettings(ctx)
+	groupID := strconv.Itoa(firstTestGroup(t, handler.db).ID)
+	rec := postJSON(t, handler.UpdateGroup, http.MethodPatch, "/api/node-groups/"+groupID,
+		map[string]int{"start_port": 35000}, ginParams("id", groupID))
 	if rec.Code != http.StatusOK {
 		t.Fatalf("unexpected status %d body=%s", rec.Code, rec.Body.String())
 	}
 
 	var inboundPort int
-	var startPort int
 	if err := handler.db.QueryRow("SELECT inbound_port FROM proxy_nodes WHERE id = ?", nodeID).Scan(&inboundPort); err != nil {
 		t.Fatalf("query inbound_port: %v", err)
-	}
-	if err := handler.db.QueryRow("SELECT start_port FROM settings LIMIT 1").Scan(&startPort); err != nil {
-		t.Fatalf("query start_port: %v", err)
 	}
 	if inboundPort != 30010 {
 		t.Fatalf("expected inbound_port to stay 30010, got %d", inboundPort)
 	}
-	if startPort != 35000 {
+	if startPort := firstTestGroup(t, handler.db).StartPort; startPort != 35000 {
 		t.Fatalf("expected start_port=35000, got %d", startPort)
 	}
 }
@@ -1444,14 +1438,14 @@ func TestUpdateSettingsDisablingPreserveModeRealignsPorts(t *testing.T) {
 		return nil, fmt.Errorf("not used")
 	})
 
-	if _, err := handler.db.Exec("UPDATE settings SET start_port = 30001, preserve_inbound_ports = 1"); err != nil {
+	setTestGroupStartPort(t, handler.db, 32000)
+	if _, err := handler.db.Exec("UPDATE settings SET preserve_inbound_ports = 1"); err != nil {
 		t.Fatalf("set settings: %v", err)
 	}
 	insertTestNodeWithPortAndOrder(t, handler.db, "node-a", 30010, 0)
 	insertTestNodeWithPortAndOrder(t, handler.db, "node-b", 30050, 1)
 
 	payload := map[string]interface{}{
-		"start_port":             32000,
 		"preserve_inbound_ports": false,
 	}
 	body, _ := json.Marshal(payload)

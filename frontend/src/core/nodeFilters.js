@@ -5,7 +5,7 @@ import { compileSearch, hasInboundAuth, nodeHealth, protocolLabel } from './node
 
 export const EMPTY_CRITERIA = Object.freeze({
   search: '',
-  status: 'all', // all | healthy | unverified | disabled
+  status: 'all', // all | healthy | untested | failed | disabled
   types: [], // 协议精确匹配（修正了旧面板里 ss 会连带匹配 vless/vmess 的子串问题）
   regions: [], // 小写地区码；'-' 表示尚未检测出地区
   ports: '', // 单个端口或范围表达式：30001-30005, 30008
@@ -60,7 +60,12 @@ export const describeCriteria = (criteria, t) => {
   const search = String(criteria.search || '').trim()
   if (search) chips.push({ id: 'search', label: `${t('search')}: ${search}`, clear: (c) => ({ ...c, search: '' }) })
   if (criteria.status !== 'all') {
-    const label = { healthy: t('status_healthy'), unverified: t('status_unverified_short'), disabled: t('disabled') }[criteria.status]
+    const label = {
+      healthy: t('status_healthy'),
+      untested: t('status_untested_short'),
+      failed: t('status_failed_short'),
+      disabled: t('disabled'),
+    }[criteria.status]
     chips.push({ id: 'status', label: `${t('status')}: ${label}`, clear: (c) => ({ ...c, status: 'all' }) })
   }
   for (const type of criteria.types) {

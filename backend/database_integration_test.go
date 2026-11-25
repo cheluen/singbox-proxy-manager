@@ -10,6 +10,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"reflect"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -40,12 +41,7 @@ func TestLocalSQLiteDatabaseIntegration(t *testing.T) {
 	}
 	t.Setenv("ADMIN_PASSWORD", "")
 
-	db, err := appdb.Open(t.TempDir())
-	if err != nil {
-		t.Fatalf("open local SQLite database: %v", err)
-	}
-	defer db.Close()
-	runDatabaseIntegrationContract(t, db)
+	runDatabaseIntegrationSuite(t, appdb.DialectSQLite)
 }
 
 func TestDatabaseURLIntegration(t *testing.T) {
@@ -59,19 +55,17 @@ func TestDatabaseURLIntegration(t *testing.T) {
 	t.Setenv("TURSO_AUTH_TOKEN", "")
 	t.Setenv("ADMIN_PASSWORD", "")
 
-	db, err := appdb.Open(t.TempDir())
-	if err != nil {
-		t.Fatalf("open database: %v", err)
-	}
-	defer db.Close()
-	runDatabaseIntegrationContract(t, db)
+	runDatabaseIntegrationSuite(t, appdb.DialectPostgres, appdb.DialectMySQL)
 }
 
 func TestTursoDatabaseIntegration(t *testing.T) {
 	tursoURL := os.Getenv("SBPM_INTEGRATION_TURSO_URL")
 	tursoToken := os.Getenv("SBPM_INTEGRATION_TURSO_TOKEN")
-	if tursoURL == "" || tursoToken == "" {
+	if tursoURL == "" && tursoToken == "" {
 		t.Skip("SBPM_INTEGRATION_TURSO_URL/SBPM_INTEGRATION_TURSO_TOKEN are not set")
+	}
+	if tursoURL == "" || tursoToken == "" {
+		t.Fatal("Turso 集成测试需要同时设置地址和令牌")
 	}
 
 	for _, key := range []string{
@@ -89,16 +83,38 @@ func TestTursoDatabaseIntegration(t *testing.T) {
 	t.Setenv("TURSO_AUTH_TOKEN", tursoToken)
 	t.Setenv("ADMIN_PASSWORD", "")
 
-	db, err := appdb.Open(t.TempDir())
-	if err != nil {
-		t.Fatalf("open Turso database: %v", err)
+	runDatabaseIntegrationSuite(t, appdb.DialectTurso)
+}
+
+func runDatabaseIntegrationSuite(t *testing.T, allowed ...appdb.Dialect) {
+	t.Helper()
+	configDir := t.TempDir()
+	withDatabase := func(t *testing.T, verify func(*sql.DB)) {
+		t.Helper()
+		db, err := appdb.Open(configDir)
+		if err != nil {
+			t.Fatalf("打开集成测试数据库失败：%v", err)
+		}
+		defer db.Close()
+		if dialect := appdb.DialectFor(db); !slices.Contains(allowed, dialect) {
+			t.Fatalf("集成测试连接了错误的数据库 %q", dialect)
+		}
+		verify(db)
 	}
-	defer db.Close()
-	if got := db.Stats().MaxOpenConnections; got != 1 {
-		t.Fatalf("Turso must serialize database operations: max open connections = %d", got)
-	}
-	runDatabaseIntegrationContract(t, db)
-	verifyTursoConnectionReuse(t, db)
+	t.Run("Fresh", func(t *testing.T) {
+		withDatabase(t, func(db *sql.DB) {
+			runDatabaseIntegrationContract(t, db)
+			if appdb.DialectFor(db) == appdb.DialectTurso {
+				if got := db.Stats().MaxOpenConnections; got != 1 {
+					t.Fatalf("Turso must serialize database operations: max open connections = %d", got)
+				}
+				verifyTursoConnectionReuse(t, db)
+			}
+		})
+	})
+	t.Run("UpgradeFromV1_7_29", func(t *testing.T) {
+		verifyLegacyGroupMigration(t, func(verify func(*sql.DB)) { withDatabase(t, verify) })
+	})
 }
 
 func runDatabaseIntegrationContract(t *testing.T, db *sql.DB) {
@@ -126,9 +142,9 @@ func runDatabaseIntegrationContract(t *testing.T, db *sql.DB) {
 			name, remark, type, config, inbound_port, username, password,
 			tcp_reuse_enabled, upstream_mode, upstream_type, upstream_config,
 			upstream_ip, upstream_location, upstream_country_code,
-			upstream_latency, upstream_error, sort_order, latency, enabled
+			upstream_latency, upstream_error, sort_order, latency, enabled, group_id
 		)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, (SELECT id FROM node_groups ORDER BY sort_order, id LIMIT 1))
 	`, "integration-socks5h", "remote-db", "socks5h", largeConfig, 31001, "user", "pass",
 		true, models.UpstreamModeCustom, "socks5", largeUpstreamConfig,
 		"198.51.100.40", "Upstream Integration", "UI", 45, "", 0, 0, true)
@@ -138,18 +154,20 @@ func runDatabaseIntegrationContract(t *testing.T, db *sql.DB) {
 
 	var node models.ProxyNode
 	if err := db.QueryRow(`
-		SELECT id, name, remark, type, config, inbound_port, username, password, tcp_reuse_enabled,
+		SELECT id, name, remark, type, config, inbound_port, inbound_port_pinned, username, password, tcp_reuse_enabled,
 		       upstream_mode, upstream_type, upstream_config, upstream_ip, upstream_location,
 		       upstream_country_code, upstream_latency, upstream_error, sort_order, node_ip,
-		       location, country_code, latency, enabled, created_at, updated_at
+		       location, country_code, latency, enabled, created_at, updated_at, group_id, subscription_key,
+		       subscription_name, check_status, check_error, checked_at, check_revision
 		FROM proxy_nodes WHERE name = ?
 	`, "integration-socks5h").Scan(
 		&node.ID, &node.Name, &node.Remark, &node.Type, &node.Config, &node.InboundPort,
-		&node.Username, &node.Password, &node.TCPReuseEnabled, &node.UpstreamMode,
+		&node.InboundPortPinned, &node.Username, &node.Password, &node.TCPReuseEnabled, &node.UpstreamMode,
 		&node.UpstreamType, &node.UpstreamConfig, &node.UpstreamIP, &node.UpstreamLocation,
 		&node.UpstreamCountryCode, &node.UpstreamLatency, &node.UpstreamError, &node.SortOrder,
 		&node.NodeIP, &node.Location, &node.CountryCode, &node.Latency, &node.Enabled,
-		&node.CreatedAt, &node.UpdatedAt,
+		&node.CreatedAt, &node.UpdatedAt, &node.GroupID, &node.SubscriptionKey, &node.SubscriptionName,
+		&node.CheckStatus, &node.CheckError, &node.CheckedAt, &node.CheckRevision,
 	); err != nil {
 		t.Fatalf("query node (%s): %v", dialect, err)
 	}
@@ -306,8 +324,12 @@ func verifySharedReadContract(t *testing.T, db *sql.DB, expected models.ProxyNod
 		t.Fatalf("共用节点列表读取不符：nodes=%d err=%v", len(nodes), err)
 	}
 	settings, err := models.LoadRuntimeSettings(ctx, db)
-	if err != nil || settings.StartPort != 30001 || settings.PreserveInboundPorts {
+	if err != nil || settings.PreserveInboundPorts {
 		t.Fatalf("共用设置读取不符：settings=%+v err=%v", settings, err)
+	}
+	group, err := models.LoadGroup(ctx, db, expected.GroupID)
+	if err != nil || group.ID != expected.GroupID || group.StartPort != 30001 || !group.AllocatePort {
+		t.Fatalf("共用分组读取不符：group=%+v err=%v", group, err)
 	}
 	var settingsID int
 	if err := db.QueryRowContext(ctx, "SELECT id FROM settings WHERE singleton_key = 1").Scan(&settingsID); err != nil || settingsID <= 0 {
@@ -321,7 +343,10 @@ func verifySharedReadContract(t *testing.T, db *sql.DB, expected models.ProxyNod
 	if _, err := tx.ExecContext(ctx, "UPDATE proxy_nodes SET inbound_port_pinned = ? WHERE id = ?", true, expected.ID); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := tx.ExecContext(ctx, "UPDATE settings SET start_port = ? WHERE singleton_key = 1", 32050); err != nil {
+	if _, err := tx.ExecContext(ctx, "UPDATE settings SET preserve_inbound_ports = ? WHERE singleton_key = 1", true); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := tx.ExecContext(ctx, "UPDATE node_groups SET start_port = ? WHERE id = ?", 32050, group.ID); err != nil {
 		t.Fatal(err)
 	}
 	transactionNode, err := models.LoadProxyNode(ctx, tx, expected.ID)
@@ -333,8 +358,12 @@ func verifySharedReadContract(t *testing.T, db *sql.DB, expected models.ProxyNod
 		t.Fatalf("共用读取未使用事务内的节点列表：%v", err)
 	}
 	transactionSettings, err := models.LoadRuntimeSettings(ctx, tx)
-	if err != nil || transactionSettings.StartPort != 32050 {
+	if err != nil || !transactionSettings.PreserveInboundPorts {
 		t.Fatalf("共用读取未使用事务内的设置状态：%v", err)
+	}
+	transactionGroup, err := models.LoadGroup(ctx, tx, group.ID)
+	if err != nil || transactionGroup.StartPort != 32050 {
+		t.Fatalf("共用读取未使用事务内的分组端口：%v", err)
 	}
 	if err := tx.Rollback(); err != nil {
 		t.Fatal(err)
@@ -379,18 +408,22 @@ func verifySQLiteWriterSerialization(t *testing.T, db *sql.DB) {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
+	group, err := models.LoadGroup(ctx, db, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
 	tx, err := db.BeginTx(ctx, nil)
 	if err != nil {
 		t.Fatalf("begin serialized transaction: %v", err)
 	}
 	defer tx.Rollback()
-	if _, err := tx.ExecContext(ctx, "UPDATE settings SET start_port = ? WHERE singleton_key = 1", 32001); err != nil {
+	if _, err := tx.ExecContext(ctx, "UPDATE node_groups SET start_port = ? WHERE id = ?", 32001, group.ID); err != nil {
 		t.Fatalf("write in transaction: %v", err)
 	}
 	waitCount := db.Stats().WaitCount
 	done := make(chan error, 1)
 	go func() {
-		_, err := db.ExecContext(ctx, "UPDATE settings SET start_port = ? WHERE singleton_key = 1", 32002)
+		_, err := db.ExecContext(ctx, "UPDATE node_groups SET start_port = ? WHERE id = ?", 32002, group.ID)
 		done <- err
 	}()
 	deadline := time.NewTimer(5 * time.Second)
@@ -417,9 +450,9 @@ func verifySQLiteWriterSerialization(t *testing.T, db *sql.DB) {
 	case <-ctx.Done():
 		t.Fatalf("queued writer did not finish: %v", ctx.Err())
 	}
-	var port int
-	if err := db.QueryRowContext(ctx, "SELECT start_port FROM settings WHERE singleton_key = 1").Scan(&port); err != nil || port != 32002 {
-		t.Fatalf("queued write not persisted: port=%d err=%v", port, err)
+	group, err = models.LoadGroup(ctx, db, group.ID)
+	if err != nil || group.StartPort != 32002 {
+		t.Fatalf("queued write not persisted: port=%d err=%v", group.StartPort, err)
 	}
 }
 
@@ -478,8 +511,8 @@ func verifyUpstreamMigrationContract(t *testing.T, db *sql.DB, largeUpstreamConf
 	t.Helper()
 	dialect := appdb.DialectFor(db)
 	if _, err := db.Exec(`
-		INSERT INTO proxy_nodes (name, type, config, inbound_port, upstream_config, sort_order, enabled)
-		VALUES ('integration-legacy-detour', 'direct', '{"detour":"direct"}', 31002, '', 1, ?)
+		INSERT INTO proxy_nodes (name, type, config, inbound_port, upstream_config, sort_order, enabled, group_id)
+		VALUES ('integration-legacy-detour', 'direct', '{"detour":"direct"}', 31002, '', 1, ?, (SELECT id FROM node_groups ORDER BY sort_order, id LIMIT 1))
 	`, true); err != nil {
 		t.Fatalf("seed legacy detour node (%s): %v", dialect, err)
 	}
@@ -662,7 +695,7 @@ func verifyInstanceLeaseContract(t *testing.T, db *sql.DB) {
 
 func resetApplicationTables(t *testing.T, db *sql.DB) {
 	t.Helper()
-	for _, table := range []string{"admin_sessions", "proxy_nodes", "settings", "manager_instance_lock"} {
+	for _, table := range []string{"admin_sessions", "proxy_nodes", "node_groups", "settings", "manager_instance_lock"} {
 		if _, err := db.Exec("DROP TABLE IF EXISTS " + table); err != nil {
 			t.Fatalf("drop %s: %v", table, err)
 		}

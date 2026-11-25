@@ -13,11 +13,12 @@ const ProxyNodeSelectColumns = `
 	username, password, tcp_reuse_enabled, upstream_mode, upstream_type,
 	upstream_config, upstream_ip, upstream_location, upstream_country_code,
 	upstream_latency, upstream_error, sort_order, node_ip, location, country_code, latency,
-	enabled, created_at, updated_at
+	enabled, created_at, updated_at, group_id, subscription_key, subscription_name,
+	check_status, check_error, checked_at, check_revision
 `
 
 const runtimeSettingsSelectColumns = `
-	start_port, preserve_inbound_ports, global_upstream_enabled,
+	preserve_inbound_ports, global_upstream_enabled,
 	global_upstream_type, global_upstream_config, global_upstream_ip,
 	global_upstream_location, global_upstream_country_code, global_upstream_latency,
 	global_upstream_error, node_list_column_widths
@@ -42,13 +43,14 @@ type queryRower interface {
 
 func scanProxyNode(scanner rowScanner) (ProxyNode, error) {
 	var node ProxyNode
+	var port sql.NullInt64
 	err := scanner.Scan(
 		&node.ID,
 		&node.Name,
 		&node.Remark,
 		&node.Type,
 		&node.Config,
-		&node.InboundPort,
+		&port,
 		&node.InboundPortPinned,
 		&node.Username,
 		&node.Password,
@@ -69,16 +71,26 @@ func scanProxyNode(scanner rowScanner) (ProxyNode, error) {
 		&node.Enabled,
 		&node.CreatedAt,
 		&node.UpdatedAt,
+		&node.GroupID, &node.SubscriptionKey, &node.SubscriptionName,
+		&node.CheckStatus, &node.CheckError, &node.CheckedAt, &node.CheckRevision,
 	)
+	node.InboundPort = int(port.Int64)
 	return node, err
 }
 
 func LoadProxyNodes(ctx context.Context, queryer queryer) ([]ProxyNode, error) {
-	rows, err := queryer.QueryContext(ctx, `
-		SELECT `+ProxyNodeSelectColumns+`
-		FROM proxy_nodes
-		ORDER BY sort_order ASC
-	`)
+	return LoadGroupNodes(ctx, queryer, 0)
+}
+
+func LoadGroupNodes(ctx context.Context, queryer queryer, groupID int) ([]ProxyNode, error) {
+	query := "SELECT " + ProxyNodeSelectColumns + " FROM proxy_nodes"
+	var args []any
+	if groupID > 0 {
+		query += " WHERE group_id = ?"
+		args = append(args, groupID)
+	}
+	query += " ORDER BY (SELECT sort_order FROM node_groups WHERE id = proxy_nodes.group_id), group_id, sort_order, id"
+	rows, err := queryer.QueryContext(ctx, query, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -117,7 +129,6 @@ func LoadRuntimeSettings(ctx context.Context, queryer queryRower) (Settings, err
 		FROM settings
 		WHERE singleton_key = 1
 	`).Scan(
-		&settings.StartPort,
 		&settings.PreserveInboundPorts,
 		&settings.GlobalUpstreamEnabled,
 		&settings.GlobalUpstreamType,

@@ -23,6 +23,8 @@ const protocol = (label, shortLabel, fields = []) => ({ label, shortLabel, field
 
 const PROTOCOLS = {
   direct: protocol('Direct (Local)', 'Direct'),
+  failover: protocol('Failover (Policy)', 'Failover'),
+  loadbalance: protocol('Load Balance (Policy)', 'LoadBalance'),
 
   ss: protocol('Shadowsocks', 'SS', [
     { name: 'method', en: 'Method', zh: '加密方式', kind: 'select', required: true, options: opts('aes-128-gcm', 'aes-256-gcm', 'chacha20-ietf-poly1305', '2022-blake3-aes-128-gcm', '2022-blake3-aes-256-gcm') },
@@ -160,7 +162,10 @@ const PROTOCOLS = {
   ]),
 }
 
+export const POLICY_NODE_TYPES = new Set(['failover', 'loadbalance'])
+export const isPolicyType = (type) => POLICY_NODE_TYPES.has(String(type || '').toLowerCase())
 export const proxyTypes = Object.entries(PROTOCOLS).map(([value, { label }]) => ({ value, label }))
+export const upstreamProxyTypes = proxyTypes.filter((item) => !POLICY_NODE_TYPES.has(item.value))
 export const protocolLabel = (type) => PROTOCOLS[type]?.shortLabel || String(type || '-').toUpperCase()
 
 const FIELD_GROUPS = ['main', 'transport', 'tls', 'advanced']

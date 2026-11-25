@@ -7,10 +7,10 @@ import (
 	"errors"
 	"fmt"
 	"maps"
-	"net"
 	"net/http"
 	"os"
 	"slices"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -26,6 +26,9 @@ import (
 )
 
 type Handler struct {
+	refreshMu                 sync.Mutex
+	refreshing                map[int]bool
+	fetchSubscription         func(context.Context, []string, services.BatchImportSourceType) ([]services.ImportItem, []services.ImportFailure, error)
 	db                        *sql.DB
 	singBoxService            *services.SingBoxService
 	loginLimiter              *loginRateLimiter
@@ -38,6 +41,7 @@ type Handler struct {
 }
 
 type nodeUpsertRequest struct {
+	GroupID         *int    `json:"group_id"`
 	Name            string  `json:"name"`
 	Remark          string  `json:"remark"`
 	Type            string  `json:"type"`
@@ -127,6 +131,7 @@ func normalizeIPInfoForStorage(info *services.IPInfo) {
 
 func NewHandler(db *sql.DB, singBoxService *services.SingBoxService) *Handler {
 	return &Handler{
+		refreshing: make(map[int]bool), fetchSubscription: services.ExpandBatchImportSourcesWithType,
 		db:              db,
 		singBoxService:  singBoxService,
 		loginLimiter:    newLoginRateLimiterFromEnv(),
@@ -138,6 +143,9 @@ func NewHandler(db *sql.DB, singBoxService *services.SingBoxService) *Handler {
 }
 
 func validateInboundCredentials(username string, password string, authEnabled *bool) error {
+	if strings.ContainsAny(username, "\r\n") || strings.ContainsAny(password, "\r\n") {
+		return errors.New("inbound credentials must not contain line breaks")
+	}
 	if strings.Contains(username, "+") {
 		return fmt.Errorf("username must not contain '+'")
 	}
@@ -165,19 +173,6 @@ func validateInboundPort(port int) error {
 	return nil
 }
 
-func (h *Handler) validateInboundPortAvailable(port int) error {
-	if h.skipPortAvailabilityCheck {
-		return nil
-	}
-
-	ln, err := net.Listen("tcp", fmt.Sprintf(":%d", port))
-	if err != nil {
-		return fmt.Errorf("inbound port not available: %w", err)
-	}
-	_ = ln.Close()
-	return nil
-}
-
 func validateStartPort(port int) error {
 	if port < 1024 || port > 65535 {
 		return fmt.Errorf("start port out of range")
@@ -189,20 +184,17 @@ type sqlQueryRower interface {
 	QueryRowContext(ctx context.Context, query string, args ...any) *sql.Row
 }
 
-func getPortSettings(ctx context.Context, rower sqlQueryRower) (int, bool, error) {
-	var startPort int
+func getPreservePorts(ctx context.Context, rower sqlQueryRower) (bool, error) {
 	var preserveInboundPorts bool
-	if err := rower.QueryRowContext(ctx, "SELECT start_port, preserve_inbound_ports FROM settings WHERE singleton_key = 1").Scan(&startPort, &preserveInboundPorts); err != nil {
-		return 0, false, err
-	}
-	return startPort, preserveInboundPorts, nil
+	err := rower.QueryRowContext(ctx, "SELECT preserve_inbound_ports FROM settings WHERE singleton_key=1").Scan(&preserveInboundPorts)
+	return preserveInboundPorts, err
 }
 
 func collectUsedInboundPortsTx(ctx context.Context, tx *sql.Tx, excludeNodeID int) (map[int]struct{}, error) {
-	query := "SELECT inbound_port FROM proxy_nodes"
+	query := "SELECT inbound_port FROM proxy_nodes WHERE inbound_port IS NOT NULL"
 	args := []interface{}{}
 	if excludeNodeID > 0 {
-		query += " WHERE id <> ?"
+		query += " AND id <> ?"
 		args = append(args, excludeNodeID)
 	}
 
@@ -239,15 +231,22 @@ func nextAvailableInboundPort(startPort int, usedPorts map[int]struct{}) (int, e
 }
 
 func (h *Handler) nextBindableInboundPort(startPort int, usedPorts map[int]struct{}) (int, error) {
+	return h.nextBindablePort(context.Background(), startPort, usedPorts)
+}
+
+func (h *Handler) nextBindablePort(ctx context.Context, startPort int, usedPorts map[int]struct{}) (int, error) {
 	if err := validateInboundPort(startPort); err != nil {
 		return 0, err
 	}
 	for startPort <= 65535 {
+		if err := ctx.Err(); err != nil {
+			return 0, err
+		}
 		port, err := nextAvailableInboundPort(startPort, usedPorts)
 		if err != nil {
 			return 0, err
 		}
-		if h.validateInboundPortAvailable(port) == nil {
+		if h.checkPort(ctx, port) == nil {
 			return port, nil
 		}
 		if usedPorts != nil {
@@ -288,6 +287,13 @@ func nodeFromUpsertRequest(req nodeUpsertRequest) models.ProxyNode {
 }
 
 func (h *Handler) validateNodeUpstream(node *models.ProxyNode, allowLegacy bool) error {
+	if models.IsPolicy(node.Type) {
+		if node.UpstreamType != "" || node.UpstreamConfig != "" || (node.UpstreamMode != "" && node.UpstreamMode != "none") {
+			return errors.New("policy nodes cannot use an upstream proxy")
+		}
+		node.UpstreamMode = "none"
+		return nil
+	}
 	mode, err := models.NormalizeUpstreamMode(node.UpstreamMode)
 	if err != nil {
 		return err
@@ -337,7 +343,7 @@ func clearChangedNodeUpstreamCheck(ctx context.Context, tx *sql.Tx, previous, ne
 // singboxUpdateError builds the error payload for a failed config update,
 // surfacing the underlying kernel/validator message to the frontend.
 func singboxUpdateError(err error) gin.H {
-	return gin.H{"error": fmt.Sprintf("failed to update sing-box config: %v", err)}
+	return gin.H{"error": "failed to update sing-box config: " + services.SafeDiagnostic(err.Error())}
 }
 
 // Auth middleware
@@ -445,12 +451,24 @@ func (h *Handler) Login(c *gin.Context) {
 
 // GetNodes returns all proxy nodes
 func (h *Handler) GetNodes(c *gin.Context) {
-	nodes, err := models.LoadProxyNodes(c.Request.Context(), h.db)
+	groupID := 0
+	if raw, ok := c.GetQuery("group_id"); ok {
+		var err error
+		groupID, err = strconv.Atoi(raw)
+		if err != nil || groupID <= 0 {
+			c.JSON(400, gin.H{"error": "invalid group_id"})
+			return
+		}
+	}
+	nodes, err := models.LoadGroupNodes(c.Request.Context(), h.db, groupID)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "database error"})
 		return
 	}
 
+	for index := range nodes {
+		nodes[index] = h.singBoxService.WithPolicyStatus(nodes[index])
+	}
 	c.JSON(http.StatusOK, nodes)
 }
 
@@ -467,7 +485,7 @@ func (h *Handler) GetNode(c *gin.Context) {
 		return
 	}
 
-	c.JSON(http.StatusOK, node)
+	c.JSON(http.StatusOK, h.singBoxService.WithPolicyStatus(node))
 }
 
 // CreateNode creates a new proxy node
@@ -490,13 +508,21 @@ func (h *Handler) CreateNode(c *gin.Context) {
 	_, mutationErr := h.nodeMutations.execute(c.Request.Context(), nodeMutationOperation{
 		ApplyRuntime: true,
 		Mutate: func(ctx context.Context, tx *sql.Tx) error {
+			group, err := requestGroup(ctx, tx, payload.GroupID)
+			if err != nil {
+				return err
+			}
+			req.GroupID = group.ID
+			if err := validatePolicyMembers(ctx, tx, &req); err != nil {
+				return err
+			}
 			var maxOrder int
-			if err := tx.QueryRowContext(ctx, "SELECT COALESCE(MAX(sort_order), -1) FROM proxy_nodes").Scan(&maxOrder); err != nil {
+			if err := tx.QueryRowContext(ctx, "SELECT COALESCE(MAX(sort_order), -1) FROM proxy_nodes WHERE group_id=?", group.ID).Scan(&maxOrder); err != nil {
 				return err
 			}
 			req.SortOrder = maxOrder + 1
 
-			startPort, preserveInboundPorts, err := getPortSettings(ctx, tx)
+			preserveInboundPorts, err := getPreservePorts(ctx, tx)
 			if err != nil {
 				return err
 			}
@@ -504,8 +530,10 @@ func (h *Handler) CreateNode(c *gin.Context) {
 			if err != nil {
 				return err
 			}
-			if !preserveInboundPorts || req.InboundPort == 0 {
-				req.InboundPort, err = h.nextBindableInboundPort(startPort, usedInboundPorts)
+			if !group.AllocatePort {
+				req.InboundPort = 0
+			} else if !preserveInboundPorts || req.InboundPort == 0 {
+				req.InboundPort, err = h.nextBindablePort(ctx, group.StartPort, usedInboundPorts)
 				if err != nil {
 					return err
 				}
@@ -516,7 +544,7 @@ func (h *Handler) CreateNode(c *gin.Context) {
 				if _, exists := usedInboundPorts[req.InboundPort]; exists {
 					return invalidNodeRequest(errors.New("inbound port already in use"))
 				}
-				if err := h.validateInboundPortAvailable(req.InboundPort); err != nil {
+				if err := h.checkPort(ctx, req.InboundPort); err != nil {
 					return invalidNodeRequest(err)
 				}
 			}
@@ -538,7 +566,7 @@ func (h *Handler) CreateNode(c *gin.Context) {
 		return
 	}
 
-	c.JSON(http.StatusCreated, req)
+	h.respondNode(c, req.ID, http.StatusCreated)
 }
 
 type batchImportCandidate struct {
@@ -551,6 +579,7 @@ type batchImportCandidate struct {
 // inserted, so a rejected candidate cannot roll back unrelated valid nodes.
 func (h *Handler) BatchImportNodes(c *gin.Context) {
 	var req struct {
+		GroupID    *int     `json:"group_id"`
 		Links      []string `json:"links"`
 		Content    string   `json:"content"`
 		SourceType string   `json:"source_type"`
@@ -612,6 +641,12 @@ func (h *Handler) BatchImportNodes(c *gin.Context) {
 	defer cancelValidation()
 
 	h.nodeWriteMu.Lock()
+	group, groupErr := requestGroup(validationCtx, h.db, req.GroupID)
+	if groupErr != nil {
+		h.nodeWriteMu.Unlock()
+		writeNodeMutationError(c, groupErr, false)
+		return
+	}
 	existingNodes, snapshotErr := models.LoadProxyNodes(validationCtx, h.db)
 	var runtimeSettings models.Settings
 	if snapshotErr == nil {
@@ -626,7 +661,7 @@ func (h *Handler) BatchImportNodes(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, singboxUpdateError(fmt.Errorf("existing node set is invalid: %w", err)))
 		return
 	}
-	allocator := newBatchImportAllocator(existingNodes, runtimeSettings.StartPort, true)
+	allocator := newBatchImportAllocator(existingNodes, group, true)
 
 	candidates := make([]*batchImportCandidate, 0, len(items))
 	for _, item := range items {
@@ -658,7 +693,7 @@ func (h *Handler) BatchImportNodes(c *gin.Context) {
 			continue
 		}
 
-		inboundPort, err := h.nextBindableInboundPort(allocator.startPort, allocator.usedPorts)
+		inboundPort, err := h.batchPort(group, &allocator)
 		if err != nil {
 			result["success"] = false
 			result["error"] = err.Error()
@@ -668,6 +703,7 @@ func (h *Handler) BatchImportNodes(c *gin.Context) {
 
 		candidate := &batchImportCandidate{
 			node: models.ProxyNode{
+				GroupID:         group.ID,
 				Name:            name,
 				Type:            proxyType,
 				Config:          string(configJSON),
@@ -698,7 +734,7 @@ func (h *Handler) BatchImportNodes(c *gin.Context) {
 
 	// Reassign ports and order after isolation so rejected candidates leave no
 	// artificial gaps. A final grouped validation covers the exact persisted set.
-	portValidCandidates, assignmentsChanged := h.assignBatchImportCandidates(existingNodes, validCandidates, runtimeSettings.StartPort, true)
+	portValidCandidates, assignmentsChanged := h.assignBatchImportCandidates(existingNodes, validCandidates, group, true)
 	if assignmentsChanged {
 		var finalRejected map[*batchImportCandidate]error
 		validCandidates, finalRejected = h.selectValidBatchCandidates(validationCtx, existingNodes, portValidCandidates, runtimeSettings)
@@ -723,15 +759,14 @@ func (h *Handler) BatchImportNodes(c *gin.Context) {
 		defer h.nodeWriteMu.Unlock()
 
 		currentNodes, currentErr := models.LoadProxyNodes(validationCtx, h.db)
-		var currentStartPort int
 		if currentErr == nil {
-			currentStartPort, _, currentErr = getPortSettings(validationCtx, h.db)
+			group, currentErr = requestGroup(validationCtx, h.db, &group.ID)
 		}
 		if currentErr != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "database error"})
 			return
 		}
-		validCandidates, _ = h.assignBatchImportCandidates(currentNodes, validCandidates, currentStartPort, false)
+		validCandidates, _ = h.assignBatchImportCandidates(currentNodes, validCandidates, group, false)
 	}
 
 	accepted := make(map[*batchImportCandidate]struct{}, len(validCandidates))
@@ -804,13 +839,13 @@ type batchImportAllocator struct {
 	usedPorts     map[int]struct{}
 }
 
-func newBatchImportAllocator(nodes []models.ProxyNode, startPort int, assignIDs bool) batchImportAllocator {
-	allocator := batchImportAllocator{startPort: startPort, usedPorts: make(map[int]struct{}, len(nodes))}
+func newBatchImportAllocator(nodes []models.ProxyNode, group models.NodeGroup, assignIDs bool) batchImportAllocator {
+	allocator := batchImportAllocator{startPort: group.StartPort, usedPorts: make(map[int]struct{}, len(nodes))}
 	if assignIDs {
 		allocator.nextID = 1
 	}
 	for _, node := range nodes {
-		if node.SortOrder >= allocator.nextSortOrder {
+		if node.GroupID == group.ID && node.SortOrder >= allocator.nextSortOrder {
 			allocator.nextSortOrder = node.SortOrder + 1
 		}
 		if assignIDs && node.ID >= allocator.nextID {
@@ -835,12 +870,23 @@ func (allocator *batchImportAllocator) assign(node *models.ProxyNode, port int) 
 	return changed
 }
 
-func (h *Handler) assignBatchImportCandidates(existingNodes []models.ProxyNode, candidates []*batchImportCandidate, startPort int, assignIDs bool) ([]*batchImportCandidate, bool) {
-	allocator := newBatchImportAllocator(existingNodes, startPort, assignIDs)
+func (h *Handler) batchPort(group models.NodeGroup, allocator *batchImportAllocator) (int, error) {
+	if !group.AllocatePort {
+		return 0, nil
+	}
+	port, err := h.nextBindableInboundPort(allocator.startPort, allocator.usedPorts)
+	if err == nil {
+		allocator.startPort = port + 1
+	}
+	return port, err
+}
+
+func (h *Handler) assignBatchImportCandidates(existingNodes []models.ProxyNode, candidates []*batchImportCandidate, group models.NodeGroup, assignIDs bool) ([]*batchImportCandidate, bool) {
+	allocator := newBatchImportAllocator(existingNodes, group, assignIDs)
 	accepted := make([]*batchImportCandidate, 0, len(candidates))
 	changed := false
 	for _, candidate := range candidates {
-		port, err := h.nextBindableInboundPort(allocator.startPort, allocator.usedPorts)
+		port, err := h.batchPort(group, &allocator)
 		if err != nil {
 			candidate.result["success"] = false
 			candidate.result["error"] = err.Error()
@@ -1178,28 +1224,48 @@ func (h *Handler) UpdateNode(c *gin.Context) {
 			if payload.TCPReuseEnabled == nil {
 				req.TCPReuseEnabled = prev.TCPReuseEnabled
 			}
-			if payload.UpstreamMode == nil {
+			if payload.UpstreamMode == nil && !models.IsPolicy(req.Type) {
 				req.UpstreamMode = prev.UpstreamMode
 				if err := validateCharacterLimit("upstream_mode", req.UpstreamMode, maxUpstreamModeCharacters); err != nil {
 					return invalidNodeRequest(err)
 				}
 			}
-			if payload.UpstreamType == nil {
+			if payload.UpstreamType == nil && !models.IsPolicy(req.Type) {
 				req.UpstreamType = prev.UpstreamType
 				if err := validateCharacterLimit("upstream_type", req.UpstreamType, maxUpstreamTypeCharacters); err != nil {
 					return invalidNodeRequest(err)
 				}
 			}
-			if payload.UpstreamConfig == nil {
+			if payload.UpstreamConfig == nil && !models.IsPolicy(req.Type) {
 				req.UpstreamConfig = prev.UpstreamConfig
 			}
 			if err := h.validateUpdatedNodeUpstream(&req, prev.UpstreamMode); err != nil {
 				return invalidNodeRequest(err)
 			}
+			if err := validatePolicyMembers(ctx, tx, &req); err != nil {
+				return err
+			}
 			req.SortOrder = prev.SortOrder
 			req.InboundPortPinned = prev.InboundPortPinned
+			req.GroupID = prev.GroupID
+			if payload.GroupID != nil && *payload.GroupID != prev.GroupID {
+				if err := h.moveNodes(ctx, tx, []int{id}, *payload.GroupID); err != nil {
+					return err
+				}
+				moved, err := loadNodeForMutation(ctx, tx, id)
+				if err != nil {
+					return err
+				}
+				req.GroupID, req.SortOrder, req.InboundPortPinned = moved.GroupID, moved.SortOrder, moved.InboundPortPinned
+				req.InboundPort = moved.InboundPort
+				prev.InboundPort, prev.InboundPortPinned = moved.InboundPort, moved.InboundPortPinned
+			}
 
-			startPort, preserveInboundPorts, err := getPortSettings(ctx, tx)
+			group, err := requestGroup(ctx, tx, &req.GroupID)
+			if err != nil {
+				return err
+			}
+			preserveInboundPorts, err := getPreservePorts(ctx, tx)
 			if err != nil {
 				return err
 			}
@@ -1209,8 +1275,10 @@ func (h *Handler) UpdateNode(c *gin.Context) {
 			}
 
 			switch {
+			case !group.AllocatePort:
+				req.InboundPort = 0
 			case preserveInboundPorts && req.InboundPort == 0:
-				req.InboundPort, err = nextAvailableInboundPort(startPort, usedInboundPorts)
+				req.InboundPort, err = h.nextBindablePort(ctx, group.StartPort, usedInboundPorts)
 				if err != nil {
 					return err
 				}
@@ -1220,14 +1288,14 @@ func (h *Handler) UpdateNode(c *gin.Context) {
 				req.InboundPort = prev.InboundPort
 			}
 
-			if err := validateInboundPort(req.InboundPort); err != nil {
+			if err := validateInboundPort(req.InboundPort); group.AllocatePort && err != nil {
 				return invalidNodeRequest(err)
 			}
 			if _, exists := usedInboundPorts[req.InboundPort]; exists {
 				return invalidNodeRequest(errors.New("inbound port already in use"))
 			}
-			if req.InboundPort != prev.InboundPort {
-				if err := h.validateInboundPortAvailable(req.InboundPort); err != nil {
+			if group.AllocatePort && req.InboundPort != prev.InboundPort {
+				if err := h.checkPort(ctx, req.InboundPort); err != nil {
 					return invalidNodeRequest(err)
 				}
 			}
@@ -1239,7 +1307,7 @@ func (h *Handler) UpdateNode(c *gin.Context) {
 				    upstream_type = ?, upstream_config = ?, enabled = ?,
 				    updated_at = CURRENT_TIMESTAMP
 				WHERE id = ?
-			`, req.Name, req.Remark, req.Type, req.Config, req.InboundPort, req.Username,
+			`, req.Name, req.Remark, req.Type, req.Config, models.NullablePort(req.InboundPort), req.Username,
 				req.Password, req.TCPReuseEnabled, req.UpstreamMode, req.UpstreamType,
 				req.UpstreamConfig, req.Enabled, id)
 			if err != nil {
@@ -1255,8 +1323,8 @@ func (h *Handler) UpdateNode(c *gin.Context) {
 			if err := clearChangedNodeUpstreamCheck(ctx, tx, prev, req); err != nil {
 				return err
 			}
-			if !preserveInboundPorts && !prev.InboundPortPinned {
-				if err := reassignAutomaticPortsTx(ctx, tx, startPort); err != nil {
+			if group.AllocatePort && !preserveInboundPorts && !prev.InboundPortPinned {
+				if err := h.reassignAutomaticPortsTx(ctx, tx, group); err != nil {
 					return err
 				}
 				if err := tx.QueryRowContext(ctx, "SELECT inbound_port FROM proxy_nodes WHERE id = ?", id).Scan(&req.InboundPort); err != nil {
@@ -1271,7 +1339,7 @@ func (h *Handler) UpdateNode(c *gin.Context) {
 		return
 	}
 
-	c.JSON(http.StatusOK, req)
+	h.respondNode(c, req.ID, http.StatusOK)
 }
 
 // UpdateNodeUpstream updates only a node's managed upstream policy and definition.
@@ -1338,7 +1406,7 @@ func (h *Handler) UpdateNodeUpstream(c *gin.Context) {
 
 	for _, node := range candidateNodes {
 		if node.ID == id {
-			c.JSON(http.StatusOK, node)
+			c.JSON(http.StatusOK, h.singBoxService.WithPolicyStatus(node))
 			return
 		}
 	}
@@ -1400,7 +1468,16 @@ func (h *Handler) SetNodeInboundPortPinned(c *gin.Context) {
 	h.nodeWriteMu.Lock()
 	defer h.nodeWriteMu.Unlock()
 
-	_, preserveInboundPorts, err := getPortSettings(c.Request.Context(), h.db)
+	node, err := models.LoadProxyNode(c.Request.Context(), h.db, id)
+	if err != nil {
+		writeNodeReadError(c, err)
+		return
+	}
+	if node.InboundPort == 0 {
+		c.JSON(http.StatusConflict, gin.H{"error": "node has no inbound port"})
+		return
+	}
+	preserveInboundPorts, err := getPreservePorts(c.Request.Context(), h.db)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "database error"})
 		return
@@ -1448,7 +1525,7 @@ func (h *Handler) DeleteNode(c *gin.Context) {
 	_, mutationErr := h.nodeMutations.execute(c.Request.Context(), nodeMutationOperation{
 		ApplyRuntime: true,
 		Mutate: func(ctx context.Context, tx *sql.Tx) error {
-			return deleteNodesTx(ctx, tx, []int{id}, false)
+			return h.deleteNodesTx(ctx, tx, []int{id}, false)
 		},
 	})
 	if mutationErr != nil {
@@ -1485,7 +1562,7 @@ func (h *Handler) BatchDeleteNodes(c *gin.Context) {
 	_, mutationErr := h.nodeMutations.execute(c.Request.Context(), nodeMutationOperation{
 		ApplyRuntime: true,
 		Mutate: func(ctx context.Context, tx *sql.Tx) error {
-			return deleteNodesTx(ctx, tx, req.IDs, true)
+			return h.deleteNodesTx(ctx, tx, req.IDs, true)
 		},
 	})
 	if mutationErr != nil {
@@ -1502,7 +1579,8 @@ func (h *Handler) BatchDeleteNodes(c *gin.Context) {
 // ReorderNodes 更新节点排序；自动模式仅重分配未固定端口，保留模式不改端口。
 func (h *Handler) ReorderNodes(c *gin.Context) {
 	var req struct {
-		Nodes []struct {
+		GroupID *int `json:"group_id"`
+		Nodes   []struct {
 			ID        int `json:"id"`
 			SortOrder int `json:"sort_order"`
 		} `json:"nodes"`
@@ -1518,9 +1596,20 @@ func (h *Handler) ReorderNodes(c *gin.Context) {
 	_, mutationErr := h.nodeMutations.execute(c.Request.Context(), nodeMutationOperation{
 		ApplyRuntime: true,
 		Mutate: func(ctx context.Context, tx *sql.Tx) error {
-			currentIDs, err := loadNodeIDs(ctx, tx, nil)
+			currentNodes, err := models.LoadProxyNodes(ctx, tx)
 			if err != nil {
 				return err
+			}
+			currentIDs := map[int]int{}
+			if req.GroupID != nil {
+				if _, err := requestGroup(ctx, tx, req.GroupID); err != nil {
+					return err
+				}
+			}
+			for _, node := range currentNodes {
+				if req.GroupID == nil || node.GroupID == *req.GroupID {
+					currentIDs[node.ID] = node.GroupID
+				}
 			}
 			if len(req.Nodes) != len(currentIDs) {
 				return invalidNodeRequest(errors.New("reorder request must contain every node exactly once"))
@@ -1545,12 +1634,18 @@ func (h *Handler) ReorderNodes(c *gin.Context) {
 				sortOrders[order.SortOrder] = struct{}{}
 			}
 
+			sort.Slice(req.Nodes, func(left, right int) bool { return req.Nodes[left].SortOrder < req.Nodes[right].SortOrder })
+			orders := map[int]int{}
+			groups := map[int]bool{}
 			for _, order := range req.Nodes {
+				groupID := currentIDs[order.ID]
+				groups[groupID] = true
 				result, err := tx.ExecContext(ctx, `
 					UPDATE proxy_nodes
 					SET sort_order = ?, updated_at = CURRENT_TIMESTAMP
 					WHERE id = ?
-				`, order.SortOrder, order.ID)
+				`, orders[groupID], order.ID)
+				orders[groupID]++
 				if err != nil {
 					return err
 				}
@@ -1563,14 +1658,7 @@ func (h *Handler) ReorderNodes(c *gin.Context) {
 				}
 			}
 
-			startPort, preserveInboundPorts, err := getPortSettings(ctx, tx)
-			if err != nil {
-				return err
-			}
-			if !preserveInboundPorts {
-				return reassignAutomaticPortsTx(ctx, tx, startPort)
-			}
-			return nil
+			return h.normalizeGroups(ctx, tx, groups)
 		},
 	})
 	if mutationErr != nil {
@@ -1587,8 +1675,6 @@ type upstreamCheckOutcome struct {
 }
 
 var errUpstreamDefinitionChanged = errors.New("upstream proxy changed during IP check")
-
-const nodeUpstreamDefinitionColumns = "upstream_mode, upstream_type, upstream_config"
 
 func (h *Handler) runUpstreamCheck(ctx context.Context, definition models.ProxyDefinition) upstreamCheckOutcome {
 	info, err := h.checkUpstreamIP(ctx, definition)
@@ -1650,16 +1736,7 @@ func boundedCheckError(err error) string {
 	if err == nil {
 		return ""
 	}
-	message := strings.ToValidUTF8(err.Error(), "?")
-	const maxBytes = 2000
-	for len(message) > maxBytes {
-		_, size := utf8.DecodeLastRuneInString(message)
-		if size <= 0 {
-			return message[:maxBytes]
-		}
-		message = message[:len(message)-size]
-	}
-	return message
+	return services.SafeDiagnostic(err.Error())
 }
 
 func ipCheckFailureStatus(c *gin.Context, err error) int {
@@ -1673,45 +1750,104 @@ func ipCheckFailureStatus(c *gin.Context, err error) int {
 	return http.StatusTooManyRequests
 }
 
-func (h *Handler) persistNodeUpstreamCheck(
-	ctx context.Context,
-	id int,
-	definition models.ProxyDefinition,
-	outcome upstreamCheckOutcome,
-) error {
+type nodeIPCheckResult struct {
+	info    services.IPInfo
+	err     error
+	message string
+}
+
+func nodeProbeResult(node models.ProxyNode, scope string, info *services.IPInfo, err error) nodeIPCheckResult {
+	if err == nil && (info == nil || strings.TrimSpace(info.IP) == "") {
+		err = fmt.Errorf("%s IP check returned no result", scope)
+	}
+	if err != nil {
+		message := services.NodeIPCheckDiagnostic(err.Error(), node)
+		if strings.TrimSpace(message) == "" {
+			message = scope + " IP check failed"
+		}
+		return nodeIPCheckResult{err: err, message: message}
+	}
+	result := nodeIPCheckResult{info: *info}
+	normalizeIPInfoForStorage(&result.info)
+	result.info.HTTPError = services.NodeIPCheckDiagnostic(result.info.HTTPError, node)
+	return result
+}
+
+func (result nodeIPCheckResult) payload() gin.H {
+	if result.err != nil {
+		return gin.H{"error": result.message}
+	}
+	return ipInfoPayload(&result.info)
+}
+
+func (h *Handler) checkNodeExitIP(ctx context.Context, node models.ProxyNode) (*services.IPInfo, error) {
+	if node.InboundPort == 0 && models.IsPolicy(node.Type) {
+		return h.singBoxService.CheckPolicyIP(ctx, node.ID, h.checkProxyIP)
+	}
+	if node.InboundPort > 0 {
+		return h.checkProxyIP(ctx, fmt.Sprintf("localhost:%d", node.InboundPort), node.Username, node.Password)
+	}
+	return h.singBoxService.CheckIsolatedNodeIPContext(ctx, node.ID, func(checkCtx context.Context) ([]models.ProxyNode, models.Settings, error) {
+		return h.loadIsolatedCheckInputs(checkCtx, node)
+	}, h.checkProxyIP)
+}
+
+func (h *Handler) loadIsolatedCheckInputs(ctx context.Context, target models.ProxyNode) ([]models.ProxyNode, models.Settings, error) {
+	var settings models.Settings
+	mode, err := models.NormalizeUpstreamMode(target.UpstreamMode)
+	if err != nil {
+		return nil, settings, err
+	}
+	if mode == models.UpstreamModeLegacy || mode == models.UpstreamModeGlobal {
+		err := h.db.QueryRowContext(ctx, `SELECT global_upstream_enabled, global_upstream_type, global_upstream_config
+			FROM settings WHERE singleton_key = 1`).Scan(&settings.GlobalUpstreamEnabled, &settings.GlobalUpstreamType, &settings.GlobalUpstreamConfig)
+		if err != nil {
+			return nil, settings, errors.New("failed to load settings for isolated IP check")
+		}
+	}
+	if mode == models.UpstreamModeLegacy {
+		nodes, err := models.LoadProxyNodes(ctx, h.db)
+		if err != nil {
+			return nil, settings, errors.New("failed to load dependencies for isolated IP check")
+		}
+		return nodes, settings, nil
+	}
+	nodes := []models.ProxyNode{target}
+	rows, err := h.db.QueryContext(ctx, `SELECT id, inbound_port, enabled FROM proxy_nodes WHERE inbound_port > 0 AND id <> ?`, target.ID)
+	if err != nil {
+		return nil, settings, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var listener models.ProxyNode
+		if err := rows.Scan(&listener.ID, &listener.InboundPort, &listener.Enabled); err != nil {
+			return nil, settings, err
+		}
+		nodes = append(nodes, listener)
+	}
+	return nodes, settings, rows.Err()
+}
+
+func (h *Handler) persistNodeIPCheck(ctx context.Context, node models.ProxyNode, status string, checkedAt time.Time, final nodeIPCheckResult, upstream *nodeIPCheckResult) (bool, error) {
+	query := `UPDATE proxy_nodes SET check_status = ?, check_error = ?, checked_at = ?,
+		node_ip = ?, location = ?, country_code = ?, latency = ?, updated_at = CURRENT_TIMESTAMP`
+	args := []any{status, final.message, checkedAt, final.info.IP, final.info.Location, final.info.CountryCode, final.info.Latency}
+	condition := ` WHERE id = ? AND check_revision = ? AND enabled`
+	matchArgs := []any{node.ID, node.CheckRevision}
+	if upstream != nil {
+		query += `, upstream_ip = ?, upstream_location = ?, upstream_country_code = ?, upstream_latency = ?, upstream_error = ?`
+		args = append(args, upstream.info.IP, upstream.info.Location, upstream.info.CountryCode, upstream.info.Latency, upstream.message)
+		condition += ` AND upstream_mode = ? AND upstream_type = ? AND upstream_config = ?`
+		matchArgs = append(matchArgs, node.UpstreamMode, node.UpstreamType, node.UpstreamConfig)
+	}
 	h.nodeWriteMu.Lock()
 	defer h.nodeWriteMu.Unlock()
-
-	matchesDefinition := func() (bool, error) {
-		var mode string
-		var current models.ProxyDefinition
-		err := h.db.QueryRowContext(ctx, "SELECT "+nodeUpstreamDefinitionColumns+" FROM proxy_nodes WHERE id = ?", id).
-			Scan(&mode, &current.Type, &current.Config)
-		if errors.Is(err, sql.ErrNoRows) {
-			return false, nil
-		}
-		return mode == models.UpstreamModeCustom && current == definition, err
-	}
-	matches, err := matchesDefinition()
+	result, err := h.db.ExecContext(ctx, query+condition, append(args, matchArgs...)...)
 	if err != nil {
-		return err
+		return false, err
 	}
-	if !matches {
-		return errUpstreamDefinitionChanged
-	}
-
-	info, message := outcome.storedValues()
-	result, err := h.db.ExecContext(ctx, `
-		UPDATE proxy_nodes
-		SET upstream_ip = ?, upstream_location = ?, upstream_country_code = ?,
-		    upstream_latency = ?, upstream_error = ?, updated_at = CURRENT_TIMESTAMP
-		WHERE id = ? AND upstream_mode = ? AND upstream_type = ? AND upstream_config = ?
-	`, info.IP, info.Location, info.CountryCode, info.Latency, message,
-		id, models.UpstreamModeCustom, definition.Type, definition.Config)
-	if err != nil {
-		return err
-	}
-	return verifyConditionalCheckUpdate(result, matchesDefinition)
+	affected, err := result.RowsAffected()
+	return affected == 1, err
 }
 
 // CheckNodeIP checks the final node exit and its custom upstream, when present.
@@ -1722,20 +1858,7 @@ func (h *Handler) CheckNodeIP(c *gin.Context) {
 	}
 
 	ctx := c.Request.Context()
-	var node models.ProxyNode
-	err := h.db.QueryRowContext(ctx, `
-		SELECT inbound_port, username, password, enabled, `+nodeUpstreamDefinitionColumns+`
-		FROM proxy_nodes WHERE id = ?
-	`, id).Scan(
-		&node.InboundPort,
-		&node.Username,
-		&node.Password,
-		&node.Enabled,
-		&node.UpstreamMode,
-		&node.UpstreamType,
-		&node.UpstreamConfig,
-	)
-
+	node, err := models.LoadProxyNode(ctx, h.db, id)
 	if err != nil {
 		writeNodeReadError(c, err)
 		return
@@ -1746,84 +1869,59 @@ func (h *Handler) CheckNodeIP(c *gin.Context) {
 		return
 	}
 
-	customUpstream := node.UpstreamMode == models.UpstreamModeCustom
-	upstreamDefinition := models.ProxyDefinition{Type: node.UpstreamType, Config: node.UpstreamConfig}
-	var upstreamResult <-chan upstreamCheckOutcome
-	if customUpstream {
-		result := make(chan upstreamCheckOutcome, 1)
-		upstreamResult = result
+	var upstreamResult chan nodeIPCheckResult
+	if node.UpstreamMode == models.UpstreamModeCustom {
+		upstreamResult = make(chan nodeIPCheckResult, 1)
 		go func() {
-			result <- h.runUpstreamCheck(ctx, upstreamDefinition)
+			info, err := h.checkUpstreamIP(ctx, models.ProxyDefinition{Type: node.UpstreamType, Config: node.UpstreamConfig})
+			upstreamResult <- nodeProbeResult(node, "upstream", info, err)
 		}()
 	}
 
-	proxyAddr := fmt.Sprintf("localhost:%d", node.InboundPort)
-	ipInfo, nodeCheckErr := h.checkProxyIP(ctx, proxyAddr, node.Username, node.Password)
-	normalizeIPInfoForStorage(ipInfo)
-	if nodeCheckErr == nil && ipInfo == nil {
-		nodeCheckErr = fmt.Errorf("node IP check returned no result")
-	}
-	upstreamOutcome := upstreamCheckOutcome{}
-	if customUpstream {
+	info, probeErr := h.checkNodeExitIP(ctx, node)
+	final := nodeProbeResult(node, "node", info, probeErr)
+	var upstream *nodeIPCheckResult
+	if upstreamResult != nil {
 		select {
-		case upstreamOutcome = <-upstreamResult:
+		case result := <-upstreamResult:
+			upstream = &result
 		case <-ctx.Done():
 			return
 		}
-		if err := h.persistNodeUpstreamCheck(ctx, id, upstreamDefinition, upstreamOutcome); err != nil {
-			if errors.Is(err, errUpstreamDefinitionChanged) {
-				c.JSON(http.StatusConflict, gin.H{"error": err.Error()})
-				return
-			}
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to update upstream check result"})
-			return
-		}
 	}
-
 	if ctx.Err() != nil {
 		return
 	}
-	h.nodeWriteMu.Lock()
-	defer h.nodeWriteMu.Unlock()
-	if nodeCheckErr != nil {
-		if _, clearErr := h.db.ExecContext(ctx, `
-			UPDATE proxy_nodes
-			SET node_ip = '', location = '', country_code = '', latency = 0, updated_at = CURRENT_TIMESTAMP
-			WHERE id = ?
-		`, id); clearErr != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to clear node check result"})
-			return
+	status := "ok"
+	if final.err != nil {
+		status = "failed"
+	}
+	checkedAt := time.Now().UTC().Truncate(time.Microsecond)
+	matched, err := h.persistNodeIPCheck(ctx, node, status, checkedAt, final, upstream)
+	if err != nil {
+		if ctx.Err() == nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to save node check result"})
 		}
-		payload := gin.H{"error": boundedCheckError(nodeCheckErr)}
-		if customUpstream {
-			if upstreamOutcome.err != nil {
-				payload["upstream"] = gin.H{"error": boundedCheckError(upstreamOutcome.err)}
-			} else {
-				payload["upstream"] = ipInfoPayload(upstreamOutcome.info)
-			}
-		}
-		c.JSON(ipCheckFailureStatus(c, nodeCheckErr), payload)
 		return
 	}
-
-	if _, err := h.db.ExecContext(ctx, `
-		UPDATE proxy_nodes
-		SET node_ip = ?, location = ?, country_code = ?, latency = ?, updated_at = CURRENT_TIMESTAMP
-		WHERE id = ?
-	`, ipInfo.IP, ipInfo.Location, ipInfo.CountryCode, ipInfo.Latency, id); err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to update node"})
+	if !matched {
+		message := "node changed during IP check"
+		if upstream != nil {
+			message = errUpstreamDefinitionChanged.Error()
+		}
+		c.JSON(http.StatusConflict, gin.H{"error": message})
 		return
 	}
-
-	payload := ipInfoPayload(ipInfo)
-	if customUpstream {
-		if upstreamOutcome.err != nil {
-			payload["upstream"] = gin.H{"error": boundedCheckError(upstreamOutcome.err)}
-		} else {
-			payload["upstream"] = ipInfoPayload(upstreamOutcome.info)
-		}
+	payload := final.payload()
+	payload["check_status"], payload["check_error"], payload["checked_at"] = status, final.message, checkedAt
+	if upstream != nil {
+		payload["upstream"] = upstream.payload()
 	}
-	c.JSON(http.StatusOK, payload)
+	code := http.StatusOK
+	if final.err != nil {
+		code = ipCheckFailureStatus(c, final.err)
+	}
+	c.JSON(code, payload)
 }
 
 // BatchSetAuth sets authentication for multiple nodes
@@ -1897,7 +1995,6 @@ func (h *Handler) GetSettings(c *gin.Context) {
 	}
 
 	c.JSON(http.StatusOK, gin.H{
-		"start_port":                   settings.StartPort,
 		"preserve_inbound_ports":       settings.PreserveInboundPorts,
 		"global_upstream_enabled":      settings.GlobalUpstreamEnabled,
 		"global_upstream_type":         settings.GlobalUpstreamType,
@@ -2027,7 +2124,6 @@ func (h *Handler) RestartRuntime(c *gin.Context) {
 // UpdateSettings updates settings
 func (h *Handler) UpdateSettings(c *gin.Context) {
 	var req struct {
-		StartPort             *int            `json:"start_port,omitempty"`
 		AdminPassword         *string         `json:"admin_password,omitempty"`
 		PreserveInboundPorts  *bool           `json:"preserve_inbound_ports,omitempty"`
 		GlobalUpstreamEnabled *bool           `json:"global_upstream_enabled,omitempty"`
@@ -2082,13 +2178,6 @@ func (h *Handler) UpdateSettings(c *gin.Context) {
 		hashedPassword = string(hashed)
 	}
 
-	if req.StartPort != nil {
-		if err := validateStartPort(*req.StartPort); err != nil {
-			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
-			return
-		}
-	}
-
 	h.nodeWriteMu.Lock()
 	defer h.nodeWriteMu.Unlock()
 
@@ -2098,10 +2187,6 @@ func (h *Handler) UpdateSettings(c *gin.Context) {
 		return
 	}
 
-	nextStartPort := previous.StartPort
-	if req.StartPort != nil {
-		nextStartPort = *req.StartPort
-	}
 	nextPreserveInboundPorts := previous.PreserveInboundPorts
 	if req.PreserveInboundPorts != nil {
 		nextPreserveInboundPorts = *req.PreserveInboundPorts
@@ -2119,7 +2204,7 @@ func (h *Handler) UpdateSettings(c *gin.Context) {
 		nextGlobalUpstreamConfig = strings.TrimSpace(*req.GlobalUpstreamConfig)
 	}
 	globalDefinitionRequested := req.GlobalUpstreamType != nil || req.GlobalUpstreamConfig != nil
-	onlyColumnWidths := req.NodeListColumnWidths != nil && req.StartPort == nil && req.PreserveInboundPorts == nil &&
+	onlyColumnWidths := req.NodeListColumnWidths != nil && req.PreserveInboundPorts == nil &&
 		req.GlobalUpstreamEnabled == nil && !globalDefinitionRequested && req.AdminPassword == nil
 	if !onlyColumnWidths {
 		if err := validateCharacterLimit("global_upstream_type", nextGlobalUpstreamType, maxUpstreamTypeCharacters); err != nil {
@@ -2147,8 +2232,7 @@ func (h *Handler) UpdateSettings(c *gin.Context) {
 			}
 		}
 	}
-	portSettingsChanged := nextStartPort != previous.StartPort ||
-		nextPreserveInboundPorts != previous.PreserveInboundPorts
+	portSettingsChanged := nextPreserveInboundPorts != previous.PreserveInboundPorts
 	globalDefinitionChanged := nextGlobalUpstreamType != previous.GlobalUpstreamType ||
 		nextGlobalUpstreamConfig != previous.GlobalUpstreamConfig
 	globalEnabledChanged := nextGlobalUpstreamEnabled != previous.GlobalUpstreamEnabled
@@ -2179,10 +2263,10 @@ func (h *Handler) UpdateSettings(c *gin.Context) {
 		Mutate: func(ctx context.Context, tx *sql.Tx) error {
 			query := `
 				UPDATE settings
-				SET start_port = ?, preserve_inbound_ports = ?,
+				SET preserve_inbound_ports = ?,
 				    global_upstream_enabled = ?, global_upstream_type = ?,
 				    global_upstream_config = ?, updated_at = CURRENT_TIMESTAMP`
-			args := []any{nextStartPort, nextPreserveInboundPorts, nextGlobalUpstreamEnabled,
+			args := []any{nextPreserveInboundPorts, nextGlobalUpstreamEnabled,
 				nextGlobalUpstreamType, nextGlobalUpstreamConfig}
 			if columnWidthsChanged {
 				query += ", node_list_column_widths = ?"
@@ -2209,7 +2293,7 @@ func (h *Handler) UpdateSettings(c *gin.Context) {
 			}
 
 			if shouldReassignInboundPorts {
-				return reassignAutomaticPortsTx(ctx, tx, nextStartPort)
+				return h.normalizeGroups(ctx, tx, nil)
 			}
 			return nil
 		},
@@ -2390,6 +2474,7 @@ func (h *Handler) ReplaceNode(c *gin.Context) {
 
 	_, mutationErr := h.nodeMutations.execute(c.Request.Context(), nodeMutationOperation{
 		ApplyRuntime: true,
+		ReplacedID:   id,
 		Mutate: func(ctx context.Context, tx *sql.Tx) error {
 			previous, err := loadNodeForMutation(ctx, tx, id)
 			if err != nil {
@@ -2418,7 +2503,6 @@ func (h *Handler) ReplaceNode(c *gin.Context) {
 			_, err = tx.ExecContext(ctx, `
 				UPDATE proxy_nodes
 				SET name = ?, type = ?, config = ?, upstream_mode = ?,
-				    node_ip = '', location = '', country_code = '', latency = 0,
 				    updated_at = CURRENT_TIMESTAMP
 				WHERE id = ?
 			`, nextName, proxyType, string(configJSON), nextUpstreamMode, id)
@@ -2436,5 +2520,5 @@ func (h *Handler) ReplaceNode(c *gin.Context) {
 		return
 	}
 
-	c.JSON(http.StatusOK, node)
+	c.JSON(http.StatusOK, h.singBoxService.WithPolicyStatus(node))
 }

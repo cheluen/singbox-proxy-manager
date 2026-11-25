@@ -1,13 +1,17 @@
 package services
 
 import (
+	"bytes"
+	"errors"
 	"fmt"
 	"io"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 )
 
 const (
@@ -20,9 +24,118 @@ type noOpWriteCloser struct{}
 func (noOpWriteCloser) Close() error { return nil }
 
 func (s *SingBoxService) openProcessLog() (io.Writer, io.Writer, io.Closer, error) {
+	stdout, stderr, closer, err := s.processLogOutput()
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	s.features.mu.RLock()
+	observer, wiring := s.features.observer, s.features.wiring
+	s.features.mu.RUnlock()
+	wrap := func(output io.Writer) *logLineWriter {
+		var afterAuthFailure bool
+		return &logLineWriter{emit: func(line string) error {
+			line = strings.TrimRight(logANSI.ReplaceAllString(line, ""), "\r")
+			if afterAuthFailure && !currentKernelLogHeader(line, time.Now()) {
+				return nil
+			}
+			afterAuthFailure = strings.Contains(line, "authentication failed, ") || line == omittedLogLine
+			_, err := fmt.Fprintln(output, observer.line("singbox", line, wiring))
+			return err
+		}}
+	}
+	out, errOut := wrap(stdout), wrap(stderr)
+	return out, errOut, processLogCloser{out, errOut, closer}, nil
+}
+
+var logPasswordTail = regexp.MustCompile(`(?i)\b(password\s*[:=]\s*).*`)
+
+const kernelTimestamp = "-0700 2006-01-02 15:04:05"
+
+var kernelLogHeader = regexp.MustCompile(`^[+-]\d{4} \d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2} (?:TRACE|DEBUG|INFO|WARN|ERROR|FATAL|PANIC) `)
+
+func currentKernelLogHeader(line string, now time.Time) bool {
+	if !kernelLogHeader.MatchString(line) {
+		return false
+	}
+	stamp, err := time.Parse(kernelTimestamp, line[:len(kernelTimestamp)])
+	return err == nil && !stamp.Before(now.Add(-10*time.Second)) && !stamp.After(now.Add(10*time.Second))
+}
+
+func cleanLogLine(line string, wiring *runtimeWiring) string {
+	if prefix, _, found := strings.Cut(line, "authentication failed, "); found {
+		line = prefix + "authentication failed, [redacted]"
+	} else {
+		line = logPasswordTail.ReplaceAllString(line, "${1}[redacted]")
+	}
+	if wiring != nil && wiring.redactSecrets != nil {
+		line = wiring.redactSecrets.Replace(line)
+	}
+	return redactIPCheckDiagnostic(line)
+}
+
+type processLogCloser struct {
+	stdout, stderr *logLineWriter
+	output         io.Closer
+}
+
+func (c processLogCloser) Close() error {
+	return errors.Join(c.stdout.Close(), c.stderr.Close(), c.output.Close())
+}
+
+type logLineWriter struct {
+	emit    func(string) error
+	mu      sync.Mutex
+	tail    []byte
+	discard bool
+}
+
+const omittedLogLine = "Overlong log line omitted"
+
+func (w *logLineWriter) finish() error {
+	line := string(w.tail)
+	if w.discard {
+		line = omittedLogLine
+	}
+	w.tail, w.discard = w.tail[:0], false
+	return w.emit(line)
+}
+
+func (w *logLineWriter) Write(data []byte) (int, error) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	count := len(data)
+	for len(data) > 0 {
+		line, rest, end := bytes.Cut(data, []byte{'\n'})
+		if !w.discard {
+			if len(line)+len(w.tail) > 16384 {
+				w.discard = true
+			} else {
+				w.tail = append(w.tail, line...)
+			}
+		}
+		if end {
+			if err := w.finish(); err != nil {
+				return count - len(rest), err
+			}
+		}
+		data = rest
+	}
+	return count, nil
+}
+
+func (w *logLineWriter) Close() error {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if len(w.tail) == 0 && !w.discard {
+		return nil
+	}
+	return w.finish()
+}
+
+func (s *SingBoxService) processLogOutput() (io.Writer, io.Writer, io.Closer, error) {
 	mode := strings.ToLower(strings.TrimSpace(os.Getenv("SBPM_SINGBOX_LOG_OUTPUT")))
 	if mode == "" {
-		mode = "file"
+		mode = "stdout"
 	}
 
 	switch mode {

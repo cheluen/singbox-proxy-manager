@@ -21,7 +21,7 @@ test('系统测试只允许同源预期停机与撤销认证错误，不屏蔽�
   const origin = 'http://127.0.0.1:38080'
   const refused = 'Failed to load resource: net::ERR_CONNECTION_REFUSED'
   const error = (endpoint, text = refused) => ({ text, url: origin + endpoint })
-  for (const endpoint of ['/api/nodes', '/api/settings', '/api/runtime/status', '/api/version']) {
+  for (const endpoint of ['/api/nodes', '/api/node-groups', '/api/settings', '/api/runtime/status', '/api/version']) {
     assert.equal(isExpectedSystemBrowserError(error(endpoint), { origin, restarting: true }), true)
     assert.equal(isExpectedSystemBrowserError(error(endpoint), { origin }), false)
     assert.equal(isExpectedSystemBrowserError(error(endpoint, 'net::ERR_FAILED'), { origin, restarting: true }), false)
@@ -189,10 +189,10 @@ test('节点列表列宽清洗、范围约束与 CSS 变量映射准确', () => 
   assert.deepEqual(normalizeColumnWidths([]), {})
   assert.deepEqual(normalizeColumnWidths({ name: 260.4, port: 12, server: 9999, unknown: 200, ip: 'bad' }), {
     name: 260,
-    port: 72,
+    port: 68,
     server: 560,
   })
-  assert.equal(clampColumnWidth('latency', 30), 52)
+  assert.equal(clampColumnWidth('latency', 30), 58)
   assert.equal(clampColumnWidth('latency', 120), 120)
   assert.equal(clampColumnWidth('unknown', 100), null)
   assert.equal(columnWidthsEqual({ name: 200, user: 150 }, { user: 150, name: 200 }), true)
@@ -202,16 +202,17 @@ test('节点列表列宽清洗、范围约束与 CSS 变量映射准确', () => 
   const style = buildColumnWidthStyle({ name: 260, server: 320 }, true, 1440)
   assert.equal(style['--dusk-col-name'], '260px')
   assert.equal(style['--dusk-col-server'], '320px')
-  assert.equal(calculateTableMinWidth({ name: 260, server: 320 }, 1440), 1518)
-  assert.equal(calculateTableMinWidth({ name: 280 }, 1080), 1170)
-  assert.equal(calculateTableMinWidth({ name: 280 }, 1000), 1014)
-  assert.equal(style['--dusk-table-min-width'], '1518px')
+  assert.equal(calculateTableMinWidth({ name: 260, server: 320 }, 1440), 1494)
+  assert.equal(calculateTableMinWidth({ name: 280 }, 1080), 1148)
+  assert.equal(calculateTableMinWidth({ name: 280 }, 1000), 994)
+  assert.equal(style['--dusk-table-min-width'], '1494px')
 })
 
 const nodes = [
-  { id: 1, name: 'Tokyo alpha', type: 'ss', remark: 'primary', inbound_port: 30001, username: 'alice', password: 'secret', enabled: true, node_ip: '203.0.113.1', country_code: 'JP', location: 'Tokyo, Japan', latency: 30 },
-  { id: 2, name: 'US beta', type: 'vless', inbound_port: 30002, enabled: true, tcp_reuse_enabled: false, node_ip: '', latency: 0 },
+  { id: 1, name: 'Tokyo alpha', type: 'ss', remark: 'primary', inbound_port: 30001, username: 'alice', password: 'secret', enabled: true, check_status: 'ok', node_ip: '203.0.113.1', country_code: 'JP', location: 'Tokyo, Japan', latency: 30 },
+  { id: 2, name: 'US beta', type: 'vless', inbound_port: 30002, enabled: true, tcp_reuse_enabled: false, check_status: 'untested', node_ip: '', latency: 0 },
   { id: 3, name: 'Tokyo off', type: 'vmess', inbound_port: 30003, enabled: false, node_ip: '203.0.113.3', country_code: 'JP', latency: 50 },
+  { id: 4, name: 'Failed delta', type: 'trojan', inbound_port: 30004, enabled: true, check_status: 'failed', check_error: 'dial timeout', node_ip: '', latency: 0 },
 ]
 
 test('节点渲染阈值默认 120，0 全量，正整数决定批次大小', () => {
@@ -234,7 +235,8 @@ test('全部筛选项准确匹配，不把 SS 混为 VLESS 或 VMess', () => {
   const ids = (criteria) => filterNodes(nodes, { ...EMPTY_CRITERIA, ...criteria }).map((node) => node.id)
   assert.deepEqual(ids({ types: ['ss'] }), [1])
   assert.deepEqual(ids({ status: 'healthy' }), [1])
-  assert.deepEqual(ids({ status: 'unverified' }), [2])
+  assert.deepEqual(ids({ status: 'untested' }), [2])
+  assert.deepEqual(ids({ status: 'failed' }), [4])
   assert.deepEqual(ids({ status: 'disabled' }), [3])
   assert.deepEqual(ids({ ports: '30001-30002,30009' }), [1, 2])
   assert.deepEqual(ids({ ports: '30001-30002，30009', search: 'TOKYO primary' }), [1])
@@ -247,7 +249,7 @@ test('全部筛选项准确匹配，不把 SS 混为 VLESS 或 VMess', () => {
   const facets = collectFacets(nodes)
   assert.deepEqual(facets.usernames, ['alice'])
   assert.equal(facets.regions.find((region) => region.value === 'jp').count, 2)
-  assert.deepEqual(summarizeNodes(nodes), { total: 3, healthy: 1, unverified: 1, disabled: 1 })
+  assert.deepEqual(summarizeNodes(nodes), { total: 4, healthy: 1, untested: 1, failed: 1, disabled: 1 })
 })
 
 test('去重基于配置语义，连接串安全编码认证字段', () => {

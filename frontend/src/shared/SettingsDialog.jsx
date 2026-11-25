@@ -1,5 +1,5 @@
 import { useState } from 'react'
-import { Alert, Button, Form, Input, InputNumber, Modal, Switch } from 'antd'
+import { Alert, Button, Form, Input, Modal, Switch } from 'antd'
 import { Pencil, Plus, Zap } from 'lucide-react'
 import { useTranslation } from 'react-i18next'
 import { protocolLabel } from '../core/nodeView'
@@ -32,7 +32,6 @@ function SettingsFormBody({ ctl, onDone }) {
 
   const submit = async (values) => {
     const update = {}
-    if (Number(values.start_port) !== Number(saved.start_port)) update.start_port = values.start_port
     if (Boolean(values.preserve_inbound_ports) !== Boolean(saved.preserve_inbound_ports)) update.preserve_inbound_ports = Boolean(values.preserve_inbound_ports)
     if (Boolean(values.global_upstream_enabled) !== Boolean(saved.global_upstream_enabled)) update.global_upstream_enabled = Boolean(values.global_upstream_enabled)
     if (upstream.type !== (saved.global_upstream_type || '')) update.global_upstream_type = upstream.type
@@ -48,7 +47,7 @@ function SettingsFormBody({ ctl, onDone }) {
       onDone()
       return
     }
-    // 关闭「保留入站端口」会重分配未固定节点的端口，固定端口不变；可能影响客户端连接，需二次确认。
+    // 关闭「保留入站端口」会按各分组起始端口重排未固定节点端口，固定端口不变；可能影响客户端连接，需二次确认。
     if (saved.preserve_inbound_ports && update.preserve_inbound_ports === false) {
       const confirmed = await ctl.helpers.confirm({ title: t('warning'), content: t('preserve_inbound_ports_disable_warning'), okText: t('confirm'), danger: true })
       if (!confirmed) return
@@ -72,19 +71,11 @@ function SettingsFormBody({ ctl, onDone }) {
       requiredMark={false}
       className="sb-form"
       data-testid="settings-form"
-      initialValues={{ start_port: saved.start_port, preserve_inbound_ports: Boolean(saved.preserve_inbound_ports), global_upstream_enabled: Boolean(saved.global_upstream_enabled), admin_secret: '', admin_secret_confirm: '' }}
+      initialValues={{ preserve_inbound_ports: Boolean(saved.preserve_inbound_ports), global_upstream_enabled: Boolean(saved.global_upstream_enabled), admin_secret: '', admin_secret_confirm: '' }}
       onFinish={submit}
     >
       <section className="sb-form-section">
         <h3 className="sb-form-section__title">{t('settings_ports')}</h3>
-        <Form.Item
-          name="start_port"
-          label={t('start_port')}
-          extra={t('start_port_desc')}
-          rules={[{ required: true, message: t('start_port_required') }, { type: 'number', min: 1024, max: 65535, message: t('start_port_range') }]}
-        >
-          <InputNumber style={{ width: 200 }} />
-        </Form.Item>
         <div className="sb-setting-row">
           <div className="sb-setting-row__text">
             <strong>{t('preserve_inbound_ports')}</strong>
@@ -94,6 +85,7 @@ function SettingsFormBody({ ctl, onDone }) {
             <Switch aria-label={t('preserve_inbound_ports')} />
           </Form.Item>
         </div>
+        <p className="sb-form-note">{t('settings_group_start_port_hint')}</p>
       </section>
 
       <section className="sb-form-section">

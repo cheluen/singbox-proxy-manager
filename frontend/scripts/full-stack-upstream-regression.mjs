@@ -343,8 +343,15 @@ try {
   await clickButton(page, 'Login')
   await page.waitForSelector('[data-testid="nodes-add-node"]', { visible: true, timeout: 15000 })
 
+  const initialGroups = await browserAPI(page, '/api/node-groups')
+  assert(initialGroups.status === 200 && initialGroups.body?.length >= 1, 'Default group missing')
+  const updatedGroup = await browserAPI(page, `/api/node-groups/${initialGroups.body[0].id}`, {
+    method: 'PATCH',
+    body: JSON.stringify({ start_port: await findTestPortRange() }),
+  })
+  assert(updatedGroup.status === 200, `Update group start_port failed: ${JSON.stringify(updatedGroup)}`)
+
   await openSettings(page)
-  await setInput(page, '#start_port', await findTestPortRange())
   await openUpstreamEditor(page, '[data-testid="global-upstream-configure"]')
   await selectOption(page, 'global_upstream_proxy_type', 'SOCKS5')
   await setInput(page, '#global_upstream_server', '127.0.0.1')

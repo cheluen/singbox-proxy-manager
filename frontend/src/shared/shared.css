@@ -25,19 +25,22 @@
 /* 状态徽标：形状 + 文字 + 颜色三重表达 */
 .sb-badge { display: inline-flex; align-items: center; gap: 6px; height: 24px; padding: 0 9px; border-radius: 999px; font-size: 12px; font-weight: 600; white-space: nowrap; }
 .sb-health--healthy { background: var(--ok-soft); color: var(--ok-ink); }
-.sb-health--unverified { background: var(--warn-soft); color: var(--warn-ink); }
+.sb-health--untested { background: var(--warn-soft); color: var(--warn-ink); }
+.sb-health--failed { background: var(--bad-soft); color: var(--bad-ink); }
 .sb-health--disabled { background: var(--bg-2); color: var(--ink-2); }
 .sb-health-dot { display: inline-flex; align-items: center; justify-content: center; flex: none; width: 20px; height: 20px; border-radius: 50%; background: transparent !important; }
 .sb-health-glyph--healthy { color: var(--ok); }
-.sb-health-glyph--unverified { color: var(--warn); }
+.sb-health-glyph--untested { color: var(--warn); }
+.sb-health-glyph--failed { color: var(--bad); }
 .sb-health-glyph--disabled { color: var(--muted); }
 
 .sb-tag { display: inline-flex; align-items: center; height: 22px; padding: 0 7px; border-radius: 6px; font-size: 11.5px; font-weight: 600; letter-spacing: 0.02em; white-space: nowrap; }
 .sb-tag--protocol { background: var(--accent-soft); color: var(--ink); }
 
-.sb-latency { display: inline-flex; align-items: baseline; gap: 5px; white-space: nowrap; color: var(--ink); }
-.sb-latency .sb-signal { align-self: center; }
-.sb-latency__unit { font-size: 11px; color: var(--ink-3); margin-left: -2px; }
+.sb-latency { display: inline-flex; align-items: baseline; gap: 3px; white-space: nowrap; color: var(--ink); font-size: 12px; }
+.sb-latency .sb-signal { align-self: center; flex: none; }
+.sb-latency__unit { font-size: 10.5px; color: var(--ink-3); margin-left: -2px; }
+.sb-latency--failed { align-items: center; color: var(--ink-3); cursor: help; }
 .sb-signal__on { fill: var(--ink-2); }
 .sb-signal__off { fill: var(--line-strong); }
 .sb-latency[data-tone='fast'] .sb-signal__on { fill: var(--ok); }
@@ -100,13 +103,13 @@
 .sb-tip { position: fixed; z-index: 2000; max-width: min(320px, calc(100vw - 16px)); padding: 6px 9px; border-radius: 7px; background: #0f1113; color: var(--ink); font-size: 12px; line-height: 1.45; white-space: pre-wrap; overflow-wrap: anywhere; pointer-events: none; box-shadow: 0 0 0 1px var(--line-strong), var(--shadow-2); transition: opacity 0.12s; }
 
 /* 端口 / 认证 / 小标记 */
-.sb-port { display: inline-flex; align-items: center; gap: 2px; height: 26px; padding: 0 2px 0 8px; border-radius: 7px; border: 1px solid var(--line); background: var(--surface); white-space: nowrap; }
-.sb-port__value { font-size: 12.5px; font-weight: 550; padding-right: 6px; }
-.sb-port__pin { display: inline-flex; align-items: center; justify-content: center; width: 24px; height: 24px; padding: 0; border: 0; border-radius: 5px; background: transparent; color: var(--muted); }
+.sb-port { display: inline-flex; align-items: center; gap: 2px; height: 26px; padding: 0 2px 0 6px; border-radius: 7px; border: 1px solid var(--line); background: var(--surface); white-space: nowrap; }
+.sb-port__value { font-size: 12.5px; font-weight: 550; padding-right: 3px; }
+.sb-port__pin { display: inline-flex; align-items: center; justify-content: center; width: 20px; height: 22px; padding: 0; border: 0; border-radius: 5px; background: transparent; color: var(--muted); flex: none; }
 .sb-port__pin:hover:not(:disabled) { background: var(--bg-2); color: var(--ink); }
 .sb-port.is-pinned { border-color: var(--accent); background: var(--accent-soft); }
 .sb-port.is-pinned .sb-port__pin { color: var(--ink); }
-.sb-port .sb-icon-btn { width: 24px; height: 24px; }
+.sb-port .sb-icon-btn { width: 22px; height: 22px; }
 
 .sb-auth-mark { display: inline-flex; align-items: center; gap: 5px; min-width: 0; max-width: 100%; color: var(--ink-2); font-size: 12.5px; }
 .sb-auth-mark svg { flex: none; }

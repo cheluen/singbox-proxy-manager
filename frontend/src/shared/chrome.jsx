@@ -1,6 +1,6 @@
 // 面板外围的通用部件：批量操作条、运行状态、测 IP 进度、版本标记、空状态。
 import { Button, Dropdown } from 'antd'
-import { CircleArrowUp, CopyMinus, Download, Ellipsis, KeyRound, Power, RefreshCw, RotateCcw, Square, Trash2, TriangleAlert, X, Zap } from 'lucide-react'
+import { CircleArrowUp, CopyMinus, Download, Ellipsis, FolderInput, KeyRound, Power, RefreshCw, RotateCcw, Square, Trash2, TriangleAlert, X, Zap } from 'lucide-react'
 import { useTranslation } from 'react-i18next'
 import { EMPTY_CRITERIA } from '../core/nodeFilters'
 import { isNodeExportable } from '../core/nodeModel'
@@ -17,13 +17,19 @@ export function BulkBar({ ctl }) {
   const count = ctl.selectedIds.size
   if (count === 0) return null
   const exportable = ctl.selectedNodes.some(isNodeExportable)
+  const canMoveGroup = (ctl.groups?.length || 0) > 1
   const more = {
     items: [
+      ...(canMoveGroup ? [{ key: 'move', icon: <MenuIcon icon={FolderInput} />, label: t('move_to_group') }] : []),
       { key: 'dedupe', icon: <MenuIcon icon={CopyMinus} />, label: t('outbound_dedup') },
       { type: 'divider' },
       { key: 'delete', icon: <MenuIcon icon={Trash2} />, label: t('batch_delete'), danger: true },
     ],
-    onClick: ({ key }) => (key === 'dedupe' ? ctl.dedupeSelected() : ctl.deleteSelected()),
+    onClick: ({ key }) => {
+      if (key === 'move') ctl.open({ kind: 'move-group', nodeIds: [...ctl.selectedIds] })
+      else if (key === 'dedupe') ctl.dedupeSelected()
+      else ctl.deleteSelected()
+    },
   }
   return (
     <div className="sb-bulk sb-bulk--docked" role="toolbar" aria-label={t('bulk_actions')} data-testid="dashboard-toolbar-selection">
@@ -36,6 +42,9 @@ export function BulkBar({ ctl }) {
       <Button type="text" icon={<MenuIcon icon={KeyRound} />} onClick={() => ctl.open({ kind: 'auth' })} data-testid="nodes-batch-auth">{t('set_auth')}</Button>
       <Button type="text" icon={<MenuIcon icon={Download} />} loading={Boolean(ctl.working.export)} disabled={!exportable} onClick={ctl.exportSelected} data-testid="nodes-batch-export">{t('export')}</Button>
       <span className="sb-bulk__wide">
+        {canMoveGroup ? (
+          <Button type="text" icon={<MenuIcon icon={FolderInput} />} loading={Boolean(ctl.working.move)} onClick={() => ctl.open({ kind: 'move-group', nodeIds: [...ctl.selectedIds] })} data-testid="nodes-batch-move">{t('move_to_group')}</Button>
+        ) : null}
         <Button type="text" icon={<MenuIcon icon={CopyMinus} />} loading={Boolean(ctl.working.dedupe)} onClick={ctl.dedupeSelected} data-testid="nodes-batch-dedupe">{t('outbound_dedup')}</Button>
         <Button type="text" danger icon={<MenuIcon icon={Trash2} />} loading={Boolean(ctl.working.delete)} onClick={ctl.deleteSelected} data-testid="nodes-batch-delete">{t('delete')}</Button>
       </span>
@@ -104,9 +113,10 @@ export function VersionBadge({ ctl, className = '' }) {
   const update = ctl.version.update
   const available = Boolean(update?.available)
   const tip = `${t('frontend_build')}: ${frontendBuildVersion}`
+  const latestHref = update?.latest_release_url || `${OFFICIAL_GITHUB_URL}/releases/latest`
   if (available) {
     return (
-      <a className={`sb-version is-update ${className}`} href={update.release_url || `${OFFICIAL_GITHUB_URL}/releases/latest`} target="_blank" rel="noreferrer" data-tip={`${t('update_available')}: ${update.latest_version}`} data-testid="version-badge">
+      <a className={`sb-version is-update ${className}`} href={latestHref} target="_blank" rel="noreferrer" data-tip={`${t('update_available')}: ${update.latest_version}`} data-testid="version-badge">
         <CircleArrowUp size={13} strokeWidth={2} aria-hidden="true" />
         <span className="mono">v{ctl.version.server || '—'}</span>
         <span className="sr-only">{t('update_available')}: {update.latest_version}</span>
