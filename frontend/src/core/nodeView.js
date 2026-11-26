@@ -57,7 +57,7 @@ export const serverAddress = (node, t) => {
     const count = Array.isArray(cfg.member_ids) ? cfg.member_ids.length : 0
     if (node.type === 'loadbalance') {
       const algo = cfg.strategy === 'consistent-hashing'
-        ? (typeof t === 'function' ? t('policy_summary_hash') : 'hash')
+        ? (typeof t === 'function' ? t('policy_summary_hash') : 'sticky')
         : (typeof t === 'function' ? t('policy_summary_rr') : 'rr')
       return `${count} · ${algo}`
     }
@@ -195,7 +195,7 @@ const searchTypeAliases = (node) => {
   if (node?.type === 'failover') return '故障转移 策略'
   if (node?.type === 'loadbalance') {
     return parsedConfig(node).strategy === 'consistent-hashing'
-      ? '负载均衡 策略 哈希 一致性哈希'
+      ? '负载均衡 策略 目标粘性 粘性 target sticky'
       : '负载均衡 策略 轮询'
   }
   return ''

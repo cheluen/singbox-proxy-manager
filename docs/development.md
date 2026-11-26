@@ -12,7 +12,7 @@
 | Node.js | `>= 22.12.0` | Docker 与 CI 使用 Node `22` |
 | sing-box 源码版本 | **固定 `1.12.12`** | 由 `scripts/build-sing-box.sh` 从 Go 模块缓存按固定 `h1:` 校验和重编译 |
 | Chromium / Chrome | 任意现代版本 | 仅运行前端及全栈浏览器回归测试时需要 |
-| Python 3 | 3.x | 仅运行 Linux 单文件发行回归 `scripts/test-release.py` 时需要 |
+| Python 3 | 3.x | 用于运行 Linux 单文件发行回归 `scripts/test-release.py`（另需 `curl`），以及 CI 发布计划、镜像标签计算、Release Notes 生成、GHCR 清理脚本与对应单元测试 |
 
 ---
 
@@ -166,12 +166,12 @@ rm -f /tmp/sbpm-upstream-e2e-backend
 
 1. **发布计划与条件触发判定**：`release-plan` 自动判定是否执行完整流水线（`run_full`）以及是否发版（`should_release`）：
    - Pull Request 与 `v*` Git Tag 始终执行完整 CI；
-   - 推送至 `main` 时，若 `internal/version/version.txt` 内容未变且对应 `v<版本号>` 标签已存在（如仅更新文档或注释），自动跳过重量级测试与构建作业；若版本号递增或对应标签尚不存在，则执行完整 CI 与发版校验。
+   - 推送至 `main` 时，判定仅看 `internal/version/version.txt` 内容是否变化及对应 `v<版本号>` 标签是否存在（不按改动文件类型区分）：若版本文件内容未变且对应标签已存在，自动跳过重型构建与测试作业；若版本文件内容变化或对应标签尚不存在，则执行完整 CI 与发版校验。
    - 完整 CI 会重编译 `sing-box 1.12.12`，并行执行 `golangci-lint`、`govulncheck`（同时扫描管理程序源码与二进制及固定内核二进制）、Go `-race` 测试、四库真实服务集成测试（`postgres:17-alpine`、`mysql:8.4`、`libsql-server` 覆盖旧库升级、批量导入与独立日志库）、发布说明与 GHCR 清理脚本单测、前端 ESLint、生产依赖 `npm audit`、`test:core`、`audit`、`test:version-sync`、`build` 以及 26 项前端 E2E 矩阵。
 2. **全栈、容器系统测试与质量门禁**：在零削减任何测试项与安全扫描的前提下采用并行 DAG 与增量隔离缓存（按任务用途与目标架构隔离 Go 模块/编译缓存与 `golangci-lint` 缓存，单写者维护 npm 下载缓存，隔离源码与发行 Docker Buildx scope）。`test-system-local-deploy`、`test-release-image-build` 与 `build-binaries` 并行执行，所有质量/安全任务汇总至严格 `quality-gate`（任一项未 `success` 即阻断发布）后才允许 `build-ghcr` 与 `create-release` 执行。复用 `frontend-dist` 与测试内核执行真实上游与协议导入全栈回归、`docker compose --profile local`（基于 `alpine:3.24`）源码构建系统测试（验证未同意协议拒绝启动、`HEALTHCHECK` 达到 `healthy`、Shadowsocks 与 Direct 真实 HTTP/SOCKS5 转发）、单文件发行回归（覆盖非交互/伪终端协议门禁与 `v1.7.29` 原地升级）、`full-stack-system` / `full-stack-node-list` / `full-stack-features` / `precompressed-static` 浏览器验证，以及 `Dockerfile.release`（`alpine:3.24`）多架构构建、镜像体积报告与容器实际启动探活验证。
    - 源码构建和发行镜像均验证 `/app/LICENSE`、`/app/THIRD_PARTY_NOTICES.md`、`/app/USER_AGREEMENT.md`、`/app/licenses/SING-BOX-GPL-3.0.txt` 存在且匹配仓库文件 SHA-256，且校验镜像内置 `HEALTHCHECK`。
 3. **自动发布与规范化 GHCR 打标（含 SBOM）**：
-   - 工作流顶层对 PR 按编号去重、对 push 按 `run_id` 独立隔离（避免后续纯文档提交取消正在执行的发版流水线）；`build-ghcr` 按版本标签隔离并发并仅推送不可变的精确版本镜像（或 `edge`），`create-release` 在全局发布锁内先核对同版本标签未指向其他提交，创建 GitHub Release 后再基于最新远端标签通过 `scripts/publish_tags.py` 推进共享滚动镜像标签（`1.7`、`1`、`latest`），保障并发发布不覆盖、不倒退。
+   - 工作流顶层对 PR 按编号去重、对 push 按 `run_id` 独立隔离（避免后续纯文档提交取消正在执行的发版流水线）；`build-ghcr` 按版本标签隔离并发并推送对应精确版本镜像（或 `edge`），`create-release` 在全局发布锁内先核对同版本标签未指向其他提交（防止跨提交覆盖；同提交重跑允许重建该标签，如需内容绝对固定请按镜像 digest 拉取）并基于最新远端标签通过 `scripts/publish_tags.py` 计算待推进标签，随后创建 GitHub Release 并推进共享滚动镜像标签（`1.7`、`1`、`latest`），保障并发发布不覆盖、不倒退。
    - **GHCR 多架构镜像（`linux/amd64`, `linux/arm64`）**：`build-ghcr` 启用 `provenance: mode=max` 与 `sbom: true` 同时附带构建来源证明与 SBOM，推送精确版本或 `edge`；正式稳定版由 `create-release` 在创建 Release 后同步推进滚动标签：
      - 正式稳定版（如 `v1.7.30`）：推送精确标签 `1.7.30`，并仅在版本号不低于同主/次/全局既有稳定版时同步推进 `1.7`、`1`、`latest` 滚动标签（旧维护分支补丁不会倒退 `latest`）；
      - 预发布版（如 `v1.8.0-beta.1`）：仅推送精确预发布标签 `1.8.0-beta.1`（不覆盖滚动标签与 `latest`）；

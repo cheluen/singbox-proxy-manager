@@ -4,9 +4,9 @@
 
 ---
 
-## 1. 支持的 12 种实体协议与 2 种策略节点类型
+## 1. 支持的 12 种实体节点类型与 2 种策略节点类型
 
-前端面板与后端数据模型共定义 **12 种实体出站协议类型**（含 `socks5h`）与 **2 种策略出站节点类型**（`failover` 故障转移、`loadbalance` 负载均衡）。实体节点共用「节点名称（UI 上限 255 字符）」「服务器地址」「服务器端口」「入站端口（所在分组开启分配时）」「启用状态」「入站认证（用户名/密码）」字段；表单新建非 WireGuard 节点时默认服务器端口为 `443`，切换至 WireGuard 时仅在当前端口为空或为 `443` 时自动调整为 `2408`（已有自定义端口会保留）。策略节点不配置远端服务器，而是选择已有实体节点作为成员（支持跨组与无端口实体成员，不支持嵌套策略节点），不支持导入或导出为分享链接，但支持独立入站认证、TCP 复用与出口测 IP。
+前端面板与后端数据模型共定义 **12 种实体节点类型**（含 `socks5h`，其中 11 种生成 `outbounds`，`wireguard` 生成顶层 `endpoints`）与 **2 种策略出站节点类型**（`failover` 故障转移、`loadbalance` 负载均衡，支持轮询与目标粘性）。除 `direct` 外，实体节点共用「节点名称（UI 上限 255 字符）」「服务器地址」「服务器端口」「入站端口（所在分组开启分配时）」「启用状态」「入站认证（用户名/密码）」字段；表单新建非 WireGuard 节点时默认服务器端口为 `443`，切换至 WireGuard 时仅在当前端口为空或为 `443` 时自动调整为 `2408`，从 WireGuard 切回其他协议时 `2408` 会自动改回 `443`（其余自定义端口均保留）。策略节点不配置远端服务器，而是选择已有实体节点作为成员（支持跨组与无端口实体成员，不支持嵌套策略节点），不支持导入或导出为分享链接，但支持独立入站认证、TCP 复用与出口测 IP。
 
 > **关于原始 JSON 与自定义协议的边界**：
 > - 节点编辑弹窗底部的「原始配置」折叠区为**只读展示**（`<pre>`），不能直接编辑任意 JSON；仅 WireGuard 提供可编辑的「多 Peer JSON」高级字段。
@@ -23,26 +23,26 @@
 | `vless` | `outbounds` (`vless`) | UUID、Flow（空 / `xtls-rprx-vision`）、传输（TCP / WS / gRPC / QUIC）、路径、gRPC 服务名、安全层（None / TLS / Reality）、SNI、ALPN、指纹、Reality 公钥、Short ID | 支持 | 支持 | 支持 |
 | `vmess` | `outbounds` (`vmess`) | UUID、Alter ID（`0–65535`）、加密策略（`auto` / `aes-128-gcm` / `aes-128-cfb` / `chacha20-poly1305` / `none`）、传输（TCP / WS / HTTP / gRPC）、路径、服务名、TLS、SNI、ALPN | 支持 | 支持 | 支持 |
 | `trojan` | `outbounds` (`trojan`) | 密码、传输（TCP / WS / gRPC / HTTP / HTTPUpgrade）、Host、路径、HTTP 方法、gRPC 服务名、SNI、ALPN、指纹、跳过证书校验 | 支持 | 支持 | 支持 |
-| `hy2` | `outbounds` (`hysteria2`) | 密码、上/下行限速（Mbps）、混淆类型（如 `salamander`）、混淆密码（`salamander` 必填）、SNI、ALPN、指纹、跳过证书校验 | 支持 | 支持 | 支持 |
+| `hy2` | `outbounds` (`hysteria2`) | 密码、上/下行限速（Mbps）、混淆类型（空 / `none` / `salamander`）、混淆密码（`salamander` 必填）、SNI、ALPN、指纹、跳过证书校验 | 支持 | 支持 | 支持 |
 | `tuic` | `outbounds` (`tuic`) | UUID、密码、拥塞控制（`cubic` / `new_reno` / `bbr`）、UDP 转发模式（`native` / `quic`）、SNI、ALPN、指纹、跳过证书校验、0-RTT | 支持 | 支持 | 支持 |
 | `anytls` | `outbounds` (`anytls`) | 密码、SNI、ALPN、指纹（`chrome` / `firefox` / `safari` / `edge` / `random`）、跳过证书校验、空闲检查间隔、空闲超时、最小空闲会话数 | 支持 | 支持 | 支持 |
 | `socks5` | `outbounds` (`socks`, v5) | 出站用户名、出站密码 | 支持 | 支持 | 支持 |
 | `socks5h` | `outbounds` (`socks`, v5) | 同 `socks5` | 支持 | 支持 | 支持 |
 | `http` | `outbounds` (`http`) | 出站用户名、出站密码、HTTP/HTTPS 开关、HTTPS SNI、跳过证书校验 | 支持 | 支持 | 支持 |
-| `wireguard` | `endpoints` (`wireguard`) | 本地 CIDR、本地私钥、对端公钥、预共享密钥、Allowed IPs、Cloudflare Reserved 字节（支持逗号分隔数字或 Base64）、系统网卡开关与名称、MTU（`0–65535`）、Workers（`0–128`）、域名解析器与策略、Routing Mark、连接超时、UDP 分片、多 Peer JSON（填写后优先于单 Peer 字段） | 支持 | 仅单 Peer | 支持 |
+| `wireguard` | `endpoints` (`wireguard`) | 本地 CIDR、本地私钥、对端公钥、预共享密钥、Allowed IPs、Cloudflare Reserved 字节（支持逗号分隔数字或 Base64）、系统网卡开关与名称、MTU（`0–65535`）、Workers（`0–128`）、域名解析器与策略、Routing Mark、连接超时、UDP 分片、多 Peer JSON（解析为非空数组时优先于单 Peer 字段，面板仍要求填写公共服务器地址与端口） | 支持 | 仅单 Peer | 支持 |
 
 ### 协议合法性校验要点
 
-- **传输层限制**：支持 `tcp / ws / http / quic / grpc / httpupgrade`（`h2` 自动映射为 `http`，`gun` 自动映射为 `grpc`）；拒绝 `kcp / mkcp` 及未知传输类型。
+- **传输层限制**：支持 `tcp / ws / http / quic / grpc / httpupgrade`（`h2` 自动映射为 `http`，`gun` 自动映射为 `grpc`）；拒绝 `kcp / mkcp / xhttp / splithttp / mekya` 及未知传输类型，同时拒绝 TCP 头伪装、扩展 QUIC 参数以及 gRPC 的 `authority`、自定义 User-Agent 与 `multi` 模式。
 - **VLESS 限制**：仅允许 `none` 加密，不支持 Reality `spider_x` 参数；Packet Encoding 仅允许实现支持的值（如 `packetaddr`、`xudp`）。
-- **TUIC / Hysteria2 兼容归一**：TUIC 旧别名 `reduce_rtt` 自动归一化至 `zero_rtt_handshake`（显式提交 `zero_rtt_handshake: false` 时优先生效并清除旧别名）；Hysteria2 出站生成与分享导出共用同一套有效混淆解析规则。
+- **TUIC / Hysteria2 兼容归一**：TUIC 仅支持 UUID 型 v5（Clash 导入明确拒绝仅 token 的 v4）；通过 API 提交 JSON 时，旧别名 `reduce_rtt` 自动归一化至 `zero_rtt_handshake` 且显式 `zero_rtt_handshake: false` 优先并清除旧别名（Clash 导入则对相关别名取逻辑或）；Hysteria2 出站生成与分享导出共用同一套有效混淆解析规则。
 - **WireGuard 配置位置**：按 `sing-box 1.12` 规范生成至顶层 `endpoints`，使用 `local` 域名解析器时会自动注入对应 DNS 配置。
 
 ---
 
-## 2. 分享链接编解码规范（15 种 URI Scheme）
+## 2. 分享链接编解码规范（导入识别 15 种 / 导出规范 12 种 Scheme）
 
-后端 `backend/services/sharelink.go` 与 `sharelink_export.go` 支持以下 **15 种 URI Scheme**：
+后端 `backend/services/sharelink.go` 导入时识别以下 **15 种 URI Scheme**，`sharelink_export.go` 导出时生成 **12 种规范 Scheme**（`hy2://`、`socks://`、`wg://` 分别规范导出为 `hysteria2://`、`socks5://`、`wireguard://`）：
 
 ```text
 ss://  vless://  vmess://  trojan://  hysteria2://  hy2://  tuic://  anytls://
@@ -94,7 +94,7 @@ socks://  socks5://  socks5h://  wireguard://  wg://  http://  https://
 - **分享链接导出**：单节点、当前组/全部分组导出与勾选批量导出均支持一键复制或下载为 `sbpm-nodes.txt`。批量导出时前端自动跳过 `direct` 与策略节点（`failover` / `loadbalance`），若包含多 Peer WireGuard 等不支持导出的节点会逐项反馈失败原因。本应用不提供导出完整 `sing-box JSON`、Clash YAML 或 CSV 功能。
 - **列表与详情**：列表从左到右依次划分为基础标识（`#`、缩窄截断的节点名称）、入站信息（入站端口、明文入站用户名、固定宽度柔边毛玻璃掩码入站密码，点击掩码区域可显示完整密码；空凭据或无端口分别显示 `—` / 无端口标识）和出站信息（节点类型、服务器地址或策略成员摘要、地区、节点IP、延迟与检测状态——未检测显示黄点+`—`，成功显示绿点+毫秒/ `<1 ms`，失败显示红点+中性色 `X` 并悬停显示脱敏原因）；行内详情在备注上方提供完整名称与复制按钮，策略节点另展示成员健康状态与运行告警。
 - **复制入站连接信息**：行内展开详情在 `Mixed` 模式下支持复制 HTTP URL、SOCKS5 URL、`host:port`、入站用户名、密码、出口 IP、路由号和 `curl -x ... http://httpbin.org/ip` 示例命令；在 `HTTPS` 模式下仅展示并复制 HTTPS URL（`https://...`）与 `curl -x 'https://...' ...` 示例命令（操作菜单同步仅提供复制 HTTPS 地址）。路由号为开启 TCP 复用时显示的 `<用户名>+<入站端口>`。连接主机名取浏览器访问面板的 `hostname`。
-- **手动出站去重**：批量导入阶段**不自动去重**。需要去重时，在列表中勾选目标范围后点击底部批量操作栏的「出站去重」：
+- **手动出站去重**：一次性批量导入阶段**不自动去重**（分组独立订阅刷新时会自动合并订阅内「配置哈希 + 原订阅名」相同的条目，二者属不同机制）。需要手工去重时，在列表中勾选目标范围后点击底部批量操作栏的「出站去重」：
   - 前端对 `type + config + upstream_mode + upstream_type + upstream_config`（JSON 对象键递归排序后）做严格比对。
   - 节点名称、备注、入站端口与入站认证凭据**不参与**重复判定。
   - 按当前列表顺序保留每组第一条，经二次确认后批量删除其余重复项。

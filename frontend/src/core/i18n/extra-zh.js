@@ -267,7 +267,7 @@ export default {
   protocol_http_label: 'HTTP 代理',
   policy_summary_failover: '故障转移',
   policy_summary_rr: '轮询',
-  policy_summary_hash: '哈希',
+  policy_summary_hash: '目标粘性',
   policy_warn_no_healthy: '没有健康的已启用成员节点',
   policy_warn_disabled_skipped: '已自动跳过禁用的成员节点',
   policy_warn_inactive: '策略当前未激活',
@@ -275,12 +275,12 @@ export default {
 
   // 策略出站节点
   policy_failover_hint: '故障转移：按成员优先级顺序选择首个健康节点，并在建连失败时即时切换备选。',
-  policy_loadbalance_hint: '负载均衡：在多个健康成员节点之间自动分流（支持轮询与按目标域名一致性哈希）。',
+  policy_loadbalance_hint: '负载均衡：在多个健康成员节点之间自动分流（支持轮询与目标粘性，同一目标主机优先走同一节点）。',
   policy_config_title: '策略路由配置',
   policy_lb_strategy: '调度策略',
   policy_mode_failover: '故障转移（按优先级自动切换）',
   policy_strategy_rr: '轮询',
-  policy_strategy_hash: '一致性哈希',
+  policy_strategy_hash: '目标粘性',
   policy_members: '成员节点',
   policy_members_priority: '成员节点（按优先级排序）',
   policy_members_placeholder: '跨分组多选实体代理节点（含无端口分组节点）',

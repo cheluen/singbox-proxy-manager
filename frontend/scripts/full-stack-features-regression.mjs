@@ -351,7 +351,7 @@ try {
   await api('DELETE', `/node-groups/${subGroup.id}?mode=delete_nodes`)
   steps.push('group-subscription-ssrf-and-guards')
 
-  // 3. 策略出站节点：Failover（实时故障转移）+ LoadBalance（轮询分发 + 一致性哈希）
+  // 3. 策略出站节点：Failover（实时故障转移）+ LoadBalance（轮询分发 + 目标粘性）
   const failoverNode = await api('POST', '/nodes', {
     group_id: defaultGroupId,
     name: 'JP Failover',

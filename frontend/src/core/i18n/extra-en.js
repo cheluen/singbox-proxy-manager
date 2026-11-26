@@ -267,7 +267,7 @@ export default {
   protocol_http_label: 'HTTP Proxy',
   policy_summary_failover: 'failover',
   policy_summary_rr: 'rr',
-  policy_summary_hash: 'hash',
+  policy_summary_hash: 'sticky',
   policy_warn_no_healthy: 'No healthy enabled members',
   policy_warn_disabled_skipped: 'Disabled members are skipped',
   policy_warn_inactive: 'Policy is inactive',
@@ -275,12 +275,12 @@ export default {
 
   // Policy outbound nodes
   policy_failover_hint: 'Failover selects the first healthy member in priority order and switches immediately on connect failure.',
-  policy_loadbalance_hint: 'Load Balance distributes connections across healthy members via round-robin or domain consistent hashing.',
+  policy_loadbalance_hint: 'Load Balance distributes connections across healthy members via round-robin or target sticky routing (same target host sticks to the same node).',
   policy_config_title: 'Policy Routing',
   policy_lb_strategy: 'Strategy',
   policy_mode_failover: 'Failover (priority fallback)',
   policy_strategy_rr: 'Round-Robin',
-  policy_strategy_hash: 'Consistent Hashing',
+  policy_strategy_hash: 'Target Sticky',
   policy_members: 'Member Nodes',
   policy_members_priority: 'Member Nodes (priority order)',
   policy_members_placeholder: 'Select entity proxy nodes across groups (including no-port groups)',

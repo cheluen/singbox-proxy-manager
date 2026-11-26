@@ -6,7 +6,7 @@
 
 ## 1. 环境变量加载规则
 
-- **独立二进制部署**：启动时自动查找 `.env` 文件，生效优先级从高到低为：**进程已有环境变量 > 可执行文件同目录 `.env` > 当前工作目录 `.env`**。
+- **独立二进制部署**：启动时自动查找 `.env` 文件，生效优先级从高到低为：**进程已有环境变量 > 可执行文件同目录 `.env` > 当前工作目录 `.env`**。注意：相对路径配置（如 `CONFIG_DIR=./config`）按**当前工作目录**解析，不会自动拼接可执行文件目录；使用 `systemd` 启动时请设置好 `WorkingDirectory` 或改用绝对路径。
 - **Docker Compose 部署**：通过 `env_file: [.env]` 注入同目录 `.env`，同时在 `environment` 区块映射常用默认值；未在 `docker-compose.yml` 显式列出的受支持运行变量也可直接在 `.env` 中配置生效。
 - **重要提示**：修改 `CONFIG_DIR` 不会自动改变 Compose 的宿主机卷挂载目标（默认 `./config:/app/config`），若修改容器内 `CONFIG_DIR`，必须同步调整挂载路径。
 
@@ -24,9 +24,11 @@
 | `BIND_ADDRESS` | `0.0.0.0` | IPv4 / IPv6 地址（自动剥离 IPv6 方括号） | R | **仅控制管理后台 HTTP 监听地址**；节点入站始终写为 `::` |
 | `CONFIG_DIR` | 二进制 `./config`<br/>容器 `/app/config` | 目录路径 | R | 存放 SQLite 数据库、`config.json`、`last-good`、内置内核与日志文件 |
 | `TZ` | `Asia/Singapore` | 标准 IANA 时区名称（如 `Asia/Singapore`、`Asia/Shanghai`、`UTC`） | R | 仅接受标准 IANA 名称（拒绝 `UTC+8`、`GMT+8`、`Local` 等易与容器 POSIX 偏移反转的格式），无效或旧格式自动回退 `Asia/Singapore` 并同步进程 `TZ`。 |
-| `INBOUND_TLS_CERT_DIR` | 空（Compose 挂载 `./certs`） | 宿主机目录路径 | R / C | HTTPS 入站证书目录（Compose 只读挂载至容器 `/app/certs:ro`）。不使用 HTTPS 入站时留空且启动不报错；证书与私钥同目录时仅填本项（`INBOUND_TLS_KEY_DIR` 留空，切勿重复填同一路径）；Certbot 软链接场景请挂载包含目标文件的上级目录（如 `/etc/letsencrypt`）。 |
-| `INBOUND_TLS_KEY_DIR` | 空（Compose 挂载 `./certs`） | 宿主机目录路径 | R / C | HTTPS 入站私钥目录（Compose 只读挂载至容器 `/app/keys:ro`）。仅在证书与私钥分离存放于不同目录时选填；留空时自动在证书目录内配对。 |
-| `ACCEPT_USER_AGREEMENT` | `false` | `true` / `yes` / `y` / `1`（不区分大小写） | R | 位于 `.env` 中 `ADMIN_PASSWORD` 上方。二进制首次在交互式终端运行时会打印 `USER_AGREEMENT.md` 并要求输入 `y` 同意（同意哈希保存至 `<CONFIG_DIR>/user-agreement.accepted`）；Docker 或非交互式运行须显式设为 `true`，否则在建库与释放内核前直接退出 |
+| `SBPM_INBOUND_TLS_CERT_DIR` | `/app/certs`（容器镜像显式设置） | 目录路径 | R | HTTPS 入站证书扫描主目录（优先级高于 `INBOUND_TLS_CERT_DIR`）。裸二进制可直接设置本项指定扫描目录；递归深度上限 `10`、单文件上限 `2 MiB`，支持未加密 PKCS#8 / PKCS#1 / SEC1 私钥及软链接防环；不使用 HTTPS 入站时目录不存在也不报错。 |
+| `SBPM_INBOUND_TLS_KEY_DIR` | `/app/keys`（容器镜像显式设置） | 目录路径 | R | HTTPS 入站私钥扫描主目录（优先级高于 `INBOUND_TLS_KEY_DIR`）。两个目录均会同时扫描证书与私钥并按叶证书+公钥自动配对去重。 |
+| `INBOUND_TLS_CERT_DIR` | 空（Compose 挂载 `./certs`） | 宿主机目录路径 | R / C | Compose 中用于将宿主机证书目录只读挂载至容器 `/app/certs:ro`；裸二进制中作为 `SBPM_INBOUND_TLS_CERT_DIR` 的低优先级别名。证书与私钥同目录时仅配这一项即可（无需重复挂载）；Certbot 软链接场景请挂载包含真实目标文件的上级目录（如 `/etc/letsencrypt`）。 |
+| `INBOUND_TLS_KEY_DIR` | 空（Compose 挂载 `./certs`） | 宿主机目录路径 | R / C | Compose 中用于将宿主机私钥目录只读挂载至容器 `/app/keys:ro`（仅证书与私钥分离存放时选填）；裸二进制中作为 `SBPM_INBOUND_TLS_KEY_DIR` 的低优先级别名。 |
+| `ACCEPT_USER_AGREEMENT` | `false` | `true` / `yes` / `y` / `1`（不区分大小写） | R | 首次启动协议门禁。二进制在交互式终端首次运行会打印 `USER_AGREEMENT.md` 并要求输入 `y`（同意记录以正文 SHA-256 存至 `<CONFIG_DIR>/user-agreement.accepted`）；若已有与当前正文匹配的同意记录，非交互启动也会直接放行。无同意记录的 Docker 或非交互部署须显式设为 `true`（环境变量放行不写同意记录，设为 `false` 也不撤销已有记录），否则在建库与释放内核前直接退出。 |
 | `ADMIN_PASSWORD` | 无默认密码 | 非空，上限 `72` UTF-8 字节 | R | 新库首次启动必填；老库已有有效密码时可留空；老库已有有效密码但尚未记录环境指纹时，首次设置仅登记指纹、不会覆盖旧密码或吊销会话；此后更改为新非空值并重启才会覆盖密码并吊销全部会话 |
 | `TRUSTED_PROXIES` | 空（不信任任何代理） | 逗号分隔 IP / CIDR | R | 反向代理可信列表（如 `127.0.0.1,10.0.0.0/8`），供 Gin 获取真实客户端 IP 用于登录限流 |
 | `CORS_ALLOWED_ORIGINS` | 空（关闭跨域） | 逗号分隔精确 Origin | R | 跨域白名单（忽略 `*`）；允许方法为 `GET/POST/PUT/PATCH/DELETE/OPTIONS` |
@@ -114,7 +116,7 @@
 | `CONFIG_VOLUME_HOST` | `./config` | C | Compose 挂载到容器 `/app/config` 的宿主机目录 |
 | `GO_MODULE_PROXY` / `GOPROXY` | `https://proxy.golang.org,direct` | C | Docker 本地构建 Go 模块代理 |
 | `GO_SUM_DB` / `GOSUMDB` | `sum.golang.org` | C | Docker 本地构建 Go 校验和数据库 |
-| `APP_VERSION` | `frontend/package.json` 版本 | F | 前端构建版本号覆盖（不修改后端 `version.txt`） |
+| `APP_VERSION` | `frontend/package.json` / `version.txt` | F / C | 前端 Vite 构建及 `scripts/build-release.sh` 发行构建时的版本号覆盖（发行脚本通过链接参数覆写后端版本号） |
 | `VITE_API_TARGET` | `http://127.0.0.1:30000` | F | 前端 Vite 开发服务器 API 代理目标 |
 | `VITE_BATCH_CHECK_IP_CONCURRENCY` | 空 | F | 前端构建期并发备用值，优先级低于服务端注入的 `SBPM_BATCH_CHECK_IP_CONCURRENCY` |
 
@@ -130,7 +132,7 @@
 - 上述 7 项全部为空时，若 `TURSO_DATABASE_URL` 与 `TURSO_AUTH_TOKEN` 均非空则连接 Turso/libSQL；仅配置其中一项时会记录提示并降级为本地 SQLite。
 - **SQLite**（默认）：使用纯 Go `modernc.org/sqlite` 写入 `<CONFIG_DIR>/proxy.db`，开启 WAL、外键约束与 `10s` `busy_timeout`，固定 1 打开 / 1 空闲连接。
 - **PostgreSQL**：支持 `postgres://` 与 `postgresql://`（基于 `pgx/v5`），内部自动转换 SQL 占位符（`?` → `$1`）。
-- **MySQL / TiDB**：支持 `mysql://` 与标准 `@tcp/@unix` DSN；未显式配置时默认开启 `parseTime`（不覆盖显式 `parseTime=false`），强制开启 `clientFoundRows`；连接公网主机在未显式指定 `tls` 参数时默认启用 TLS（显式 `tls=false` 或空 `tls=` 均会被保留），节点/配置字段自动使用 `LONGTEXT NOT NULL`。
+- **MySQL / TiDB**：支持 `mysql://` 与标准 `@tcp/@unix` DSN；未显式配置时默认开启 `parseTime`（不覆盖显式 `parseTime=false`），强制开启 `clientFoundRows`；未显式指定 `tls` 参数时，除 `localhost` 外的所有域名默认启用 TLS，直接填写 IP 地址时仅公网 IP 默认启用 TLS（显式 `tls=false` 或空 `tls=` 均会被保留）；节点/配置字段自动使用 `LONGTEXT NOT NULL`。
 - **Turso / libSQL**：固定 1 打开 / 0 空闲 / 1ns 连接寿命以规避驱动会话复用异常。
 
 数据库启动后自动创建并增量补齐核心应用表（无独立 `schema_version` 表）：
@@ -167,13 +169,13 @@ config/
     └── sing-box-<sha256>     # 统一发行版自动释放并校验的内核（权限 0700）
 ```
 
-> **容器基础镜像与健康检查（Docker `HEALTHCHECK`）**：`Dockerfile` 与 `Dockerfile.release` 均基于轻量 `alpine:3.24` 构建，内置 `ca-certificates`、`tzdata` 与 `HEALTHCHECK --interval=30s --timeout=5s --start-period=15s --retries=3 CMD ["/app/singbox-proxy-manager", "--healthcheck"]`。探针绕过环境代理直接探测本机管理服务 `GET /api/health`（验证 HTTP 服务响应及数据库连接池存活），无需在容器内额外安装 `curl` / `wget`。
+> **容器基础镜像与健康检查（Docker `HEALTHCHECK`）**：`Dockerfile` 与 `Dockerfile.release` 均基于轻量 `alpine:3.24` 构建，内置 `ca-certificates`、`tzdata` 与 `HEALTHCHECK --interval=30s --timeout=5s --start-period=15s --retries=3 CMD ["/app/singbox-proxy-manager", "--healthcheck"]`。探针绕过环境代理直接探测本机管理服务 `GET /api/health`（验证 HTTP 服务响应及数据库连接池存活），无需在容器内额外安装 `curl` / `wget`。注意：探针返回 `200`（容器 `healthy`）只说明管理端与数据库正常，**不代表 `sing-box` 代理内核未降级或全部代理端口可用**（内核状态可查看响应体中的 `runtime_running` / `runtime_degraded` 或 `/api/runtime/status`）。
 
 > **数据敏感性提示**：除管理员密码、环境指纹（bcrypt）与会话 Token（SHA-256）外，数据库与 `config.json` 中的节点出站密钥、前置代理凭据及入站账密均以可读取形式存储。请务必妥善管控宿主机文件权限（`chmod 600 .env`、`chmod 700 config`）并避免将其提交到任何仓库或公开备份。
 
 ### 4.2 生产环境安全建议
 
-1. **反向代理与 HTTPS**：应用自身仅监听原生 HTTP，未内置 TLS 证书配置。公网访问管理面板强烈建议将 `BIND_ADDRESS=127.0.0.1`，前置 Nginx / Caddy / Traefik 提供 HTTPS，并正确设置 `TRUSTED_PROXIES=127.0.0.1` 使登录限流精准识别真实客户端 IP。
+1. **反向代理与 HTTPS**：**管理后台 HTTP 服务**本身不提供原生 HTTPS（节点代理入站已支持 HTTPS TLS 加密）。公网访问管理面板强烈建议将 `BIND_ADDRESS=127.0.0.1`，前置 Nginx / Caddy / Traefik 提供 HTTPS，并正确设置 `TRUSTED_PROXIES=127.0.0.1` 使登录限流精准识别真实客户端 IP。
 2. **防火墙与入站认证**：`sing-box` 节点入站固定监听 `::`（默认从 `30001` 递增）。公网服务器请使用防火墙（ufw / firewalld / 安全组）仅放行可信来源 IP，并保持各节点的**入站认证开启**（禁止对公网开放无认证代理）。
 3. **定期轮换强密码**：首次启动使用 `.env` 设置高强度 `ADMIN_PASSWORD`，之后可直接在面板「系统设置」修改密码（至少 8 位，修改后自动吊销所有旧会话）。
 
@@ -184,7 +186,7 @@ config/
 ### 5.1 版本升级与模式切换
 
 > **版本原地升级说明**：
-> - **从 `1.7.33` 升级至 `1.7.34`**：四类数据库均在启动时自动向 `node_groups` 补齐 `preserve_inbound_ports` 列；若旧库 `settings` 表存在全局 `preserve_inbound_ports`，会一次性迁移至全部 `allocate_port=true` 的已有分组（无端口分组保持 `false`）并随后删除旧列，不改动任何既有节点端口、固定标记或排序；启动前还会幂等收敛存量整组关联策略的成员顺序，使其按组内 `(sort_order ASC, id ASC)` 生效。
+> - **从 `1.7.33` 升级至 `1.7.34`**：四类数据库均在启动时自动向 `node_groups` 补齐 `preserve_inbound_ports` 列；若旧库 `settings` 表存在全局 `preserve_inbound_ports`，会一次性迁移至全部 `allocate_port=true` 的已有分组（无端口分组保持 `false`）并随后删除旧列，不改动任何既有节点端口、固定标记或排序；启动前还会幂等收敛存量整组关联策略的成员顺序，使其按组内 `(sort_order ASC, id ASC)` 生效。**升级前请备份数据库与配置目录**（该迁移包含删列操作，无自动逆向降级入口）。
 > - **从 `1.7.32` 升级至 `1.7.33`**：无数据库表结构变更，四类数据库均可直接原地无缝升级；旧版 WireGuard 订阅节点首次刷新时会自动规范化匹配键以保留原有节点 ID、端口与设置，`Dockerfile.release` 已补齐 `SINGBOX_ENV_ALLOWLIST` 默认声明。
 > - **从 `1.7.31` 升级至 `1.7.32`**：四类数据库均在启动时自动向 `proxy_nodes` 补齐 `inbound_mode`（默认 `'mixed'`）并向 `settings` 补齐 `inbound_tls_cert_path`、`inbound_tls_key_path`（默认 `''`），完整保留既有分组、节点、策略、端口与设置；若 `.env` 曾配置 `UTC+8` / `GMT+8` 等非 IANA 时区值，启动时会自动回退到标准 IANA 时区，建议同步调整 `.env` 中的 `TZ`。
 > - **从 `1.7.30` 升级至 `1.7.31`**：四类数据库均在启动时自动向 `node_groups` 补齐分组级前置代理字段（`upstream_*` 与内部修订号 `upstream_revision`，其中 MySQL 配置列使用 `LONGTEXT NOT NULL`、`upstream_ip` 为 `VARCHAR(255)`、`upstream_country_code` 为 `VARCHAR(32)`）并向 `settings` 补齐 `global_upstream_revision`，完整保留既有分组、节点、端口与订阅状态。
@@ -222,7 +224,7 @@ GitHub Release 提供 `LICENSE`、`THIRD_PARTY_NOTICES.md`、`USER_AGREEMENT.md`
 | 启动报错：未能获取数据库实例租约 | 确认同一数据库没有另一个正在运行的管理实例；若前一个实例异常崩溃，等待 `30s`（`SBPM_INSTANCE_LEASE_DURATION`）租约过期后重试。 |
 | 顶部出现「sing-box 运行异常」降级横幅 | 查看容器日志（`docker compose --profile ghcr logs --tail=100`）或 `<CONFIG_DIR>/singbox.log`；核查端口冲突或节点参数异常，修正后点击横幅中的「重启内核」。 |
 | 代理端口无法连接 | 1) 检查节点是否处于「启用」状态；2) 宿主机使用 `ss -tulpn` 确认对应入站端口已监听；3) 检查云安全组与宿主机防火墙规则；4) 如开启了入站认证，确认账密匹配。 |
-| 出口 IP 检测超时或报 `429` | 1) 确认节点自身出站链路连通；2) 单个检测默认先走 HTTP 入站失败再回退 SOCKS5，内置 7 个公共检测接口在高并发时可能触发上游限流，可调低 `SBPM_BATCH_CHECK_IP_CONCURRENCY` 或通过 `SBPM_IPCHECK_URLS` 指定自建检测接口。 |
+| 出口 IP 检测超时或报 `429` | 1) 确认节点自身出站链路连通；2) Mixed 模式下默认先走 HTTP 入站失败再回退 SOCKS5，HTTPS 入站模式仅走 HTTPS 且不回退 SOCKS5；内置 7 个公共检测接口在高并发时可能触发上游限流，可调低 `SBPM_BATCH_CHECK_IP_CONCURRENCY` 或通过 `SBPM_IPCHECK_URLS` 指定自建检测接口。 |
 | 远程订阅链接导入失败 | 本程序强制拒绝指向内网/回环/保留 IP 的订阅地址，并拦截返回 HTML 登录页/错误页的链接；若源链接本身是 HTTP 代理而非订阅，请在批量导入弹窗将来源类型切换为「HTTP 代理」或在 URL 参数中附带 `proxy=1`。 |
 
 ### 策略与连接采集
@@ -233,7 +235,7 @@ GitHub Release 提供 `LICENSE`、`THIRD_PARTY_NOTICES.md`、`USER_AGREEMENT.md`
 
 ### 日志存储
 
-默认在内存中保留最近 1000 条面板和内核日志。内核子进程输出在分流至控制台、轮转文件与面板缓冲前会先执行行级脱敏（拦截认证失败凭据、非实时时间戳续行及已配置的节点/内部控制密钥）。管理员在日志面板显式保存后才能启用批量落盘和分钟级流量采样。`min_level` 可选 `INFO`、`WARN`、`ERROR`。默认保留 7 天、上限 200 MiB，两项均可设为 `0` 以取消对应限制。
+默认在内存中保留最近 1000 条面板和内核日志。内核子进程输出在分流至控制台、轮转文件与面板缓冲前会先执行行级脱敏（拦截认证失败凭据、非实时时间戳续行及已配置的节点/内部控制密钥）。管理员在日志面板显式保存后才能启用批量落盘和分钟级流量采样（待写日志队列与分钟流量路径桶上限各为 `4096`，每 `2s` 或满 `100` 条批量落盘，每分钟执行一次留存清理）。`min_level` 可选 `INFO`、`WARN`、`ERROR`。默认保留 7 天、上限 200 MiB，两项均可设为 `0` 以取消对应限制。
 
 | `store_mode` | 存放位置 |
 | --- | --- |
