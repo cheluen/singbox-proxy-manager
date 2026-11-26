@@ -78,11 +78,6 @@ export const configEndpointAddress = (rawConfig) => {
   }
 }
 
-export const upstreamAddress = (node) => {
-  if (node?.upstream_mode !== 'custom' || !node.upstream_config) return ''
-  return configEndpointAddress(node.upstream_config)
-}
-
 export const initialUpstreamMode = (node) => {
   if (node?.upstream_mode) return node.upstream_mode
   return parsedConfig(node).detour ? 'legacy' : 'none'

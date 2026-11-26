@@ -61,7 +61,7 @@ func TestGroupUpstreamRouting(t *testing.T) {
 		node := nodes[index]
 		out := generatedEntryByTag(t, config, "outbounds", fmt.Sprintf("node-%d-out", node.ID))
 		var route ConnectionRoute
-		route.setUpstream(wiring, node)
+		route.setUpstream(wiring, node.ID)
 		if item.tag == "" && out["type"] != "direct" || item.tag != "" && (out["type"] != "selector" || out["default"] != item.tag) || route.Upstream != item.label {
 			t.Fatalf("group %d %s selected %v, label %q", item.group, item.mode, out, route.Upstream)
 		}
@@ -204,7 +204,10 @@ func TestConnectionUpstreamSource(t *testing.T) {
 		{"custom", 2, "custom: http", "custom"}, {"legacy", 2, "global: http", "legacy"}, {"none", 2, "", ""}, {"group", 1, "", ""},
 	} {
 		node := models.ProxyNode{ID: 1, Enabled: true, GroupID: test.group, Type: "http", UpstreamMode: test.mode, UpstreamType: "http", Config: `{"detour":"node-3-out"}`}
-		wiring := &runtimeWiring{nodes: map[int]models.ProxyNode{1: node, 3: {ID: 3, Name: "global: http"}}, settings: settings}
+		wiring, err := newWiring([]models.ProxyNode{node, {ID: 3, Name: "global: http"}}, settings)
+		if err != nil {
+			t.Fatal(err)
+		}
 		var conn clashConnection
 		conn.Metadata.Type = "mixed/node-1-in"
 		route, ok := conn.route(wiring)

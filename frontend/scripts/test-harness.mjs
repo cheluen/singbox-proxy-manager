@@ -61,6 +61,21 @@ export async function launchBrowser({
   }
 }
 
+export async function waitForHTTP(url, { timeoutMs = 30000, intervalMs = 200 } = {}) {
+  const deadline = Date.now() + timeoutMs
+  while (Date.now() < deadline) {
+    const response = await fetch(url, {
+      signal: AbortSignal.timeout(Math.max(1, Math.ceil(deadline - Date.now()))),
+    }).catch(() => null)
+    if (response?.status < 500) return
+    const remainingMs = deadline - Date.now()
+    if (remainingMs > 0) {
+      await new Promise((resolve) => setTimeout(resolve, Math.min(intervalMs, remainingMs)))
+    }
+  }
+  throw new Error(`等待 HTTP 服务超时：${url}`)
+}
+
 export async function stopProcess(child, { graceMs = 8000, requireGraceful = false } = {}) {
   if (!child?.pid || child.exitCode !== null || child.signalCode !== null) return
   const exited = new Promise((resolve) => child.once('exit', resolve))

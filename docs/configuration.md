@@ -1,6 +1,6 @@
 # 配置、数据库与运维指南
 
-本文档提供 SingBox Proxy Manager（`1.7.32`）完整的环境变量参考、多数据库配置、数据持久化、健康检查、安全加固与故障排查指南。
+本文档提供 SingBox Proxy Manager（`1.7.33`）完整的环境变量参考、多数据库配置、数据持久化、健康检查、安全加固与故障排查指南。
 
 ---
 
@@ -184,6 +184,7 @@ config/
 ### 5.1 版本升级与模式切换
 
 > **版本原地升级说明**：
+> - **从 `1.7.32` 升级至 `1.7.33`**：无数据库表结构变更，四类数据库均可直接原地无缝升级；旧版 WireGuard 订阅节点首次刷新时会自动规范化匹配键以保留原有节点 ID、端口与设置，`Dockerfile.release` 已补齐 `SINGBOX_ENV_ALLOWLIST` 默认声明。
 > - **从 `1.7.31` 升级至 `1.7.32`**：四类数据库均在启动时自动向 `proxy_nodes` 补齐 `inbound_mode`（默认 `'mixed'`）并向 `settings` 补齐 `inbound_tls_cert_path`、`inbound_tls_key_path`（默认 `''`），完整保留既有分组、节点、策略、端口与设置；若 `.env` 曾配置 `UTC+8` / `GMT+8` 等非 IANA 时区值，启动时会自动回退到标准 IANA 时区，建议同步调整 `.env` 中的 `TZ`。
 > - **从 `1.7.30` 升级至 `1.7.31`**：四类数据库均在启动时自动向 `node_groups` 补齐分组级前置代理字段（`upstream_*` 与内部修订号 `upstream_revision`，其中 MySQL 配置列使用 `LONGTEXT NOT NULL`、`upstream_ip` 为 `VARCHAR(255)`、`upstream_country_code` 为 `VARCHAR(32)`）并向 `settings` 补齐 `global_upstream_revision`，完整保留既有分组、节点、端口与订阅状态。
 > - **从 `1.7.29` 升级至 `1.7.30+`**：四类数据库均支持自动原地升级——系统会创建默认分组并继承原全局 `start_port`，完整保留全部节点的 ID、端口、固定标记、账密、备注与排序；无端口节点在数据库中以 `NULL` 存储，API 层统一返回 `0`。

@@ -294,12 +294,11 @@ proxies:
 			if err := clientService.ValidateConfigContext(context.Background(), clientConfig); err != nil {
 				t.Fatalf("validate imported client config: %v\n%s", err, clientConfig)
 			}
-			if err := clientService.ApplyConfig(clientConfig); err != nil {
+			transaction, err := NewRuntimeApplier(clientService).Begin(&RuntimePlan{configJSON: clientConfig, hash: runtimeConfigHash(clientConfig)})
+			if err != nil {
 				t.Fatalf("apply imported client config: %v", err)
 			}
-			if err := clientService.Start(); err != nil {
-				t.Fatalf("start imported client config: %v", err)
-			}
+			transaction.Commit()
 			t.Cleanup(func() {
 				if err := clientService.Stop(); err != nil {
 					t.Errorf("stop imported client: %v", err)

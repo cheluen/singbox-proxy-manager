@@ -1,6 +1,7 @@
 package services
 
 import (
+	"encoding/json"
 	"fmt"
 	"io"
 	"net"
@@ -45,6 +46,122 @@ func TestConnectionRatesIncludeNewConnectionsAfterBaseline(t *testing.T) {
 	}
 	if *route.UploadRate != 50 || *route.DownloadRate != 100 || *next.Up != 50 || *next.Down != 100 {
 		t.Fatalf("upload/download B/s: route %g/%g, total %g/%g, want 50/100 for both", *route.UploadRate, *route.DownloadRate, *next.Up, *next.Down)
+	}
+}
+
+func TestConnectionPolicyMemberKeepsCachedUpstreamAndRates(testContext *testing.T) {
+	wiring, err := newWiring([]models.ProxyNode{
+		{ID: 1, Name: "member", Type: "direct", Enabled: true, Config: `{"detour":"node-2-out"}`, InboundPort: 30001},
+		{ID: 2, Name: "relay", Type: "direct", Enabled: true, Config: `{}`, InboundPort: 30002},
+		{ID: 3, Name: "policy", Type: "loadbalance", Enabled: true, Config: `{"member_ids":[1]}`, InboundPort: 30003},
+	}, models.Settings{})
+	if err != nil {
+		testContext.Fatal(err)
+	}
+	started := time.Unix(60, 0)
+	dispatcher := &policyDispatcher{wiring: wiring, sessions: map[string]policySession{
+		"127.0.0.1:44000": {Policy: 3, Member: 1, Started: started.Add(-time.Second), Target: "target.test:443", DialTarget: "target.test:443"},
+	}}
+	outer := clashConnection{ID: "outer", Start: started, Upload: 600, Download: 900}
+	outer.Metadata.Type = "mixed/node-3-in"
+	outer.Metadata.SourceIP = "192.0.2.1"
+	outer.Metadata.Host, outer.Metadata.DestinationPort = "target.test", "443"
+	inner := outer
+	inner.ID, inner.Upload, inner.Download = "inner", 9000, 18000
+	inner.Metadata.Type = "socks/" + dispatchTag
+	inner.Metadata.SourceIP, inner.Metadata.SourcePort = "127.0.0.1", "44000"
+	var monitor ConnectionMonitor
+	baseline := ConnectionSnapshot{At: started}
+	monitor.counters, _ = monitor.aggregate(&baseline, []clashConnection{outer, inner}, wiring, dispatcher)
+	monitor.last = baseline
+	if baseline.Active != 1 || len(baseline.Routes) != 1 || baseline.Routes[0].MemberID != 1 || baseline.Routes[0].Upstream != "relay" || baseline.Routes[0].UpstreamSource != "legacy" || baseline.Up != nil {
+		testContext.Fatalf("policy baseline lost member/upstream or included internal traffic: %+v", baseline)
+	}
+	outer.Upload += 20
+	outer.Download += 40
+	fresh := outer
+	fresh.ID, fresh.Start, fresh.Upload, fresh.Download = "fresh", started.Add(2*time.Second), 80, 160
+	freshInner := inner
+	freshInner.ID, freshInner.Start, freshInner.Metadata.SourcePort = "fresh-inner", fresh.Start, "44001"
+	dispatcher.sessions["127.0.0.1:44001"] = policySession{Policy: 3, Member: 1, Started: started.Add(time.Second), Target: "target.test:443", DialTarget: "target.test:443"}
+	next := ConnectionSnapshot{At: fresh.Start}
+	counters, deltas := monitor.aggregate(&next, []clashConnection{outer, inner, fresh, freshInner}, wiring, dispatcher)
+	if next.Active != 2 || len(next.Routes) != 1 || len(counters) != 2 || len(deltas) != 2 {
+		testContext.Fatalf("unexpected policy traffic grouping: snapshot=%+v counters=%+v deltas=%+v", next, counters, deltas)
+	}
+	route := next.Routes[0]
+	if route.MemberID != 1 || route.Upstream != "relay" || route.UpstreamSource != "legacy" || route.Count != 2 || route.Upload != 700 || route.Download != 1100 {
+		testContext.Fatalf("policy member or totals changed: %+v", route)
+	}
+	if next.Up == nil || next.Down == nil || route.UploadRate == nil || route.DownloadRate == nil || *next.Up != 50 || *next.Down != 100 || *route.UploadRate != 50 || *route.DownloadRate != 100 {
+		testContext.Fatalf("policy traffic rates changed: %+v", next)
+	}
+	if deltas[0].opened || !deltas[1].opened || deltas[0].up != 20 || deltas[0].down != 40 || deltas[1].up != 80 || deltas[1].down != 160 {
+		testContext.Fatalf("policy persistence deltas changed: %+v", deltas)
+	}
+}
+
+func TestConnectionCaptureResetsBaselineWhenWiringChanges(testContext *testing.T) {
+	var upload atomic.Int64
+	upload.Store(100)
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
+		connection := clashConnection{ID: "connection", Upload: upload.Load()}
+		connection.Download = connection.Upload * 2
+		connection.Metadata.Type, connection.Metadata.SourceIP = "mixed/node-1-in", "192.0.2.1"
+		if err := json.NewEncoder(writer).Encode(map[string]any{"connections": []clashConnection{connection}}); err != nil {
+			testContext.Error(err)
+		}
+	}))
+	defer server.Close()
+	self, err := os.FindProcess(os.Getpid())
+	if err != nil {
+		testContext.Fatal(err)
+	}
+	defer self.Release()
+	service := NewSingBoxService(testContext.TempDir())
+	service.process = &exec.Cmd{Process: self}
+	wiring, err := newWiring([]models.ProxyNode{
+		{ID: 1, Type: "direct", Enabled: true, Config: `{"detour":"node-2-out"}`, InboundPort: 30001},
+		{ID: 2, Name: "first relay", Type: "direct", Enabled: true, Config: `{}`},
+	}, models.Settings{})
+	if err != nil {
+		testContext.Fatal(err)
+	}
+	wiring.controller = server.Listener.Addr().(*net.TCPAddr).Port
+	service.features.wiring, service.features.epoch = wiring, 1
+	monitor := NewConnectionMonitor(service)
+	defer monitor.releaseIdle()
+	baseline, err := monitor.Capture(testContext.Context())
+	if err != nil || baseline.Epoch != 1 || baseline.Up != nil || len(baseline.Routes) != 1 || baseline.Routes[0].Upstream != "first relay" || baseline.Routes[0].UpstreamSource != "legacy" {
+		testContext.Fatalf("first wiring baseline: %+v err=%v", baseline, err)
+	}
+	upload.Store(140)
+	monitor.sampleMu.Lock()
+	monitor.last.At = baseline.At.Add(-time.Second)
+	previousAt := monitor.last.At
+	monitor.sampleMu.Unlock()
+	rated, err := monitor.Capture(testContext.Context())
+	if err != nil || rated.Up == nil || rated.Down == nil || *rated.Up != 40/rated.At.Sub(previousAt).Seconds() || *rated.Down != 80/rated.At.Sub(previousAt).Seconds() {
+		testContext.Fatalf("same wiring did not retain counters: %+v err=%v", rated, err)
+	}
+	nextWiring, err := newWiring([]models.ProxyNode{
+		{ID: 1, Type: "direct", Enabled: true, Config: `{"detour":"node-3-out"}`, InboundPort: 30001},
+		{ID: 3, Name: "second relay", Type: "direct", Enabled: true, Config: `{}`},
+	}, models.Settings{})
+	if err != nil {
+		testContext.Fatal(err)
+	}
+	nextWiring.controller = wiring.controller
+	service.features.mu.Lock()
+	service.features.wiring, service.features.epoch = nextWiring, 2
+	service.features.mu.Unlock()
+	upload.Store(5)
+	next, err := monitor.Capture(testContext.Context())
+	if err != nil || next.Epoch != 2 || next.Up != nil || next.Down != nil || len(next.Routes) != 1 || next.Routes[0].Upstream != "second relay" || next.Routes[0].UpstreamSource != "legacy" || next.Routes[0].Upload != 5 {
+		testContext.Fatalf("new wiring reused stale display or counter baseline: %+v err=%v", next, err)
+	}
+	if wiring.upstreams[1].label != "first relay" {
+		testContext.Fatal("new wiring mutated the previous immutable display snapshot")
 	}
 }
 
@@ -233,11 +350,12 @@ func TestConnectionMemberForPinnedControlPort(t *testing.T) {
 		"127.0.0.1:44000": {Policy: 3, Member: 2, Target: "Target.Test.:30000", DialTarget: "192.0.2.5:30000"},
 	}}
 	key := "3/target.test:30000"
-	if dispatch.matchedMembers([]clashConnection{outer, inner})[key] != 2 {
+	outerCounts := map[string]int{key: 1}
+	if dispatch.matchedMembers([]clashConnection{outer, inner}, outerCounts)[key] != 2 {
 		t.Fatal("missing member for pinned domain")
 	}
 	inner.Metadata.DestinationIP = "192.0.2.7"
-	if len(dispatch.matchedMembers([]clashConnection{outer, inner})) != 0 {
+	if len(dispatch.matchedMembers([]clashConnection{outer, inner}, outerCounts)) != 0 {
 		t.Fatal("mismatched inner connection claimed the business route")
 	}
 }

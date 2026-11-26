@@ -270,26 +270,9 @@ func wireGuardDialerOptions(config *models.WireGuardConfig) (models.DialerOption
 	if err != nil {
 		return models.DialerOptions{}, err
 	}
-	return models.DialerOptions{
-		Detour:              config.Detour,
-		BindInterface:       config.BindInterface,
-		Inet4BindAddress:    config.Inet4BindAddress,
-		Inet6BindAddress:    config.Inet6BindAddress,
-		ProtectPath:         config.ProtectPath,
-		RoutingMark:         config.RoutingMark,
-		ReuseAddr:           config.ReuseAddr,
-		NetNS:               config.NetNS,
-		ConnectTimeout:      config.ConnectTimeout,
-		TCPFastOpen:         config.TCPFastOpen,
-		TCPMultiPath:        config.TCPMultiPath,
-		UDPFragment:         config.UDPFragment,
-		DomainResolver:      resolver,
-		NetworkStrategy:     config.NetworkStrategy,
-		NetworkType:         config.NetworkType,
-		FallbackNetworkType: config.FallbackNetworkType,
-		FallbackDelay:       config.FallbackDelay,
-		DomainStrategy:      config.DomainStrategy,
-	}, nil
+	dialer := config.DialerOptions
+	dialer.DomainResolver = resolver
+	return dialer, nil
 }
 
 func wireGuardSinglePeerFromConfig(cfg *models.WireGuardConfig) (models.WireGuardPeerConfig, bool) {

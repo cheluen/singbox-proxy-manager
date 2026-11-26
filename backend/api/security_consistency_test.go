@@ -263,7 +263,7 @@ exec sleep 300
 		t.Fatalf("load initial nodes: %v", err)
 	}
 	writeTestRuntimeConfig(t, service, nodes)
-	if err := service.Start(); err != nil {
+	if err := service.StartPreservedConfig(); err != nil {
 		t.Fatalf("start initial runtime: %v", err)
 	}
 	t.Cleanup(func() {
@@ -443,7 +443,7 @@ exec sleep 300
 		t.Fatalf("load initial nodes: %v", err)
 	}
 	writeTestRuntimeConfig(t, service, nodes)
-	if err := service.Start(); err != nil {
+	if err := service.StartPreservedConfig(); err != nil {
 		t.Fatalf("start initial runtime: %v", err)
 	}
 	initialLiveConfig, err := os.ReadFile(service.ConfigPath())

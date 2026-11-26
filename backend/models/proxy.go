@@ -456,6 +456,7 @@ type WireGuardPeerConfig struct {
 // Legacy fields such as local_address and system_interface, along with allowed_ips
 // and domain_resolver_strategy, are converted to native endpoint fields during generation.
 type WireGuardConfig struct {
+	DialerOptions
 	Server                 string                `json:"server,omitempty"`
 	ServerPort             int                   `json:"server_port,omitempty"`
 	SystemInterface        bool                  `json:"system_interface,omitempty"`
@@ -471,26 +472,8 @@ type WireGuardConfig struct {
 	ListenPort             int                   `json:"listen_port,omitempty"`
 	UDPTimeout             string                `json:"udp_timeout,omitempty"`
 	Network                string                `json:"network,omitempty"`
-	Detour                 string                `json:"detour,omitempty"`
-	DomainResolver         interface{}           `json:"domain_resolver,omitempty"`
 	DomainResolverStrategy string                `json:"domain_resolver_strategy,omitempty"`
-	RoutingMark            interface{}           `json:"routing_mark,omitempty"`
-	UDPFragment            *bool                 `json:"udp_fragment,omitempty"`
-	ConnectTimeout         string                `json:"connect_timeout,omitempty"`
-	BindInterface          string                `json:"bind_interface,omitempty"`
-	Inet4BindAddress       string                `json:"inet4_bind_address,omitempty"`
-	Inet6BindAddress       string                `json:"inet6_bind_address,omitempty"`
-	ProtectPath            string                `json:"protect_path,omitempty"`
-	ReuseAddr              bool                  `json:"reuse_addr,omitempty"`
-	NetNS                  string                `json:"netns,omitempty"`
-	TCPFastOpen            bool                  `json:"tcp_fast_open,omitempty"`
-	TCPMultiPath           bool                  `json:"tcp_multi_path,omitempty"`
 	DomainResolverOptions  NativeOptions         `json:"domain_resolver_options,omitempty"`
-	NetworkStrategy        string                `json:"network_strategy,omitempty"`
-	NetworkType            ListableString        `json:"network_type,omitempty"`
-	FallbackNetworkType    ListableString        `json:"fallback_network_type,omitempty"`
-	FallbackDelay          string                `json:"fallback_delay,omitempty"`
-	DomainStrategy         string                `json:"domain_strategy,omitempty"`
 	Peers                  []WireGuardPeerConfig `json:"peers,omitempty"`
 }
 
@@ -641,17 +624,13 @@ func ReconcileAdminPassword(db *sql.DB, environmentPassword string) error {
 		return tx.Commit()
 	}
 
-	newPasswordHash, err := bcrypt.GenerateFromPassword([]byte(environmentPassword), bcrypt.DefaultCost)
-	if err != nil {
-		return fmt.Errorf("hash ADMIN_PASSWORD: %w", err)
-	}
 	if _, err := tx.Exec(`
 		UPDATE settings
 		SET admin_password = ?, admin_password_env_fingerprint = ?,
 		    auth_generation = auth_generation + 1,
 		    updated_at = CURRENT_TIMESTAMP
 		WHERE id = ?
-	`, string(newPasswordHash), string(newFingerprint), settingsID); err != nil {
+	`, string(newFingerprint), string(newFingerprint), settingsID); err != nil {
 		return err
 	}
 	if _, err := tx.Exec("DELETE FROM admin_sessions"); err != nil {
@@ -1453,7 +1432,7 @@ func reconcileNativeTLSCompatibility(rawFields map[string]json.RawMessage, field
 	reconcileNativeBool(rawFields, "disable_sni", fields.disableSNI, options, "disable_sni")
 
 	if fields.alpnString != nil && rawConfigHasField(rawFields, "alpn") {
-		values := splitCompatibilityList(*fields.alpnString)
+		values := SplitCompatibilityList(*fields.alpnString)
 		if len(values) == 0 {
 			delete(options, "alpn")
 		} else {
@@ -1552,7 +1531,7 @@ func reconcileNativeTransportCompatibility(rawFields map[string]json.RawMessage,
 			reconcileNativeString(rawFields, "path", fields.path, options, "path")
 		}
 		if fields.host != nil && rawConfigHasField(rawFields, "host") {
-			hosts := splitCompatibilityList(*fields.host)
+			hosts := SplitCompatibilityList(*fields.host)
 			if len(hosts) == 0 {
 				delete(options, "host")
 			} else {
@@ -1679,7 +1658,7 @@ func NormalizeTransportType(value string) string {
 	}
 }
 
-func splitCompatibilityList(value string) []string {
+func SplitCompatibilityList(value string) []string {
 	parts := strings.FieldsFunc(value, func(r rune) bool {
 		return r == ',' || r == ';' || r == '\n' || r == '\r'
 	})

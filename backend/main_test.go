@@ -109,7 +109,7 @@ func TestHealthcheckArgumentsAndAddress(t *testing.T) {
 		"[2001:db8::1]": "[2001:db8::1]",
 	} {
 		t.Setenv("BIND_ADDRESS", host)
-		if got, want := healthcheckURL(configuredBindAddress(), configuredPort()), "http://"+expected+":30000/api/health"; got != want {
+		if got, want := healthcheckURLs(configuredBindAddress(), configuredPort())[0], "http://"+expected+":30000/api/health"; got != want {
 			t.Errorf("healthcheck for bind %q = %q, want %q", host, got, want)
 		}
 	}
@@ -119,7 +119,7 @@ func TestHealthcheckArgumentsAndAddress(t *testing.T) {
 		t.Fatalf("healthcheckURLs(::, 30000) = %v, want %v", gotDualStack, wantDualStack)
 	}
 	t.Setenv("PORT", "38080")
-	if got := healthcheckURL("::1", configuredPort()); got != "http://[::1]:38080/api/health" {
+	if got := healthcheckURLs("::1", configuredPort())[0]; got != "http://[::1]:38080/api/health" {
 		t.Fatalf("custom healthcheck port not used: %s", got)
 	}
 }

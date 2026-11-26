@@ -93,14 +93,15 @@ export async function clickText(page, text, { root = 'body', timeout = 15000, ex
   }, root, text, exact)
   const element = handle.asElement()
   assert.ok(element, `未找到控件：${text}`)
-  await element.asLocator().click()
-  await handle.dispose()
+  try {
+    await clickControl(page, element)
+  } finally {
+    await handle.dispose()
+  }
 }
 
 export async function setInput(page, selector, value) {
-  await waitControlReady(page, selector)
-  await page.$eval(selector, (element) => element.scrollIntoView({ block: 'center', inline: 'nearest' }))
-  await page.locator(selector).click()
+  await clickControl(page, selector)
   await page.waitForFunction((target) => document.activeElement === document.querySelector(target), {}, selector)
   await page.keyboard.down('Control')
   await page.keyboard.press('a')
@@ -112,29 +113,85 @@ export async function setInput(page, selector, value) {
 
 async function waitControlReady(page, selector) {
   await page.bringToFront()
-  await page.waitForFunction((target) => {
-    const element = document.querySelector(target)
-    if (!element || element.getBoundingClientRect().height === 0) return false
-    const popup = element.closest('.ant-modal, .ant-popover, .ant-select-dropdown')
+  const timeout = page.getDefaultTimeout()
+  const deadline = timeout === 0 ? Infinity : Date.now() + timeout
+  const visible = await page.waitForFunction((target) => {
+    const element = typeof target === 'string' ? document.querySelector(target) : target
+    if (!element || element.disabled) return false
+    const bounds = element.getBoundingClientRect()
+    if (bounds.width === 0 || bounds.height === 0) return false
+    if (getComputedStyle(element).visibility !== 'visible') return false
+    if (element.closest('.ant-collapse-content:not(.ant-collapse-content-active), .ant-collapse-content-hidden, .ant-motion-collapse')) return false
+    const popup = element.closest('.ant-modal, .ant-popover, .ant-select-dropdown, .ant-dropdown')
     return !popup || !/-(?:appear|enter|leave)(?:-(?:active|prepare|start))?(?:\s|$)/.test(popup.className)
   }, {}, selector)
+  await visible.dispose()
+  await page.evaluate((target) => {
+    const element = typeof target === 'string' ? document.querySelector(target) : target
+    element.scrollIntoView({ block: 'center', inline: 'nearest', behavior: 'instant' })
+  }, selector)
+  while (Date.now() < deadline) {
+    const point = await page.evaluate(async (target) => {
+      const element = typeof target === 'string' ? document.querySelector(target) : target
+      const before = element?.getBoundingClientRect()
+      if (!before) return null
+      await new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve)))
+      if (!element?.isConnected || element.disabled) return null
+      const bounds = element.getBoundingClientRect()
+      if (before.x !== bounds.x || before.y !== bounds.y || before.width !== bounds.width || before.height !== bounds.height) return null
+      const body = element.closest('.ant-modal-body')
+      const viewport = body?.getBoundingClientRect() || { left: 0, right: innerWidth, top: 0, bottom: innerHeight }
+      const left = Math.max(bounds.left, viewport.left, 0)
+      const right = Math.min(bounds.right, viewport.right, innerWidth)
+      const top = Math.max(bounds.top, viewport.top, 0)
+      let bottom = Math.min(bounds.bottom, viewport.bottom, innerHeight)
+      const footer = body?.querySelector('.sb-form-footer')
+      if (footer && !footer.contains(element)) {
+        const footerBounds = footer.getBoundingClientRect()
+        if (footerBounds.height > 0 && footerBounds.left < right && footerBounds.right > left) {
+          bottom = Math.min(bottom, footerBounds.top)
+        }
+      }
+      return right > left && bottom > top ? { x: (left + right) / 2, y: (top + bottom) / 2 } : null
+    }, selector)
+    if (!point) continue
+    await page.mouse.move(point.x, point.y)
+    const ready = await page.evaluate((target, position) => {
+      const element = typeof target === 'string' ? document.querySelector(target) : target
+      if (!element?.isConnected || element.disabled) return false
+      const style = getComputedStyle(element)
+      if (style.visibility !== 'visible' || (Number(style.opacity) === 0 && !element.matches('input[type="checkbox"], input[type="radio"]'))) return false
+      if (element.closest('.ant-collapse-content:not(.ant-collapse-content-active), .ant-collapse-content-hidden, .ant-motion-collapse')) return false
+      const bounds = element.getBoundingClientRect()
+      if (position.x < bounds.left || position.x >= bounds.right || position.y < bounds.top || position.y >= bounds.bottom) return false
+      const hit = document.elementFromPoint(position.x, position.y)
+      return hit === element || element.contains(hit) || Boolean(element.labels && Array.from(element.labels).some((label) => label === hit || label.contains(hit)))
+    }, selector, point)
+    if (ready) return point
+  }
+  throw new Error(`控件未达到稳定可点击状态：${typeof selector === 'string' ? selector : '文本控件'}`)
 }
 
 export async function clickControl(page, selector) {
-  await waitControlReady(page, selector)
-  await page.$eval(selector, (element) => element.scrollIntoView({ block: 'center', inline: 'nearest' })).catch(() => {})
-  await page.locator(selector).click()
+  const point = await waitControlReady(page, selector)
+  await page.mouse.click(point.x, point.y)
 }
 
-export async function selectOption(page, field, text) {
+export async function selectOption(page, field, text, { waitForSelection = false } = {}) {
   const selector = `.ant-select:has(#${field}) .ant-select-selector`
-  await waitControlReady(page, selector)
-  await page.locator(selector).click()
+  await clickControl(page, selector)
   await clickText(page, text, { root: '.ant-select-dropdown:not(.ant-select-dropdown-hidden)' })
   await page.waitForFunction(() => !Array.from(document.querySelectorAll('.ant-select-dropdown')).some((element) => {
     const rect = element.getBoundingClientRect()
     return rect.height > 0 && getComputedStyle(element).display !== 'none'
   }))
+  if (waitForSelection) {
+    await page.waitForFunction((id, label) => {
+      const selected = document.getElementById(id)?.closest('.ant-select')
+        ?.querySelector('.ant-select-selection-item')
+      return selected?.textContent?.trim() === label
+    }, { timeout: 10000 }, field, text)
+  }
 }
 
 export async function confirmDialog(page, accept = true) {
@@ -145,13 +202,13 @@ export async function confirmDialog(page, accept = true) {
 }
 
 export async function openBatchImport(page) {
-  await page.locator('[data-testid="nodes-add-menu"]').click()
+  await clickControl(page, '[data-testid="nodes-add-menu"]')
   await clickText(page, 'Batch Import', { root: '.ant-dropdown:not(.ant-dropdown-hidden)' })
   await page.waitForSelector('[data-testid="batch-import-content"]', { visible: true })
 }
 
 export async function openNodeMenu(page, id, action) {
-  await page.locator(`[data-testid="node-menu-${id}"]`).click()
+  await clickControl(page, `[data-testid="node-menu-${id}"]`)
   await clickText(page, action, { root: '.ant-dropdown:not(.ant-dropdown-hidden)' })
 }
 
@@ -183,26 +240,4 @@ export async function waitOverlaysClosed(page) {
     const rect = element.getBoundingClientRect()
     return style.display !== 'none' && style.visibility !== 'hidden' && rect.width > 0 && rect.height > 0
   }))
-}
-
-export async function legacyClick(page, text) {
-  if (text === 'Batch Import') return openBatchImport(page)
-  if (text === 'Import Node' || text === 'Add Node') return page.click('[data-testid="nodes-add-node"]')
-  if (text === 'Confirm' && await page.$('[data-testid="batch-import-submit"]')) return page.click('[data-testid="batch-import-submit"]')
-  if (text === 'Cancel' && await page.$('[data-testid="batch-import-errors"]')) {
-    await clickText(page, 'Close')
-    return waitOverlaysClosed(page)
-  }
-  if (text === 'Save' && await page.$('[data-testid="node-form"] button[type="submit"]')) {
-    await saveNodeForm(page)
-    await page.waitForFunction(() => {
-      const visible = (element) => element && element.getBoundingClientRect().height > 0
-      return visible(document.querySelector('.ant-modal-confirm-btns .ant-btn-primary')) ||
-        Array.from(document.querySelectorAll('.ant-form-item-explain-error')).some(visible) ||
-        !visible(document.querySelector('[data-testid="node-form"]'))
-    })
-    if (await page.$('.ant-modal-confirm-btns .ant-btn-primary')) await confirmDialog(page)
-    return
-  }
-  return clickText(page, text)
 }

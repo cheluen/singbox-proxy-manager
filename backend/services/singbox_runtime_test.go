@@ -66,7 +66,7 @@ exit 17
 
 	service := NewSingBoxService(configDir)
 	writeRuntimeConfigFixture(t, service)
-	if err := service.Start(); err != nil {
+	if err := service.StartPreservedConfig(); err != nil {
 		t.Fatalf("start should pass the initial stability window: %v", err)
 	}
 	t.Cleanup(func() { _ = service.Stop() })
@@ -104,7 +104,7 @@ exit 17
 	if err := os.WriteFile(stableMarker, []byte("ready"), 0o600); err != nil {
 		t.Fatalf("write stable marker: %v", err)
 	}
-	if err := service.Start(); err != nil {
+	if err := service.StartPreservedConfig(); err != nil {
 		t.Fatalf("manual restart after recovery exhaustion: %v", err)
 	}
 	status = service.RuntimeStatus()
@@ -145,7 +145,7 @@ exit 17
 
 	service := NewSingBoxService(configDir)
 	writeRuntimeConfigFixture(t, service)
-	if err := service.Start(); err != nil {
+	if err := service.StartPreservedConfig(); err != nil {
 		t.Fatalf("start: %v", err)
 	}
 	t.Cleanup(func() { _ = service.Stop() })

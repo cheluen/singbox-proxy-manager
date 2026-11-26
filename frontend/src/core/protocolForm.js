@@ -1,4 +1,4 @@
-export { proxyTypes, upstreamProxyTypes, localizedProxyTypes, isPolicyType } from './protocolSchema.js'
+export { localizedProxyTypes, isPolicyType } from './protocolSchema.js'
 
 const isPolicyTypeName = (type) => type === 'failover' || type === 'loadbalance'
 

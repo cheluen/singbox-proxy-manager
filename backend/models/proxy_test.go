@@ -615,14 +615,14 @@ func TestInitDBMigratesDuplicateLegacySettingsToSingleton(t *testing.T) {
 
 func TestProxyNodeParseConfigWireGuard(t *testing.T) {
 	rawConfig := WireGuardConfig{
-		Server:         "engage.cloudflareclient.com",
-		ServerPort:     2408,
-		LocalAddress:   []string{"172.16.0.2/32", "2606:4700:110:8765::2/128"},
-		PrivateKey:     "private-key",
-		PeerPublicKey:  "peer-public-key",
-		AllowedIPs:     []string{"0.0.0.0/0", "::/0"},
-		Reserved:       []uint8{162, 104, 222},
-		DomainResolver: "local",
+		DialerOptions: DialerOptions{DomainResolver: "local"},
+		Server:        "engage.cloudflareclient.com",
+		ServerPort:    2408,
+		LocalAddress:  []string{"172.16.0.2/32", "2606:4700:110:8765::2/128"},
+		PrivateKey:    "private-key",
+		PeerPublicKey: "peer-public-key",
+		AllowedIPs:    []string{"0.0.0.0/0", "::/0"},
+		Reserved:      []uint8{162, 104, 222},
 	}
 	configJSON, err := json.Marshal(rawConfig)
 	if err != nil {

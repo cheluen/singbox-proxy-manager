@@ -5,7 +5,7 @@
   <p>将各类主流协议节点集中管理，一键转为独立的本地 Mixed（HTTP / SOCKS5）或 HTTPS (TLS) 加密代理端口</p>
 
   <p>
-    <a href="https://github.com/cheluen/singbox-proxy-manager/releases"><img src="https://img.shields.io/badge/version-1.7.32-blue.svg" alt="Version" /></a>
+    <a href="https://github.com/cheluen/singbox-proxy-manager/releases"><img src="https://img.shields.io/badge/version-1.7.33-blue.svg" alt="Version" /></a>
     <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-green.svg" alt="MIT License" /></a>
     <img src="https://img.shields.io/badge/sing--box-1.12.12-orange.svg" alt="sing-box 1.12.12" />
     <img src="https://img.shields.io/badge/Go-1.26.11-00ADD8.svg" alt="Go 1.26.11" />
@@ -151,7 +151,7 @@ ADMIN_PASSWORD=请替换为你的高强度密码
 > 提示：
 > - 默认管理端口为 `30000`，默认分组入站端口从 `30001` 开始顺延分配（每个分组可独立配置是否分配端口及起始端口），数据保存在同目录的 `./config`。如需调整管理端口，可在 `.env` 中修改 `PORT=30000`。
 > - 镜像基于 `Alpine 3.24` 构建并内置 Docker `HEALTHCHECK`（通过 `/app/singbox-proxy-manager --healthcheck` 探测 `/api/health`），可执行 `docker compose --profile ghcr ps` 直接查看容器 `healthy / unhealthy` 状态。
-> - 正式版 GHCR 多架构镜像提供精确版本（如 `1.7.32`）、次版本滚动（如 `1.7`）、主版本滚动（如 `1`）与 `latest` 标签，并附带构建来源证明（Provenance）和 SBOM；日常 `main` 分支未发版且已存在对应版本标签的提交默认跳过完整 CI，仅在触发完整 CI 的未发版提交时更新 `edge` 标签。
+> - 正式版 GHCR 多架构镜像提供精确版本（如 `1.7.33`）、次版本滚动（如 `1.7`）、主版本滚动（如 `1`）与 `latest` 标签，并附带构建来源证明（Provenance）和 SBOM；日常 `main` 分支未发版且已存在对应版本标签的提交默认跳过完整 CI，仅在触发完整 CI 的未发版提交时更新 `edge` 标签。
 
 #### 第 3 步：启动服务
 
@@ -199,7 +199,7 @@ docker compose --profile ghcr logs --tail=50
 ```bash
 mkdir -p singbox-proxy-manager && cd singbox-proxy-manager
 
-APP_VERSION=1.7.32
+APP_VERSION=1.7.33
 OS=linux      # 可选：linux / darwin / freebsd
 ARCH=amd64    # 可选：amd64 / arm64
 

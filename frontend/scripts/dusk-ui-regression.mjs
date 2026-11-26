@@ -1,13 +1,13 @@
 import assert from 'node:assert/strict'
 import fs from 'node:fs'
 import http from 'node:http'
-import net from 'node:net'
 import os from 'node:os'
 import path from 'node:path'
 import process from 'node:process'
 import { spawn } from 'node:child_process'
 import { fileURLToPath } from 'node:url'
 import { launchBrowser, stopProcess } from './test-harness.mjs'
+import { findFreePort } from './test-ports.mjs'
 import { assertProjectBrand, clickControl, clickText, closeOverlay, confirmDialog, editNode, openBatchImport, openNodeMenu, saveNodeForm, selectOption, setInput, sleep, toggle, waitOverlaysClosed } from './ui-driver.mjs'
 import { assertColumnOrder, assertCopiedText, assertDetailLayoutOrderAndBalance, assertEmptyInboundPassword, assertFullNodeName, assertInboundUsername, assertMaskedInboundPassword, assertRevealedInboundPassword, assertRouteId, assertUnclippedTableHeaders } from './node-display-assertions.mjs'
 
@@ -30,13 +30,6 @@ const listen = (server) => new Promise((resolve, reject) => {
   server.once('error', reject)
   server.listen(0, '127.0.0.1', () => resolve(server.address().port))
 })
-
-const freePort = async () => {
-  const server = net.createServer()
-  const port = await listen(server)
-  await new Promise((resolve) => server.close(resolve))
-  return port
-}
 
 const eventually = async (predicate, message, timeout = 15000) => {
   const deadline = Date.now() + timeout
@@ -1505,7 +1498,7 @@ async function runRegression(name) {
   assert.ok(scenarios[name], `未知回归场景：${name}`)
   const fixture = createFixture()
   const port = await listen(fixture.server)
-  const frontendPort = await freePort()
+  const frontendPort = await findFreePort()
   const url = `http://127.0.0.1:${frontendPort}`
   const logs = []
   const vite = spawn(process.execPath, [path.join(FRONTEND, 'node_modules/vite/bin/vite.js'), '--host', '127.0.0.1', '--port', String(frontendPort), '--strictPort'], {

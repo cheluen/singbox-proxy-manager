@@ -133,6 +133,7 @@ func TestGenerateWireGuardEndpointMultiPeerAndDialFields(t *testing.T) {
 	service := NewSingBoxService(t.TempDir())
 
 	config := &models.WireGuardConfig{
+		DialerOptions:   models.DialerOptions{Detour: "upstream", ConnectTimeout: "5s"},
 		LocalAddress:    []string{"10.0.0.2/32"},
 		PrivateKey:      "pk",
 		SystemInterface: true,
@@ -140,8 +141,6 @@ func TestGenerateWireGuardEndpointMultiPeerAndDialFields(t *testing.T) {
 		Workers:         4,
 		MTU:             1408,
 		Network:         "tcp",
-		Detour:          "upstream",
-		ConnectTimeout:  "5s",
 		Peers: []models.WireGuardPeerConfig{
 			{
 				Server:       "peer-a.example.com",
@@ -197,7 +196,7 @@ func TestGenerateWireGuardEndpointMultiPeerAndDialFields(t *testing.T) {
 
 func TestWireGuardDomainResolverFlatFieldsOverrideAndClearCompatibility(t *testing.T) {
 	config := &models.WireGuardConfig{
-		DomainResolver:         "local",
+		DialerOptions:          models.DialerOptions{DomainResolver: "local"},
 		DomainResolverStrategy: "prefer_ipv6",
 		DomainResolverOptions: models.NativeOptions{
 			"server":        "stale-resolver",
@@ -284,7 +283,7 @@ func TestValidateConfigSurfacesKernelError(t *testing.T) {
 	}
 }
 
-func TestApplyConfigRollsBackToLastGood(t *testing.T) {
+func TestRuntimeApplyRollsBackToLastGood(t *testing.T) {
 	t.Setenv("SINGBOX_BINARY", writeScriptedSingBox(t))
 	configDir := t.TempDir()
 	service := NewSingBoxService(configDir)
@@ -294,7 +293,7 @@ func TestApplyConfigRollsBackToLastGood(t *testing.T) {
 	if err := service.writeConfigFile(goodConfig); err != nil {
 		t.Fatalf("write good config: %v", err)
 	}
-	if err := service.Start(); err != nil {
+	if err := service.StartPreservedConfig(); err != nil {
 		t.Fatalf("start with good config: %v", err)
 	}
 
@@ -304,9 +303,10 @@ func TestApplyConfigRollsBackToLastGood(t *testing.T) {
 	}
 
 	badConfig := []byte(`{"good": false, "comment": "RUN_FAIL_MARKER"}`)
-	err = service.ApplyConfig(badConfig)
+	transaction, err := service.beginRuntimeApply(RuntimePlan{configJSON: badConfig, hash: runtimeConfigHash(badConfig)})
 	if err == nil {
-		t.Fatalf("ApplyConfig must fail when the kernel cannot start")
+		transaction.Commit()
+		t.Fatalf("runtime apply must fail when the kernel cannot start")
 	}
 	if !strings.Contains(err.Error(), "rolled back") {
 		t.Fatalf("error must mention rollback, got: %v", err)
@@ -325,7 +325,7 @@ func TestApplyConfigRollsBackToLastGood(t *testing.T) {
 	}
 }
 
-func TestApplyConfigRollsBackWhenLastGoodSnapshotFails(t *testing.T) {
+func TestRuntimeApplyRollsBackWhenLastGoodSnapshotFails(t *testing.T) {
 	t.Setenv("SINGBOX_BINARY", writeScriptedSingBox(t))
 	configDir := t.TempDir()
 	service := NewSingBoxService(configDir)
@@ -335,7 +335,7 @@ func TestApplyConfigRollsBackWhenLastGoodSnapshotFails(t *testing.T) {
 	if err := service.writeConfigFile(goodConfig); err != nil {
 		t.Fatalf("write good config: %v", err)
 	}
-	if err := service.Start(); err != nil {
+	if err := service.StartPreservedConfig(); err != nil {
 		t.Fatalf("start good config: %v", err)
 	}
 	service.writeLastGoodFile = func(_ string, _ []byte) error {
@@ -343,7 +343,10 @@ func TestApplyConfigRollsBackWhenLastGoodSnapshotFails(t *testing.T) {
 	}
 
 	candidate := []byte(`{"generation":"candidate"}`)
-	err := service.ApplyConfig(candidate)
+	transaction, err := service.beginRuntimeApply(RuntimePlan{configJSON: candidate, hash: runtimeConfigHash(candidate)})
+	if err == nil {
+		transaction.Commit()
+	}
 	if err == nil || !strings.Contains(err.Error(), "snapshot") || !strings.Contains(err.Error(), "rolled back") {
 		t.Fatalf("snapshot failure was not propagated with rollback status: %v", err)
 	}
@@ -419,12 +422,12 @@ func TestRealSingBoxAcceptsEditedWireGuardDomainResolver(t *testing.T) {
 	service := NewSingBoxService(t.TempDir())
 
 	node := nativeTestNode(t, 1, "warp-resolver", "wireguard", models.WireGuardConfig{
+		DialerOptions:          models.DialerOptions{DomainResolver: "local"},
 		Server:                 "engage.cloudflareclient.com",
 		ServerPort:             2408,
 		LocalAddress:           []string{"172.16.0.2/32"},
 		PrivateKey:             testWireGuardPrivateKey,
 		PeerPublicKey:          testWireGuardPeerPublicKey,
-		DomainResolver:         "local",
 		DomainResolverStrategy: "prefer_ipv4",
 		DomainResolverOptions: models.NativeOptions{
 			"server":        "stale-resolver",

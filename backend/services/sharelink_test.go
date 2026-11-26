@@ -216,6 +216,7 @@ func TestParseWireGuardLink(t *testing.T) {
 func TestGenerateWireGuardOutboundUsesPeersWhenAllowedIPsPresent(t *testing.T) {
 	udpFragment := true
 	rawCfg := models.WireGuardConfig{
+		DialerOptions:          models.DialerOptions{Detour: "warp-selector", DomainResolver: "local", UDPFragment: &udpFragment},
 		Server:                 "engage.cloudflareclient.com",
 		ServerPort:             2408,
 		LocalAddress:           []string{"172.16.0.2/32", "2606:4700:110:8765::2/128"},
@@ -225,10 +226,7 @@ func TestGenerateWireGuardOutboundUsesPeersWhenAllowedIPsPresent(t *testing.T) {
 		Reserved:               []uint8{162, 104, 222},
 		MTU:                    1280,
 		Workers:                2,
-		Detour:                 "warp-selector",
-		DomainResolver:         "local",
 		DomainResolverStrategy: "prefer_ipv4",
-		UDPFragment:            &udpFragment,
 	}
 	svc := &SingBoxService{}
 	out, err := svc.generateWireGuardEndpoint(&rawCfg, "wireguard-out")
@@ -262,6 +260,9 @@ func TestGenerateWireGuardOutboundUsesPeersWhenAllowedIPsPresent(t *testing.T) {
 func TestBuildWireGuardShareLinkRoundTrip(t *testing.T) {
 	udpFragment := true
 	config := models.WireGuardConfig{
+		DialerOptions: models.DialerOptions{
+			Detour: "warp-selector", DomainResolver: "local", RoutingMark: "0x10", UDPFragment: &udpFragment,
+		},
 		Server:                 "engage.cloudflareclient.com",
 		ServerPort:             2408,
 		LocalAddress:           []string{"172.16.0.2/32", "2606:4700:110:8765::2/128"},
@@ -271,11 +272,7 @@ func TestBuildWireGuardShareLinkRoundTrip(t *testing.T) {
 		Reserved:               []uint8{162, 104, 222},
 		MTU:                    1280,
 		Workers:                2,
-		Detour:                 "warp-selector",
-		DomainResolver:         "local",
 		DomainResolverStrategy: "prefer_ipv4",
-		RoutingMark:            "0x10",
-		UDPFragment:            &udpFragment,
 	}
 	cfgBytes, _ := json.Marshal(config)
 

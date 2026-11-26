@@ -382,20 +382,9 @@ jobs:
         run: npm ci
         working-directory: frontend
 
-      - name: Resolve browser path
-        run: |
-          if command -v google-chrome >/dev/null 2>&1; then
-            echo "PUPPETEER_EXECUTABLE_PATH=$(command -v google-chrome)" >> "$GITHUB_ENV"
-          elif command -v google-chrome-stable >/dev/null 2>&1; then
-            echo "PUPPETEER_EXECUTABLE_PATH=$(command -v google-chrome-stable)" >> "$GITHUB_ENV"
-          elif command -v chromium-browser >/dev/null 2>&1; then
-            echo "PUPPETEER_EXECUTABLE_PATH=$(command -v chromium-browser)" >> "$GITHUB_ENV"
-          elif command -v chromium >/dev/null 2>&1; then
-            echo "PUPPETEER_EXECUTABLE_PATH=$(command -v chromium)" >> "$GITHUB_ENV"
-          else
-            echo "::error::No Chrome/Chromium executable found on runner."
-            exit 1
-          fi
+      - name: Check browser availability
+        run: node -e "import('./scripts/test-harness.mjs').then(({ findBrowserExecutable }) => console.log(findBrowserExecutable()))"
+        working-directory: frontend
 
       - name: Run frontend regression
         run: npm run ${{ matrix.script }}
@@ -447,20 +436,9 @@ jobs:
       - name: Build backend for full-stack test
         run: CGO_ENABLED=0 go build -tags frontend_dist -ldflags="-X sb-proxy/internal/version.rawVersion=${APP_VERSION}" -o "${RUNNER_TEMP}/sbpm-upstream-e2e-backend" ./backend
 
-      - name: Resolve browser path
-        run: |
-          if command -v google-chrome >/dev/null 2>&1; then
-            echo "PUPPETEER_EXECUTABLE_PATH=$(command -v google-chrome)" >> "$GITHUB_ENV"
-          elif command -v google-chrome-stable >/dev/null 2>&1; then
-            echo "PUPPETEER_EXECUTABLE_PATH=$(command -v google-chrome-stable)" >> "$GITHUB_ENV"
-          elif command -v chromium-browser >/dev/null 2>&1; then
-            echo "PUPPETEER_EXECUTABLE_PATH=$(command -v chromium-browser)" >> "$GITHUB_ENV"
-          elif command -v chromium >/dev/null 2>&1; then
-            echo "PUPPETEER_EXECUTABLE_PATH=$(command -v chromium)" >> "$GITHUB_ENV"
-          else
-            echo "::error::No Chrome/Chromium executable found on runner."
-            exit 1
-          fi
+      - name: Check browser availability
+        run: node -e "import('./scripts/test-harness.mjs').then(({ findBrowserExecutable }) => console.log(findBrowserExecutable()))"
+        working-directory: frontend
 
       - name: Run live upstream full-stack regression
         run: npm run test:e2e:full-stack-upstream
@@ -728,7 +706,6 @@ jobs:
           SINGBOX_TEST_BINARY: ${{ runner.temp }}/sing-box-kernel/sing-box
         run: |
           chmod +x "$SINGBOX_TEST_BINARY"
-          export PUPPETEER_EXECUTABLE_PATH="$(command -v google-chrome || command -v chromium)"
           npm run test:e2e:full-stack-protocol-import
 
       - name: 验证统一发行文件的完整系统交互
@@ -737,7 +714,6 @@ jobs:
           SBPM_E2E_BACKEND_BINARY: ${{ github.workspace }}/release-binaries/singbox-proxy-manager-linux-amd64
           SINGBOX_TEST_BINARY: ${{ runner.temp }}/sing-box-kernel/sing-box
         run: |
-          export PUPPETEER_EXECUTABLE_PATH="$(command -v google-chrome || command -v chromium)"
           npm run test:e2e:full-stack-system
           npm run test:e2e:full-stack-node-list
           npm run test:e2e:full-stack-features
@@ -747,7 +723,6 @@ jobs:
         env:
           SBPM_TEST_BINARY: ${{ github.workspace }}/release-binaries/singbox-proxy-manager-linux-amd64
         run: |
-          export PUPPETEER_EXECUTABLE_PATH="$(command -v google-chrome || command -v chromium)"
           npm run test:e2e:precompressed-static
 
       - name: Set up QEMU

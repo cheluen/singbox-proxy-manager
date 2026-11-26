@@ -1,4 +1,4 @@
-import { legacyClick as clickVisibleButton, editNode, setInput, waitOverlaysClosed } from './ui-driver.mjs'
+import { clickControl, clickText, editNode, saveNodeForm, selectOption, setInput, sleep, toggle, waitOverlaysClosed } from './ui-driver.mjs'
 import http from 'node:http'
 import { spawn } from 'node:child_process'
 import fs from 'node:fs'
@@ -6,7 +6,7 @@ import path from 'node:path'
 import process from 'node:process'
 import { isDeepStrictEqual } from 'node:util'
 import { fileURLToPath } from 'node:url'
-import { launchBrowser, stopProcess } from './test-harness.mjs'
+import { launchBrowser, stopProcess, waitForHTTP } from './test-harness.mjs'
 
 const API_PORT = Number(process.env.E2E_API_PORT || 30023)
 const FRONTEND_PORT = Number(process.env.E2E_FRONTEND_PORT || 5186)
@@ -18,8 +18,6 @@ const FRONTEND_PACKAGE = JSON.parse(
 )
 
 import { protocolFixtures as fixtures } from './fixtures/protocol-configs.mjs'
-
-const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms))
 
 const sendJSON = (res, statusCode, payload) => {
   const body = JSON.stringify(payload)
@@ -141,20 +139,6 @@ const createMockAPI = () => {
   return { server, createdPayloads, updatedPayloads }
 }
 
-const waitForHTTP = async (url, timeoutMs) => {
-  const deadline = Date.now() + timeoutMs
-  while (Date.now() < deadline) {
-    try {
-      const response = await fetch(url)
-      if (response.status < 500) return
-    } catch {
-      // Retry until the server is ready.
-    }
-    await sleep(250)
-  }
-  throw new Error(`Timed out waiting for ${url}`)
-}
-
 const startVite = () => {
   const viteBin = path.join(FRONTEND_ROOT, 'node_modules', 'vite', 'bin', 'vite.js')
   const logs = []
@@ -176,107 +160,6 @@ const startVite = () => {
   return { child, getLogs: () => logs.join('') }
 }
 
-const selectFormOption = async (page, fieldID, optionText, timeoutMs = 10000) => {
-  const opened = await page.evaluate((id) => {
-    const input = document.getElementById(id)
-    const selector = input?.closest('.ant-select')?.querySelector('.ant-select-selector')
-    if (!selector) return false
-
-    selector.scrollIntoView({ block: 'center', inline: 'nearest' })
-    const rect = selector.getBoundingClientRect()
-    const eventInit = {
-      bubbles: true,
-      cancelable: true,
-      clientX: rect.left + rect.width / 2,
-      clientY: rect.top + rect.height / 2,
-      buttons: 1,
-    }
-    selector.dispatchEvent(
-      new PointerEvent('pointerdown', { ...eventInit, pointerType: 'mouse' })
-    )
-    selector.dispatchEvent(new MouseEvent('mousedown', eventInit))
-    selector.dispatchEvent(new MouseEvent('mouseup', eventInit))
-    selector.click()
-    return true
-  }, fieldID)
-
-  if (!opened) {
-    throw new Error(`Select field not found: ${fieldID}`)
-  }
-
-  await page.waitForFunction(
-    (text) =>
-      Array.from(
-        document.querySelectorAll(
-          '.ant-select-dropdown:not(.ant-select-dropdown-hidden) .ant-select-item-option'
-        )
-      ).some((option) => (option.textContent || '').trim() === text),
-    { timeout: timeoutMs },
-    optionText
-  )
-
-  const selected = await page.evaluate((text) => {
-    const option = Array.from(
-      document.querySelectorAll(
-        '.ant-select-dropdown:not(.ant-select-dropdown-hidden) .ant-select-item-option'
-      )
-    ).find((candidate) => (candidate.textContent || '').trim() === text)
-    if (!option) return false
-
-    const rect = option.getBoundingClientRect()
-    const eventInit = {
-      bubbles: true,
-      cancelable: true,
-      clientX: rect.left + rect.width / 2,
-      clientY: rect.top + rect.height / 2,
-      buttons: 1,
-    }
-    option.dispatchEvent(
-      new PointerEvent('pointerdown', { ...eventInit, pointerType: 'mouse' })
-    )
-    option.dispatchEvent(new MouseEvent('mousedown', eventInit))
-    option.dispatchEvent(new MouseEvent('mouseup', eventInit))
-    option.click()
-    return true
-  }, optionText)
-
-  if (!selected) {
-    throw new Error(`Select option not found: ${optionText}`)
-  }
-
-  await page.waitForFunction(
-    (id, text) => {
-      const input = document.getElementById(id)
-      const selectedValue = input
-        ?.closest('.ant-select')
-        ?.querySelector('.ant-select-selection-item')?.textContent
-      return (selectedValue || '').trim() === text
-    },
-    { timeout: timeoutMs },
-    fieldID,
-    optionText
-  )
-}
-
-const setImportLink = async (page, link) => {
-  await page.waitForSelector('#sb-link-input', { visible: true, timeout: 10000 })
-  await page.$eval(
-    '#sb-link-input',
-    (input, value) => {
-      const setter = Object.getOwnPropertyDescriptor(
-        window.HTMLInputElement.prototype,
-        'value'
-      )?.set
-      setter?.call(input, value)
-      input.dispatchEvent(new Event('input', { bubbles: true }))
-      input.dispatchEvent(new Event('change', { bubbles: true }))
-    },
-    link
-  )
-}
-
-const setPasswordInput = setInput
-
 const waitForNodeForm = async (page, expectedName) => {
   await page.waitForFunction(
     (name) => {
@@ -291,27 +174,6 @@ const waitForNodeForm = async (page, expectedName) => {
     expectedName
   )
 }
-
-const setInboundAuthentication = async (page, enabled) => {
-  await page.waitForSelector('#auth_enabled', { visible: true, timeout: 10000 })
-  await page.$eval(
-    '#auth_enabled',
-    (button, nextEnabled) => {
-      if (button.getAttribute('aria-checked') !== String(nextEnabled)) {
-        button.click()
-      }
-    },
-    enabled
-  )
-  await page.waitForFunction(
-    (nextEnabled) =>
-      document.querySelector('#auth_enabled')?.getAttribute('aria-checked') === String(nextEnabled),
-    { timeout: 5000 },
-    enabled
-  )
-}
-
-const waitForNodeFormClosed = waitOverlaysClosed
 
 const assertOriginalConfigPreserved = (fixture, actual) => {
   const expectedAbsentFields = new Set(fixture.expectedAbsentFields || [])
@@ -370,9 +232,12 @@ const run = async () => {
   const vite = startVite()
   let browser
   let page
+  let currentFixture = null
+  let currentStep = '等待前端服务'
 
   try {
-    await waitForHTTP(FRONTEND_URL, 60000)
+    await waitForHTTP(FRONTEND_URL, { timeoutMs: 60000, intervalMs: 250 })
+    currentStep = '启动浏览器'
     browser = await launchBrowser()
     page = await browser.newPage()
     page.setDefaultNavigationTimeout(120000)
@@ -388,34 +253,45 @@ const run = async () => {
     })
     page.on('pageerror', (error) => consoleErrors.push(`pageerror:${error.message}`))
 
+    currentStep = '打开管理面板'
     await page.goto(FRONTEND_URL, { waitUntil: 'domcontentloaded' })
     await page.waitForSelector('.sb-repo', { timeout: 15000 })
 
     for (const fixture of fixtures) {
+      currentFixture = fixture.key
       const captureIndex = mockAPI.createdPayloads.length
-      await clickVisibleButton(page, 'Import Node')
-      await setImportLink(page, `audit://${fixture.key}`)
-      await clickVisibleButton(page, 'Parse Link')
+      currentStep = '打开节点创建弹窗'
+      await clickControl(page, '[data-testid="nodes-add-node"]')
+      currentStep = '填写导入链接'
+      await setInput(page, '#sb-link-input', `audit://${fixture.key}`)
+      currentStep = '解析导入链接'
+      await clickText(page, 'Parse Link')
+      currentStep = '等待协议表单回填'
       await waitForNodeForm(page, `Imported ${fixture.key}`)
-      await setInboundAuthentication(page, false)
+      currentStep = '关闭入站认证'
+      await toggle(page, '#auth_enabled', false)
 
       for (const [id, expected] of Object.entries(fixture.initialInputs || {})) {
+        currentStep = `核对初始输入：${id}`
         const actual = await page.$eval(`#${id}`, (input) => input.value)
         if (actual !== expected) throw new Error(`${fixture.key}: ${id}=${actual}, expected ${expected}`)
       }
       for (const [id, expected] of Object.entries(fixture.initialSelections || {})) {
+        currentStep = `核对初始选项：${id}`
         const actual = await page.$eval(`#${id}`, (input) =>
           input.closest('.ant-select')?.querySelector('.ant-select-selection-item')?.textContent
         )
         if (actual !== expected) throw new Error(`${fixture.key}: ${id}=${actual}, expected ${expected}`)
       }
       for (const [id, value] of Object.entries(fixture.editInputs || {})) {
-        await setPasswordInput(page, `#${id}`, value)
+        currentStep = `修改输入：${id}`
+        await setInput(page, `#${id}`, value)
       }
       for (const id of fixture.clearSelections || []) {
         const select = `.ant-select:has(#${id})`
-        await page.locator(select).hover()
-        await page.locator(`${select} .ant-select-clear`).click()
+        currentStep = `清空选项：${id}`
+        await clickControl(page, `${select} .ant-select-clear`)
+        currentStep = `等待选项清空：${id}`
         await page.waitForFunction(
           (fieldID) => {
             const text = document.getElementById(fieldID)?.closest('.ant-select')
@@ -428,6 +304,7 @@ const run = async () => {
       }
 
       if (fixture.peerArray) {
+        currentStep = '核对 WireGuard peer-array 表单'
         const hasNetworkField = await page.evaluate(() =>
           Array.from(document.querySelectorAll('.ant-modal .ant-form-item-label label')).some(
             (label) => (label.textContent || '').trim() === 'Network'
@@ -439,28 +316,36 @@ const run = async () => {
       }
 
       if (fixture.clearPeerArray) {
-        await page.$eval('#wireguard_peers_json', (textarea) => {
-          const setter = Object.getOwnPropertyDescriptor(
-            window.HTMLTextAreaElement.prototype,
-            'value'
-          )?.set
-          setter?.call(textarea, '')
-          textarea.dispatchEvent(new Event('input', { bubbles: true }))
-          textarea.dispatchEvent(new Event('change', { bubbles: true }))
-        })
+        const panel = '[data-testid="node-form"] .ant-collapse-item:has(#wireguard_peers_json)'
+        const header = `${panel} > .ant-collapse-header`
+        currentStep = '检查 WireGuard 高级区展开状态'
+        const expanded = await page.$eval(header, (element) => element.getAttribute('aria-expanded') === 'true')
+        if (!expanded) {
+          currentStep = '展开 WireGuard 高级区'
+          await clickControl(page, header)
+        }
+        currentStep = '等待 WireGuard 高级区动画结束'
+        await page.waitForSelector(`${panel}.ant-collapse-item-active > .ant-collapse-content-active:not(.ant-collapse-content-hidden):not(.ant-motion-collapse)`, { visible: true })
+        currentStep = '清空 WireGuard peers'
+        await setInput(page, '[data-testid="node-form"] #wireguard_peers_json', '')
       }
 
       if (fixture.switchSecurityToTLS) {
-        await selectFormOption(page, 'security', 'TLS')
+        currentStep = '将安全层切换到 TLS'
+        await selectOption(page, 'security', 'TLS', { waitForSelection: true })
       }
 
       if (fixture.selectVMessCFB) {
-        await selectFormOption(page, 'vmess_security', 'aes-128-cfb')
+        currentStep = '选择 VMess aes-128-cfb'
+        await selectOption(page, 'vmess_security', 'aes-128-cfb', { waitForSelection: true })
       }
 
       if (fixture.verifySalamanderRequired) {
-        await setPasswordInput(page, '#obfs_password', '')
-        await clickVisibleButton(page, 'Save')
+        currentStep = '清空 Salamander 混淆密码'
+        await setInput(page, '#obfs_password', '')
+        currentStep = '提交无混淆密码的 Salamander 表单'
+        await saveNodeForm(page)
+        currentStep = '核对 Salamander 必填校验'
         await page.waitForFunction(
           () =>
             Array.from(document.querySelectorAll('.ant-form-item-explain-error')).some(
@@ -471,15 +356,19 @@ const run = async () => {
         if (mockAPI.createdPayloads.length !== captureIndex) {
           throw new Error('Hysteria2 Salamander was saved with an empty obfs password')
         }
-        await setPasswordInput(page, '#obfs_password', 'obfs-secret')
+        currentStep = '恢复 Salamander 混淆密码'
+        await setInput(page, '#obfs_password', 'obfs-secret')
       }
 
-      await clickVisibleButton(page, 'Save')
+      currentStep = '保存新节点并确认关闭认证'
+      await saveNodeForm(page, { confirmOpenAuth: true })
+      currentStep = '等待节点创建请求'
       const deadline = Date.now() + 10000
       while (mockAPI.createdPayloads.length === captureIndex && Date.now() < deadline) {
         await sleep(100)
       }
       const payload = mockAPI.createdPayloads[captureIndex]
+      currentStep = '核对创建类型与认证配置'
       if (!payload) throw new Error(`${fixture.key}: create payload was not captured`)
       if (payload.type !== fixture.type) {
         throw new Error(`${fixture.key}: expected type ${fixture.type}, got ${payload.type}`)
@@ -491,6 +380,7 @@ const run = async () => {
       }
 
       const actualConfig = JSON.parse(payload.config || '{}')
+      currentStep = '核对协议原始配置与兼容字段'
       assertOriginalConfigPreserved(fixture, actualConfig)
       assertExpectedSavedFields(fixture, actualConfig)
       if (fixture.peerArray && !fixture.clearPeerArray) {
@@ -543,17 +433,24 @@ const run = async () => {
       if (fixture.flatWireGuard && 'peers' in actualConfig) {
         throw new Error('Flat WireGuard config must not gain an empty peers array')
       }
-      await waitForNodeFormClosed(page)
+      currentStep = '等待节点创建弹窗关闭'
+      await waitOverlaysClosed(page)
     }
 
+    currentFixture = 'Existing empty Trojan'
+    currentStep = '打开已有 Trojan 编辑弹窗'
     await editNode(page, 9901)
+    currentStep = '等待已有 Trojan 表单回填'
     await waitForNodeForm(page, 'Existing empty Trojan')
-    await clickVisibleButton(page, 'Save')
+    currentStep = '保存已有 Trojan 节点'
+    await saveNodeForm(page)
+    currentStep = '等待已有 Trojan 更新请求'
     const updateDeadline = Date.now() + 10000
     while (mockAPI.updatedPayloads.length === 0 && Date.now() < updateDeadline) {
       await sleep(100)
     }
     const updatedTrojan = mockAPI.updatedPayloads[0]
+    currentStep = '核对已有 Trojan 协议密码与入站认证'
     if (!updatedTrojan) {
       throw new Error('Existing empty Trojan update payload was not captured')
     }
@@ -566,8 +463,11 @@ const run = async () => {
     if (updatedTrojan.password !== 'local-inbound-secret') {
       throw new Error('Existing local inbound password was not preserved independently')
     }
-    await waitForNodeFormClosed(page)
+    currentStep = '等待已有 Trojan 编辑弹窗关闭'
+    await waitOverlaysClosed(page)
 
+    currentFixture = null
+    currentStep = '核对浏览器错误'
     const unexpectedErrors = consoleErrors.filter((line) => !isIgnorableConsoleError(line))
     if (unexpectedErrors.length > 0) {
       throw new Error(`Unexpected browser errors: ${unexpectedErrors.join('\n')}`)
@@ -577,10 +477,31 @@ const run = async () => {
       `${JSON.stringify({ success: true, fixtures: fixtures.map((fixture) => fixture.key) })}\n`
     )
   } catch (error) {
-    const diagnostic = page ? await page.evaluate(() => ({
-      errors: Array.from(document.querySelectorAll('.ant-form-item-explain-error'), (element) => element.textContent),
-      buttons: Array.from(document.querySelectorAll('.ant-modal button'), (element) => ({ text: element.textContent, disabled: element.disabled })),
-    })).catch(() => ({})) : {}
+    const state = page ? await page.evaluate(() => {
+      const rect = (element) => {
+        if (!element) return null
+        const { x, y, width, height } = element.getBoundingClientRect()
+        return { x, y, width, height }
+      }
+      const peers = document.querySelector('[data-testid="node-form"] #wireguard_peers_json')
+      const focused = document.activeElement
+      return {
+        errors: Array.from(document.querySelectorAll('.ant-form-item-explain-error'), (element) => element.textContent),
+        buttons: Array.from(document.querySelectorAll('.ant-modal button'), (element) => ({ text: element.textContent, disabled: element.disabled })),
+        focus: { tag: focused?.tagName, id: focused?.id, testId: focused?.getAttribute('data-testid') },
+        peers: peers ? { bounds: rect(peers), disabled: peers.disabled, visibility: getComputedStyle(peers).visibility } : null,
+        collapse: Array.from(document.querySelectorAll('.ant-modal .ant-collapse-item'), (element) => {
+          const header = element.querySelector(':scope > .ant-collapse-header')
+          const content = element.querySelector(':scope > .ant-collapse-content')
+          return { itemClass: element.className, expanded: header?.getAttribute('aria-expanded'), contentClass: content?.className, contentBounds: rect(content) }
+        }),
+        scroll: Array.from(document.querySelectorAll('.ant-modal-body'), (element) => ({
+          bounds: rect(element), scrollTop: element.scrollTop, clientHeight: element.clientHeight, scrollHeight: element.scrollHeight,
+        })),
+        footers: Array.from(document.querySelectorAll('.ant-modal .sb-form-footer'), rect),
+      }
+    }).catch((failure) => ({ snapshotError: failure.message })) : {}
+    const diagnostic = { fixture: currentFixture, step: currentStep, ...state }
     throw new Error(`${error.stack}\n诊断：${JSON.stringify(diagnostic)}\nVite logs:\n${vite.getLogs()}`)
   } finally {
     try {

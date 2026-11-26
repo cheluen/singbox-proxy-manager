@@ -1,6 +1,19 @@
 import { randomInt } from 'node:crypto'
 import net from 'node:net'
 
+export async function findFreePort() {
+  const server = net.createServer()
+  await new Promise((resolve, reject) => {
+    server.once('error', reject)
+    server.listen(0, '127.0.0.1', resolve)
+  })
+  const port = server.address().port
+  await new Promise((resolve, reject) => {
+    server.close((error) => error ? reject(error) : resolve())
+  })
+  return port
+}
+
 // 使用独立的非临时端口段，避免测试与验收实例或客户端源端口争用。
 export async function findTestPortRange(size = 64) {
   if (!Number.isSafeInteger(size) || size < 1 || size > 512) throw new RangeError('测试端口段大小无效')

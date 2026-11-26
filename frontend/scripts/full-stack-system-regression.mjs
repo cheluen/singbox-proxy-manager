@@ -1,14 +1,13 @@
 import assert from 'node:assert/strict'
 import fs from 'node:fs'
 import http from 'node:http'
-import net from 'node:net'
 import os from 'node:os'
 import path from 'node:path'
 import process from 'node:process'
 import { randomBytes } from 'node:crypto'
 import { spawn } from 'node:child_process'
 import { fileURLToPath } from 'node:url'
-import { findTestPortRange } from './test-ports.mjs'
+import { findFreePort, findTestPortRange } from './test-ports.mjs'
 import { launchBrowser, stopProcess } from './test-harness.mjs'
 import { isExpectedSystemBrowserError } from './system-browser-errors.mjs'
 import { PROJECT_MARK_FILE, PROJECT_NAME } from '../src/core/project.js'
@@ -29,12 +28,6 @@ const listen = (server) => new Promise((resolve, reject) => {
   server.once('error', reject)
   server.listen(0, '127.0.0.1', () => resolve(server.address().port))
 })
-const freePort = async () => {
-  const server = net.createServer()
-  const port = await listen(server)
-  await new Promise((resolve) => server.close(resolve))
-  return port
-}
 const wait = async (predicate, description, timeout = 40000) => {
   const deadline = Date.now() + timeout
   while (Date.now() < deadline) {
@@ -86,7 +79,7 @@ const started = Date.now()
 
 try {
   const targetPort = await listen(target)
-  const port = await freePort()
+  const port = await findFreePort()
   const base = `http://127.0.0.1:${port}`
   const environment = { ...process.env }
   if (MODE === 'sqlite') for (const key of DATABASE_KEYS) delete environment[key]

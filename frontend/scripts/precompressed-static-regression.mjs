@@ -3,12 +3,12 @@ import { execFileSync, spawn } from 'node:child_process'
 import { randomUUID } from 'node:crypto'
 import { accessSync, constants, copyFileSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync } from 'node:fs'
 import http from 'node:http'
-import net from 'node:net'
 import os from 'node:os'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { brotliDecompressSync, gunzipSync } from 'node:zlib'
 import { launchBrowser, stopProcess } from './test-harness.mjs'
+import { findFreePort } from './test-ports.mjs'
 
 const frontend = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
 const binary = path.resolve(process.env.SBPM_TEST_BINARY || path.join(frontend, '..', 'sb-proxy'))
@@ -17,10 +17,6 @@ const temporary = mkdtempSync(path.join(process.platform === 'linux' ? '/tmp' : 
 const password = randomUUID()
 const results = { httpChecks: 0, modes: [], browser: null }
 const delay = () => new Promise((resolve) => setTimeout(resolve, 100))
-const freePort = () => new Promise((resolve, reject) => {
-  const server = net.createServer().on('error', reject)
-  server.listen(0, '127.0.0.1', () => { const port = server.address().port; server.close(() => resolve(port)) })
-})
 const request = (origin, endpoint, headers = {}, method = 'GET') => new Promise((resolve, reject) => {
   const outgoing = http.request(origin + endpoint, { method, headers }, (response) => {
     const chunks = []
@@ -86,7 +82,7 @@ async function checkBrowser(origin) {
 }
 
 async function verifyMode(threshold) {
-  const origin = `http://127.0.0.1:${await freePort()}`
+  const origin = `http://127.0.0.1:${await findFreePort()}`
   const environment = { ...process.env, CONFIG_DIR: path.join(temporary, `config-${threshold}`), PORT: new URL(origin).port, BIND_ADDRESS: '127.0.0.1', ACCEPT_USER_AGREEMENT: 'true', ADMIN_PASSWORD: password, SBPM_UPDATE_CHECK_DISABLED: 'true', GOMAXPROCS: '2' }
   for (const name of ['DATABASE_URL', 'POSTGRES_DATABASE_URL', 'POSTGRES_URL', 'PGSQL_DATABASE_URL', 'PGSQL', 'MYSQL_DATABASE_URL', 'MYSQL', 'TURSO_DATABASE_URL', 'TURSO_AUTH_TOKEN', 'MYSQL_DATABASE_NAME', 'SBPM_NODES_VIRTUAL_THRESHOLD', 'SBPM_BATCH_CHECK_IP_CONCURRENCY']) environment[name] = ''
   if (threshold === 42) environment.SBPM_NODES_VIRTUAL_THRESHOLD = '42'

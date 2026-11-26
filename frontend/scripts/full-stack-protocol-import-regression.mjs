@@ -1,6 +1,6 @@
-import { legacyClick as clickVisibleButton, editNode as openNodeEditor, waitOverlaysClosed, toggle, clickControl, setInput as setControlInput } from './ui-driver.mjs'
-import { findTestPortRange } from './test-ports.mjs'
-import { launchBrowser, stopProcess } from './test-harness.mjs'
+import { clickControl, clickText, editNode as openNodeEditor, openBatchImport, saveNodeForm, setInput, sleep, toggle, waitOverlaysClosed } from './ui-driver.mjs'
+import { findFreePort, findTestPortRange } from './test-ports.mjs'
+import { launchBrowser, stopProcess, waitForHTTP } from './test-harness.mjs'
 import fs from 'node:fs'
 import http from 'node:http'
 import net from 'node:net'
@@ -27,8 +27,6 @@ const assert = (condition, message) => {
   if (!condition) throw new Error(message)
 }
 
-const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms))
-
 const listen = (server) => new Promise((resolve, reject) => {
   server.once('error', reject)
   server.listen(0, '127.0.0.1', () => {
@@ -42,13 +40,6 @@ const closeServer = (server) => new Promise((resolve) => {
   server.close(resolve)
   server.closeAllConnections?.()
 })
-
-const reservePort = async () => {
-  const server = net.createServer()
-  const port = await listen(server)
-  await closeServer(server)
-  return port
-}
 
 const waitForUpstream = async (child, ports) => {
   const deadline = Date.now() + 15000
@@ -67,29 +58,6 @@ const waitForUpstream = async (child, ports) => {
       await sleep(100)
     }
   }
-}
-
-const setInput = async (page, selector, value) => {
-  await page.$eval(selector, (input, nextValue) => {
-    const prototype = input instanceof HTMLTextAreaElement ? HTMLTextAreaElement.prototype : HTMLInputElement.prototype
-    Object.getOwnPropertyDescriptor(prototype, 'value').set.call(input, String(nextValue))
-    input.dispatchEvent(new Event('input', { bubbles: true }))
-    input.dispatchEvent(new Event('change', { bubbles: true }))
-  }, value)
-}
-
-const waitForHTTP = async (url, timeoutMs) => {
-  const deadline = Date.now() + timeoutMs
-  while (Date.now() < deadline) {
-    try {
-      const response = await fetch(url)
-      if (response.status < 500) return
-    } catch {
-      // Retry until the real backend is listening.
-    }
-    await sleep(200)
-  }
-  throw new Error(`Timed out waiting for ${url}`)
 }
 
 if (!BACKEND_BINARY || !SINGBOX_BINARY) {
@@ -126,7 +94,7 @@ try {
   })
   backend.stdout.on('data', (chunk) => backendLogs.push(chunk.toString()))
   backend.stderr.on('data', (chunk) => backendLogs.push(chunk.toString()))
-  await waitForHTTP(`${BASE_URL}/api/version`, 30000)
+  await waitForHTTP(`${BASE_URL}/api/version`, { timeoutMs: 30000 })
   for (const legacyRoute of [
     { method: 'GET', path: '/api/auth/status' },
     { method: 'POST', path: '/api/setup/admin-password' },
@@ -200,19 +168,19 @@ try {
     await page.screenshot({ path: path.join(ARTIFACT_DIR, 'login-mobile.png'), fullPage: true })
   }
   await page.setViewport({ width: 1440, height: 1000 })
-  await page.type('input[type="password"]', ADMIN_PASSWORD)
-  await clickVisibleButton(page, 'Login')
+  await setInput(page, 'input[type="password"]', ADMIN_PASSWORD)
+  await clickText(page, 'Login')
   await page.waitForSelector('[data-testid="nodes-add-menu"]', { visible: true, timeout: 15000 })
   assert(legacyAuthRequests.length === 0, `legacy auth requests: ${legacyAuthRequests.join(', ')}`)
 
   const initialStartPort = await findTestPortRange()
   await clickControl(page, '[data-testid="group-settings-button"]')
-  await clickVisibleButton(page, 'Group Settings')
-  await setControlInput(page, '[data-testid="group-start-port"]', initialStartPort)
+  await clickText(page, 'Group Settings')
+  await setInput(page, '[data-testid="group-start-port"]', initialStartPort)
   await clickControl(page, '[data-testid="group-form-submit"]')
   await waitOverlaysClosed(page)
 
-  await clickVisibleButton(page, 'Batch Import')
+  await openBatchImport(page)
   await page.waitForSelector('.ant-modal textarea', { visible: true, timeout: 10000 })
   const content = [
     'socks5://user:pass@127.0.0.1:1080#system-valid-socks',
@@ -221,13 +189,13 @@ try {
     'anytls://@127.0.0.1:443/?insecure=1#system-empty-anytls',
     'vless://00000000-0000-0000-0000-000000000000@127.0.0.1:443?security=tls&flow=unsupported-flow&detour=system-valid-socks#system-bad-vless',
   ].join('\n')
-  await page.type('.ant-modal textarea', content)
+  await setInput(page, '.ant-modal textarea', content)
 
   const enabledCheckbox = await page.$('.ant-modal .ant-checkbox-input')
   if (enabledCheckbox && (await enabledCheckbox.evaluate((input) => input.checked))) {
-    await page.click('.ant-modal .ant-checkbox')
+    await clickControl(page, '.ant-modal .ant-checkbox')
   }
-  await clickVisibleButton(page, 'Confirm')
+  await clickControl(page, '[data-testid="batch-import-submit"]')
 
   const deadline = Date.now() + 30000
   while (!batchResponse && Date.now() < deadline) {
@@ -254,7 +222,8 @@ try {
     if (ARTIFACT_DIR) await page.screenshot({ path: path.join(ARTIFACT_DIR, `import-errors-${width}.png`), fullPage: true })
   }
   await page.setViewport({ width: 1440, height: 1000 })
-  await clickVisibleButton(page, 'Cancel')
+  await clickText(page, 'Close')
+  await waitOverlaysClosed(page)
 
   const state = await page.evaluate(async () => {
     const token = localStorage.getItem('token') || ''
@@ -296,12 +265,12 @@ try {
     assert(outbound, `missing runtime outbound for ${node.name}`)
     return outbound
   }
-  const saveForm = async (method, endpoint) => {
+  const saveForm = async (method, endpoint, options) => {
     const [response] = await Promise.all([
       page.waitForResponse((response) =>
         response.request().method() === method && response.url() === `${BASE_URL}/api${endpoint}`
       ),
-      clickVisibleButton(page, 'Save'),
+      saveNodeForm(page, options),
     ])
     const body = await response.json()
     assert(response.status() < 400, `form save failed: ${JSON.stringify(body)}`)
@@ -318,16 +287,17 @@ try {
   - {name: pinned-trojan, type: trojan, server: proxy.example, port: 443, password: test, fingerprint: "${'ab'.repeat(32)}", client-fingerprint: chrome, skip-cert-verify: true}
   - {name: encrypted-socks, type: socks5, server: proxy.example, port: 443, tls: true}
 `
-  await clickVisibleButton(page, 'Batch Import')
+  await openBatchImport(page)
   await page.waitForSelector('.ant-modal textarea', { visible: true })
   await setInput(page, '.ant-modal textarea', securityContent)
-  await clickVisibleButton(page, 'Confirm')
+  await clickControl(page, '[data-testid="batch-import-submit"]')
   await page.waitForFunction(() => document.querySelector('[data-testid="batch-import-errors"]')?.textContent.includes('SOCKS TLS'))
   const securityErrors = await page.$eval('[data-testid="batch-import-errors"]', (element) => element.textContent)
   assert(securityErrors.includes('certificate fingerprint pinning'), 'certificate pin rejection is missing from the UI')
   assert(await page.$eval('.ant-modal textarea', (element) => element.value) === securityContent, 'fully failed batch erased input')
   assert((await apiRequest('GET', '/nodes')).length === 4, 'unsafe imports were persisted')
-  await clickVisibleButton(page, 'Cancel')
+  await clickText(page, 'Close')
+  await waitOverlaysClosed(page)
 
   const occupiedPort = await listen(occupiedPortServer)
   const defaultGroup = (await apiRequest('GET', '/node-groups'))[0]
@@ -344,8 +314,8 @@ try {
   // 占用端口测试使用系统临时端口范围，后续协议测试恢复原范围以避免客户端源端口竞争。
   await apiRequest('PATCH', `/node-groups/${defaultGroup.id}`, { start_port: defaultGroup.start_port })
 
-  const socksPort = await reservePort()
-  const vmessPort = await reservePort()
+  const socksPort = await findFreePort()
+  const vmessPort = await findFreePort()
   const vmessUUID = '00000000-0000-0000-0000-000000000019'
   const upstreamConfigPath = path.join(configDir, 'upstream-test.json')
   fs.writeFileSync(upstreamConfigPath, JSON.stringify({
@@ -366,14 +336,14 @@ try {
     config: JSON.stringify({ server: '127.0.0.1', server_port: socksPort }),
   })
   await page.reload({ waitUntil: 'networkidle2' })
-  await clickVisibleButton(page, 'Import Node')
+  await clickControl(page, '[data-testid="nodes-add-node"]')
   await page.waitForSelector('#sb-link-input', { visible: true })
   await setInput(page, '#sb-link-input', `socks5://127.0.0.1:${socksPort}?detour=chain-target#single-detour`)
-  await clickVisibleButton(page, 'Parse Link')
+  await clickText(page, 'Parse Link')
   await page.waitForFunction(() => document.querySelector('#name')?.value === 'single-detour')
   await page.waitForSelector('#auth_enabled', { visible: true })
   await toggle(page, '#auth_enabled', false)
-  const singleNode = await saveForm('POST', '/nodes')
+  const singleNode = await saveForm('POST', '/nodes', { confirmOpenAuth: true })
   const batchChain = await apiRequest('POST', '/nodes/batch-import', {
     content: `socks5://127.0.0.1:${socksPort}?detour=chain-target#batch-detour`, enabled: true,
   })
@@ -429,8 +399,7 @@ try {
     })
     await editNode(node)
     const select = `.ant-select:has(#${field})`
-    await page.locator(select).hover()
-    await page.locator(`${select} .ant-select-clear`).click()
+    await clickControl(page, `${select} .ant-select-clear`)
     await page.waitForFunction((fieldID) => {
       const text = document.getElementById(fieldID)?.closest('.ant-select')
         ?.querySelector('.ant-select-selection-item')?.textContent?.trim() || ''

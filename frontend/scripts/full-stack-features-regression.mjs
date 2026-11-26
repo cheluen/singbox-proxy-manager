@@ -9,7 +9,7 @@ import path from 'node:path'
 import process from 'node:process'
 import { randomBytes } from 'node:crypto'
 import { execFileSync, spawn } from 'node:child_process'
-import { findTestPortRange } from './test-ports.mjs'
+import { findFreePort, findTestPortRange } from './test-ports.mjs'
 import { launchBrowser, stopProcess } from './test-harness.mjs'
 import { clickControl, closeOverlay, setInput, sleep, toggle, waitOverlaysClosed } from './ui-driver.mjs'
 
@@ -32,13 +32,6 @@ const closeServer = (server) => new Promise((resolve) => {
   server.close(resolve)
   server.closeAllConnections?.()
 })
-
-const reservePort = async () => {
-  const server = net.createServer()
-  const port = await listen(server)
-  await closeServer(server)
-  return port
-}
 
 const wait = async (predicate, label, timeout = 30000) => {
   const deadline = Date.now() + timeout
@@ -179,7 +172,7 @@ try {
   const socksPortGroup = await listen(socksGroup)
   const socksPortCustom = await listen(socksCustom)
 
-  const unusedPort = await reservePort()
+  const unusedPort = await findFreePort()
   let subHits = 0
   subServer = http.createServer((_req, res) => {
     subHits += 1
@@ -188,7 +181,7 @@ try {
   })
   const subPort = await listen(subServer)
 
-  const httpPort = await reservePort()
+  const httpPort = await findFreePort()
   const base = `http://127.0.0.1:${httpPort}`
   const env = { ...process.env }
   for (const key of ['DATABASE_URL', 'POSTGRES_DATABASE_URL', 'POSTGRES_URL', 'PGSQL_DATABASE_URL', 'PGSQL', 'MYSQL_DATABASE_URL', 'MYSQL', 'TURSO_DATABASE_URL', 'TURSO_AUTH_TOKEN']) {

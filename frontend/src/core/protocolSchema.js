@@ -177,8 +177,6 @@ const PROTOCOLS = {
 
 export const POLICY_NODE_TYPES = new Set(['failover', 'loadbalance'])
 export const isPolicyType = (type) => POLICY_NODE_TYPES.has(String(type || '').toLowerCase())
-export const proxyTypes = Object.entries(PROTOCOLS).map(([value, { label }]) => ({ value, label }))
-export const upstreamProxyTypes = proxyTypes.filter((item) => !POLICY_NODE_TYPES.has(item.value))
 export const localizedProxyTypes = (t, { includePolicy = true } = {}) =>
   Object.entries(PROTOCOLS)
     .filter(([value]) => includePolicy || !POLICY_NODE_TYPES.has(value))

@@ -5,6 +5,7 @@ import { ArrowDown, ArrowUp, BarChart3, Database, HardDrive, RefreshCw, ScrollTe
 import { useTranslation } from 'react-i18next'
 import api from '../core/api'
 import { formatBytes } from '../core/format'
+import { createLatestRequestCoordinator } from '../core/latestRequest'
 import { formatDateTime } from '../core/nodeView'
 import { EmptyState, Segmented, Spinner } from '../shared/primitives'
 
@@ -341,8 +342,10 @@ export default function LogsPanel({ ctl }) {
   const [trafficError, setTrafficError] = useState('')
   const [loadingTraffic, setLoadingTraffic] = useState(false)
 
-  const eventsReqRef = useRef({ seq: 0, controller: null })
-  const trafficReqRef = useRef({ seq: 0, controller: null })
+  const requestsRef = useRef(null)
+  if (!requestsRef.current) {
+    requestsRef.current = createLatestRequestCoordinator()
+  }
 
   const loadSettings = useCallback(async () => {
     setLoadingSettings(true)
@@ -359,10 +362,6 @@ export default function LogsPanel({ ctl }) {
   }, [t])
 
   const loadEvents = useCallback(async ({ cursor = '', append = false } = {}) => {
-    eventsReqRef.current.controller?.abort()
-    const controller = new AbortController()
-    const seq = eventsReqRef.current.seq + 1
-    eventsReqRef.current = { seq, controller }
     if (append) {
       setLoadingMore(true)
       setLoadMoreError('')
@@ -371,72 +370,75 @@ export default function LogsPanel({ ctl }) {
       setEventsError('')
       setLoadMoreError('')
     }
-    try {
-      const params = { limit: LOG_PAGE_SIZE }
-      if (source) params.source = source
-      if (level) params.level = level
-      if (keyword.trim()) params.q = keyword.trim()
-      if (clientIP.trim()) params.client_ip = clientIP.trim()
-      if (cursor) params.cursor = cursor
-      const response = await api.get('/logs', { params, signal: controller.signal })
-      if (eventsReqRef.current.seq !== seq) return
-      const data = response.data || {}
-      const list = Array.isArray(data.items) ? data.items : []
-      setEvents((prev) => (append ? [...prev, ...list] : list))
-      setNextCursor(data.next_cursor || '')
-      setEventsMeta({ persisted: Boolean(data.persisted), dropped: Number(data.dropped_events) || 0 })
-      setEventsError('')
-      setLoadMoreError('')
-    } catch (error) {
-      if (controller.signal.aborted || error?.code === 'ERR_CANCELED' || eventsReqRef.current.seq !== seq) return
-      const msg = error?.response?.data?.error || t('network_error')
-      if (append) {
-        setLoadMoreError(msg)
-      } else {
-        setEvents([])
-        setNextCursor('')
-        setEventsError(msg)
-      }
-    } finally {
-      if (eventsReqRef.current.seq === seq) {
-        setLoadingEvents(false)
-        setLoadingMore(false)
-      }
-    }
+    const params = { limit: LOG_PAGE_SIZE }
+    if (source) params.source = source
+    if (level) params.level = level
+    if (keyword.trim()) params.q = keyword.trim()
+    if (clientIP.trim()) params.client_ip = clientIP.trim()
+    if (cursor) params.cursor = cursor
+    await requestsRef.current.run(
+      'events',
+      (signal) => api.get('/logs', { params, signal }),
+      (response) => {
+        const data = response.data || {}
+        const list = Array.isArray(data.items) ? data.items : []
+        setEvents((prev) => (append ? [...prev, ...list] : list))
+        setNextCursor(data.next_cursor || '')
+        setEventsMeta({ persisted: Boolean(data.persisted), dropped: Number(data.dropped_events) || 0 })
+        setEventsError('')
+        setLoadMoreError('')
+      },
+      {
+        onError: (error) => {
+          if (error?.code === 'ERR_CANCELED') return
+          const msg = error?.response?.data?.error || t('network_error')
+          if (append) {
+            setLoadMoreError(msg)
+          } else {
+            setEvents([])
+            setNextCursor('')
+            setEventsError(msg)
+          }
+        },
+        onSettled: () => {
+          setLoadingEvents(false)
+          setLoadingMore(false)
+        },
+      },
+    )
   }, [clientIP, keyword, level, source, t])
 
   const loadTraffic = useCallback(async () => {
-    trafficReqRef.current.controller?.abort()
-    const controller = new AbortController()
-    const seq = trafficReqRef.current.seq + 1
-    trafficReqRef.current = { seq, controller }
     setLoadingTraffic(true)
     setTrafficError('')
-    try {
-      const preset = RANGE_PRESETS.find((item) => item.key === rangePreset) || RANGE_PRESETS[1]
-      const now = new Date()
-      const from = new Date(now.getTime() - preset.ms).toISOString()
-      const params = { from, to: now.toISOString() }
-      if (trafficIP.trim()) params.client_ip = trafficIP.trim()
-      if (trafficPort.trim()) params.inbound_port = trafficPort.trim()
-      if (trafficOutbound) params.outbound_node_id = trafficOutbound
-      const response = await api.get('/logs/traffic', { params, signal: controller.signal })
-      if (trafficReqRef.current.seq !== seq) return
-      setTraffic(response.data || null)
-    } catch (error) {
-      if (controller.signal.aborted || error?.code === 'ERR_CANCELED' || trafficReqRef.current.seq !== seq) return
-      setTraffic(null)
-      setTrafficError(error?.response?.data?.error || t('network_error'))
-    } finally {
-      if (trafficReqRef.current.seq === seq) {
-        setLoadingTraffic(false)
-      }
-    }
+    const preset = RANGE_PRESETS.find((item) => item.key === rangePreset) || RANGE_PRESETS[1]
+    const now = new Date()
+    const from = new Date(now.getTime() - preset.ms).toISOString()
+    const params = { from, to: now.toISOString() }
+    if (trafficIP.trim()) params.client_ip = trafficIP.trim()
+    if (trafficPort.trim()) params.inbound_port = trafficPort.trim()
+    if (trafficOutbound) params.outbound_node_id = trafficOutbound
+    await requestsRef.current.run(
+      'traffic',
+      (signal) => api.get('/logs/traffic', { params, signal }),
+      (response) => {
+        setTraffic(response.data || null)
+      },
+      {
+        onError: (error) => {
+          if (error?.code === 'ERR_CANCELED') return
+          setTraffic(null)
+          setTrafficError(error?.response?.data?.error || t('network_error'))
+        },
+        onSettled: () => {
+          setLoadingTraffic(false)
+        },
+      },
+    )
   }, [rangePreset, t, trafficIP, trafficOutbound, trafficPort])
 
   useEffect(() => () => {
-    eventsReqRef.current.controller?.abort()
-    trafficReqRef.current.controller?.abort()
+    requestsRef.current?.abortAll()
   }, [])
 
   useEffect(() => {

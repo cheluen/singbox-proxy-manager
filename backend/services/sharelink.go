@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"maps"
+	"math"
 	"net"
 	"net/url"
 	"strconv"
@@ -473,14 +474,20 @@ func intFromAny(value any) int {
 }
 
 func parseCommaSeparatedList(raw string) []string {
-	parts := strings.FieldsFunc(raw, func(char rune) bool {
-		return char == ',' || char == '\n' || char == '\r'
+	return models.SplitCompatibilityList(raw)
+}
+
+func shareCompatibilityList(raw string) []string {
+	if strings.TrimSpace(raw) == "" {
+		return nil
+	}
+	parts := strings.FieldsFunc(raw, func(character rune) bool {
+		return character == ',' || character == '\n' || character == '\r'
 	})
 	result := make([]string, 0, len(parts))
 	for _, part := range parts {
-		part = strings.TrimSpace(part)
-		if part != "" {
-			result = append(result, part)
+		if value := strings.TrimSpace(part); value != "" {
+			result = append(result, value)
 		}
 	}
 	return result
@@ -576,7 +583,11 @@ func normalizeDurationString(raw string, numericUnit time.Duration) string {
 		if number <= 0 {
 			return ""
 		}
-		duration := time.Duration(number * float64(numericUnit))
+		nanoseconds := number * float64(numericUnit)
+		if math.IsNaN(nanoseconds) || math.IsInf(nanoseconds, 0) || nanoseconds >= 1<<63 {
+			return raw
+		}
+		duration := time.Duration(nanoseconds)
 		return duration.String()
 	}
 	if duration, err := time.ParseDuration(raw); err == nil && duration > 0 {
@@ -854,48 +865,6 @@ func nativeECHShareValue(config []string) string {
 		return ""
 	}
 	return base64.StdEncoding.EncodeToString(configList)
-}
-
-func buildTLSOptions(enabled bool, disableSNI bool, serverName string, insecure bool, alpn []string, fingerprint string, realityPublicKey string, realityShortID string, echConfig string) (map[string]any, error) {
-	if !enabled && !disableSNI && serverName == "" && !insecure && len(alpn) == 0 && fingerprint == "" && echConfig == "" && realityPublicKey == "" {
-		return nil, nil
-	}
-	if strings.TrimSpace(realityPublicKey) != "" && strings.TrimSpace(echConfig) != "" {
-		return nil, fmt.Errorf("reality is incompatible with ECH in sing-box 1.12.12")
-	}
-	options := map[string]any{"enabled": enabled}
-	if disableSNI {
-		options["disable_sni"] = true
-	}
-	setMapIfNotEmpty(options, "server_name", serverName)
-	if insecure {
-		options["insecure"] = true
-	}
-	if len(alpn) > 0 {
-		options["alpn"] = alpn
-	}
-	fingerprint = normalizeFingerprint(fingerprint)
-	if fingerprint != "" {
-		options["utls"] = map[string]any{"enabled": true, "fingerprint": fingerprint}
-	}
-	if realityPublicKey != "" {
-		options["reality"] = map[string]any{
-			"enabled":    true,
-			"public_key": realityPublicKey,
-			"short_id":   realityShortID,
-		}
-		if _, ok := options["utls"]; !ok {
-			options["utls"] = map[string]any{"enabled": true, "fingerprint": "chrome"}
-		}
-	}
-	if strings.TrimSpace(echConfig) != "" {
-		_, nativeConfig, err := normalizeShareECHConfigList(echConfig)
-		if err != nil {
-			return nil, err
-		}
-		options["ech"] = map[string]any{"enabled": true, "config": nativeConfig}
-	}
-	return options, nil
 }
 
 type shareTLSParameters struct {
@@ -1515,7 +1484,7 @@ func parseVLESSLink(link string) (interface{}, string, string, error) {
 		serverNamePresent:  sniPresent,
 		insecure:           insecure,
 		insecurePresent:    insecurePresent,
-		alpn:               parseCommaSeparatedList(alpnRaw),
+		alpn:               shareCompatibilityList(alpnRaw),
 		alpnPresent:        alpnPresent,
 		fingerprint:        fingerprintRaw,
 		fingerprintPresent: fingerprintPresent,
@@ -1558,7 +1527,7 @@ func parseVLESSLink(link string) (interface{}, string, string, error) {
 		config.HTTPUpgradeHost = config.Host
 	}
 	if transportType == "http" {
-		if hosts := nativeStringSlice(transportOptions["host"]); len(hosts) > 0 {
+		if hosts := shareCompatibilityList(params.Get("host")); len(hosts) > 0 {
 			config.Host = strings.Join(hosts, ",")
 		}
 	}
@@ -1656,6 +1625,14 @@ func parseVMESSLink(link string) (interface{}, string, string, error) {
 			return nil, "", "", err
 		}
 	}
+	for name, value := range rawFields {
+		for _, canonical := range []string{"tls", "sni", "allowInsecure", "alpn", "fp", "pbk", "sid", "ech"} {
+			if strings.EqualFold(name, canonical) {
+				rawFields[canonical] = value
+				break
+			}
+		}
+	}
 
 	name := vmessJSON.PS
 	if name == "" {
@@ -1675,9 +1652,6 @@ func parseVMESSLink(link string) (interface{}, string, string, error) {
 	if err != nil {
 		return nil, "", "", err
 	}
-	if transportSecurity == "reality" && strings.TrimSpace(vmessJSON.PublicKey) == "" {
-		return nil, "", "", fmt.Errorf("invalid vmess reality link: missing public key")
-	}
 	transportType, transportOptions, err := buildLegacyVMessTransportOptions(
 		vmessJSON.Net,
 		vmessJSON.Type,
@@ -1695,8 +1669,56 @@ func parseVMESSLink(link string) (interface{}, string, string, error) {
 	if err != nil {
 		return nil, "", "", err
 	}
+	var insecure bool
+	switch value := vmessJSON.Insecure.(type) {
+	case bool:
+		insecure = value
+	case string:
+		insecure = value == "1" || value == "true"
+	case float64:
+		insecure = value == 1
+	}
+	alpn := shareCompatibilityList(vmessJSON.ALPN)
 	fingerprint := normalizeFingerprint(vmessJSON.FP)
-	alpn := parseCommaSeparatedList(vmessJSON.ALPN)
+	modePresent := rawFields["tls"] != nil
+	tlsEnabled := transportSecurity == "tls" || transportSecurity == "reality"
+	var nativeTLS models.NativeOptions
+	if tlsEnabled || vmessJSON.SNI != "" || insecure || len(alpn) > 0 || fingerprint != "" || vmessJSON.PublicKey != "" || vmessJSON.ECH != "" {
+		nativeTLS = models.NativeOptions{"enabled": tlsEnabled || (!modePresent && strings.TrimSpace(vmessJSON.PublicKey) != "")}
+	}
+	tlsResult, err := reconcileShareTLSOptions(nativeTLS, shareTLSParameters{
+		protocol:           "vmess",
+		mode:               transportSecurity,
+		modePresent:        modePresent,
+		defaultMode:        "none",
+		serverName:         vmessJSON.SNI,
+		serverNamePresent:  rawFields["sni"] != nil,
+		insecure:           insecure,
+		insecurePresent:    insecure,
+		alpn:               alpn,
+		alpnPresent:        rawFields["alpn"] != nil,
+		fingerprint:        fingerprint,
+		fingerprintPresent: rawFields["fp"] != nil,
+		publicKey:          vmessJSON.PublicKey,
+		publicKeyPresent:   rawFields["pbk"] != nil,
+		shortID:            vmessJSON.ShortID,
+		shortIDPresent:     rawFields["sid"] != nil && strings.TrimSpace(vmessJSON.PublicKey) != "",
+		echConfig:          vmessJSON.ECH,
+		echPresent:         rawFields["ech"] != nil,
+	})
+	if err != nil {
+		return nil, "", "", err
+	}
+	setMapIfNotEmpty(tlsResult.options, "server_name", vmessJSON.SNI)
+	if tlsResult.mode == "reality" {
+		tlsResult.options["enabled"] = tlsEnabled
+		reality := ensureShareTLSNested(&tlsResult.options, "reality")
+		reality["public_key"] = vmessJSON.PublicKey
+		reality["short_id"] = vmessJSON.ShortID
+		if tlsResult.fingerprint == "" {
+			tlsResult.options["utls"] = map[string]any{"enabled": true, "fingerprint": "chrome"}
+		}
+	}
 
 	config := models.VMESSConfig{
 		Server:         vmessJSON.Add,
@@ -1707,24 +1729,16 @@ func parseVMESSLink(link string) (interface{}, string, string, error) {
 		Network:        transportType,
 		TLS:            transportSecurity,
 		SNI:            vmessJSON.SNI,
-		ALPN:           strings.Join(alpn, ","),
-		Fingerprint:    fingerprint,
+		ALPN:           strings.Join(tlsResult.alpn, ","),
+		Fingerprint:    tlsResult.fingerprint,
+		Insecure:       tlsResult.insecure,
+		TLSOptions:     tlsResult.options,
 		Path:           vmessJSON.Path,
 		Host:           vmessJSON.Host,
 		HeaderType:     vmessJSON.Type,
 		Seed:           vmessJSON.Seed,
 		Method:         vmessJSON.Method,
 		PacketEncoding: packetEncoding,
-	}
-
-	// Parse insecure
-	switch v := vmessJSON.Insecure.(type) {
-	case bool:
-		config.Insecure = v
-	case string:
-		config.Insecure = v == "1" || v == "true"
-	case float64:
-		config.Insecure = v == 1
 	}
 
 	// Parse max early data
@@ -1765,23 +1779,13 @@ func parseVMESSLink(link string) (interface{}, string, string, error) {
 		config.HTTPPath = []string{vmessJSON.Path}
 	}
 	if transportType == "http" {
-		if hosts := nativeStringSlice(transportOptions["host"]); len(hosts) > 0 {
+		if hosts := shareCompatibilityList(vmessJSON.Host); len(hosts) > 0 {
 			config.Host = strings.Join(hosts, ",")
 		}
 	}
 	if transportOptions != nil {
 		config.TransportOptions = models.NativeOptions(transportOptions)
 	}
-	security := transportSecurity
-	tlsEnabled := security == "tls" || security == "reality"
-	tlsOptions, err := buildTLSOptions(tlsEnabled, false, config.SNI, config.Insecure, alpn, fingerprint, vmessJSON.PublicKey, vmessJSON.ShortID, vmessJSON.ECH)
-	if err != nil {
-		return nil, "", "", fmt.Errorf("invalid vmess ECH config: %w", err)
-	}
-	if tlsOptions != nil {
-		config.TLSOptions = models.NativeOptions(tlsOptions)
-	}
-
 	return config, "vmess", name, nil
 }
 
@@ -1843,7 +1847,7 @@ func parseVMESSURLLink(link string) (interface{}, string, string, error) {
 		serverNamePresent:  sniPresent,
 		insecure:           insecure,
 		insecurePresent:    insecurePresent,
-		alpn:               parseCommaSeparatedList(alpnRaw),
+		alpn:               shareCompatibilityList(alpnRaw),
 		alpnPresent:        alpnPresent,
 		fingerprint:        fingerprintRaw,
 		fingerprintPresent: fingerprintPresent,
@@ -1888,7 +1892,7 @@ func parseVMESSURLLink(link string) (interface{}, string, string, error) {
 		config.Method = params.Get("method")
 	}
 	if transportType == "http" {
-		if hosts := nativeStringSlice(transportOptions["host"]); len(hosts) > 0 {
+		if hosts := shareCompatibilityList(params.Get("host")); len(hosts) > 0 {
 			config.Host = strings.Join(hosts, ",")
 		}
 	}
@@ -1907,28 +1911,15 @@ func parseVMESSURLLink(link string) (interface{}, string, string, error) {
 		config.OutboundNetwork = models.ListableString(outboundNetwork)
 	}
 	config.TLSOptions = tlsResult.options
-	if nativeTransport, present, nativeErr := parseNativeOptionsQuery(params, "transport_options"); nativeErr != nil {
-		return nil, "", "", nativeErr
+	if nativeTransport, nativeType, present, nativeErr := parseV2RayNativeTransportQuery(params, config.Network); nativeErr != nil {
+		return nil, "", "", fmt.Errorf("vmess: %w", nativeErr)
 	} else if present {
-		nativeType := models.NormalizeTransportType(nativeString(nativeTransport["type"]))
-		if !supportsV2RayTransport(nativeType) {
-			return nil, "", "", errors.New("invalid vmess transport_options type")
-		}
-		if config.Network != "" && config.Network != nativeType {
-			return nil, "", "", fmt.Errorf("vmess transport type conflicts with transport_options")
-		}
 		config.Network = nativeType
-		nativeTransport["type"] = nativeType
 		config.TransportOptions = nativeTransport
 	}
-	if rawMultiplex := strings.TrimSpace(params.Get("multiplex")); rawMultiplex != "" {
-		var multiplex map[string]interface{}
-		if err := json.Unmarshal([]byte(rawMultiplex), &multiplex); err != nil {
-			return nil, "", "", errors.New("invalid vmess multiplex options JSON")
-		}
-		if multiplex == nil {
-			return nil, "", "", fmt.Errorf("invalid vmess multiplex options: expected object")
-		}
+	if multiplex, present, multiplexErr := parseMultiplexQuery(params); multiplexErr != nil {
+		return nil, "", "", fmt.Errorf("vmess: %w", multiplexErr)
+	} else if present {
 		config.MultiplexConfig = multiplex
 	}
 	if err := applyURLDialerOptions(&config.DialerOptions, params); err != nil {
@@ -2046,7 +2037,7 @@ func parseTrojanLink(link string) (interface{}, string, string, error) {
 		serverNamePresent:  sniPresent,
 		insecure:           insecure,
 		insecurePresent:    insecurePresent,
-		alpn:               parseCommaSeparatedList(alpnRaw),
+		alpn:               shareCompatibilityList(alpnRaw),
 		alpnPresent:        alpnPresent,
 		fingerprint:        fingerprintRaw,
 		fingerprintPresent: fingerprintPresent,
@@ -2077,7 +2068,7 @@ func parseTrojanLink(link string) (interface{}, string, string, error) {
 		HTTPMethod:  params.Get("method"),
 	}
 	if network == "http" {
-		if hosts := nativeStringSlice(transportOptions["host"]); len(hosts) > 0 {
+		if hosts := shareCompatibilityList(params.Get("host")); len(hosts) > 0 {
 			cfg.Host = strings.Join(hosts, ",")
 		}
 	}
@@ -2148,7 +2139,7 @@ func parseHysteria2Link(link string) (interface{}, string, string, error) {
 		serverNamePresent:  sniPresent,
 		insecure:           insecure,
 		insecurePresent:    insecurePresent,
-		alpn:               parseCommaSeparatedList(alpnRaw),
+		alpn:               shareCompatibilityList(alpnRaw),
 		alpnPresent:        alpnPresent,
 		fingerprint:        fingerprintRaw,
 		fingerprintPresent: fingerprintPresent,
@@ -2254,7 +2245,7 @@ func parseTUICLink(link string) (interface{}, string, string, error) {
 		serverNamePresent:  sniPresent,
 		insecure:           insecure,
 		insecurePresent:    insecurePresent,
-		alpn:               parseCommaSeparatedList(alpnRaw),
+		alpn:               shareCompatibilityList(alpnRaw),
 		alpnPresent:        alpnPresent,
 		fingerprint:        fingerprintRaw,
 		fingerprintPresent: fingerprintPresent,
@@ -2342,7 +2333,7 @@ func parseAnyTLSLink(link string) (interface{}, string, string, error) {
 		serverNamePresent:  sniPresent,
 		insecure:           insecure,
 		insecurePresent:    insecurePresent,
-		alpn:               parseCommaSeparatedList(alpnRaw),
+		alpn:               shareCompatibilityList(alpnRaw),
 		alpnPresent:        alpnPresent,
 		fingerprint:        fingerprintRaw,
 		fingerprintPresent: fingerprintPresent,
@@ -2480,7 +2471,7 @@ func parseHTTPProxyLink(link string) (interface{}, string, string, error) {
 		serverNamePresent:  sniPresent,
 		insecure:           insecure,
 		insecurePresent:    insecurePresent,
-		alpn:               parseCommaSeparatedList(alpnRaw),
+		alpn:               shareCompatibilityList(alpnRaw),
 		alpnPresent:        alpnPresent,
 		fingerprint:        fingerprintRaw,
 		fingerprintPresent: fingerprintPresent,
@@ -2580,32 +2571,34 @@ func parseWireGuardLink(link string) (interface{}, string, string, error) {
 		}
 	}
 	cfg := models.WireGuardConfig{
-		Server:              parsed.Hostname(),
-		ServerPort:          port,
-		LocalAddress:        collectWireGuardAddressesFromQuery(query),
-		PrivateKey:          privateKey,
-		PeerPublicKey:       firstQueryValue(query, "publickey", "public-key", "public_key", "peer", "peer_public_key"),
-		PreSharedKey:        firstQueryValue(query, "presharedkey", "pre-shared-key", "pre_shared_key", "psk"),
-		AllowedIPs:          parseWireGuardList(firstQueryValue(query, "allowedips", "allowed-ips", "allowed_ips")),
-		InterfaceName:       firstQueryValue(query, "interface_name", "interface-name", "name"),
-		Network:             firstQueryValue(query, "network"),
-		Detour:              firstQueryValue(query, "detour", "dialer-proxy", "dialer_proxy"),
-		DomainResolver:      domainResolverValue,
-		ConnectTimeout:      normalizeDurationString(firstQueryValue(query, "connect_timeout", "connect-timeout"), time.Second),
-		RoutingMark:         parseWireGuardRoutingMark(firstQueryValue(query, "routing_mark", "routing-mark")),
-		BindInterface:       firstQueryValue(query, "bind_interface", "bind-interface"),
-		Inet4BindAddress:    firstQueryValue(query, "inet4_bind_address", "inet4-bind-address"),
-		Inet6BindAddress:    firstQueryValue(query, "inet6_bind_address", "inet6-bind-address"),
-		ProtectPath:         firstQueryValue(query, "protect_path", "protect-path"),
-		ReuseAddr:           queryBoolValue(query, "reuse_addr", "reuse-addr"),
-		NetNS:               firstQueryValue(query, "netns", "net-ns"),
-		TCPFastOpen:         queryBoolValue(query, "tcp_fast_open", "tcp-fast-open", "tfo"),
-		TCPMultiPath:        queryBoolValue(query, "tcp_multi_path", "tcp-multi-path", "mptcp"),
-		NetworkStrategy:     firstQueryValue(query, "network_strategy", "network-strategy"),
-		NetworkType:         models.ListableString(normalizeLooseStringList(firstQueryValue(query, "network_type", "network-type"))),
-		FallbackNetworkType: models.ListableString(normalizeLooseStringList(firstQueryValue(query, "fallback_network_type", "fallback-network-type"))),
-		FallbackDelay:       normalizeDurationString(firstQueryValue(query, "fallback_delay", "fallback-delay"), time.Second),
-		DomainStrategy:      firstQueryValue(query, "domain_strategy", "domain-strategy", "ip-version", "ip_version"),
+		DialerOptions: models.DialerOptions{
+			Detour:              firstQueryValue(query, "detour", "dialer-proxy", "dialer_proxy"),
+			DomainResolver:      domainResolverValue,
+			ConnectTimeout:      normalizeDurationString(firstQueryValue(query, "connect_timeout", "connect-timeout"), time.Second),
+			RoutingMark:         parseWireGuardRoutingMark(firstQueryValue(query, "routing_mark", "routing-mark")),
+			BindInterface:       firstQueryValue(query, "bind_interface", "bind-interface"),
+			Inet4BindAddress:    firstQueryValue(query, "inet4_bind_address", "inet4-bind-address"),
+			Inet6BindAddress:    firstQueryValue(query, "inet6_bind_address", "inet6-bind-address"),
+			ProtectPath:         firstQueryValue(query, "protect_path", "protect-path"),
+			ReuseAddr:           queryBoolValue(query, "reuse_addr", "reuse-addr"),
+			NetNS:               firstQueryValue(query, "netns", "net-ns"),
+			TCPFastOpen:         queryBoolValue(query, "tcp_fast_open", "tcp-fast-open", "tfo"),
+			TCPMultiPath:        queryBoolValue(query, "tcp_multi_path", "tcp-multi-path", "mptcp"),
+			NetworkStrategy:     firstQueryValue(query, "network_strategy", "network-strategy"),
+			NetworkType:         models.ListableString(normalizeLooseStringList(firstQueryValue(query, "network_type", "network-type"))),
+			FallbackNetworkType: models.ListableString(normalizeLooseStringList(firstQueryValue(query, "fallback_network_type", "fallback-network-type"))),
+			FallbackDelay:       normalizeDurationString(firstQueryValue(query, "fallback_delay", "fallback-delay"), time.Second),
+			DomainStrategy:      firstQueryValue(query, "domain_strategy", "domain-strategy", "ip-version", "ip_version"),
+		},
+		Server:        parsed.Hostname(),
+		ServerPort:    port,
+		LocalAddress:  collectWireGuardAddressesFromQuery(query),
+		PrivateKey:    privateKey,
+		PeerPublicKey: firstQueryValue(query, "publickey", "public-key", "public_key", "peer", "peer_public_key"),
+		PreSharedKey:  firstQueryValue(query, "presharedkey", "pre-shared-key", "pre_shared_key", "psk"),
+		AllowedIPs:    parseWireGuardList(firstQueryValue(query, "allowedips", "allowed-ips", "allowed_ips")),
+		InterfaceName: firstQueryValue(query, "interface_name", "interface-name", "name"),
+		Network:       firstQueryValue(query, "network"),
 	}
 
 	if len(cfg.LocalAddress) == 0 {

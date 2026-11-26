@@ -25,7 +25,7 @@ func TestNodeMutationLateFailureRestoresRuntimeWithoutOverwritingDatabase(t *tes
 				t.Fatal(err)
 			}
 			writeTestRuntimeConfig(t, handler.singBoxService, nodes)
-			if err := handler.singBoxService.Start(); err != nil {
+			if err := handler.singBoxService.StartPreservedConfig(); err != nil {
 				t.Fatal(err)
 			}
 			originalHash := handler.singBoxService.RuntimeStatus().ActiveConfigHash

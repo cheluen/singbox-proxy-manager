@@ -30,10 +30,6 @@ func healthcheckURLs(host, port string) []string {
 	return urls
 }
 
-func healthcheckURL(host, port string) string {
-	return healthcheckURLs(host, port)[0]
-}
-
 func probeHealth(host, port string) error {
 	client := &http.Client{
 		Timeout:   3 * time.Second,

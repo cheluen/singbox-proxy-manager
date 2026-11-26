@@ -628,20 +628,6 @@ func (s *SingBoxService) ValidateConfigContext(ctx context.Context, configJSON [
 	return nil
 }
 
-// ApplyConfig atomically writes an already-validated configuration and
-// restarts sing-box with it. If the new config still fails to start (for
-// example an inbound port was taken by another program), it rolls back to the
-// last known-good configuration so existing nodes keep working.
-func (s *SingBoxService) ApplyConfig(configJSON []byte) error {
-	plan := RuntimePlan{configJSON: append([]byte(nil), configJSON...), hash: runtimeConfigHash(configJSON)}
-	transaction, err := s.beginRuntimeApply(plan)
-	if err != nil {
-		return err
-	}
-	transaction.Commit()
-	return nil
-}
-
 func (s *SingBoxService) saveLastGoodBytes(configJSON []byte) error {
 	writer := s.writeLastGoodFile
 	if writer == nil {
@@ -880,6 +866,8 @@ func dialerOptionsForConfig(config interface{}) *models.DialerOptions {
 		return &typed.DialerOptions
 	case *models.HTTPProxyConfig:
 		return &typed.DialerOptions
+	case *models.WireGuardConfig:
+		return &typed.DialerOptions
 	default:
 		return nil
 	}
@@ -889,19 +877,12 @@ func configDetour(config interface{}) string {
 	if dialer := dialerOptionsForConfig(config); dialer != nil {
 		return dialer.Detour
 	}
-	if wireGuard, ok := config.(*models.WireGuardConfig); ok {
-		return wireGuard.Detour
-	}
 	return ""
 }
 
 func setConfigDetour(config interface{}, detour string) {
 	if dialer := dialerOptionsForConfig(config); dialer != nil {
 		dialer.Detour = detour
-		return
-	}
-	if wireGuard, ok := config.(*models.WireGuardConfig); ok {
-		wireGuard.Detour = detour
 	}
 }
 
@@ -1290,11 +1271,11 @@ func normalizeManagerHost(raw string) string {
 }
 
 func configDomainResolverValue(config interface{}) (interface{}, error) {
-	if dialer := dialerOptionsForConfig(config); dialer != nil {
-		return dialer.DomainResolver, nil
-	}
 	if wireGuard, ok := config.(*models.WireGuardConfig); ok {
 		return wireGuardDomainResolverValue(wireGuard)
+	}
+	if dialer := dialerOptionsForConfig(config); dialer != nil {
+		return dialer.DomainResolver, nil
 	}
 	return nil, nil
 }
@@ -2140,18 +2121,6 @@ func resolveGeneratorUDPOverTCP(value interface{}, compatibility models.NativeOp
 	}
 }
 
-func splitGeneratorCommaList(raw string) []string {
-	parts := strings.Split(raw, ",")
-	out := make([]string, 0, len(parts))
-	for _, part := range parts {
-		part = strings.TrimSpace(part)
-		if part != "" {
-			out = append(out, part)
-		}
-	}
-	return out
-}
-
 func generatorTransportHeaders(host string, configured map[string]string) map[string]interface{} {
 	headers := make(map[string]interface{}, len(configured)+1)
 	if host != "" {
@@ -2250,7 +2219,7 @@ func (s *SingBoxService) generateVLESSOutbound(config *models.VLESSConfig, tag s
 	}
 	var tls map[string]interface{}
 	if security != "none" {
-		tlsBase := legacyGeneratorTLS(security == "tls" || security == "reality", false, config.SNI, config.Insecure, splitGeneratorCommaList(config.ALPN), config.Fingerprint)
+		tlsBase := legacyGeneratorTLS(security == "tls" || security == "reality", false, config.SNI, config.Insecure, models.SplitCompatibilityList(config.ALPN), config.Fingerprint)
 		if security == "tls" {
 			tlsBase["reality"] = nil
 		}
@@ -2335,7 +2304,7 @@ func (s *SingBoxService) generateVMESSOutbound(config *models.VMESSConfig, tag s
 	}
 	var tls map[string]interface{}
 	if tlsMode != "none" {
-		tlsBase := legacyGeneratorTLS(tlsMode == "tls" || tlsMode == "reality", false, config.SNI, config.Insecure, splitGeneratorCommaList(config.ALPN), config.Fingerprint)
+		tlsBase := legacyGeneratorTLS(tlsMode == "tls" || tlsMode == "reality", false, config.SNI, config.Insecure, models.SplitCompatibilityList(config.ALPN), config.Fingerprint)
 		if tlsMode == "tls" {
 			tlsBase["reality"] = nil
 		}
@@ -2425,7 +2394,7 @@ func generatorV2RayLegacyTransport(network string, path string, headers map[stri
 		}
 	case "quic":
 	case "http":
-		if hosts := splitGeneratorCommaList(host); len(hosts) > 0 {
+		if hosts := models.SplitCompatibilityList(host); len(hosts) > 0 {
 			transport["host"] = hosts
 		}
 		if len(httpPaths) > 1 {
@@ -2865,18 +2834,6 @@ func (s *SingBoxService) generateWireGuardEndpoint(config *models.WireGuardConfi
 	}
 	endpoint.Extra["peers"] = peerConfigs
 	return endpoint, nil
-}
-
-// Start starts the single sing-box process
-func (s *SingBoxService) Start() error {
-	configJSON, err := os.ReadFile(s.ConfigPath())
-	if err != nil {
-		if os.IsNotExist(err) {
-			return fmt.Errorf("config file not found: %s", s.ConfigPath())
-		}
-		return fmt.Errorf("failed to read config file: %w", err)
-	}
-	return s.ApplyConfig(configJSON)
 }
 
 func (s *SingBoxService) startProcessLocked(configHash string) error {

@@ -35,7 +35,7 @@ wait
 
 	service := NewSingBoxService(configDir)
 	writeRuntimeConfigFixture(t, service)
-	if err := service.Start(); err != nil {
+	if err := service.StartPreservedConfig(); err != nil {
 		t.Fatalf("start: %v", err)
 	}
 	t.Cleanup(func() { _ = service.Stop() })

@@ -70,6 +70,10 @@ type connectionCounter struct {
 	up, down int64
 	member   int
 }
+type routedConnection struct {
+	connection *clashConnection
+	route      ConnectionRoute
+}
 type routeDelta struct {
 	route    ConnectionRoute
 	up, down int64
@@ -305,23 +309,9 @@ func (m *ConnectionMonitor) capture(ctx context.Context, poll bool) (ConnectionS
 	return snapshot, nil
 }
 
-func (route *ConnectionRoute) setUpstream(w *runtimeWiring, node models.ProxyNode) {
-	source, upstream := w.settings.EffectiveUpstream(node)
-	route.Upstream, route.UpstreamSource = "", ""
-	switch source {
-	case models.UpstreamModeGlobal, models.UpstreamModeGroup, models.UpstreamModeCustom:
-		route.Upstream, route.UpstreamSource = source+": "+upstream.Type, source
-	case models.UpstreamModeLegacy:
-		var legacy struct {
-			Detour string `json:"detour"`
-		}
-		if json.Unmarshal([]byte(node.Config), &legacy) == nil && legacy.Detour != "" && legacy.Detour != "direct" {
-			route.Upstream, route.UpstreamSource = legacy.Detour, source
-			if id, ok := tagID(legacy.Detour, "node-", "-out"); ok {
-				route.Upstream = w.nodes[id].Name
-			}
-		}
-	}
+func (route *ConnectionRoute) setUpstream(w *runtimeWiring, nodeID int) {
+	upstream := w.upstreams[nodeID]
+	route.Upstream, route.UpstreamSource = upstream.label, upstream.source
 }
 
 func (c clashConnection) route(w *runtimeWiring) (ConnectionRoute, bool) {
@@ -346,7 +336,7 @@ func (c clashConnection) route(w *runtimeWiring) (ConnectionRoute, bool) {
 		}
 	}
 	route := ConnectionRoute{ClientIP: c.Metadata.SourceIP, InboundID: id, InboundName: in.Name, InboundPort: in.InboundPort, OutboundID: out.ID, OutboundName: out.Name, OutboundType: out.Type}
-	route.setUpstream(w, out)
+	route.setUpstream(w, out.ID)
 	reuse := out.Username + "+" + strconv.Itoa(out.InboundPort)
 	if out.Username != "" && strings.Contains(c.Rule, "auth_user="+reuse+" =>") {
 		route.RouteID = reuse
@@ -362,17 +352,13 @@ func (c clashConnection) target() string {
 	return net.JoinHostPort(normalizedTarget(host), c.Metadata.DestinationPort)
 }
 
-func (d *policyDispatcher) matchedMembers(raw []clashConnection) map[string]int {
+func (d *policyDispatcher) matchedMembers(raw []clashConnection, outerCounts map[string]int) map[string]int {
 	resolved := map[string]int{}
 	innerCounts := map[string]int{}
-	outerCounts := map[string]int{}
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	for _, c := range raw {
 		if c.Metadata.Type != "socks/"+dispatchTag {
-			if route, ok := c.route(d.wiring); ok && models.IsPolicy(route.OutboundType) {
-				outerCounts[strconv.Itoa(route.OutboundID)+"/"+c.target()]++
-			}
 			continue
 		}
 		session, ok := d.sessions[net.JoinHostPort(c.Metadata.SourceIP, c.Metadata.SourcePort)]
@@ -413,15 +399,25 @@ func (m *ConnectionMonitor) aggregate(snapshot *ConnectionSnapshot, raw []clashC
 		snapshot.Up = new(float64)
 		snapshot.Down = new(float64)
 	}
-	var members map[string]int
-	if dispatcher != nil {
-		members = dispatcher.matchedMembers(raw)
-	}
-	for _, c := range raw {
-		r, ok := c.route(w)
+	routed := make([]routedConnection, 0, len(raw))
+	outerCounts := map[string]int{}
+	for index := range raw {
+		connection := &raw[index]
+		route, ok := connection.route(w)
 		if !ok {
 			continue
 		}
+		routed = append(routed, routedConnection{connection: connection, route: route})
+		if dispatcher != nil && models.IsPolicy(route.OutboundType) {
+			outerCounts[strconv.Itoa(route.OutboundID)+"/"+connection.target()]++
+		}
+	}
+	var members map[string]int
+	if dispatcher != nil {
+		members = dispatcher.matchedMembers(raw, outerCounts)
+	}
+	for _, sampled := range routed {
+		c, r := sampled.connection, sampled.route
 		prev, seen := m.counters[c.ID]
 		up, down := c.Upload, c.Download
 		if seen {
@@ -435,7 +431,7 @@ func (m *ConnectionMonitor) aggregate(snapshot *ConnectionSnapshot, raw []clashC
 			}
 			if member, ok := w.nodes[r.MemberID]; ok {
 				r.MemberName = member.Name
-				r.setUpstream(w, member)
+				r.setUpstream(w, member.ID)
 			}
 		}
 		r.Key = fmt.Sprintf("%s|%d|%d|%s|%d", r.ClientIP, r.InboundPort, r.OutboundID, r.RouteID, r.MemberID)

@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"net"
 	"os"
@@ -17,11 +18,17 @@ import (
 
 const dispatchTag = "internal-policy-dispatch-in"
 
+type connectionUpstream struct {
+	label  string
+	source string
+}
+
 type runtimeWiring struct {
 	hash                                         string
 	controller, scheduler, dispatch, manager     int
 	controllerSecret, policySecret, memberSecret string
 	nodes                                        map[int]models.ProxyNode
+	upstreams                                    map[int]connectionUpstream
 	policies                                     map[int]*models.PolicyConfig
 	settings                                     models.Settings
 	redactSecrets                                *strings.Replacer
@@ -68,6 +75,26 @@ func newWiring(nodes []models.ProxyNode, settings models.Settings) (*runtimeWiri
 			}
 			w.policies[node.ID] = parsed.(*models.PolicyConfig)
 		}
+	}
+	w.upstreams = make(map[int]connectionUpstream, len(w.nodes))
+	for nodeID, node := range w.nodes {
+		source, upstream := settings.EffectiveUpstream(node)
+		var display connectionUpstream
+		switch source {
+		case models.UpstreamModeGlobal, models.UpstreamModeGroup, models.UpstreamModeCustom:
+			display = connectionUpstream{label: source + ": " + upstream.Type, source: source}
+		case models.UpstreamModeLegacy:
+			var legacy struct {
+				Detour string `json:"detour"`
+			}
+			if json.Unmarshal([]byte(node.Config), &legacy) == nil && legacy.Detour != "" && legacy.Detour != "direct" {
+				display = connectionUpstream{label: legacy.Detour, source: source}
+				if upstreamID, ok := tagID(legacy.Detour, "node-", "-out"); ok {
+					display.label = w.nodes[upstreamID].Name
+				}
+			}
+		}
+		w.upstreams[nodeID] = display
 	}
 	ports := []*int{&w.controller}
 	if len(w.policies) > 0 {

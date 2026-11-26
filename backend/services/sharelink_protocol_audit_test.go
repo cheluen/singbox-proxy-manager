@@ -1440,10 +1440,10 @@ func TestShareLinkAuditFragmentSemantics(t *testing.T) {
 
 func TestShareLinkAuditWireGuardNativeRoundTrip(t *testing.T) {
 	cfg := &models.WireGuardConfig{
-		Server: "wg.example", ServerPort: 51820, LocalAddress: []string{"10.0.0.2/32"}, PrivateKey: "private",
+		DialerOptions: models.DialerOptions{DomainResolver: map[string]interface{}{"server": "local", "strategy": "prefer_ipv4"}},
+		Server:        "wg.example", ServerPort: 51820, LocalAddress: []string{"10.0.0.2/32"}, PrivateKey: "private",
 		PeerPublicKey: "public", ListenPort: 51821, UDPTimeout: "45s",
-		DomainResolver: map[string]interface{}{"server": "local", "strategy": "prefer_ipv4"},
-		Peers:          []models.WireGuardPeerConfig{{Server: "wg.example", ServerPort: 51820, PublicKey: "public", PersistentKeepaliveInterval: 25}},
+		Peers: []models.WireGuardPeerConfig{{Server: "wg.example", ServerPort: 51820, PublicKey: "public", PersistentKeepaliveInterval: 25}},
 	}
 	link, err := buildWireGuardShareLink("WG+A %20", cfg)
 	if err != nil {
@@ -1503,13 +1503,13 @@ func TestShareLinkAuditWireGuardKeepaliveDefaultsAllowedIPs(t *testing.T) {
 func TestShareLinkAuditWireGuardResolverExportPrecedence(t *testing.T) {
 	baseConfig := func() *models.WireGuardConfig {
 		return &models.WireGuardConfig{
-			Server:         "wg.example",
-			ServerPort:     51820,
-			LocalAddress:   []string{"10.0.0.2/32"},
-			PrivateKey:     "private",
-			PeerPublicKey:  "public",
-			AllowedIPs:     []string{"0.0.0.0/0"},
-			DomainResolver: "local",
+			DialerOptions: models.DialerOptions{DomainResolver: "local"},
+			Server:        "wg.example",
+			ServerPort:    51820,
+			LocalAddress:  []string{"10.0.0.2/32"},
+			PrivateKey:    "private",
+			PeerPublicKey: "public",
+			AllowedIPs:    []string{"0.0.0.0/0"},
 		}
 	}
 

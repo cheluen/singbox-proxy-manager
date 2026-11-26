@@ -486,7 +486,7 @@ func convertClashProxyToImportItem(proxy map[string]any) (ImportItem, error) {
 			return ImportItem{}, fmt.Errorf("missing uuid")
 		}
 
-		transportType, transportOptions, err := buildClashTransportOptions(proxy)
+		transportType, transportOptions, grpcServiceName, err := buildClashTransportOptions(proxy)
 		if err != nil {
 			return ImportItem{}, err
 		}
@@ -543,9 +543,11 @@ func convertClashProxyToImportItem(proxy map[string]any) (ImportItem, error) {
 
 		switch cfg.Network {
 		case "ws":
-			applyWSOpts(&cfg.Path, &cfg.Headers, &cfg.Host, proxy)
+			cfg.Headers = clashTransportHeaders(transportOptions)
+			cfg.Path = nativeString(transportOptions["path"])
+			cfg.Host = firstNonEmpty(cfg.Headers["Host"], cfg.Headers["host"])
 		case "grpc":
-			cfg.ServiceName = getGRPCServiceName(proxy)
+			cfg.ServiceName = grpcServiceName
 		case "http":
 			cfg.Path = nativeString(transportOptions["path"])
 			if hosts := nativeStringSlice(transportOptions["host"]); len(hosts) > 0 {
@@ -570,7 +572,7 @@ func convertClashProxyToImportItem(proxy map[string]any) (ImportItem, error) {
 			return ImportItem{}, fmt.Errorf("missing uuid")
 		}
 
-		transportType, transportOptions, err := buildClashTransportOptions(proxy)
+		transportType, transportOptions, grpcServiceName, err := buildClashTransportOptions(proxy)
 		if err != nil {
 			return ImportItem{}, err
 		}
@@ -627,9 +629,15 @@ func convertClashProxyToImportItem(proxy map[string]any) (ImportItem, error) {
 
 		switch cfg.Network {
 		case "ws":
-			applyWSOpts(&cfg.Path, &cfg.Headers, &cfg.Host, proxy)
+			cfg.Headers = clashTransportHeaders(transportOptions)
+			cfg.Path = firstNonEmpty(nativeString(transportOptions["path"]), cfg.Path)
+			if _, headersPresent := transportOptions["headers"]; headersPresent && cfg.Headers == nil {
+				cfg.Host = ""
+			} else {
+				cfg.Host = firstNonEmpty(cfg.Headers["Host"], cfg.Headers["host"], cfg.Host)
+			}
 		case "grpc":
-			cfg.ServiceName = getGRPCServiceName(proxy)
+			cfg.ServiceName = grpcServiceName
 		case "http":
 			if path := nativeString(transportOptions["path"]); path != "" {
 				cfg.Path = path
@@ -658,7 +666,7 @@ func convertClashProxyToImportItem(proxy map[string]any) (ImportItem, error) {
 			return ImportItem{}, fmt.Errorf("missing password")
 		}
 
-		transportType, transportOptions, err := buildClashTransportOptions(proxy)
+		transportType, transportOptions, grpcServiceName, err := buildClashTransportOptions(proxy)
 		if err != nil {
 			return ImportItem{}, err
 		}
@@ -692,9 +700,11 @@ func convertClashProxyToImportItem(proxy map[string]any) (ImportItem, error) {
 
 		switch cfg.Network {
 		case "ws":
-			applyWSOpts(&cfg.Path, &cfg.Headers, &cfg.Host, proxy)
+			cfg.Headers = clashTransportHeaders(transportOptions)
+			cfg.Path = nativeString(transportOptions["path"])
+			cfg.Host = firstNonEmpty(cfg.Headers["Host"], cfg.Headers["host"])
 		case "grpc":
-			cfg.ServiceName = getGRPCServiceName(proxy)
+			cfg.ServiceName = grpcServiceName
 		case "http":
 			cfg.Path = nativeString(transportOptions["path"])
 			cfg.HTTPMethod = nativeString(transportOptions["method"])
@@ -876,15 +886,7 @@ func convertClashProxyToImportItem(proxy map[string]any) (ImportItem, error) {
 			AllowedIPs:      firstNonEmptyStringSlice(getStringSlice(proxy, "allowed-ips"), getStringSlice(proxy, "allowed_ips")),
 			InterfaceName:   firstNonEmpty(getString(proxy, "wireguard-interface-name"), getString(proxy, "wireguard_interface_name")),
 			Network:         getString(proxy, "network"),
-			ConnectTimeout:  secondsToDurationString(firstMapValueOrNil(proxy, "connect-timeout", "connect_timeout")),
 			SystemInterface: getBool(proxy, "system-interface") || getBool(proxy, "system_interface"),
-		}
-		if raw, ok := firstMapValue(proxy, "routing-mark", "routing_mark"); ok {
-			if number := intFromAny(raw); number != 0 {
-				cfg.RoutingMark = number
-			} else {
-				cfg.RoutingMark = parseWireGuardRoutingMark(fmt.Sprint(raw))
-			}
 		}
 
 		if reserved, err := parseWireGuardReservedAny(proxy["reserved"]); err != nil {
@@ -905,35 +907,11 @@ func convertClashProxyToImportItem(proxy map[string]any) (ImportItem, error) {
 			cfg.ListenPort = listenPort
 		}
 		cfg.UDPTimeout = secondsToDurationString(firstMapValueOrNil(proxy, "udp-timeout", "udp_timeout"))
-		var dialer models.DialerOptions
-		if err := applyClashDialerOptions(&dialer, proxy); err != nil {
+		if err := applyClashDialerOptions(&cfg.DialerOptions, proxy); err != nil {
 			return ImportItem{}, err
-		}
-		cfg.Detour = dialer.Detour
-		cfg.BindInterface = dialer.BindInterface
-		cfg.Inet4BindAddress = dialer.Inet4BindAddress
-		cfg.Inet6BindAddress = dialer.Inet6BindAddress
-		cfg.ProtectPath = dialer.ProtectPath
-		cfg.ReuseAddr = dialer.ReuseAddr
-		cfg.NetNS = dialer.NetNS
-		cfg.TCPFastOpen = dialer.TCPFastOpen
-		cfg.TCPMultiPath = dialer.TCPMultiPath
-		if dialer.UDPFragment != nil {
-			cfg.UDPFragment = dialer.UDPFragment
-		}
-		cfg.NetworkStrategy = dialer.NetworkStrategy
-		cfg.NetworkType = dialer.NetworkType
-		cfg.FallbackNetworkType = dialer.FallbackNetworkType
-		cfg.FallbackDelay = dialer.FallbackDelay
-		cfg.DomainStrategy = dialer.DomainStrategy
-		if dialer.DomainResolver != nil {
-			cfg.DomainResolver = dialer.DomainResolver
 		}
 		if strings.TrimSpace(cfg.Network) == "" && getBool(proxy, "udp") {
 			cfg.Network = "udp"
-		}
-		if udpFragment := getBool(proxy, "udp-fragment") || getBool(proxy, "udp_fragment"); udpFragment {
-			cfg.UDPFragment = &udpFragment
 		}
 
 		if rawPeers, ok := proxy["peers"].([]any); ok && len(rawPeers) > 0 {
@@ -1706,37 +1684,20 @@ func parseSIP003Options(raw string) (map[string]any, error) {
 	return result, nil
 }
 
-func applyWSOpts(path *string, headers *map[string]string, host *string, proxy map[string]any) {
-	wsOpts, ok := getMap(proxy, "ws-opts", "ws_opts")
-	if !ok {
-		return
+func clashTransportHeaders(options models.NativeOptions) map[string]string {
+	headers, _ := options["headers"].(map[string]any)
+	if len(headers) == 0 {
+		return nil
 	}
-	if p := getString(wsOpts, "path"); p != "" {
-		*path = p
-	}
-	hdrs, ok := getMap(wsOpts, "headers")
-	if ok && len(hdrs) > 0 {
-		out := make(map[string]string, len(hdrs))
-		for k, v := range hdrs {
-			if s, ok := v.(string); ok {
-				out[k] = s
-			}
+	result := make(map[string]string, len(headers))
+	for name, value := range headers {
+		text, ok := value.(string)
+		if !ok {
+			return nil
 		}
-		if len(out) > 0 {
-			*headers = out
-		}
-		if hv := firstNonEmpty(out["Host"], out["host"]); hv != "" {
-			*host = hv
-		}
+		result[name] = text
 	}
-}
-
-func getGRPCServiceName(proxy map[string]any) string {
-	grpcOpts, ok := getMap(proxy, "grpc-opts", "grpc_opts")
-	if !ok {
-		return ""
-	}
-	return firstNonEmpty(getString(grpcOpts, "grpc-service-name"), getString(grpcOpts, "serviceName"), getString(grpcOpts, "service_name"))
+	return result
 }
 
 var bandwidthRe = regexp.MustCompile(`(?i)^\s*([0-9]+(?:\.[0-9]+)?)\s*([a-z]+)?`)
@@ -1784,75 +1745,33 @@ func parseBandwidthMbps(v any) int {
 	}
 }
 
-func secondsToDurationString(v any) string {
-	if v == nil {
+func secondsToDurationString(value any) string {
+	if _, isBool := value.(bool); isBool {
 		return ""
 	}
-	switch vv := v.(type) {
-	case int:
-		if vv <= 0 {
-			return ""
-		}
-		return fmt.Sprintf("%ds", vv)
-	case int64:
-		if vv <= 0 {
-			return ""
-		}
-		return fmt.Sprintf("%ds", vv)
-	case float64:
-		if vv <= 0 {
-			return ""
-		}
-		return fmt.Sprintf("%ds", int(vv))
-	case string:
-		s := strings.TrimSpace(vv)
-		if s == "" {
-			return ""
-		}
-		if strings.HasSuffix(s, "s") || strings.HasSuffix(s, "ms") || strings.HasSuffix(s, "m") || strings.HasSuffix(s, "h") {
-			return s
-		}
-		if i, err := strconv.Atoi(s); err == nil && i > 0 {
-			return fmt.Sprintf("%ds", i)
-		}
-		return s
-	default:
-		return ""
+	raw, _ := scalarString(value)
+	raw = strings.TrimSpace(raw)
+	if seconds, err := strconv.Atoi(raw); err == nil && seconds > 0 {
+		return strconv.Itoa(seconds) + "s"
 	}
+	if _, isString := value.(string); isString {
+		return raw
+	}
+	return normalizeDurationString(raw, time.Second)
 }
 
-func millisecondsToDurationString(v any) string {
-	if v == nil {
+func millisecondsToDurationString(value any) string {
+	if _, isBool := value.(bool); isBool {
 		return ""
 	}
-	switch vv := v.(type) {
-	case int:
-		if vv <= 0 {
-			return ""
+	raw, _ := scalarString(value)
+	raw = strings.TrimSpace(raw)
+	if _, isString := value.(string); isString {
+		if number, err := strconv.ParseFloat(raw, 64); err != nil || number <= 0 {
+			return raw
 		}
-		return (time.Duration(vv) * time.Millisecond).String()
-	case int64:
-		if vv <= 0 {
-			return ""
-		}
-		return (time.Duration(vv) * time.Millisecond).String()
-	case float64:
-		if vv <= 0 {
-			return ""
-		}
-		return (time.Duration(int(vv)) * time.Millisecond).String()
-	case string:
-		s := strings.TrimSpace(vv)
-		if s == "" {
-			return ""
-		}
-		if i, err := strconv.Atoi(s); err == nil && i > 0 {
-			return (time.Duration(i) * time.Millisecond).String()
-		}
-		return s
-	default:
-		return ""
 	}
+	return normalizeDurationString(raw, time.Millisecond)
 }
 
 func parseClashHysteria2Ports(proxy map[string]any) (int, []string, error) {
@@ -2038,9 +1957,9 @@ func buildClashTLSOptions(proxy map[string]any, enabled bool, disableSNI bool) (
 	return result, nil
 }
 
-func buildClashTransportOptions(proxy map[string]any) (string, models.NativeOptions, error) {
+func buildClashTransportOptions(proxy map[string]any) (string, models.NativeOptions, string, error) {
 	if hasMeaningfulClashValue(proxy, "fm", "finalmask", "final-mask", "final_mask", "finalMask", "FinalMask") {
-		return "", nil, fmt.Errorf("FinalMask is not supported by sing-box 1.12.12")
+		return "", nil, "", fmt.Errorf("FinalMask is not supported by sing-box 1.12.12")
 	}
 	rawNetwork := strings.ToLower(getString(proxy, "network"))
 	network := models.NormalizeTransportType(rawNetwork)
@@ -2049,15 +1968,15 @@ func buildClashTransportOptions(proxy map[string]any) (string, models.NativeOpti
 		if network == "raw" || network == "none" {
 			network = "tcp"
 		}
-		return network, nil, nil
+		return network, nil, "", nil
 	case "kcp", "mkcp", "xhttp", "splithttp", "mekya":
-		return "", nil, fmt.Errorf("transport %s is not supported by sing-box 1.12.12", network)
+		return "", nil, "", fmt.Errorf("transport %s is not supported by sing-box 1.12.12", network)
 	case "quic":
 		quicOptions, _ := getMap(proxy, "quic-opts", "quic_opts")
 		if len(quicOptions) > 0 || hasMeaningfulClashValue(proxy, "seed", "header-type", "header_type", "quic-security", "quic_security", "quic-key", "quic_key") {
-			return "", nil, fmt.Errorf("quic transport options are not supported by sing-box 1.12.12")
+			return "", nil, "", fmt.Errorf("quic transport options are not supported by sing-box 1.12.12")
 		}
-		return network, models.NativeOptions{"type": "quic"}, nil
+		return network, models.NativeOptions{"type": "quic"}, "", nil
 	case "ws":
 		opts, _ := getMap(proxy, "ws-opts", "ws_opts")
 		result := models.NativeOptions{"type": "ws"}
@@ -2069,7 +1988,7 @@ func buildClashTransportOptions(proxy map[string]any) (string, models.NativeOpti
 			result["max_early_data"] = value
 		}
 		setMapIfNotEmpty(result, "early_data_header_name", firstNonEmpty(getString(opts, "early-data-header-name"), getString(opts, "early_data_header_name")))
-		return network, result, nil
+		return network, result, "", nil
 	case "http":
 		key := "http-opts"
 		if rawNetwork == "h2" {
@@ -2079,7 +1998,7 @@ func buildClashTransportOptions(proxy map[string]any) (string, models.NativeOpti
 		result := models.NativeOptions{"type": "http"}
 		paths := getStringSlice(opts, "path")
 		if len(paths) > 1 {
-			return "", nil, fmt.Errorf("multiple HTTP transport paths cannot be represented by sing-box 1.12.12")
+			return "", nil, "", fmt.Errorf("multiple HTTP transport paths cannot be represented by sing-box 1.12.12")
 		}
 		if len(paths) == 1 {
 			result["path"] = paths[0]
@@ -2093,7 +2012,7 @@ func buildClashTransportOptions(proxy map[string]any) (string, models.NativeOpti
 		}
 		setMapIfNotEmpty(result, "idle_timeout", secondsToDurationString(firstMapValueOrNil(opts, "idle-timeout", "idle_timeout")))
 		setMapIfNotEmpty(result, "ping_timeout", secondsToDurationString(firstMapValueOrNil(opts, "ping-timeout", "ping_timeout")))
-		return network, result, nil
+		return network, result, "", nil
 	case "grpc":
 		opts, _ := getMap(proxy, "grpc-opts", "grpc_opts")
 		if firstNonEmpty(
@@ -2104,23 +2023,24 @@ func buildClashTransportOptions(proxy map[string]any) (string, models.NativeOpti
 			getString(opts, "user_agent"),
 			getString(opts, "userAgent"),
 		) != "" {
-			return "", nil, fmt.Errorf("grpc-user-agent is not supported by sing-box 1.12.12")
+			return "", nil, "", fmt.Errorf("grpc-user-agent is not supported by sing-box 1.12.12")
 		}
 		if firstNonEmpty(getString(opts, "authority"), getString(opts, "grpc-authority"), getString(opts, "grpc_authority")) != "" {
-			return "", nil, fmt.Errorf("grpc authority is not supported by sing-box 1.12.12")
+			return "", nil, "", fmt.Errorf("grpc authority is not supported by sing-box 1.12.12")
 		}
 		if strings.EqualFold(firstNonEmpty(getString(opts, "mode"), getString(opts, "grpc-mode"), getString(opts, "grpc_mode")), "multi") ||
 			getBool(opts, "multi-mode") || getBool(opts, "multi_mode") || getBool(opts, "multiMode") {
-			return "", nil, fmt.Errorf("grpc multi mode is not supported by sing-box 1.12.12")
+			return "", nil, "", fmt.Errorf("grpc multi mode is not supported by sing-box 1.12.12")
 		}
 		result := models.NativeOptions{"type": "grpc"}
-		setMapIfNotEmpty(result, "service_name", firstNonEmpty(getString(opts, "grpc-service-name"), getString(opts, "service-name"), getString(opts, "service_name")))
+		serviceName := firstNonEmpty(getString(opts, "grpc-service-name"), getString(opts, "serviceName"), getString(opts, "service_name"))
+		setMapIfNotEmpty(result, "service_name", firstNonEmpty(serviceName, getString(opts, "service-name")))
 		setMapIfNotEmpty(result, "idle_timeout", secondsToDurationString(firstMapValueOrNil(opts, "idle-timeout", "idle_timeout")))
 		setMapIfNotEmpty(result, "ping_timeout", secondsToDurationString(firstMapValueOrNil(opts, "ping-timeout", "ping_timeout")))
 		if getBool(opts, "permit-without-stream") || getBool(opts, "permit_without_stream") {
 			result["permit_without_stream"] = true
 		}
-		return network, result, nil
+		return network, result, serviceName, nil
 	case "httpupgrade":
 		opts, _ := getMap(proxy, "httpupgrade-opts", "httpupgrade_opts")
 		result := models.NativeOptions{"type": "httpupgrade"}
@@ -2129,9 +2049,9 @@ func buildClashTransportOptions(proxy map[string]any) (string, models.NativeOpti
 		if headers, ok := getMap(opts, "headers"); ok && len(headers) > 0 {
 			result["headers"] = headers
 		}
-		return network, result, nil
+		return network, result, "", nil
 	default:
-		return "", nil, fmt.Errorf("unknown transport type")
+		return "", nil, "", fmt.Errorf("unknown transport type")
 	}
 }
 

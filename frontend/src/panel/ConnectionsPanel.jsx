@@ -185,37 +185,20 @@ export default function ConnectionsPanel({ token }) {
       const count = Number(route.active_count) || 0
 
       if (!clientMap.has(ip)) {
-        clientMap.set(ip, { ip, activeCount: 0, inboundPorts: new Set(), routeKeys: new Set(), activeTraffic: false })
+        clientMap.set(ip, { ip, activeCount: 0 })
       }
-      const cEntry = clientMap.get(ip)
-      cEntry.activeCount += count
-      cEntry.inboundPorts.add(port)
-      cEntry.routeKeys.add(route.key)
-      if ((up || 0) + (down || 0) > 0) cEntry.activeTraffic = true
+      clientMap.get(ip).activeCount += count
 
       if (!inboundMap.has(port)) {
-        inboundMap.set(port, {
-          port,
-          nodeName: route.inbound_node_name || '',
-          activeCount: 0,
-          clients: new Set(),
-          routeKeys: new Set(),
-          activeTraffic: false,
-        })
+        inboundMap.set(port, { port, activeCount: 0 })
       }
-      const iEntry = inboundMap.get(port)
-      iEntry.activeCount += count
-      iEntry.clients.add(ip)
-      iEntry.routeKeys.add(route.key)
-      if ((up || 0) + (down || 0) > 0) iEntry.activeTraffic = true
+      inboundMap.get(port).activeCount += count
 
       const pairKey = `${ip}|${port}`
       if (!pairMap.has(pairKey)) {
-        pairMap.set(pairKey, { key: pairKey, ip, port, activeTraffic: false, routeKeys: new Set() })
+        pairMap.set(pairKey, { key: pairKey, ip, port, activeTraffic: false })
       }
-      const pEntry = pairMap.get(pairKey)
-      pEntry.routeKeys.add(route.key)
-      if ((up || 0) + (down || 0) > 0) pEntry.activeTraffic = true
+      if ((up || 0) + (down || 0) > 0) pairMap.get(pairKey).activeTraffic = true
     }
 
     return {

@@ -1,6 +1,6 @@
-import { legacyClick as clickButton, editNode as openNodeEditor, waitOverlaysClosed, clickControl, openNodeMenu } from './ui-driver.mjs'
-import { findTestPortRange } from './test-ports.mjs'
-import { launchBrowser, stopProcess } from './test-harness.mjs'
+import { clickControl, clickText, editNode as openNodeEditor, openNodeMenu, saveNodeForm, selectOption, setInput, sleep, toggle, waitOverlaysClosed } from './ui-driver.mjs'
+import { findFreePort, findTestPortRange } from './test-ports.mjs'
+import { launchBrowser, stopProcess, waitForHTTP } from './test-harness.mjs'
 import fs from 'node:fs'
 import http from 'node:http'
 import net from 'node:net'
@@ -30,22 +30,6 @@ const assert = (condition, message) => {
   if (!condition) throw new Error(message)
 }
 
-const sleep = (milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds))
-
-const waitForHTTP = async (url, timeoutMilliseconds) => {
-  const deadline = Date.now() + timeoutMilliseconds
-  while (Date.now() < deadline) {
-    try {
-      const response = await fetch(url)
-      if (response.status < 500) return
-    } catch {
-      // Retry while the backend starts.
-    }
-    await sleep(200)
-  }
-  throw new Error(`Timed out waiting for ${url}`)
-}
-
 const listen = (server) =>
   new Promise((resolve, reject) => {
     server.once('error', reject)
@@ -63,13 +47,6 @@ const closeServer = (server) =>
     }
     server.close(() => resolve())
   })
-
-const reserveTCPPort = async () => {
-  const server = net.createServer()
-  const port = await listen(server)
-  await closeServer(server)
-  return port
-}
 
 const waitForTCP = async (port, timeoutMilliseconds) => {
   const deadline = Date.now() + timeoutMilliseconds
@@ -104,89 +81,10 @@ const runCommand = (command, args) =>
     child.on('exit', (code) => resolve({ code, stdout, stderr }))
   })
 
-const setInput = async (page, selector, value) => {
-  await page.waitForSelector(selector, { visible: true, timeout: 10000 })
-  await page.$eval(
-    selector,
-    (input, nextValue) => {
-      const setter = Object.getOwnPropertyDescriptor(
-        window.HTMLInputElement.prototype,
-        'value'
-      )?.set
-      setter?.call(input, String(nextValue))
-      input.dispatchEvent(new Event('input', { bubbles: true }))
-      input.dispatchEvent(new Event('change', { bubbles: true }))
-    },
-    value
-  )
-}
-
-const setSwitch = async (page, selector, enabled) => {
-  await page.$eval(
-    selector,
-    (element, nextEnabled) => {
-      if (element.getAttribute('aria-checked') !== String(nextEnabled)) element.click()
-    },
-    enabled
-  )
-  await page.waitForFunction(
-    (target, nextEnabled) =>
-      document.querySelector(target)?.getAttribute('aria-checked') === String(nextEnabled),
-    { timeout: 5000 },
-    selector,
-    enabled
-  )
-}
-
-const selectOption = async (page, fieldID, optionText) => {
-  const opened = await page.evaluate((id) => {
-    const selector = document.getElementById(id)?.closest('.ant-select')?.querySelector('.ant-select-selector')
-    if (!selector) return false
-    const rectangle = selector.getBoundingClientRect()
-    const eventInit = {
-      bubbles: true,
-      cancelable: true,
-      clientX: rectangle.left + rectangle.width / 2,
-      clientY: rectangle.top + rectangle.height / 2,
-      buttons: 1,
-    }
-    selector.dispatchEvent(new PointerEvent('pointerdown', { ...eventInit, pointerType: 'mouse' }))
-    selector.dispatchEvent(new MouseEvent('mousedown', eventInit))
-    selector.dispatchEvent(new MouseEvent('mouseup', eventInit))
-    selector.click()
-    return true
-  }, fieldID)
-  assert(opened, `Select field not found: ${fieldID}`)
-
-  await page.waitForFunction(
-    (label) =>
-      Array.from(document.querySelectorAll('.ant-select-dropdown:not(.ant-select-dropdown-hidden) .ant-select-item-option'))
-        .some((option) => (option.textContent || '').trim() === label),
-    { timeout: 10000 },
-    optionText
-  )
-  const selected = await page.evaluate((label) => {
-    const option = Array.from(
-      document.querySelectorAll('.ant-select-dropdown:not(.ant-select-dropdown-hidden) .ant-select-item-option')
-    ).find((candidate) => (candidate.textContent || '').trim() === label)
-    if (!option) return false
-    option.click()
-    return true
-  }, optionText)
-  assert(selected, `Select option not found: ${optionText}`)
-}
-
-
-const clickSegment = async (page, label) => {
-  const mode = { 'Follow Global': 'global', Custom: 'custom', Direct: 'none', Legacy: 'legacy' }[label]
-  assert(mode, `未知前置代理模式：${label}`)
-  await clickControl(page, `[data-testid="node-upstream-mode"] [data-mode="${mode}"]`)
-}
-
 const openUpstreamEditor = async (page, triggerSelector) => {
   await page.waitForSelector(triggerSelector, { visible: true, timeout: 10000 })
   for (let attempt = 0; attempt < 3; attempt += 1) {
-    await page.click(triggerSelector)
+    await clickControl(page, triggerSelector)
     try {
       await page.waitForSelector('[data-testid="upstream-editor"]', {
         visible: true,
@@ -202,7 +100,7 @@ const openUpstreamEditor = async (page, triggerSelector) => {
 
 
 const openSettings = async (page) => {
-  await page.click('[data-testid="open-settings"]')
+  await clickControl(page, '[data-testid="open-settings"]')
   await page.waitForSelector('[data-testid="settings-form"]', { visible: true })
 }
 
@@ -303,9 +201,9 @@ try {
     response.end('sbpm-upstream-live-ok\n')
   })
   const targetPort = await listen(targetServer)
-  let upstreamPort = await reserveTCPPort()
+  let upstreamPort = await findFreePort()
   while (upstreamPort === 30001 || upstreamPort === HTTP_PORT || upstreamPort === targetPort) {
-    upstreamPort = await reserveTCPPort()
+    upstreamPort = await findFreePort()
   }
   const upstreamConfigPath = path.join(configDir, 'test-upstream.json')
   fs.writeFileSync(
@@ -325,7 +223,7 @@ try {
   await waitForTCP(upstreamPort, 10000)
 
   backend = startBackend()
-  await waitForHTTP(`${BASE_URL}/api/version`, BACKEND_READY_TIMEOUT)
+  await waitForHTTP(`${BASE_URL}/api/version`, { timeoutMs: BACKEND_READY_TIMEOUT })
   browser = await launchBrowser()
   const page = await browser.newPage()
   await page.setViewport({ width: 1440, height: 1000 })
@@ -339,8 +237,8 @@ try {
 
   await page.goto(BASE_URL, { waitUntil: 'networkidle2' })
   await page.waitForSelector('input[type="password"]', { visible: true, timeout: 15000 })
-  await page.type('input[type="password"]', ADMIN_PASSWORD)
-  await clickButton(page, 'Login')
+  await setInput(page, 'input[type="password"]', ADMIN_PASSWORD)
+  await clickText(page, 'Login')
   await page.waitForSelector('[data-testid="nodes-add-node"]', { visible: true, timeout: 15000 })
 
   const initialGroups = await browserAPI(page, '/api/node-groups')
@@ -356,10 +254,10 @@ try {
   await selectOption(page, 'global_upstream_proxy_type', 'SOCKS5')
   await setInput(page, '#global_upstream_server', '127.0.0.1')
   await setInput(page, '#global_upstream_server_port', upstreamPort)
-  await page.$eval('[data-testid="upstream-editor"] button[type="submit"]', (button) => button.click())
+  await clickControl(page, '[data-testid="upstream-editor"] button[type="submit"]')
   await page.waitForSelector('[data-testid="upstream-editor"]', { hidden: true, timeout: 10000 })
-  await setSwitch(page, '[data-testid="global-upstream-enabled"]', true)
-  await clickButton(page, 'Save Settings')
+  await toggle(page, '[data-testid="global-upstream-enabled"]', true)
+  await clickText(page, 'Save Settings')
   await page.waitForSelector('[data-testid="settings-form"]', { hidden: true, timeout: 15000 })
   await waitOverlaysClosed(page)
 
@@ -368,11 +266,11 @@ try {
   assert(persistedSettings.body.global_upstream_enabled === true, 'Global upstream was not persisted')
   assert(persistedSettings.body.global_upstream_type === 'socks5', 'Global upstream type was not persisted')
 
-  await page.click('[data-testid="nodes-add-node"]')
+  await clickControl(page, '[data-testid="nodes-add-node"]')
   await page.waitForSelector('[data-testid="node-form"]', { visible: true, timeout: 10000 })
   await setInput(page, '#name', 'full-stack-upstream-node')
   await selectOption(page, 'proxy_type', 'Direct (Local)')
-  await setSwitch(page, '#auth_enabled', false)
+  await toggle(page, '#auth_enabled', false)
   const upstreamControlsInMainForm = await page.$('[data-testid="node-upstream-mode"]')
   assert(!upstreamControlsInMainForm, 'Main node editor still contains upstream policy controls')
   const [createResponse] = await Promise.all([
@@ -380,7 +278,7 @@ try {
       (response) => response.url() === `${BASE_URL}/api/nodes` && response.request().method() === 'POST',
       { timeout: 15000 }
     ),
-    clickButton(page, 'Save'),
+    saveNodeForm(page, { confirmOpenAuth: true }),
   ])
   const createBody = await createResponse.json()
   assert(createResponse.status() === 201, `Create node failed (${createResponse.status()}): ${JSON.stringify(createBody)}`)
@@ -397,7 +295,7 @@ try {
     (element) => (element.textContent || '').trim()
   )
   assert(initialMode === 'Direct', `New node upstream default mode=${initialMode}`)
-  await clickSegment(page, 'Follow Global')
+  await clickControl(page, '[data-testid="node-upstream-mode"] [data-mode="global"]')
   await saveNodeUpstream(page)
   const inheritedNode = await waitForNodeMode(page, 'global')
 
@@ -419,12 +317,12 @@ try {
 
   await sleep(500)
   await openNodeUpstream(page, inheritedNode.id)
-  await clickSegment(page, 'Custom')
+  await clickControl(page, '[data-testid="node-upstream-mode"] [data-mode="custom"]')
   await openUpstreamEditor(page, '[data-testid="node-upstream-configure"]')
   await selectOption(page, 'node_upstream_proxy_type', 'HTTP Proxy')
   await setInput(page, '#node_upstream_server', '198.51.100.21')
   await setInput(page, '#node_upstream_server_port', 8080)
-  await page.$eval('[data-testid="upstream-editor"] button[type="submit"]', (button) => button.click())
+  await clickControl(page, '[data-testid="upstream-editor"] button[type="submit"]')
   await page.waitForSelector('[data-testid="upstream-editor"]', { hidden: true, timeout: 10000 })
   await saveNodeUpstream(page)
   await waitForNodeMode(page, 'custom')
@@ -439,7 +337,7 @@ try {
 
   await sleep(500)
   await openNodeUpstream(page, inheritedNode.id)
-  await clickSegment(page, 'Direct')
+  await clickControl(page, '[data-testid="node-upstream-mode"] [data-mode="none"]')
   if (ARTIFACT_DIR) {
     fs.mkdirSync(ARTIFACT_DIR, { recursive: true })
     await page.screenshot({ path: path.join(ARTIFACT_DIR, 'full-stack-upstream-node.png'), fullPage: true })
@@ -470,7 +368,7 @@ try {
     await stalePage.setViewport({ width: 1440, height: 1000 })
     await stalePage.goto(BASE_URL, { waitUntil: 'networkidle2' })
     await stalePage.waitForSelector(`[data-testid="node-enabled-${concurrentID}"]`)
-    await stalePage.click(`[data-testid="node-open-${concurrentID}"]`)
+    await clickControl(stalePage, `[data-testid="node-open-${concurrentID}"]`)
   }
   await page.bringToFront()
   await openNodeEditor(page, concurrentID)
@@ -483,7 +381,7 @@ try {
     page.waitForResponse((response) =>
       response.url() === `${BASE_URL}/api/nodes/${concurrentID}` && response.request().method() === 'PUT'
     ),
-    clickButton(page, 'Save'),
+    saveNodeForm(page),
   ])
   assert(savedResponse.status() === 200, 'Editing node and rotating credentials failed')
   await page.waitForSelector('[data-testid="node-form"]', { hidden: true })
@@ -502,7 +400,7 @@ try {
       stalePage.waitForResponse((response) =>
         response.url() === `${BASE_URL}/api/nodes/${concurrentID}` && response.request().method() === 'PATCH'
       ),
-      stalePage.click(selector),
+      clickControl(stalePage, selector),
     ]).catch((error) => {
       throw new Error(`${field} toggle response failed (${JSON.stringify(toggleState)}): ${error.message}`)
     })
@@ -559,7 +457,7 @@ try {
   browser = undefined
   await stopProcess(backend)
   backend = startBackend()
-  await waitForHTTP(`${BASE_URL}/api/version`, BACKEND_READY_TIMEOUT)
+  await waitForHTTP(`${BASE_URL}/api/version`, { timeoutMs: BACKEND_READY_TIMEOUT })
   const relogin = await fetch(`${BASE_URL}/api/login`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
@@ -603,7 +501,7 @@ try {
     SBPM_SINGBOX_STARTUP_GRACE: '6s', SBPM_INSTANCE_LEASE_DURATION: STRESS_LEASE_DURATION,
     SBPM_INSTANCE_LEASE_HEARTBEAT: STRESS_LEASE_HEARTBEAT,
   })
-  await waitForHTTP(`${BASE_URL}/api/version`, BACKEND_READY_TIMEOUT)
+  await waitForHTTP(`${BASE_URL}/api/version`, { timeoutMs: BACKEND_READY_TIMEOUT })
   fs.rmSync(slowMarker, { force: true })
   const headers = { Authorization: `Bearer ${reloginBody.token}`, 'Content-Type': 'application/json' }
   const slowMutationStartedAt = Date.now()

@@ -140,6 +140,15 @@ func planSubscription(current, incoming []models.ProxyNode, groupID int) (subscr
 	var managed []models.ProxyNode
 	for _, node := range current {
 		if node.GroupID == groupID && node.SubscriptionKey != "" {
+			if node.Type == "wireguard" && node.Config != "" && fmt.Sprintf("%x", sha256.Sum256([]byte(node.Type+"\x00"+node.Config))) == node.SubscriptionKey {
+				if config, err := node.ParseConfig(); err == nil {
+					if canonical, err := json.Marshal(config); err == nil {
+						if rekey := fmt.Sprintf("%x", sha256.Sum256([]byte(node.Type+"\x00"+string(canonical)))); rekey != node.SubscriptionKey {
+							node.SubscriptionKey = rekey
+						}
+					}
+				}
+			}
 			managed = append(managed, node)
 		}
 	}

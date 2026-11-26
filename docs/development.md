@@ -1,6 +1,6 @@
 # 本地开发、构建发布与测试指南
 
-本文档以 `1.7.32` 为基线，说明工具链、本地联调、单文件与 Alpine 镜像发行、许可证分发和 CI 测试矩阵。
+本文档以 `1.7.33` 为基线，说明工具链、本地联调、单文件与 Alpine 镜像发行、许可证分发和 CI 测试矩阵。
 
 ---
 
@@ -114,7 +114,7 @@ SINGBOX_TEST_BINARY="$PWD/sing-box" go test -race -count=1 ./backend/... ./inter
 > `full-stack-protocol-import` 与 `full-stack-upstream` 会继承当前进程环境并在项目根目录启动后端（后端会自动加载根目录 `.env`），临时 `CONFIG_DIR` **无法隔离** PostgreSQL / MySQL / Turso 远程数据库连接。请务必在不含生产 `.env` 的干净测试副本中执行，并清空 `DATABASE_URL`、`POSTGRES_*`、`PGSQL*`、`MYSQL*`、`TURSO_*` 等环境变量（或显式指向独立可销毁测试库）。
 
 ```bash
-# 1. 准备浏览器可执行文件路径（按环境选择 chrome / chromium）
+# 1. 可选：指定浏览器可执行文件路径（若 Chrome / Chromium 位于常见系统路径，test-harness.mjs 会自动探测）
 export PUPPETEER_EXECUTABLE_PATH="$(command -v google-chrome || command -v chromium)"
 
 # 2. 针对单文件发行版执行 Linux 系统回归（验证启动、内嵌内核校验修复、数据保留、转发与崩溃自愈）
