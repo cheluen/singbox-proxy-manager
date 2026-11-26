@@ -44,6 +44,8 @@ const restrictSelection = (selected, visibleIds) => {
   return scoped.size === selected.size ? selected : scoped
 }
 
+const groupPreservesPorts = (group) => Boolean(group && group.allocate_port !== false && group.preserve_inbound_ports)
+
 export function useNodeManager({ t, notify, confirm, onPasswordChanged }) {
   const [allNodes, setAllNodeState] = useState([])
   const [groups, setGroups] = useState([])
@@ -104,7 +106,11 @@ export function useNodeManager({ t, notify, confirm, onPasswordChanged }) {
     })
   }, [allNodes, effectiveGroupId, firstGroupId])
 
-  const preservePorts = Boolean(settings?.preserve_inbound_ports)
+  const preservePorts = groupPreservesPorts(activeGroup)
+  const nodePreservesPorts = useCallback(
+    (node) => groupPreservesPorts(node?.group_id != null ? groupById.get(node.group_id) : activeGroup),
+    [activeGroup, groupById]
+  )
   const columnWidths = useMemo(
     () => normalizeColumnWidths(settings?.node_list_column_widths),
     [settings?.node_list_column_widths]
@@ -697,7 +703,7 @@ export function useNodeManager({ t, notify, confirm, onPasswordChanged }) {
   }, [groupById, loadNodes, notify, patchNode, t])
 
   const togglePortPin = useCallback(async (node) => {
-    if (preservePorts || pinBusy[node.id] || !node.inbound_port) return
+    if (nodePreservesPorts(node) || pinBusy[node.id] || !node.inbound_port) return
     const pinned = !node.inbound_port_pinned
     setPinBusy((prev) => ({ ...prev, [node.id]: true }))
     try {
@@ -710,7 +716,7 @@ export function useNodeManager({ t, notify, confirm, onPasswordChanged }) {
     } finally {
       setPinBusy((prev) => ({ ...prev, [node.id]: false }))
     }
-  }, [loadNodes, notify, patchNode, pinBusy, preservePorts, t])
+  }, [loadNodes, nodePreservesPorts, notify, patchNode, pinBusy, t])
 
   const saveRemark = useCallback(async (node, remark) => {
     if (remark === (node.remark ?? '')) return true
@@ -801,7 +807,7 @@ export function useNodeManager({ t, notify, confirm, onPasswordChanged }) {
     allNodes, nodes, groups, groupsLoaded, groupsError, groupById, activeGroupId: effectiveGroupId, activeGroup, selectGroup,
     loading, loaded, criteria, setCriteria, visibleNodes, summary, facets, filtersActive,
     selectedIds: scopedSelectedIds, selectedNodes, toggleSelect, selectAllVisible, clearSelection,
-    settings, preservePorts, columnWidths, saveColumnWidths, loadSettings, runtime, setRuntime, runtimeRestarting, setRuntimeRestarting, version,
+    settings, preservePorts, nodePreservesPorts, columnWidths, saveColumnWidths, loadSettings, runtime, setRuntime, runtimeRestarting, setRuntimeRestarting, version,
     flagBusy, pinBusy, refreshingGroupId, working, setWorking, overlay, setOverlay, canReorder,
     checks, checkNodes, loadGroups, loadNodes, refreshAll, patchNode, setNodes,
     allNodesRef, nodesRef, visibleRef, selectedNodesRef, activeGroupIdRef,

@@ -81,11 +81,11 @@ const createMockAPI = () => {
       return
     }
     if (req.method === 'GET' && req.url === '/api/node-groups') {
-      sendJSON(res, 200, [{ id: 1, name: 'Default', sort_order: 0, allocate_port: true, start_port: 30001 }])
+      sendJSON(res, 200, [{ id: 1, name: 'Default', sort_order: 0, allocate_port: true, preserve_inbound_ports: true, start_port: 30001 }])
       return
     }
     if (req.method === 'GET' && req.url === '/api/settings') {
-      sendJSON(res, 200, { preserve_inbound_ports: true })
+      sendJSON(res, 200, {})
       return
     }
     if (req.method === 'GET' && req.url === '/api/nodes') {

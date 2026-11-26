@@ -45,10 +45,29 @@ func createGroupTable(db *sql.DB, dialect appdb.Dialect) error {
 	}
 	_, err := db.Exec(fmt.Sprintf(`CREATE TABLE IF NOT EXISTS node_groups (
 		id %s, name VARCHAR(255) NOT NULL, sort_order INTEGER NOT NULL, allocate_port BOOLEAN NOT NULL DEFAULT TRUE,
-		start_port INTEGER NOT NULL, subscription_url VARCHAR(4096) NOT NULL DEFAULT '',
+		preserve_inbound_ports BOOLEAN NOT NULL DEFAULT FALSE, start_port INTEGER NOT NULL, subscription_url VARCHAR(4096) NOT NULL DEFAULT '',
 		subscription_auto_update BOOLEAN NOT NULL DEFAULT FALSE, subscription_interval_minutes INTEGER NOT NULL DEFAULT 60,
 		subscription_last_updated_at %s NULL, subscription_last_error VARCHAR(2048) NOT NULL DEFAULT '',
 		%s, revision BIGINT NOT NULL DEFAULT 0, created_at %s DEFAULT %s, updated_at %s DEFAULT %s)`, key, timestamp, strings.Join(groupUpstreamColumns(dialect), ", "), timestamp, now, timestamp, now))
+	return err
+}
+
+func migrateGroupPreserveInboundPorts(db *sql.DB, dialect appdb.Dialect) error {
+	columns, err := loadSchemaColumns(db, dialect, "settings")
+	if err != nil {
+		return err
+	}
+	if _, exists := columns["preserve_inbound_ports"]; !exists {
+		return nil
+	}
+	var preserve bool
+	if err := db.QueryRow("SELECT preserve_inbound_ports FROM settings WHERE singleton_key=1").Scan(&preserve); err != nil {
+		return err
+	}
+	if _, err := db.Exec("UPDATE node_groups SET preserve_inbound_ports=CASE WHEN allocate_port THEN ? ELSE FALSE END", preserve); err != nil {
+		return err
+	}
+	_, err = db.Exec("ALTER TABLE settings DROP COLUMN preserve_inbound_ports")
 	return err
 }
 

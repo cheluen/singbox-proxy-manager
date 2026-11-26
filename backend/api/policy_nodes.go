@@ -1,6 +1,7 @@
 package api
 
 import (
+	"cmp"
 	"context"
 	"database/sql"
 	"encoding/json"
@@ -65,7 +66,7 @@ func validatePolicyMembers(ctx context.Context, tx *sql.Tx, node *models.ProxyNo
 }
 
 func loadPhysicalGroupMembers(ctx context.Context, tx *sql.Tx, groupID, selfID int) ([]int, error) {
-	rows, err := tx.QueryContext(ctx, "SELECT id,type FROM proxy_nodes WHERE group_id=? AND id<>? ORDER BY id ASC", groupID, selfID)
+	rows, err := tx.QueryContext(ctx, "SELECT id,type FROM proxy_nodes WHERE group_id=? AND id<>? ORDER BY sort_order ASC, id ASC", groupID, selfID)
 	if err != nil {
 		return nil, err
 	}
@@ -106,6 +107,29 @@ func expandPolicyMembers(sources []models.PolicyMemberSource, groups map[int][]i
 }
 
 func reconcilePolicyReferences(ctx context.Context, tx *sql.Tx, nodes []models.ProxyNode) error {
+	return reconcilePolicyMembers(ctx, tx, nodes, false)
+}
+
+func ReconcileLinkedPolicyMembers(ctx context.Context, db *sql.DB) ([]models.ProxyNode, error) {
+	tx, err := db.BeginTx(ctx, nil)
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Rollback()
+	nodes, err := models.LoadProxyNodes(ctx, tx)
+	if err != nil {
+		return nil, err
+	}
+	if err := reconcilePolicyMembers(ctx, tx, nodes, true); err != nil {
+		return nil, err
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, err
+	}
+	return nodes, nil
+}
+
+func reconcilePolicyMembers(ctx context.Context, tx *sql.Tx, nodes []models.ProxyNode, onlyLinked bool) error {
 	groupIDs, err := readIDs(ctx, tx, "SELECT id FROM node_groups")
 	if err != nil {
 		return err
@@ -115,15 +139,22 @@ func reconcilePolicyReferences(ctx context.Context, tx *sql.Tx, nodes []models.P
 		existingGroups[id] = true
 	}
 	types := make(map[int]string, len(nodes))
+	sortOrders := make(map[int]int, len(nodes))
 	groups := make(map[int][]int)
 	for _, node := range nodes {
 		types[node.ID] = node.Type
 		if !models.IsPolicy(node.Type) {
+			sortOrders[node.ID] = node.SortOrder
 			groups[node.GroupID] = append(groups[node.GroupID], node.ID)
 		}
 	}
 	for _, ids := range groups {
-		slices.Sort(ids)
+		slices.SortFunc(ids, func(left, right int) int {
+			if order := cmp.Compare(sortOrders[left], sortOrders[right]); order != 0 {
+				return order
+			}
+			return cmp.Compare(left, right)
+		})
 	}
 	for index := range nodes {
 		node := &nodes[index]
@@ -135,6 +166,12 @@ func reconcilePolicyReferences(ctx context.Context, tx *sql.Tx, nodes []models.P
 			return err
 		}
 		policy := parsed.(*models.PolicyConfig)
+		if onlyLinked && !slices.ContainsFunc(policy.MemberSources, func(source models.PolicyMemberSource) bool {
+			return source.Type == models.PolicyMemberSourceGroup
+		}) {
+			continue
+		}
+		previousMembers, previousSources := policy.MemberIDs, policy.MemberSources
 		hadSources := len(policy.MemberSources) > 0
 		if hadSources {
 			kept := make([]models.PolicyMemberSource, 0, len(policy.MemberSources))
@@ -179,6 +216,9 @@ func reconcilePolicyReferences(ctx context.Context, tx *sql.Tx, nodes []models.P
 				continue
 			}
 			policy.MemberIDs = kept
+		}
+		if onlyLinked && slices.Equal(previousMembers, policy.MemberIDs) && slices.Equal(previousSources, policy.MemberSources) {
+			continue
 		}
 		encoded, err := json.Marshal(policy)
 		if err != nil {

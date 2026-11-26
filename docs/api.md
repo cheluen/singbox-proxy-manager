@@ -68,11 +68,11 @@
 | `GET /api/nodes` | 可选查询参数 `group_id` | 返回包含 `group_id` 的节点数组，依次按组序、组 ID、组内排序、节点 ID 排序。`inbound_port: 0` 表示仅有出站。 |
 | `GET /api/nodes/:id` | 无 | 返回单个节点完整记录；不存在返回 `404`。 |
 | `POST /api/nodes` | 节点 Upsert 字段（可选 `group_id`） | 创建节点、校验并应用至 `sing-box`，成功返回 `201`。自动端口模式下忽略请求中的 `inbound_port`；保留端口模式下填 `0` 表示自动分配；所属分组关闭端口分配时端口为 `0`。 |
-| `PUT /api/nodes/:id` | 节点 Upsert 字段 | 全量更新节点并原子应用；保留原 `sort_order` 与 `inbound_port_pinned` 状态；未传入 `tcp_reuse_enabled` 或前置代理字段时保留原值。 |
+| `PUT /api/nodes/:id` | 节点 Upsert 字段 | 全量更新节点并原子应用；保留原 `sort_order` 与 `inbound_port_pinned` 状态；未传入 `inbound_port`、`tcp_reuse_enabled` 或前置代理字段时保留原值（保留端口或固定端口模式下显式传 `inbound_port: 0` 表示自动重新分配）。 |
 | `PATCH /api/nodes/:id` | `{ "enabled"?: bool, "tcp_reuse_enabled"?: bool, "inbound_mode"?: "mixed"\|"https" }` | 仅允许切换启用状态、TCP 复用开关或入站模式（至少提供一项）；切换至 `https` 时要求存在已选定或唯一自动选中的有效 TLS 证书，严格拒绝未知字段与尾随 JSON 数据。 |
 | `PUT /api/nodes/:id/upstream` | `{ "upstream_mode", "upstream_type", "upstream_config" }` | 更新节点前置代理策略（`none` / `group` / `global` / `custom`，优先级：`custom > group > global`；`group` 仅走本组前置不回退全局，`global` 在本组前置启用时优先走分组前置）并执行防环路与内核校验，返回更新后节点。 |
 | `PUT /api/nodes/:id/remark` | `{ "remark": "..." }` | 更新节点备注（最多 `1024` 字符），仅改数据库，**不重启 `sing-box`**。 |
-| `PUT /api/nodes/:id/port-pin` | `{ "pinned": true }` | 切换自动端口模式下的端口固定标记，**不重启 `sing-box`**；处于「保留入站端口」模式时拒绝并返回 `409`。 |
+| `PUT /api/nodes/:id/port-pin` | `{ "pinned": true }` | 切换所属分组自动端口模式下的端口固定标记，**不重启 `sing-box`**；所属分组处于「保留入站端口」模式或无端口时拒绝并返回 `409`。 |
 | `PUT /api/nodes/:id/replace` | `{ "link": "...", "update_name"?: bool }` | 使用分享链接替换该节点的出站协议与配置（`update_name` 默认 `true`）；保留入站端口、账密与备注，清空旧出口 IP/延迟数据并重新应用内核。 |
 | `DELETE /api/nodes/:id` | 无 | 删除节点并规范化剩余节点 `sort_order`；自动端口模式下同步重排未固定节点端口并应用内核。 |
 | `GET /api/nodes/:id/export` | 无 | 导出单节点出站分享链接，返回 `{ "link": "..." }`；`direct` 或多 Peer WireGuard 等不支持导出的节点返回 `400`。 |
@@ -80,12 +80,12 @@
 
 ### 节点分组
 
-节点创建和批量导入支持可选 `group_id`，省略时归入排序第一组。更新节点时省略该字段会保留原组。每组可独立设置 `allocate_port`、`start_port`（1024–65535）、分组级前置代理（`upstream_enabled`、`upstream_type`、`upstream_config`）以及 `subscription_url`、`subscription_auto_update`、`subscription_interval_minutes`。
+节点创建和批量导入支持可选 `group_id`，省略时归入排序第一组。更新节点时省略该字段会保留原组。每组可独立设置 `allocate_port`、`preserve_inbound_ports`（仅在 `allocate_port=true` 时可开启）、`start_port`（1024–65535）、分组级前置代理（`upstream_enabled`、`upstream_type`、`upstream_config`）以及 `subscription_url`、`subscription_auto_update`、`subscription_interval_minutes`。
 
 | 接口 | 行为 |
 | --- | --- |
-| `GET /api/node-groups`、`GET /api/node-groups/:id` | 返回组设置、分组前置代理配置及检测结果（`upstream_enabled` / `upstream_type` / `upstream_config` / `upstream_ip` / `upstream_location` / `upstream_country_code` / `upstream_latency` / `upstream_error` / `upstream_revision`）、`revision`、`node_count`、`enabled_node_count`、最后订阅时间与错误。已鉴权管理员能读取完整订阅地址。 |
-| `POST /api/node-groups`、`PATCH /api/node-groups/:id` | 创建时需要 `name`。支持配置与启停分组级前置代理（启用时经防环路、自引用与 `sing-box check` 校验，仅影响当前分组内 `group` / `global` 节点，无实际路由变化时不重启共享内核；`PATCH` 修改前置时可附带 `expected_upstream_revision` / `expected_upstream_enabled` 核对编辑基线，并发冲突返回 `409` 及 `code: upstream_conflict`）。关闭端口分配遇到固定端口返回 `409`、`code: pinned_ports_exist` 和 `pinned_node_ids`。传 `release_pins: true` 可释放端口和固定标记。 |
+| `GET /api/node-groups`、`GET /api/node-groups/:id` | 返回组设置（含 `allocate_port`、`preserve_inbound_ports`、`start_port`）、分组前置代理配置及检测结果（`upstream_enabled` / `upstream_type` / `upstream_config` / `upstream_ip` / `upstream_location` / `upstream_country_code` / `upstream_latency` / `upstream_error` / `upstream_revision`）、`revision`、`node_count`、`enabled_node_count`、最后订阅时间与错误。已鉴权管理员能读取完整订阅地址。 |
+| `POST /api/node-groups`、`PATCH /api/node-groups/:id` | 创建时需要 `name`。`preserve_inbound_ports` 依赖 `allocate_port=true`：最终 `allocate_port=false` 且显式请求 `preserve_inbound_ports=true` 返回 `400`；关闭 `allocate_port` 时自动将 `preserve_inbound_ports` 归零为 `false`；将 `preserve_inbound_ports` 由 `true` 切为 `false` 时仅重排本组未固定端口并重启内核，纯开启保留或保留模式下调整 `start_port` 不重启内核。支持配置与启停分组级前置代理（启用时经防环路、自引用与 `sing-box check` 校验，仅影响当前分组内 `group` / `global` 节点，无实际路由变化时不重启共享内核；`PATCH` 修改前置时可附带 `expected_upstream_revision` / `expected_upstream_enabled` 核对编辑基线，并发冲突返回 `409` 及 `code: upstream_conflict`）。关闭端口分配遇到固定端口返回 `409`、`code: pinned_ports_exist` 和 `pinned_node_ids`。传 `release_pins: true` 可释放端口和固定标记。 |
 | `POST /api/node-groups/:id/upstream/check-ip` | 通过临时隔离 `sing-box` 进程检测**已保存**的分组前置代理出口 IP（不要求「启用分组前置代理」开关打开，防环路边界与正式启用一致）。成功返回 `200` 并落库检测结果；未配置或定义非法/命中防环路返回 `400`；分组不存在返回 `404`；检测期间分组前置定义被并发修改返回 `409`；上游测速限流返回 `429`（附 `Retry-After` 头）；探测失败返回 `502` 并持久化脱敏错误。 |
 | `DELETE /api/node-groups/:id` | 删除最后一组返回 `409` 和 `last_group`。非空组须指定 `?mode=move&target_group_id=整数` 或 `?mode=delete_nodes`，否则返回 `409` 和 `group_not_empty`。 |
 | `POST /api/node-groups/reorder` | `ids` 是按目标顺序排列的全部分组 ID。 |
@@ -111,8 +111,8 @@
 
 | 方法与路径 | 请求体 | 响应与行为说明 |
 | --- | --- | --- |
-| `GET /api/settings` | 无 | 返回 `preserve_inbound_ports`、全局前置代理及其检测结果、`node_list_column_widths`、`inbound_tls_cert_path`、`inbound_tls_key_path` 与实时扫描结果 `inbound_tls`（含 `ready`、`selection_mode`、`active` 及候选 `certificates` 列表）。起始端口通过分组接口读取。 |
-| `PUT /api/settings` | 可选 `preserve_inbound_ports`、`admin_password`、`global_upstream_enabled`、`global_upstream_type`、`global_upstream_config`、`node_list_column_widths`、`inbound_tls_cert_path`、`inbound_tls_key_path` | 返回 `changed` 和最新列宽。选择 `inbound_tls_cert_path` / `inbound_tls_key_path` 必须匹配当前扫描到的有效证书套件并会触发内核原子重载。`node_list_column_widths` 接受白名单列键与 40–1200 像素整数，传 `{}` 恢复默认。单独更新列宽时只写数据库。管理员密码至少 8 个 Unicode 字符，最多 72 个 UTF-8 字节。改密成功即吊销全部会话。旧版请求中的 `start_port` 会被忽略。 |
+| `GET /api/settings` | 无 | 返回全局前置代理及其检测结果、`node_list_column_widths`、`inbound_tls_cert_path`、`inbound_tls_key_path` 与实时扫描结果 `inbound_tls`（含 `ready`、`selection_mode`、`active` 及候选 `certificates` 列表）。`start_port` 与 `preserve_inbound_ports` 通过分组接口读取。 |
+| `PUT /api/settings` | 可选 `admin_password`、`global_upstream_enabled`、`global_upstream_type`、`global_upstream_config`、`node_list_column_widths`、`inbound_tls_cert_path`、`inbound_tls_key_path` | 返回 `changed` 和最新列宽。若显式传入旧字段 `preserve_inbound_ports` 直接返回 `400` 提示已迁移至分组设置。选择 `inbound_tls_cert_path` / `inbound_tls_key_path` 必须匹配当前扫描到的有效证书套件并会触发内核原子重载。`node_list_column_widths` 接受白名单列键与 40–1200 像素整数，传 `{}` 恢复默认。单独更新列宽时只写数据库。管理员密码至少 8 个 Unicode 字符，最多 72 个 UTF-8 字节。改密成功即吊销全部会话。旧版请求中的 `start_port` 会被忽略。 |
 | `POST /api/settings/upstream/check-ip` | 无 | 通过临时隔离 `sing-box` 进程检测**已保存**的全局前置代理出口 IP（不要求「启用全局前置代理」开关处于打开状态，防环路边界与正式启用一致）。成功返回 `200` 并落库结果；未配置或命中防环路返回 `400`；检测期间全局前置定义被并发修改返回 `409`；上游测速限流返回 `429`（附 `Retry-After` 头）；探测失败返回 `502` 并持久化脱敏错误。 |
 
 ---
@@ -144,7 +144,7 @@ curl -fsS -X POST http://127.0.0.1:30000/api/nodes/batch-import \
 {"member_ids":[12,9],"member_sources":[{"type":"group","id":2},{"type":"node","id":9}],"strategy":"round-robin","health_check_url":"https://example.org/health","health_check_interval":30}
 ```
 
-`member_ids` 按优先级排序，重复 ID 会合并；也支持通过可选 `member_sources`（每项为 `{"type":"group"|"node","id":整数}`）按分组整组引入实体节点并自动随组内节点增删、移动与订阅刷新同步（组内实体节点按 ID 升序展开；当所有分组来源断链移除后，`member_sources` 自动省略并退回普通手工 `member_ids` 管理）。创建或编辑时至少选择一个已有实体节点或有效分组，支持跨组与无端口成员。故障转移忽略 `strategy`。负载均衡支持 `round-robin` 和按目标主机的 `consistent-hashing`。健康检查周期为 10 至 3600 秒，默认 30 秒。策略的前置模式为 `none`，成员沿用各自的前置设置。策略支持普通入站认证、TCP 复用、`mixed` / `https` 入站模式及 `POST /api/nodes/:id/check-ip`。分享链接仅适用于支持该格式的实体节点。
+`member_ids` 按优先级排序，重复 ID 会合并；也支持通过可选 `member_sources`（每项为 `{"type":"group"|"node","id":整数}`）按分组整组引入实体节点并自动随组内节点增删、移动、拖拽排序与订阅刷新同步（组内实体节点跟随 `(sort_order ASC, id ASC)` 分组顺序展开；当所有分组来源断链移除后，`member_sources` 自动省略并退回普通手工 `member_ids` 管理）。创建或编辑时至少选择一个已有实体节点或有效分组，支持跨组与无端口成员。故障转移忽略 `strategy`。负载均衡支持 `round-robin` 和按目标主机的 `consistent-hashing`。健康检查周期为 10 至 3600 秒，默认 30 秒。策略的前置模式为 `none`，成员沿用各自的前置设置。策略支持普通入站认证、TCP 复用、`mixed` / `https` 入站模式及 `POST /api/nodes/:id/check-ip`。分享链接仅适用于支持该格式的实体节点。
 
 节点响应附加 `effective_member_ids`、`policy_active_member_id`、`policy_member_health` 和 `policy_warnings`。健康记录包括 `node_id`、`healthy`、`latency`（毫秒）、`last_error`、`checked_at`。删除成员会移除引用，停用成员会保留引用并暂停转发。成员全部不可用时可查询告警、编辑策略并添加替代成员。
 

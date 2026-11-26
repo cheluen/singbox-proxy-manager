@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"maps"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -38,6 +39,116 @@ func TestGroupUpstreamSchemaDialects(t *testing.T) {
 				if got := fields["upstream_"+name]; got != want {
 					t.Errorf("%s: %q, want %q", name, got, want)
 				}
+			}
+		})
+	}
+}
+
+func TestGroupPreserveInboundPortsSchemaDialects(t *testing.T) {
+	for _, dialect := range []appdb.Dialect{appdb.DialectSQLite, appdb.DialectTurso, appdb.DialectPostgres, appdb.DialectMySQL} {
+		t.Run(string(dialect), func(t *testing.T) {
+			for _, statement := range schemaStatements(dialect) {
+				if strings.Contains(statement, "CREATE TABLE IF NOT EXISTS settings") && strings.Contains(statement, "preserve_inbound_ports") {
+					t.Fatal("新建 settings 表仍包含旧版保留字段")
+				}
+			}
+			var found bool
+			for _, migration := range migrationColumns(dialect) {
+				if migration.Name != "preserve_inbound_ports" {
+					continue
+				}
+				if migration.Table != "node_groups" || migration.AlterSQL != "ALTER TABLE node_groups ADD COLUMN preserve_inbound_ports BOOLEAN NOT NULL DEFAULT FALSE" {
+					t.Fatalf("错误的分组保留字段迁移：%+v", migration)
+				}
+				found = true
+			}
+			if !found {
+				t.Fatal("缺少分组保留字段补列迁移")
+			}
+		})
+	}
+	if strings.Count(GroupColumns, "preserve_inbound_ports") != 1 || strings.Contains(runtimeSettingsSelectColumns, "preserve_inbound_ports") || strings.Contains(SettingsSnapshotColumns, "preserve_inbound_ports") {
+		t.Fatal("分组或运行时设置快照列未对齐保留策略迁移")
+	}
+}
+
+func TestInitDBGroupPreserveInboundPortsMigration(t *testing.T) {
+	for _, legacy := range []string{"absent", "false", "true"} {
+		t.Run(legacy, func(t *testing.T) {
+			db, err := sql.Open("sqlite", ":memory:")
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer db.Close()
+			if err := InitDB(db); err != nil {
+				t.Fatal(err)
+			}
+			group, err := LoadGroup(t.Context(), db, 0)
+			if err != nil || group.PreserveInboundPorts {
+				t.Fatalf("新建分组保留策略不应开启：%+v，%v", group, err)
+			}
+			if _, err := db.Exec(`INSERT INTO node_groups(name,sort_order,allocate_port,start_port,upstream_config)
+				VALUES ('Allocated',1,TRUE,32000,''),('Portless',2,FALSE,33000,'')`); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := db.Exec(`INSERT INTO proxy_nodes(name,type,config,inbound_port,inbound_port_pinned,sort_order,group_id,upstream_mode)
+				VALUES ('retained','direct','{}',31171,TRUE,8,?,'none')`, group.ID); err != nil {
+				t.Fatal(err)
+			}
+			beforeNodes, err := LoadProxyNodes(t.Context(), db)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := db.Exec("ALTER TABLE node_groups DROP COLUMN preserve_inbound_ports"); err != nil {
+				t.Fatal(err)
+			}
+			if legacy != "absent" {
+				if _, err := db.Exec("ALTER TABLE settings ADD COLUMN preserve_inbound_ports BOOLEAN NOT NULL DEFAULT FALSE"); err != nil {
+					t.Fatal(err)
+				}
+				if _, err := db.Exec("UPDATE settings SET preserve_inbound_ports=? WHERE singleton_key=1", legacy == "true"); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if err := InitDB(db); err != nil {
+				t.Fatal(err)
+			}
+			groups, err := LoadGroups(t.Context(), db)
+			if err != nil || len(groups) != 3 {
+				t.Fatalf("迁移后的分组读取失败：%+v，%v", groups, err)
+			}
+			for _, migrated := range groups {
+				if migrated.PreserveInboundPorts != (legacy == "true" && migrated.AllocatePort) {
+					t.Fatalf("迁移后的分组保留策略错误：%+v", migrated)
+				}
+			}
+			afterNodes, err := LoadProxyNodes(t.Context(), db)
+			if err != nil || !reflect.DeepEqual(beforeNodes, afterNodes) {
+				t.Fatal("迁移改变了节点端口、固定状态或排序", err)
+			}
+			if _, err := db.Exec("UPDATE node_groups SET preserve_inbound_ports=? WHERE id=?", legacy != "true", group.ID); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := db.Exec(`INSERT INTO node_groups(name,sort_order,start_port,upstream_config) VALUES ('New',3,34000,'')`); err != nil {
+				t.Fatal(err)
+			}
+			expected, err := LoadGroups(t.Context(), db)
+			if err != nil || expected[len(expected)-1].PreserveInboundPorts {
+				t.Fatal("迁移后新建分组应默认关闭保留策略", err)
+			}
+			if err := InitDB(db); err != nil {
+				t.Fatal(err)
+			}
+			groups, err = LoadGroups(t.Context(), db)
+			if err != nil || !reflect.DeepEqual(groups, expected) {
+				t.Fatal("重复初始化覆盖了已有分组的保留策略", err)
+			}
+			columns, err := loadSchemaColumns(db, appdb.DialectSQLite, "settings")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, exists := columns["preserve_inbound_ports"]; exists {
+				t.Fatal("旧版 settings 字段未删除或被重新创建")
 			}
 		})
 	}
@@ -606,8 +717,8 @@ func TestInitDBMigratesDuplicateLegacySettingsToSingleton(t *testing.T) {
 
 	if _, err := db.Exec(`
 		INSERT INTO settings (
-			singleton_key, admin_password, auth_generation, preserve_inbound_ports
-		) VALUES (1, '', 0, 0)
+			singleton_key, admin_password, auth_generation
+		) VALUES (1, '', 0)
 	`); err == nil {
 		t.Fatal("expected singleton unique index to reject a second settings row")
 	}

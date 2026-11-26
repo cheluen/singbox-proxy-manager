@@ -113,8 +113,8 @@ export default {
   start_port_required: 'Please enter start port',
   start_port_range: 'Port must be between 1024 and 65535',
   preserve_inbound_ports: 'Preserve Inbound Ports',
-  preserve_inbound_ports_desc: 'When enabled, drag sorting, delete reindexing, and start-port changes will not rewrite existing node ports. Only manual edits change a node port.',
-  preserve_inbound_ports_disable_warning: 'Disabling this will reassign unpinned inbound ports per group start port (ports may change) and restart sing-box. Continue?',
+  preserve_inbound_ports_desc: 'When enabled, drag sorting, delete reindexing, and start-port changes will not rewrite existing node ports in this group. Only manual edits change a node port.',
+  preserve_inbound_ports_disable_warning: 'Disabling this will reassign unpinned inbound ports in this group from its start port (ports may change) and restart sing-box. Continue?',
   upstream_global: 'Global Upstream Proxy',
   upstream_global_desc: 'When enabled, nodes set to Follow Global use this proxy unless their group enables a group upstream (priority: Node Custom > Group Upstream > Global Upstream).',
   upstream_global_proxy: 'Global Upstream Configuration',
@@ -163,6 +163,6 @@ export default {
   
   // Table
   select_all: 'Select All',
-  drag_sort_disabled_filtered: 'Drag sorting is disabled while filters are active (enable "Preserve Inbound Ports" to allow drag sorting under filters).',
+  drag_sort_disabled_filtered: 'Drag sorting is disabled while filters are active (enable "Preserve Inbound Ports" in this group to allow drag sorting under filters).',
   clear_filters: 'Clear Filters'
 }

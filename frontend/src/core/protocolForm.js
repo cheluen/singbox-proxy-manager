@@ -21,21 +21,21 @@ export function normalizePolicyMemberSources(sources, fallbackMemberIds = []) {
   return normalized
 }
 
-// 将分组内物理节点按 ID 升序排列（排除策略节点与自身）。
-export function groupPhysicalNodesById(allNodes, groupId, excludeNodeId = null) {
+// 将分组内物理节点按组内排序 (sort_order ASC, id ASC) 排列（排除策略节点与自身）。
+export function groupPhysicalNodesInOrder(allNodes, groupId, excludeNodeId = null) {
   return (Array.isArray(allNodes) ? allNodes : [])
     .filter((item) => item && item.group_id === groupId && !isPolicyTypeName(item.type) && item.id !== excludeNodeId)
-    .sort((left, right) => left.id - right.id)
+    .sort((left, right) => (Number(left.sort_order ?? 0) - Number(right.sort_order ?? 0)) || (left.id - right.id))
 }
 
-// 断开指定分组的关联：按首次出现顺序原地展开该分组当前物理节点（按 ID 升序）为独立成员并去重，保持原有优先级不变。
+// 断开指定分组的关联：按首次出现顺序原地展开该分组当前物理节点（跟随组内排序）为独立成员并去重，保持原有优先级不变。
 export function unlinkPolicyGroupInSources(sources, groupId, allNodes, excludeNodeId = null) {
   const normalized = normalizePolicyMemberSources(sources)
   const seenNodeIds = new Set()
   const expanded = []
   for (const entry of normalized) {
     if (entry.type === 'group' && entry.id === groupId) {
-      for (const member of groupPhysicalNodesById(allNodes, groupId, excludeNodeId)) {
+      for (const member of groupPhysicalNodesInOrder(allNodes, groupId, excludeNodeId)) {
         if (seenNodeIds.has(member.id)) continue
         seenNodeIds.add(member.id)
         expanded.push({ type: 'node', id: member.id })
@@ -63,7 +63,7 @@ export function resolvePolicyMemberIds(sources, allNodes, excludeNodeId = null) 
       }
       continue
     }
-    for (const member of groupPhysicalNodesById(allNodes, entry.id, excludeNodeId)) {
+    for (const member of groupPhysicalNodesInOrder(allNodes, entry.id, excludeNodeId)) {
       if (!seen.has(member.id)) {
         seen.add(member.id)
         result.push(member.id)

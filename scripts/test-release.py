@@ -249,9 +249,10 @@ def main():
                 request("/api/settings", {"start_port": start_port, "preserve_inbound_ports": True}, "PUT")
             else:
                 default_group, = request("/api/node-groups")
-                group = request(f"/api/node-groups/{default_group['id']}", {"start_port": start_port}, "PATCH")
+                group = request(f"/api/node-groups/{default_group['id']}",
+                                {"start_port": start_port, "preserve_inbound_ports": True}, "PATCH")
                 assert group["start_port"] == start_port and group["allocate_port"] is True
-                request("/api/settings", {"preserve_inbound_ports": True}, "PUT")
+                assert group["preserve_inbound_ports"] is True, "分组未启用保留入站端口"
             node = request("/api/nodes", {
                 "name": "release-persistent-direct", "remark": "upgrade-preserves-data",
                 "type": "direct", "config": "{}", "username": "release-proxy-user",
@@ -266,6 +267,7 @@ def main():
             before_settings = request("/api/settings")
             if legacy:
                 assert before_settings.pop("start_port") == start_port, "旧版未保存全局起始端口"
+                assert before_settings.pop("preserve_inbound_ports") is True, "旧版未保存全局保留入站端口"
             before_groups = None if legacy else request("/api/node-groups")
             before_settings.setdefault("node_list_column_widths", {})
             dbpath = config / "proxy.db"
@@ -289,11 +291,13 @@ def main():
             default_group, = groups
             assert default_group["id"] > 0 and default_group["allocate_port"] is True
             assert default_group["start_port"] == start_port, "分组未继承起始端口"
+            assert default_group["preserve_inbound_ports"] is True, "分组未继承保留入站端口设置"
             assert default_group["node_count"] == default_group["enabled_node_count"] == len(before_nodes) == 1
             if before_groups is not None:
                 assert groups == before_groups, "重启改变了分组数据"
             upgraded_settings = request("/api/settings")
             assert "start_port" not in upgraded_settings, "起始端口仍通过全局设置返回"
+            assert "preserve_inbound_ports" not in upgraded_settings, "保留入站端口仍通过全局设置返回"
             assert_retained_fields(before_settings, upgraded_settings, "设置")
             upgraded_nodes = request("/api/nodes")
             assert len(upgraded_nodes) == len(before_nodes), "升级改变了节点数量"

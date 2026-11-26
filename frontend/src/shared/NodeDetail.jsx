@@ -285,7 +285,7 @@ export function DetailSections({ node, ctl, act }) {
   return (
     <>
       <div className="sb-detail-card" data-detail-group="inbound">
-        <InboundSection node={node} ctl={ctl} act={act} pinBusy={Boolean(ctl.pinBusy[node.id])} flagBusy={Boolean(ctl.flagBusy[node.id])} preservePorts={ctl.preservePorts} />
+        <InboundSection node={node} ctl={ctl} act={act} pinBusy={Boolean(ctl.pinBusy[node.id])} flagBusy={Boolean(ctl.flagBusy[node.id])} preservePorts={ctl.nodePreservesPorts(node)} />
         <ConnectSection node={node} />
       </div>
       <div className="sb-detail-card" data-detail-group="outbound">

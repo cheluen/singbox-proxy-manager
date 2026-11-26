@@ -51,6 +51,7 @@ AGENTS.md
 # Git检查点备份
 *.patch
 .checkpoints/
+.ci-cache/
 .ace-tool/
 
 # 本地安全重编译产物和私有测试环境

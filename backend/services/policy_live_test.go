@@ -11,6 +11,7 @@ import (
 	"net/netip"
 	"net/url"
 	"os"
+	"slices"
 	"strconv"
 	"strings"
 	"testing"
@@ -121,6 +122,23 @@ func TestPolicyAndConnectionsRealKernel(t *testing.T) {
 	}
 	if got := requestPolicy(policy, ""); got != "127.0.0.2" {
 		t.Fatalf("primary source = %s", got)
+	}
+	nodes[2].Config = fmt.Sprintf(`{"member_ids":[2,1],"health_check_interval":60,"health_check_url":%q}`, origin.URL)
+	if err := applier.Apply(nodes); err != nil {
+		t.Fatal(err)
+	}
+	if got := requestPolicy(policy, ""); got != "127.0.0.3" {
+		t.Fatalf("重排后的策略未切换优先出口：%s", got)
+	}
+	if got := service.WithPolicyStatus(nodes[2]).Effective; !slices.Equal(got, []int{2, 1}) {
+		t.Fatalf("重排后的有效成员顺序错误：%v", got)
+	}
+	nodes[2].Config = policy.Config
+	if err := applier.Apply(nodes); err != nil {
+		t.Fatal(err)
+	}
+	if got := requestPolicy(policy, ""); got != "127.0.0.2" {
+		t.Fatalf("恢复策略顺序后未切回原出口：%s", got)
 	}
 	plan, err := applier.Prepare(nodes[:2])
 	if err != nil {

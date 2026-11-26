@@ -5,7 +5,7 @@
   <p>将各类主流协议节点集中管理，一键转为独立的本地 Mixed（HTTP / SOCKS5）或 HTTPS (TLS) 加密代理端口</p>
 
   <p>
-    <a href="https://github.com/cheluen/singbox-proxy-manager/releases"><img src="https://img.shields.io/badge/version-1.7.33-blue.svg" alt="Version" /></a>
+    <a href="https://github.com/cheluen/singbox-proxy-manager/releases"><img src="https://img.shields.io/badge/version-1.7.34-blue.svg" alt="Version" /></a>
     <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-green.svg" alt="MIT License" /></a>
     <img src="https://img.shields.io/badge/sing--box-1.12.12-orange.svg" alt="sing-box 1.12.12" />
     <img src="https://img.shields.io/badge/Go-1.26.11-00ADD8.svg" alt="Go 1.26.11" />
@@ -53,8 +53,8 @@
 ### 为什么好用？核心功能一览
 
 - **开箱即用，轻量低占用**：官方发行版将前端面板与固定版本 `sing-box 1.12.12` 内核打包为**单个静态可执行文件**，容器镜像基于轻量 `Alpine 3.24`（`linux/amd64` 镜像层 gzip 压缩体积约 29 MiB，本地解压镜像约 104 MiB），下载后无需再单独安装 Node.js 或手动配置 `sing-box`。
-- **12 种主流协议 + 策略出站节点**：支持 Direct、Shadowsocks、VLESS（含 Reality / XTLS-Vision）、VMess、Trojan、Hysteria2、TUIC、AnyTLS、SOCKS5 / SOCKS5H、HTTP / HTTPS 与 WireGuard（含 Cloudflare WARP 保留字节与多 Peer JSON）；同时内置 **故障转移（Failover）** 与 **负载均衡（Load Balance，支持轮询 / 域名一致性哈希）** 策略节点，支持跨组挑选单个实体节点或**整组导入并自动同步变动（组内按节点 ID 排序，支持一键断链转为独立成员自由调序）**，支持自定义健康检查、失败即时切换与自动跳过停用成员。
-- **「暮色」暗色指挥台面板**：支持 **代理节点分组**（顶部组标签支持**拖拽排序**、独立端口分配开关与起始端口、无端口纯出站节点、分组独立前置代理、分组独立订阅增量同步与跨组迁移）；列表直接显示紧凑型入站端口、入站用户名与柔边毛玻璃密码掩码，清晰区分出口测速的未检测 / 通过 / 失败（悬停展示脱敏原因）状态；**每个数据列均支持拖拽自由调整宽度并持久化写入数据库**（双击手柄复位单列，表头一键恢复默认）。行内展开详情采用对称等高卡片布局，支持 `Ctrl/⌘ + K` 命令面板、全键盘快捷键（`j/k`、`Enter`、`x`、`e`、`t`）及完整中英文双语切换（含故障转移 / 负载均衡策略节点中文化展示）。
+- **12 种主流协议 + 策略出站节点**：支持 Direct、Shadowsocks、VLESS（含 Reality / XTLS-Vision）、VMess、Trojan、Hysteria2、TUIC、AnyTLS、SOCKS5 / SOCKS5H、HTTP / HTTPS 与 WireGuard（含 Cloudflare WARP 保留字节与多 Peer JSON）；同时内置 **故障转移（Failover）** 与 **负载均衡（Load Balance，支持轮询 / 域名一致性哈希）** 策略节点，支持跨组挑选单个实体节点或**整组导入并自动同步变动（组内跟随分组排序划分优先级，拖拽排序实时同步，支持一键断链转为独立成员自由调序）**，支持自定义健康检查、失败即时切换与自动跳过停用成员。
+- **「暮色」暗色指挥台面板**：支持 **代理节点分组**（顶部组标签支持**拖拽排序**、独立端口分配开关、独立「保留入站端口」策略与起始端口、无端口纯出站节点、分组独立前置代理、分组独立订阅增量同步与跨组迁移）；列表直接显示紧凑型入站端口、入站用户名与柔边毛玻璃密码掩码，清晰区分出口测速的未检测 / 通过 / 失败（悬停展示脱敏原因）状态；**每个数据列均支持拖拽自由调整宽度并持久化写入数据库**（双击手柄复位单列，表头一键恢复默认）。行内展开详情采用对称等高卡片布局，支持 `Ctrl/⌘ + K` 命令面板、全键盘快捷键（`j/k`、`Enter`、`x`、`e`、`t`）及完整中英文双语切换（含故障转移 / 负载均衡策略节点中文化展示）。
 - **入站 HTTPS (TLS) 加密与模式切换**：在默认 `Mixed`（HTTP + SOCKS5）之外，支持通过只读挂载宿主机证书/私钥目录（`INBOUND_TLS_CERT_DIR` / `INBOUND_TLS_KEY_DIR`）自动跨目录识别与配对证书（支持子目录及 Certbot 软链接续签热加载；单套自动默认选中、多套在设置中下拉选定），并可在面板中为任意有端口节点平滑切换 `Mixed ↔ HTTPS` 入站模式（原生兼容 TCP 复用单端口路由）。
 - **当前连接与日志 / 流量观测**：
   - **当前连接**：基于本机隔离 `clash_api` 按需实时采集（空闲零后台轮询），通过三栏链路流图直观展示「客户端 IP → 入站端口 → 出站 / 策略成员 / 前置」的实时活跃连接、上下行速率与悬停路径高亮。
@@ -63,7 +63,7 @@
 - **进阶转发与灵活管理**：
   - **三级链式前置代理**：支持配置「单节点自定义前置代理」「分组级前置代理（仅对本组生效）」与「全局前置代理」，按 **节点自定义 > 分组前置代理 > 全局前置代理** 优先级自动生效，内置防环路保护与前置独立测 IP。
   - **TCP 复用单端口路由**：详情连接区可复制「路由号」`<用户名>+<目标端口>`。使用路由号和目标节点密码登录任意带认证的入站端口，即可转发至对应的已启用复用节点（含策略节点）。
-  - **端口固定与保留模式**：支持按分组自动顺延分配 + 单节点固定端口，也可开启「保留入站端口」确保拖拽排序与删除不影响客户端已有端口配置。
+  - **端口固定与分组级保留模式**：支持按分组自动顺延分配 + 单节点固定端口，也可在分组设置中按需独立开启「保留入站端口」（依赖「分配入站端口」开启），确保本组拖拽排序、删除补位与修改起始端口不影响客户端已有端口配置。
   - **批量高效维护**：支持批量测 IP、批量跨组移动、批量设置或随机生成入站账密、批量导出分享链接（当前组或全部分组）、手动出站去重及批量删除。
 - **稳定可靠与安全底盘**：配置变更先经 `sing-box check` 校验再原子切换，异常退出支持指数退避自动恢复与 `last-good` 降级保护；内核认证失败日志在分流至控制台/文件前自动脱敏；默认开启登录防爆破与无默认密码强制初始化；除开箱即用的本地 SQLite 外，还支持 PostgreSQL、MySQL/TiDB 与 Turso/libSQL 远程存储。
 
@@ -151,7 +151,7 @@ ADMIN_PASSWORD=请替换为你的高强度密码
 > 提示：
 > - 默认管理端口为 `30000`，默认分组入站端口从 `30001` 开始顺延分配（每个分组可独立配置是否分配端口及起始端口），数据保存在同目录的 `./config`。如需调整管理端口，可在 `.env` 中修改 `PORT=30000`。
 > - 镜像基于 `Alpine 3.24` 构建并内置 Docker `HEALTHCHECK`（通过 `/app/singbox-proxy-manager --healthcheck` 探测 `/api/health`），可执行 `docker compose --profile ghcr ps` 直接查看容器 `healthy / unhealthy` 状态。
-> - 正式版 GHCR 多架构镜像提供精确版本（如 `1.7.33`）、次版本滚动（如 `1.7`）、主版本滚动（如 `1`）与 `latest` 标签，并附带构建来源证明（Provenance）和 SBOM；日常 `main` 分支未发版且已存在对应版本标签的提交默认跳过完整 CI，仅在触发完整 CI 的未发版提交时更新 `edge` 标签。
+> - 正式版 GHCR 多架构镜像提供精确版本（如 `1.7.34`）、次版本滚动（如 `1.7`）、主版本滚动（如 `1`）与 `latest` 标签，并附带构建来源证明（Provenance）和 SBOM；日常 `main` 分支未发版且已存在对应版本标签的提交默认跳过完整 CI，仅在触发完整 CI 的未发版提交时更新 `edge` 标签。
 
 #### 第 3 步：启动服务
 
@@ -199,7 +199,7 @@ docker compose --profile ghcr logs --tail=50
 ```bash
 mkdir -p singbox-proxy-manager && cd singbox-proxy-manager
 
-APP_VERSION=1.7.33
+APP_VERSION=1.7.34
 OS=linux      # 可选：linux / darwin / freebsd
 ARCH=amd64    # 可选：amd64 / arm64
 

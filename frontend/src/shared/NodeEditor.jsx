@@ -5,7 +5,7 @@ import { ArrowDown, ArrowUp, Braces, Link2, Unlink, X } from 'lucide-react'
 import { useTranslation } from 'react-i18next'
 import {
   createProtocolFormModel,
-  groupPhysicalNodesById,
+  groupPhysicalNodesInOrder,
   isPolicyType,
   localizedProxyTypes,
   normalizeClearedSelect,
@@ -83,7 +83,7 @@ function PolicyMemberSelector({ value = [], onChange, allNodes = [], groups = []
   )
 
   const groupOptions = useMemo(() => groups.map((group) => {
-    const members = groupPhysicalNodesById(entityNodes, group.id, excludeNodeId)
+    const members = groupPhysicalNodesInOrder(entityNodes, group.id, excludeNodeId)
     const noPort = group.allocate_port === false ? ` · ${t('group_no_port_badge')}` : ''
     return {
       value: group.id,
@@ -186,7 +186,7 @@ function PolicyMemberSelector({ value = [], onChange, allNodes = [], groups = []
           {sources.map((entry, index) => {
             if (entry.type === 'group') {
               const group = groupById.get(entry.id)
-              const members = groupPhysicalNodesById(entityNodes, entry.id, excludeNodeId)
+              const members = groupPhysicalNodesInOrder(entityNodes, entry.id, excludeNodeId)
               return (
                 <li
                   key={`group:${entry.id}`}
@@ -227,9 +227,9 @@ function PolicyMemberSelector({ value = [], onChange, allNodes = [], groups = []
                     {members.length === 0 ? (
                       <span className="sb-dim">{t('policy_group_empty_sync_hint')}</span>
                     ) : (
-                      members.map((member) => (
-                        <span key={member.id} className={`sb-policy-order__chip${member.enabled === false ? ' is-off' : ''}`}>
-                          <span className="mono sb-dim">#{member.id}</span>
+                      members.map((member, memberIndex) => (
+                        <span key={member.id} className={`sb-policy-order__chip${member.enabled === false ? ' is-off' : ''}`} data-member-node-id={member.id}>
+                          <span className="mono sb-dim">#{memberIndex + 1}</span>
                           <span className="truncate">{member.name}</span>
                         </span>
                       ))

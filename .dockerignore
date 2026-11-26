@@ -12,6 +12,7 @@ dev.env
 !.env.example
 
 .checkpoints
+.ci-cache/
 ui-preview
 CLAUDE.md
 AGENTS.md

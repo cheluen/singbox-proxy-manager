@@ -71,7 +71,6 @@ function SettingsFormBody({ ctl, onDone }) {
 
   const submit = async (values) => {
     const update = {}
-    if (Boolean(values.preserve_inbound_ports) !== Boolean(saved.preserve_inbound_ports)) update.preserve_inbound_ports = Boolean(values.preserve_inbound_ports)
     if (Boolean(values.global_upstream_enabled) !== Boolean(saved.global_upstream_enabled)) update.global_upstream_enabled = Boolean(values.global_upstream_enabled)
     if (upstream.type !== (saved.global_upstream_type || '')) update.global_upstream_type = upstream.type
     if (upstream.config !== (saved.global_upstream_config || '')) update.global_upstream_config = upstream.config
@@ -95,11 +94,6 @@ function SettingsFormBody({ ctl, onDone }) {
       ctl.helpers.notify.info(t('settings_unchanged'))
       onDone()
       return
-    }
-    // 关闭「保留入站端口」会按各分组起始端口重排未固定节点端口，固定端口不变；可能影响客户端连接，需二次确认。
-    if (saved.preserve_inbound_ports && update.preserve_inbound_ports === false) {
-      const confirmed = await ctl.helpers.confirm({ title: t('warning'), content: t('preserve_inbound_ports_disable_warning'), okText: t('confirm'), danger: true })
-      if (!confirmed) return
     }
     setSaving(true)
     const ok = await ctl.saveSettings(update)
@@ -132,7 +126,6 @@ function SettingsFormBody({ ctl, onDone }) {
       className="sb-form"
       data-testid="settings-form"
       initialValues={{
-        preserve_inbound_ports: Boolean(saved.preserve_inbound_ports),
         global_upstream_enabled: Boolean(saved.global_upstream_enabled),
         inbound_tls_pair: matchedSavedCertKey || undefined,
         admin_secret: '',
@@ -140,20 +133,6 @@ function SettingsFormBody({ ctl, onDone }) {
       }}
       onFinish={submit}
     >
-      <section className="sb-form-section">
-        <h3 className="sb-form-section__title">{t('settings_ports')}</h3>
-        <div className="sb-setting-row">
-          <div className="sb-setting-row__text">
-            <strong>{t('preserve_inbound_ports')}</strong>
-            <span>{t('preserve_inbound_ports_desc')}</span>
-          </div>
-          <Form.Item name="preserve_inbound_ports" valuePropName="checked" noStyle>
-            <Switch aria-label={t('preserve_inbound_ports')} />
-          </Form.Item>
-        </div>
-        <p className="sb-form-note">{t('settings_group_start_port_hint')}</p>
-      </section>
-
       <section className="sb-form-section" data-testid="settings-inbound-tls">
         <div className="sb-form-section__head">
           <h3 className="sb-form-section__title">{t('settings_inbound_tls')}</h3>

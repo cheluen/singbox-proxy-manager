@@ -635,7 +635,7 @@ export default function DuskPanel({ session }) {
                           checking={ctl.checks.checkingIds.has(node.id)}
                           flagBusy={Boolean(ctl.flagBusy[node.id])}
                           pinBusy={Boolean(ctl.pinBusy[node.id])}
-                          preservePorts={ctl.preservePorts}
+                          preservePorts={ctl.nodePreservesPorts(node)}
                           canReorder={ctl.canReorder}
                           dragLabel={dragLabel}
                           act={act}

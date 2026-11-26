@@ -11,6 +11,7 @@ type NodeGroup struct {
 	Name                        string     `json:"name"`
 	SortOrder                   int        `json:"sort_order"`
 	AllocatePort                bool       `json:"allocate_port"`
+	PreserveInboundPorts        bool       `json:"preserve_inbound_ports"`
 	StartPort                   int        `json:"start_port"`
 	UpstreamEnabled             bool       `json:"upstream_enabled"`
 	UpstreamType                string     `json:"upstream_type"`
@@ -33,7 +34,7 @@ type NodeGroup struct {
 	EnabledNodeCount            int        `json:"enabled_node_count"`
 }
 
-const GroupColumns = `id,name,sort_order,allocate_port,start_port,upstream_enabled,upstream_type,upstream_config,upstream_ip,upstream_location,upstream_country_code,upstream_latency,upstream_error,upstream_revision,subscription_url,subscription_auto_update,subscription_interval_minutes,subscription_last_updated_at,subscription_last_error,revision,created_at,updated_at`
+const GroupColumns = `id,name,sort_order,allocate_port,preserve_inbound_ports,start_port,upstream_enabled,upstream_type,upstream_config,upstream_ip,upstream_location,upstream_country_code,upstream_latency,upstream_error,upstream_revision,subscription_url,subscription_auto_update,subscription_interval_minutes,subscription_last_updated_at,subscription_last_error,revision,created_at,updated_at`
 const groupSelect = `SELECT ` + GroupColumns + `,
 	(SELECT COUNT(*) FROM proxy_nodes WHERE group_id=node_groups.id),
 	(SELECT COUNT(*) FROM proxy_nodes WHERE group_id=node_groups.id AND enabled)
@@ -41,7 +42,7 @@ const groupSelect = `SELECT ` + GroupColumns + `,
 
 func scanGroup(row rowScanner) (NodeGroup, error) {
 	var group NodeGroup
-	err := row.Scan(&group.ID, &group.Name, &group.SortOrder, &group.AllocatePort, &group.StartPort,
+	err := row.Scan(&group.ID, &group.Name, &group.SortOrder, &group.AllocatePort, &group.PreserveInboundPorts, &group.StartPort,
 		&group.UpstreamEnabled, &group.UpstreamType, &group.UpstreamConfig, &group.UpstreamIP, &group.UpstreamLocation, &group.UpstreamCountryCode, &group.UpstreamLatency, &group.UpstreamError, &group.UpstreamRevision,
 		&group.SubscriptionURL, &group.SubscriptionAutoUpdate, &group.SubscriptionIntervalMinutes, &group.SubscriptionLastUpdatedAt, &group.SubscriptionLastError, &group.Revision, &group.CreatedAt, &group.UpdatedAt, &group.NodeCount, &group.EnabledNodeCount)
 	return group, err

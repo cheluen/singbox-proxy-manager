@@ -47,7 +47,7 @@ type nodeUpsertRequest struct {
 	Remark          string  `json:"remark"`
 	Type            string  `json:"type"`
 	Config          string  `json:"config"`
-	InboundPort     int     `json:"inbound_port"`
+	InboundPort     *int    `json:"inbound_port"`
 	InboundMode     *string `json:"inbound_mode"`
 	Username        string  `json:"username"`
 	Password        string  `json:"password"`
@@ -191,12 +191,6 @@ type sqlQueryRower interface {
 	QueryRowContext(ctx context.Context, query string, args ...any) *sql.Row
 }
 
-func getPreservePorts(ctx context.Context, rower sqlQueryRower) (bool, error) {
-	var preserveInboundPorts bool
-	err := rower.QueryRowContext(ctx, "SELECT preserve_inbound_ports FROM settings WHERE singleton_key=1").Scan(&preserveInboundPorts)
-	return preserveInboundPorts, err
-}
-
 func collectUsedInboundPortsTx(ctx context.Context, tx *sql.Tx, excludeNodeID int) (map[int]struct{}, error) {
 	query := "SELECT inbound_port FROM proxy_nodes WHERE inbound_port IS NOT NULL"
 	args := []interface{}{}
@@ -270,12 +264,14 @@ func nodeFromUpsertRequest(req nodeUpsertRequest) models.ProxyNode {
 		Remark:       req.Remark,
 		Type:         strings.ToLower(strings.TrimSpace(req.Type)),
 		Config:       strings.TrimSpace(req.Config),
-		InboundPort:  req.InboundPort,
 		InboundMode:  models.InboundModeMixed,
 		Username:     req.Username,
 		Password:     req.Password,
 		Enabled:      req.Enabled,
 		UpstreamMode: models.UpstreamModeNone,
+	}
+	if req.InboundPort != nil {
+		node.InboundPort = *req.InboundPort
 	}
 	if req.TCPReuseEnabled != nil {
 		node.TCPReuseEnabled = *req.TCPReuseEnabled
@@ -533,17 +529,13 @@ func (h *Handler) CreateNode(c *gin.Context) {
 			}
 			req.SortOrder = maxOrder + 1
 
-			preserveInboundPorts, err := getPreservePorts(ctx, tx)
-			if err != nil {
-				return err
-			}
 			usedInboundPorts, err := collectUsedInboundPortsTx(ctx, tx, 0)
 			if err != nil {
 				return err
 			}
 			if !group.AllocatePort {
 				req.InboundPort = 0
-			} else if !preserveInboundPorts || req.InboundPort == 0 {
+			} else if !group.PreserveInboundPorts || req.InboundPort == 0 {
 				req.InboundPort, err = h.nextBindablePort(ctx, group.StartPort, usedInboundPorts)
 				if err != nil {
 					return err
@@ -1269,6 +1261,9 @@ func (h *Handler) UpdateNode(c *gin.Context) {
 			req.SortOrder = prev.SortOrder
 			req.InboundPortPinned = prev.InboundPortPinned
 			req.GroupID = prev.GroupID
+			if payload.InboundPort == nil {
+				req.InboundPort = prev.InboundPort
+			}
 			if payload.GroupID != nil && *payload.GroupID != prev.GroupID {
 				if err := h.moveNodes(ctx, tx, []int{id}, *payload.GroupID); err != nil {
 					return err
@@ -1278,15 +1273,13 @@ func (h *Handler) UpdateNode(c *gin.Context) {
 					return err
 				}
 				req.GroupID, req.SortOrder, req.InboundPortPinned = moved.GroupID, moved.SortOrder, moved.InboundPortPinned
-				req.InboundPort = moved.InboundPort
+				if payload.InboundPort == nil {
+					req.InboundPort = moved.InboundPort
+				}
 				prev.InboundPort, prev.InboundPortPinned = moved.InboundPort, moved.InboundPortPinned
 			}
 
 			group, err := requestGroup(ctx, tx, &req.GroupID)
-			if err != nil {
-				return err
-			}
-			preserveInboundPorts, err := getPreservePorts(ctx, tx)
 			if err != nil {
 				return err
 			}
@@ -1298,14 +1291,12 @@ func (h *Handler) UpdateNode(c *gin.Context) {
 			switch {
 			case !group.AllocatePort:
 				req.InboundPort = 0
-			case preserveInboundPorts && req.InboundPort == 0:
+			case req.InboundPort == 0:
 				req.InboundPort, err = h.nextBindablePort(ctx, group.StartPort, usedInboundPorts)
 				if err != nil {
 					return err
 				}
-			case !preserveInboundPorts && !prev.InboundPortPinned:
-				req.InboundPort = prev.InboundPort
-			case !preserveInboundPorts && prev.InboundPortPinned && req.InboundPort == 0:
+			case !group.PreserveInboundPorts && !prev.InboundPortPinned:
 				req.InboundPort = prev.InboundPort
 			}
 
@@ -1344,7 +1335,7 @@ func (h *Handler) UpdateNode(c *gin.Context) {
 			if err := clearChangedNodeUpstreamCheck(ctx, tx, prev, req); err != nil {
 				return err
 			}
-			if group.AllocatePort && !preserveInboundPorts && !prev.InboundPortPinned {
+			if group.AllocatePort && !group.PreserveInboundPorts && !prev.InboundPortPinned {
 				if err := h.reassignAutomaticPortsTx(ctx, tx, group); err != nil {
 					return err
 				}
@@ -1498,12 +1489,12 @@ func (h *Handler) SetNodeInboundPortPinned(c *gin.Context) {
 		c.JSON(http.StatusConflict, gin.H{"error": "node has no inbound port"})
 		return
 	}
-	preserveInboundPorts, err := getPreservePorts(c.Request.Context(), h.db)
+	group, err := models.LoadGroup(c.Request.Context(), h.db, node.GroupID)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "database error"})
 		return
 	}
-	if preserveInboundPorts {
+	if group.PreserveInboundPorts {
 		c.JSON(http.StatusConflict, gin.H{"error": "port pinning is only available in automatic sorting mode"})
 		return
 	}
@@ -2028,7 +2019,6 @@ func (h *Handler) GetSettings(c *gin.Context) {
 	}
 
 	c.JSON(http.StatusOK, gin.H{
-		"preserve_inbound_ports":       settings.PreserveInboundPorts,
 		"global_upstream_enabled":      settings.GlobalUpstreamEnabled,
 		"global_upstream_type":         settings.GlobalUpstreamType,
 		"global_upstream_config":       settings.GlobalUpstreamConfig,
@@ -2201,6 +2191,10 @@ func (h *Handler) UpdateSettings(c *gin.Context) {
 		c.AbortWithStatusJSON(http.StatusBadRequest, gin.H{"error": message})
 		return
 	}
+	if req.PreserveInboundPorts != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "保留入站端口已迁移至分组设置，请在分组中配置"})
+		return
+	}
 	if req.NodeListColumnWidths == nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": invalidColumnWidths})
 		return
@@ -2244,10 +2238,6 @@ func (h *Handler) UpdateSettings(c *gin.Context) {
 		return
 	}
 
-	nextPreserveInboundPorts := previous.PreserveInboundPorts
-	if req.PreserveInboundPorts != nil {
-		nextPreserveInboundPorts = *req.PreserveInboundPorts
-	}
 	nextGlobalUpstreamEnabled := previous.GlobalUpstreamEnabled
 	if req.GlobalUpstreamEnabled != nil {
 		nextGlobalUpstreamEnabled = *req.GlobalUpstreamEnabled
@@ -2289,7 +2279,7 @@ func (h *Handler) UpdateSettings(c *gin.Context) {
 		}
 	}
 	globalDefinitionRequested := req.GlobalUpstreamType != nil || req.GlobalUpstreamConfig != nil
-	skipGlobalValidation := (req.NodeListColumnWidths != nil || tlsSelectionRequested) && req.PreserveInboundPorts == nil &&
+	skipGlobalValidation := (req.NodeListColumnWidths != nil || tlsSelectionRequested) &&
 		req.GlobalUpstreamEnabled == nil && !globalDefinitionRequested && req.AdminPassword == nil
 	if !skipGlobalValidation {
 		if err := validateCharacterLimit("global_upstream_type", nextGlobalUpstreamType, maxUpstreamTypeCharacters); err != nil {
@@ -2317,7 +2307,6 @@ func (h *Handler) UpdateSettings(c *gin.Context) {
 			}
 		}
 	}
-	portSettingsChanged := nextPreserveInboundPorts != previous.PreserveInboundPorts
 	globalDefinitionChanged := nextGlobalUpstreamType != previous.GlobalUpstreamType ||
 		nextGlobalUpstreamConfig != previous.GlobalUpstreamConfig
 	globalEnabledChanged := nextGlobalUpstreamEnabled != previous.GlobalUpstreamEnabled
@@ -2334,24 +2323,22 @@ func (h *Handler) UpdateSettings(c *gin.Context) {
 			return
 		}
 	}
-	if !portSettingsChanged && !globalSettingsChanged && !passwordChanged && !columnWidthsChanged && !tlsSettingsChanged {
+	if !globalSettingsChanged && !passwordChanged && !columnWidthsChanged && !tlsSettingsChanged {
 		c.JSON(http.StatusOK, gin.H{
 			"message": "settings unchanged", "changed": false, "node_list_column_widths": nextColumnWidths,
 		})
 		return
 	}
-	shouldReassignInboundPorts := !nextPreserveInboundPorts && portSettingsChanged
 	globalRuntimeChanged := globalEnabledChanged || (nextGlobalUpstreamEnabled && globalDefinitionChanged)
 
 	_, mutationErr := h.nodeMutations.execute(c.Request.Context(), nodeMutationOperation{
-		ApplyRuntime: shouldReassignInboundPorts || globalRuntimeChanged || tlsSettingsChanged,
+		ApplyRuntime: globalRuntimeChanged || tlsSettingsChanged,
 		Mutate: func(ctx context.Context, tx *sql.Tx) error {
 			query := `
 				UPDATE settings
-				SET preserve_inbound_ports = ?,
-				    global_upstream_enabled = ?, global_upstream_type = ?,
+				SET global_upstream_enabled = ?, global_upstream_type = ?,
 				    global_upstream_config = ?, updated_at = CURRENT_TIMESTAMP`
-			args := []any{nextPreserveInboundPorts, nextGlobalUpstreamEnabled,
+			args := []any{nextGlobalUpstreamEnabled,
 				nextGlobalUpstreamType, nextGlobalUpstreamConfig}
 			if columnWidthsChanged {
 				query += ", node_list_column_widths = ?"
@@ -2381,9 +2368,6 @@ func (h *Handler) UpdateSettings(c *gin.Context) {
 				}
 			}
 
-			if shouldReassignInboundPorts {
-				return h.normalizeGroups(ctx, tx, nil)
-			}
 			return nil
 		},
 	})

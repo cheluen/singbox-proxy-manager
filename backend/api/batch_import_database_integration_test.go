@@ -62,8 +62,12 @@ func TestNodeMutationRemoteDatabaseLifecycleIntegration(t *testing.T) {
 	if ids[1] <= ids[0] {
 		t.Fatal("replaying reserved IDs broke sequence allocation")
 	}
+	response = postJSON(t, handler.UpdateSettings, http.MethodPut, "/api/settings", map[string]bool{"preserve_inbound_ports": false}, nil)
+	if response.Code != http.StatusBadRequest {
+		t.Fatalf("旧版保留端口 API 未拒绝：%d %s", response.Code, response.Body.String())
+	}
 	response = postJSON(t, handler.UpdateSettings, http.MethodPut, "/api/settings", map[string]any{
-		"preserve_inbound_ports": false, "admin_password": "integration-new-admin-password",
+		"admin_password":          "integration-new-admin-password",
 		"global_upstream_enabled": true, "global_upstream_type": "socks5",
 		"global_upstream_config": `{"server":"198.51.100.9","server_port":1080}`,
 	}, nil)
@@ -102,6 +106,44 @@ func TestNodeMutationRemoteDatabaseLifecycleIntegration(t *testing.T) {
 	if err != nil || first.SortOrder != 1 || first.InboundPort != 32001 || first.Password != "integration-password" {
 		t.Fatal("reorder changed credentials or lost the port assignment")
 	}
+	response = postJSON(t, handler.UpdateGroup, http.MethodPatch, groupPath,
+		map[string]any{"preserve_inbound_ports": true, "start_port": 33000}, ginParams("id", strconv.Itoa(groupID)))
+	if err := json.Unmarshal(response.Body.Bytes(), &changedGroup); err != nil || response.Code != http.StatusOK || !changedGroup.PreserveInboundPorts {
+		t.Fatalf("远程数据库未保存分组保留策略：%d %s，%v", response.Code, response.Body.String(), err)
+	}
+	first, err = models.LoadProxyNode(context.Background(), db, ids[0])
+	if err != nil || first.InboundPort != 32001 {
+		t.Fatal("开启保留策略同时修改起始端口重排了现有端口", err)
+	}
+	response = postJSON(t, handler.CreateGroup, http.MethodPost, "/api/node-groups",
+		map[string]any{"name": "Other allocated", "start_port": 34000}, nil)
+	var otherGroup models.NodeGroup
+	if err := json.Unmarshal(response.Body.Bytes(), &otherGroup); err != nil || response.Code != http.StatusCreated || otherGroup.PreserveInboundPorts {
+		t.Fatalf("远程数据库新建分组默认策略错误：%d %s，%v", response.Code, response.Body.String(), err)
+	}
+	response = postJSON(t, handler.CreateNode, http.MethodPost, "/api/nodes",
+		map[string]any{"name": "other", "type": "direct", "config": "{}", "enabled": true, "group_id": otherGroup.ID}, nil)
+	var otherNode models.ProxyNode
+	if err := json.Unmarshal(response.Body.Bytes(), &otherNode); err != nil || response.Code != http.StatusCreated {
+		t.Fatalf("创建隔离分组节点失败：%d %s，%v", response.Code, response.Body.String(), err)
+	}
+	if _, err := db.Exec("UPDATE proxy_nodes SET inbound_port=34007,sort_order=9 WHERE id=?", otherNode.ID); err != nil {
+		t.Fatal(err)
+	}
+	response = postJSON(t, handler.UpdateGroup, http.MethodPatch, groupPath,
+		map[string]bool{"preserve_inbound_ports": false}, ginParams("id", strconv.Itoa(groupID)))
+	if response.Code != http.StatusOK {
+		t.Fatalf("关闭分组保留策略失败：%d %s", response.Code, response.Body.String())
+	}
+	first, err = models.LoadProxyNode(context.Background(), db, ids[0])
+	if err != nil || first.InboundPort != 33001 || first.Password != "integration-password" {
+		t.Fatal("关闭分组保留策略未按本组排序重排端口，或改变了凭据", err)
+	}
+	otherNode, err = models.LoadProxyNode(context.Background(), db, otherNode.ID)
+	if err != nil || otherNode.InboundPort != 34007 || otherNode.SortOrder != 9 {
+		t.Fatal("关闭本组保留策略改变了其他分组", err)
+	}
+	ids = append(ids, otherNode.ID)
 	response = postJSON(t, handler.BatchDeleteNodes, http.MethodPost, "/api/nodes/batch-delete", map[string]any{"ids": ids}, nil)
 	if response.Code != http.StatusOK {
 		t.Fatalf("delete status=%d body=%s", response.Code, response.Body.String())

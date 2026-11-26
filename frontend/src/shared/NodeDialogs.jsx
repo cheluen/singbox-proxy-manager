@@ -67,6 +67,7 @@ export function NodeDialogBody({ node, focusLink, ctl, onDone }) {
   const editing = Boolean(node?.id)
   const targetGroup = editing ? ctl.groupById?.get(node.group_id) : ctl.activeGroup
   const allocatePort = targetGroup ? targetGroup.allocate_port !== false : true
+  const preservePorts = Boolean(targetGroup && targetGroup.allocate_port !== false && targetGroup.preserve_inbound_ports)
   const save = async (values) => {
     const ok = await ctl.saveNode(values, editing ? node : null, { autoCheck: fromLink })
     if (ok) onDone()
@@ -88,7 +89,7 @@ export function NodeDialogBody({ node, focusLink, ctl, onDone }) {
       <NodeEditor
         key={`${node?.id || 'new'}:${revision}`}
         node={draft}
-        preservePorts={ctl.preservePorts}
+        preservePorts={preservePorts}
         allocatePort={allocatePort}
         allNodes={ctl.allNodes || ctl.nodes}
         groups={ctl.groups || []}

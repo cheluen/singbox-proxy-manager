@@ -83,7 +83,7 @@ func inboundTLSTestClient(t *testing.T, handler *Handler) groupTestClient {
 	router.DELETE("/api/node-groups/:id", handler.DeleteGroup)
 	router.GET("/api/settings", handler.GetSettings)
 	router.PUT("/api/settings", handler.UpdateSettings)
-	return groupTestClient{t: t, db: handler.db, router: router}
+	return groupTestClient{t: t, db: handler.db, router: router, handler: handler}
 }
 
 func assertAPIRuntimeOmitsInbounds(t *testing.T, handler *Handler, nodes ...models.ProxyNode) {
@@ -277,7 +277,7 @@ func TestGroupPortAllocationValidatesActiveHTTPSListeners(t *testing.T) {
 				var response gin.H
 				switch mutation {
 				case "group-update":
-					client.request(http.MethodPatch, testGroupPath(source.ID), gin.H{"allocate_port": true}, wantStatus, &response)
+					client.request(http.MethodPatch, testGroupPath(source.ID), gin.H{"allocate_port": true, "preserve_inbound_ports": true}, wantStatus, &response)
 				case "batch-move":
 					client.request(http.MethodPost, "/api/nodes/batch-move", gin.H{"ids": []int{node.ID}, "group_id": target.ID}, wantStatus, &response)
 				case "group-delete":
@@ -289,7 +289,7 @@ func TestGroupPortAllocationValidatesActiveHTTPSListeners(t *testing.T) {
 						t.Fatalf("证书校验失败后节点分组和端口未回滚：%+v", node)
 					}
 					group, err := models.LoadGroup(t.Context(), handler.db, source.ID)
-					if err != nil || group.AllocatePort || group.Revision != source.Revision {
+					if err != nil || group.AllocatePort || group.PreserveInboundPorts || group.Revision != source.Revision {
 						t.Fatalf("证书校验失败后原分组未保留：%+v，%v", group, err)
 					}
 					if handler.singBoxService.RuntimeStatus().PID != previousPID || !strings.Contains(response["error"].(string), "TLS 证书") {
@@ -302,6 +302,12 @@ func TestGroupPortAllocationValidatesActiveHTTPSListeners(t *testing.T) {
 					}
 					if node.GroupID != wantGroup || node.InboundPort <= 0 || node.Enabled || node.InboundMode != models.InboundModeHTTPS {
 						t.Fatalf("禁用 HTTPS 节点的端口分配被错误阻止：%+v", node)
+					}
+					if mutation == "group-update" {
+						group, err := models.LoadGroup(t.Context(), handler.db, source.ID)
+						if err != nil || !group.PreserveInboundPorts {
+							t.Fatal("重新分配禁用 HTTPS 节点端口时未保存保留策略", err)
+						}
 					}
 				}
 				settings, err := models.LoadRuntimeSettings(t.Context(), handler.db)
@@ -367,7 +373,11 @@ func TestHTTPSAutoSelectionPersistsLivePathsAcrossRenewal(t *testing.T) {
 				}
 				switch mutation {
 				case "group-update":
-					client.request(http.MethodPatch, testGroupPath(source.ID), gin.H{"allocate_port": true}, 200, nil)
+					client.request(http.MethodPatch, testGroupPath(source.ID), gin.H{"allocate_port": true, "preserve_inbound_ports": true}, 200, nil)
+					group, err := models.LoadGroup(t.Context(), handler.db, source.ID)
+					if err != nil || !group.PreserveInboundPorts {
+						t.Fatal("HTTPS 首次自动选证时未保存分组保留策略", err)
+					}
 				case "batch-move":
 					client.request(http.MethodPost, "/api/nodes/batch-move", gin.H{"ids": []int{node.ID}, "group_id": target.ID}, 200, nil)
 				case "group-delete":

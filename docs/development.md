@@ -1,6 +1,6 @@
 # 本地开发、构建发布与测试指南
 
-本文档以 `1.7.33` 为基线，说明工具链、本地联调、单文件与 Alpine 镜像发行、许可证分发和 CI 测试矩阵。
+本文档以 `1.7.34` 为基线，说明工具链、本地联调、单文件与 Alpine 镜像发行、许可证分发和 CI 测试矩阵。
 
 ---
 
@@ -168,7 +168,7 @@ rm -f /tmp/sbpm-upstream-e2e-backend
    - Pull Request 与 `v*` Git Tag 始终执行完整 CI；
    - 推送至 `main` 时，若 `internal/version/version.txt` 内容未变且对应 `v<版本号>` 标签已存在（如仅更新文档或注释），自动跳过重量级测试与构建作业；若版本号递增或对应标签尚不存在，则执行完整 CI 与发版校验。
    - 完整 CI 会重编译 `sing-box 1.12.12`，并行执行 `golangci-lint`、`govulncheck`（同时扫描管理程序源码与二进制及固定内核二进制）、Go `-race` 测试、四库真实服务集成测试（`postgres:17-alpine`、`mysql:8.4`、`libsql-server` 覆盖旧库升级、批量导入与独立日志库）、发布说明与 GHCR 清理脚本单测、前端 ESLint、生产依赖 `npm audit`、`test:core`、`audit`、`test:version-sync`、`build` 以及 26 项前端 E2E 矩阵。
-2. **全栈与容器系统测试**：复用 `frontend-dist` 与测试内核执行真实上游与协议导入全栈回归、`docker compose --profile local`（基于 `alpine:3.24`）源码构建系统测试（验证未同意协议拒绝启动、`HEALTHCHECK` 达到 `healthy`、Shadowsocks 与 Direct 真实 HTTP/SOCKS5 转发）、单文件发行回归（覆盖非交互/伪终端协议门禁与 `v1.7.29` 原地升级）、`full-stack-system` / `full-stack-node-list` / `full-stack-features` / `precompressed-static` 浏览器验证，以及 `Dockerfile.release`（`alpine:3.24`）多架构构建、镜像体积报告与容器实际启动探活验证。
+2. **全栈、容器系统测试与质量门禁**：在零削减任何测试项与安全扫描的前提下采用并行 DAG 与增量隔离缓存（按任务用途与目标架构隔离 Go 模块/编译缓存与 `golangci-lint` 缓存，单写者维护 npm 下载缓存，隔离源码与发行 Docker Buildx scope）。`test-system-local-deploy`、`test-release-image-build` 与 `build-binaries` 并行执行，所有质量/安全任务汇总至严格 `quality-gate`（任一项未 `success` 即阻断发布）后才允许 `build-ghcr` 与 `create-release` 执行。复用 `frontend-dist` 与测试内核执行真实上游与协议导入全栈回归、`docker compose --profile local`（基于 `alpine:3.24`）源码构建系统测试（验证未同意协议拒绝启动、`HEALTHCHECK` 达到 `healthy`、Shadowsocks 与 Direct 真实 HTTP/SOCKS5 转发）、单文件发行回归（覆盖非交互/伪终端协议门禁与 `v1.7.29` 原地升级）、`full-stack-system` / `full-stack-node-list` / `full-stack-features` / `precompressed-static` 浏览器验证，以及 `Dockerfile.release`（`alpine:3.24`）多架构构建、镜像体积报告与容器实际启动探活验证。
    - 源码构建和发行镜像均验证 `/app/LICENSE`、`/app/THIRD_PARTY_NOTICES.md`、`/app/USER_AGREEMENT.md`、`/app/licenses/SING-BOX-GPL-3.0.txt` 存在且匹配仓库文件 SHA-256，且校验镜像内置 `HEALTHCHECK`。
 3. **自动发布与规范化 GHCR 打标（含 SBOM）**：
    - 工作流顶层对 PR 按编号去重、对 push 按 `run_id` 独立隔离（避免后续纯文档提交取消正在执行的发版流水线）；`build-ghcr` 按版本标签隔离并发并仅推送不可变的精确版本镜像（或 `edge`），`create-release` 在全局发布锁内先核对同版本标签未指向其他提交，创建 GitHub Release 后再基于最新远端标签通过 `scripts/publish_tags.py` 推进共享滚动镜像标签（`1.7`、`1`、`latest`），保障并发发布不覆盖、不倒退。
@@ -181,7 +181,7 @@ rm -f /tmp/sbpm-upstream-e2e-backend
 
 ### 4.2 GitLab CI（`.gitlab-ci.yml`）
 
-包含 `lint / test / build / release` 四个阶段，共享校验后的测试内核产物，覆盖 Go lint、漏洞扫描、race 测试、前端构建与版本一致性检查、GitLab Registry 镜像推送及 `linux/amd64`、`freebsd/amd64` 单文件构建。相比 GitHub Actions，GitLab 流水线不包含同等的浏览器全栈、PostgreSQL / MySQL / libSQL 实时服务矩阵、Compose 实测、单文件运行回归链及 6 平台完整发布矩阵。
+包含 `lint / test / build / release` 四个阶段并采用 `needs` 并行 DAG、项目内 `.ci-cache/`（按用途隔离 Go / golangci-lint / npm 下载缓存）及 Docker Buildx Registry 缓存，共享校验后的测试内核产物与单次构建的 `frontend/dist`，覆盖 Go lint、漏洞扫描、race 测试、前端核心回归/审计/版本一致性校验与构建、严格 `quality-gate` 质量门禁、GitLab Registry 镜像推送及 `linux/amd64`、`freebsd/amd64` 单文件构建。相比 GitHub Actions，GitLab 流水线不包含同等的浏览器全栈、PostgreSQL / MySQL / libSQL 实时服务矩阵、Compose 实测、单文件运行回归链及 6 平台完整发布矩阵。
 
 GitLab 使用同一个源码构建 Dockerfile 分发许可证文件与用户协议，`auto-release` 校验并附带 `LICENSE`、`THIRD_PARTY_NOTICES.md`、`USER_AGREEMENT.md`、`SING-BOX-GPL-3.0.txt` 附件链接，同时在描述中包含内核许可与对应源码链接。
 

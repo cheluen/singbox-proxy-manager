@@ -4,7 +4,7 @@ import test from 'node:test'
 import { protocolFixtures } from './fixtures/protocol-configs.mjs'
 import {
   createProtocolFormModel,
-  groupPhysicalNodesById,
+  groupPhysicalNodesInOrder,
   normalizePolicyMemberSources,
   parsePeersJSON,
   parseReservedInput,
@@ -544,40 +544,95 @@ test('分组编辑弹窗仅提交实际修改的字段，避免覆盖并发保�
     upstreamEnabledTouched: false,
   })
   assert.equal(abaConflict.upstreamConflict, true)
+
+  // 分组级「保留入站端口」：新建随 allocate_port 归一化，编辑仅在触碰时提交并正确触发关闭二次确认
+  const createdNoPort = buildGroupFormPlan({
+    editing: false,
+    values: { name: 'NoPort', allocate_port: false, preserve_inbound_ports: true, start_port: 30001 },
+    savedGroup: null,
+    openedSnapshot: null,
+    touchedFields: {},
+    upstreamDraft: null,
+    upstreamEnabledTouched: false,
+  })
+  assert.equal(createdNoPort.payload.allocate_port, false)
+  assert.equal(createdNoPort.payload.preserve_inbound_ports, false)
+
+  const preserveGroup = { ...refreshedServerGroup, preserve_inbound_ports: true }
+  const renamePreserveGroup = buildGroupFormPlan({
+    editing: true,
+    values: { name: 'Renamed', allocate_port: true, preserve_inbound_ports: true, start_port: 30001 },
+    savedGroup: preserveGroup,
+    openedSnapshot,
+    touchedFields: { name: true },
+    upstreamDraft: null,
+    upstreamEnabledTouched: false,
+  })
+  assert.deepEqual(renamePreserveGroup.payload, { name: 'Renamed' })
+  assert.equal(renamePreserveGroup.disablingPreserve, false)
+
+  const disablePreserve = buildGroupFormPlan({
+    editing: true,
+    values: { name: 'Default', allocate_port: true, preserve_inbound_ports: false, start_port: 30001 },
+    savedGroup: preserveGroup,
+    openedSnapshot,
+    touchedFields: { preserve_inbound_ports: true },
+    upstreamDraft: null,
+    upstreamEnabledTouched: false,
+  })
+  assert.deepEqual(disablePreserve.payload, { preserve_inbound_ports: false })
+  assert.equal(disablePreserve.disablingPreserve, true)
+
+  const disableAllocateInstead = buildGroupFormPlan({
+    editing: true,
+    values: { name: 'Default', allocate_port: false, preserve_inbound_ports: false, start_port: 30001 },
+    savedGroup: preserveGroup,
+    openedSnapshot,
+    touchedFields: { allocate_port: true, preserve_inbound_ports: true },
+    upstreamDraft: null,
+    upstreamEnabledTouched: false,
+  })
+  assert.deepEqual(disableAllocateInstead.payload, { allocate_port: false })
+  assert.equal(disableAllocateInstead.disablingPreserve, false)
 })
 
-test('策略整组关联按组内 ID 排序，断链原地展开去重并在保存时彻底移除 member_sources', () => {
+test('策略整组关联跟随组内 sort_order 排序，断链原地展开去重并在保存时彻底移除 member_sources', () => {
   const all = [
-    { id: 30, group_id: 2, type: 'ss', name: 'G2-30' },
-    { id: 10, group_id: 2, type: 'vless', name: 'G2-10' },
-    { id: 20, group_id: 2, type: 'failover', name: 'Nested Policy' },
-    { id: 5, group_id: 1, type: 'vmess', name: 'G1-5' },
-    { id: 40, group_id: 3, type: 'trojan', name: 'G3-40' },
+    { id: 30, group_id: 2, sort_order: 0, type: 'ss', name: 'G2-30' },
+    { id: 10, group_id: 2, sort_order: 1, type: 'vless', name: 'G2-10' },
+    { id: 25, group_id: 2, sort_order: 1, type: 'vmess', name: 'G2-25' },
+    { id: 20, group_id: 2, sort_order: 0, type: 'failover', name: 'Nested Policy' },
+    { id: 5, group_id: 1, sort_order: 0, type: 'vmess', name: 'G1-5' },
+    { id: 40, group_id: 3, sort_order: 0, type: 'trojan', name: 'G3-40' },
   ]
-  assert.deepEqual(groupPhysicalNodesById(all, 2, 99).map((n) => n.id), [10, 30])
+  // sort_order 优先，同 sort_order 时按 id 兜底升序
+  assert.deepEqual(groupPhysicalNodesInOrder(all, 2, 99).map((n) => n.id), [30, 10, 25])
   assert.deepEqual(normalizePolicyMemberSources(undefined, [5, 10, 5]), [
     { type: 'node', id: 5 },
     { type: 'node', id: 10 },
   ])
   const linked = [{ type: 'node', id: 10 }, { type: 'group', id: 2 }, { type: 'group', id: 3 }]
-  assert.deepEqual(resolvePolicyMemberIds(linked, all, 99), [10, 30, 40])
+  assert.deepEqual(resolvePolicyMemberIds(linked, all, 99), [10, 30, 25, 40])
   const unlinkedG2 = unlinkPolicyGroupInSources(linked, 2, all, 99)
   assert.deepEqual(unlinkedG2, [
     { type: 'node', id: 10 },
     { type: 'node', id: 30 },
+    { type: 'node', id: 25 },
     { type: 'group', id: 3 },
   ])
-  // 分组在前、重复手工节点在后：断链必须保留首次出现位置 [10, 30]，不能反转成 [30, 10]
+  // 分组在前、重复手工节点在后：断链必须保留首次出现位置 [30, 10, 25]，跟随组内排序
   const groupBeforeDup = [{ type: 'group', id: 2 }, { type: 'node', id: 10 }]
-  assert.deepEqual(resolvePolicyMemberIds(groupBeforeDup, all, 99), [10, 30])
+  assert.deepEqual(resolvePolicyMemberIds(groupBeforeDup, all, 99), [30, 10, 25])
   assert.deepEqual(unlinkPolicyGroupInSources(groupBeforeDup, 2, all, 99), [
-    { type: 'node', id: 10 },
     { type: 'node', id: 30 },
+    { type: 'node', id: 10 },
+    { type: 'node', id: 25 },
   ])
   const unlinkedAll = unlinkPolicyGroupInSources(unlinkedG2, 3, all, 99)
   assert.deepEqual(unlinkedAll, [
     { type: 'node', id: 10 },
     { type: 'node', id: 30 },
+    { type: 'node', id: 25 },
     { type: 'node', id: 40 },
   ])
 
@@ -586,7 +641,7 @@ test('策略整组关联按组内 ID 排序，断链原地展开去重并在保�
     type: 'failover',
     inbound_mode: 'https',
     config: JSON.stringify({
-      member_ids: [10, 30],
+      member_ids: [30, 10, 25],
       member_sources: [{ type: 'group', id: 2 }],
     }),
   }

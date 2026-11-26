@@ -20,13 +20,15 @@ export function buildGroupFormPlan({
 
   if (!editing) {
     if (values.upstream_enabled && !upstreamConfigured) {
-      return { missingUpstream: true, upstreamConflict: false, payload: null }
+      return { missingUpstream: true, upstreamConflict: false, disablingPreserve: false, payload: null }
     }
     const subUrl = String(values.subscription_url || '').trim()
+    const allocatePort = Boolean(values.allocate_port)
     const payload = {
       name: String(values.name || '').trim(),
-      allocate_port: Boolean(values.allocate_port),
-      start_port: values.allocate_port ? Number(values.start_port || 30001) : Number(values.start_port || 30001),
+      allocate_port: allocatePort,
+      preserve_inbound_ports: Boolean(allocatePort && values.preserve_inbound_ports),
+      start_port: Number(values.start_port || 30001),
       subscription_url: subUrl,
       subscription_auto_update: Boolean(subUrl && values.subscription_auto_update),
       subscription_interval_minutes: Number(values.subscription_interval_minutes || 60),
@@ -36,12 +38,12 @@ export function buildGroupFormPlan({
       payload.upstream_type = upstream.type
       payload.upstream_config = upstream.config
     }
-    return { missingUpstream: false, upstreamConflict: false, payload }
+    return { missingUpstream: false, upstreamConflict: false, disablingPreserve: false, payload }
   }
 
   const localUpstreamTouched = Boolean(upstreamEnabledTouched || upstreamDraft !== null)
   if (localUpstreamTouched && effectiveEnabled && !upstreamConfigured) {
-    return { missingUpstream: true, upstreamConflict: false, payload: null }
+    return { missingUpstream: true, upstreamConflict: false, disablingPreserve: false, payload: null }
   }
 
   const serverUpstreamChanged = Boolean(
@@ -66,6 +68,14 @@ export function buildGroupFormPlan({
   const nextAllocate = Boolean(values.allocate_port)
   if (touched('allocate_port') && nextAllocate !== Boolean(savedGroup?.allocate_port)) {
     payload.allocate_port = nextAllocate
+  }
+
+  const savedPreserve = Boolean(savedGroup?.allocate_port !== false && savedGroup?.preserve_inbound_ports)
+  if (nextAllocate && touched('preserve_inbound_ports')) {
+    const nextPreserve = Boolean(values.preserve_inbound_ports)
+    if (nextPreserve !== savedPreserve) {
+      payload.preserve_inbound_ports = nextPreserve
+    }
   }
 
   if (nextAllocate && (touched('start_port') || (touched('allocate_port') && !Number(savedGroup?.start_port)))) {
@@ -125,6 +135,7 @@ export function buildGroupFormPlan({
   return {
     missingUpstream: false,
     upstreamConflict: Boolean(upstreamPayloadMutates && serverUpstreamChanged),
+    disablingPreserve: Boolean(nextAllocate && savedPreserve && payload.preserve_inbound_ports === false),
     payload,
   }
 }

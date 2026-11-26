@@ -8,6 +8,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"slices"
 	"strconv"
 	"testing"
@@ -18,9 +19,10 @@ import (
 )
 
 type groupTestClient struct {
-	t      *testing.T
-	db     *sql.DB
-	router *gin.Engine
+	t       *testing.T
+	db      *sql.DB
+	router  *gin.Engine
+	handler *Handler
 }
 
 func newGroupTestClient(t *testing.T) groupTestClient {
@@ -52,7 +54,7 @@ func newGroupTestClient(t *testing.T) groupTestClient {
 	router.POST("/api/nodes/reorder", handler.ReorderNodes)
 	router.GET("/api/settings", handler.GetSettings)
 	router.PUT("/api/settings", handler.UpdateSettings)
-	return groupTestClient{t: t, db: handler.db, router: router}
+	return groupTestClient{t: t, db: handler.db, router: router, handler: handler}
 }
 
 func (client groupTestClient) request(method, path string, payload any, wantStatus int, result any) {
@@ -343,7 +345,7 @@ func TestGroupAllocationToggleHonorsPinsAndGlobalReservations(t *testing.T) {
 	for _, id := range []int{first.ID, second.ID} {
 		client.request(http.MethodPut, testNodePath(id)+"/port-pin", gin.H{"pinned": true}, http.StatusOK, nil)
 	}
-	client.request(http.MethodPut, "/api/settings", gin.H{"preserve_inbound_ports": true}, http.StatusOK, nil)
+	client.request(http.MethodPatch, poolPath, gin.H{"preserve_inbound_ports": true}, http.StatusOK, nil)
 	var blocked struct {
 		Code   string `json:"code"`
 		Error  string `json:"error"`
@@ -355,7 +357,7 @@ func TestGroupAllocationToggleHonorsPinsAndGlobalReservations(t *testing.T) {
 		t.Fatalf("unexpected pin conflict: %+v", blocked)
 	}
 	client.request(http.MethodGet, poolPath, nil, http.StatusOK, &group)
-	if !group.AllocatePort || group.Name != pool.Name {
+	if !group.AllocatePort || !group.PreserveInboundPorts || group.Name != pool.Name {
 		t.Fatalf("rejected disable partially changed group: %+v", group)
 	}
 	client.assertPort(first.ID, pool.ID, 35003, true)
@@ -367,6 +369,7 @@ func TestGroupAllocationToggleHonorsPinsAndGlobalReservations(t *testing.T) {
 	client.request(http.MethodPatch, poolPath, gin.H{"allocate_port": true}, http.StatusOK, nil)
 	client.assertPort(first.ID, pool.ID, 35003, false)
 	client.assertPort(second.ID, pool.ID, 35004, false)
+	client.request(http.MethodPatch, poolPath, gin.H{"preserve_inbound_ports": true}, http.StatusOK, nil)
 	for _, port := range []int{35000, 35001, 35002} {
 		payload := gin.H{"name": "collision", "type": "direct", "config": "{}", "enabled": true, "group_id": pool.ID, "inbound_port": port}
 		client.request(http.MethodPost, "/api/nodes", payload, http.StatusBadRequest, nil)
@@ -403,7 +406,8 @@ func TestGroupMoveRespectsPortAndPinPolicy(t *testing.T) {
 		"name": "moved by edit", "type": "direct", "config": "{}", "enabled": true, "group_id": hidden.ID, "inbound_port": home.StartPort,
 	}, http.StatusOK, nil)
 	client.assertPort(pinned.ID, hidden.ID, 0, false)
-	client.request(http.MethodPut, "/api/settings", gin.H{"preserve_inbound_ports": true}, http.StatusOK, nil)
+	client.request(http.MethodPatch, testGroupPath(home.ID), gin.H{"preserve_inbound_ports": true}, http.StatusOK, nil)
+	client.request(http.MethodPatch, testGroupPath(target.ID), gin.H{"preserve_inbound_ports": true}, http.StatusOK, nil)
 	move([]int{pinned.ID}, target.ID, http.StatusOK)
 	client.assertPort(pinned.ID, target.ID, target.StartPort+2, false)
 	move([]int{automatic.ID}, home.ID, http.StatusOK)
@@ -414,4 +418,300 @@ func TestGroupMoveRespectsPortAndPinPolicy(t *testing.T) {
 	client.assertPort(resident.ID, hidden.ID, 0, false)
 	client.assertPort(pinned.ID, hidden.ID, 0, false)
 	client.assertPort(automatic.ID, home.ID, target.StartPort+1, false)
+}
+
+func TestGroupPreserveInboundPortsDependencyContract(t *testing.T) {
+	for _, test := range []struct {
+		name     string
+		payload  gin.H
+		allocate bool
+		preserve bool
+		status   int
+	}{
+		{"default", gin.H{}, true, false, http.StatusCreated},
+		{"enabled by default allocation", gin.H{"preserve_inbound_ports": true}, true, true, http.StatusCreated},
+		{"explicitly enabled", gin.H{"allocate_port": true, "preserve_inbound_ports": true}, true, true, http.StatusCreated},
+		{"portless default", gin.H{"allocate_port": false}, false, false, http.StatusCreated},
+		{"portless disabled", gin.H{"allocate_port": false, "preserve_inbound_ports": false}, false, false, http.StatusCreated},
+		{"invalid dependency", gin.H{"allocate_port": false, "preserve_inbound_ports": true}, false, false, http.StatusBadRequest},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			client := newGroupTestClient(t)
+			test.payload["name"] = test.name
+			var group models.NodeGroup
+			client.request(http.MethodPost, "/api/node-groups", test.payload, test.status, &group)
+			if test.status == http.StatusCreated && (group.AllocatePort != test.allocate || group.PreserveInboundPorts != test.preserve) {
+				t.Fatalf("分组默认值或依赖关系错误：%+v", group)
+			}
+		})
+	}
+	client := newGroupTestClient(t)
+	group := client.createGroup("Toggle dependency", 37000, true)
+	path := testGroupPath(group.ID)
+	client.request(http.MethodPatch, path, gin.H{"preserve_inbound_ports": true}, http.StatusOK, &group)
+	before := group
+	client.request(http.MethodPatch, path, gin.H{"allocate_port": false, "preserve_inbound_ports": true, "name": "rejected"}, http.StatusBadRequest, nil)
+	client.request(http.MethodGet, path, nil, http.StatusOK, &group)
+	if !reflect.DeepEqual(before, group) {
+		t.Fatal("拒绝依赖冲突时修改了分组")
+	}
+	client.request(http.MethodPatch, path, gin.H{"allocate_port": false}, http.StatusOK, &group)
+	if group.AllocatePort || group.PreserveInboundPorts {
+		t.Fatal("关闭端口分配未自动关闭保留策略")
+	}
+	client.request(http.MethodPatch, path, gin.H{"preserve_inbound_ports": true}, http.StatusBadRequest, nil)
+	client.request(http.MethodPatch, path, gin.H{"allocate_port": true, "preserve_inbound_ports": true}, http.StatusOK, &group)
+	if !group.AllocatePort || !group.PreserveInboundPorts {
+		t.Fatal("同请求重新开启端口分配与保留策略失败")
+	}
+	var groups []map[string]any
+	client.request(http.MethodGet, "/api/node-groups", nil, http.StatusOK, &groups)
+	for _, response := range groups {
+		if _, ok := response["preserve_inbound_ports"].(bool); !ok {
+			t.Fatal("分组列表缺少布尔类型的保留策略字段")
+		}
+	}
+}
+
+func TestGroupPreserveAllocationRestoresNullPorts(t *testing.T) {
+	t.Setenv("PORT", "37001")
+	client := newGroupTestClient(t)
+	setTestGroupStartPort(t, client.db, 37000)
+	home := firstTestGroup(t, client.db)
+	reserved := client.createNode("other group reservation", home.ID, false)
+	group := client.createGroup("Portless", 37000, false)
+	first := client.createNode("first", group.ID, true)
+	second := client.createNode("second", group.ID, false)
+	path := testGroupPath(group.ID)
+	client.request(http.MethodPatch, path, gin.H{"allocate_port": true, "preserve_inbound_ports": true}, http.StatusOK, &group)
+	if !group.PreserveInboundPorts {
+		t.Fatal("重新开启端口分配后未保存保留策略")
+	}
+	client.assertPort(first.ID, group.ID, 37002, false)
+	client.assertPort(second.ID, group.ID, 37003, false)
+	client.assertPort(reserved.ID, home.ID, 37000, false)
+	client.request(http.MethodPatch, path, gin.H{"allocate_port": false}, http.StatusOK, &group)
+	if group.PreserveInboundPorts {
+		t.Fatal("关闭端口分配后残留了保留策略")
+	}
+	client.assertPort(first.ID, group.ID, 0, false)
+	client.assertPort(second.ID, group.ID, 0, false)
+}
+
+func TestGroupPreserveChangesKeepRunningKernelAndPorts(t *testing.T) {
+	client := newGroupTestClient(t)
+	group := firstTestGroup(t, client.db)
+	node := client.createNode("running", group.ID, true)
+	before := client.handler.singBoxService.RuntimeStatus()
+	if !before.Running || before.PID == 0 {
+		t.Fatal("测试内核未启动")
+	}
+	for _, payload := range []gin.H{
+		{"preserve_inbound_ports": true},
+		{"start_port": 41000},
+		{"start_port": 42000, "preserve_inbound_ports": true},
+	} {
+		client.request(http.MethodPatch, testGroupPath(group.ID), payload, http.StatusOK, &group)
+		client.assertPort(node.ID, group.ID, node.InboundPort, false)
+		after := client.handler.singBoxService.RuntimeStatus()
+		if !group.PreserveInboundPorts || !after.Running || after.PID != before.PID || after.ActiveConfigHash != before.ActiveConfigHash || after.DesiredConfigHash != before.DesiredConfigHash {
+			t.Fatal("纯开启保留策略或保留模式下修改起始端口重启了内核")
+		}
+	}
+	added := client.createNode("new baseline", group.ID, true)
+	client.assertPort(added.ID, group.ID, 42000, false)
+	client.assertPort(node.ID, group.ID, node.InboundPort, false)
+}
+
+func TestGroupPreserveEnableWithNewStartKeepsRunningKernelAndPorts(t *testing.T) {
+	client := newGroupTestClient(t)
+	group := firstTestGroup(t, client.db)
+	node := client.createNode("existing automatic", group.ID, true)
+	before := client.handler.singBoxService.RuntimeStatus()
+	client.request(http.MethodPatch, testGroupPath(group.ID), gin.H{"preserve_inbound_ports": true, "start_port": 41000}, http.StatusOK, &group)
+	client.assertPort(node.ID, group.ID, node.InboundPort, false)
+	after := client.handler.singBoxService.RuntimeStatus()
+	if !group.PreserveInboundPorts || group.StartPort != 41000 || !after.Running || after.PID != before.PID || after.ActiveConfigHash != before.ActiveConfigHash {
+		t.Fatal("同请求开启保留策略并修改起始端口重排端口或重启了内核")
+	}
+}
+
+func TestGroupPreserveRealignmentIsIsolatedAndRetainsPins(t *testing.T) {
+	client := newGroupTestClient(t)
+	home := firstTestGroup(t, client.db)
+	other := client.createNode("unrelated automatic", home.ID, true)
+	fixed := client.createNode("unrelated fixed", home.ID, true)
+	client.request(http.MethodPut, testNodePath(fixed.ID)+"/port-pin", gin.H{"pinned": true}, http.StatusOK, nil)
+	client.request(http.MethodPut, testNodePath(fixed.ID), gin.H{"name": fixed.Name, "type": "direct", "config": "{}", "enabled": true, "inbound_port": 443}, http.StatusOK, nil)
+	group := client.createGroup("Selected", 38000, true)
+	pinned := client.createNode("retained pin", group.ID, true)
+	automatic := client.createNode("selected automatic", group.ID, false)
+	client.request(http.MethodPut, testNodePath(pinned.ID)+"/port-pin", gin.H{"pinned": true}, http.StatusOK, nil)
+	client.request(http.MethodPut, testNodePath(pinned.ID), gin.H{"name": pinned.Name, "type": "direct", "config": "{}", "enabled": true, "inbound_port": 444}, http.StatusOK, nil)
+	if _, err := client.db.Exec("UPDATE proxy_nodes SET inbound_port=41070,sort_order=8 WHERE id=?", other.ID); err != nil {
+		t.Fatal(err)
+	}
+	beforeOther, err := models.LoadGroupNodes(t.Context(), client.db, home.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	client.request(http.MethodPatch, testGroupPath(group.ID), gin.H{"preserve_inbound_ports": true}, http.StatusOK, nil)
+	client.assertPort(pinned.ID, group.ID, 444, true)
+	client.request(http.MethodPut, testNodePath(automatic.ID)+"/port-pin", gin.H{"pinned": true}, http.StatusConflict, nil)
+	client.request(http.MethodPut, testNodePath(automatic.ID), gin.H{"name": automatic.Name, "type": "direct", "config": "{}", "enabled": false, "inbound_port": 42022}, http.StatusOK, nil)
+	client.request(http.MethodPatch, testGroupPath(group.ID), gin.H{"start_port": 40000, "preserve_inbound_ports": false}, http.StatusOK, nil)
+	client.assertPort(pinned.ID, group.ID, 444, true)
+	client.assertPort(automatic.ID, group.ID, 40000, false)
+	client.request(http.MethodPatch, testGroupPath(group.ID), gin.H{"start_port": 42000}, http.StatusOK, nil)
+	client.assertPort(pinned.ID, group.ID, 444, true)
+	client.assertPort(automatic.ID, group.ID, 42000, false)
+	afterOther, err := models.LoadGroupNodes(t.Context(), client.db, home.ID)
+	if err != nil || !reflect.DeepEqual(beforeOther, afterOther) {
+		t.Fatal("关闭本组保留策略重排了其他分组或改变了其固定状态", err)
+	}
+	client.request(http.MethodPut, testNodePath(automatic.ID)+"/port-pin", gin.H{"pinned": true}, http.StatusOK, nil)
+}
+
+func TestUpdateNodePreserveOmittedZeroAndManualPorts(t *testing.T) {
+	for _, preserve := range []bool{false, true} {
+		t.Run(strconv.FormatBool(preserve), func(t *testing.T) {
+			client := newGroupTestClient(t)
+			group := firstTestGroup(t, client.db)
+			node := client.createNode("editable", group.ID, true)
+			if preserve {
+				client.request(http.MethodPatch, testGroupPath(group.ID), gin.H{"preserve_inbound_ports": true}, http.StatusOK, nil)
+			} else {
+				client.request(http.MethodPut, testNodePath(node.ID)+"/port-pin", gin.H{"pinned": true}, http.StatusOK, nil)
+			}
+			payload := gin.H{"name": "edited", "type": "direct", "config": "{}", "enabled": true, "inbound_port": 42050}
+			client.request(http.MethodPut, testNodePath(node.ID), payload, http.StatusOK, nil)
+			client.request(http.MethodPatch, testGroupPath(group.ID), gin.H{"start_port": 41000}, http.StatusOK, nil)
+			delete(payload, "inbound_port")
+			client.request(http.MethodPut, testNodePath(node.ID), payload, http.StatusOK, nil)
+			client.assertPort(node.ID, group.ID, 42050, !preserve)
+			payload["inbound_port"] = 0
+			client.request(http.MethodPut, testNodePath(node.ID), payload, http.StatusOK, nil)
+			client.assertPort(node.ID, group.ID, 41000, !preserve)
+			payload["inbound_port"] = 43050
+			client.request(http.MethodPut, testNodePath(node.ID), payload, http.StatusOK, nil)
+			client.assertPort(node.ID, group.ID, 43050, !preserve)
+		})
+	}
+}
+
+func TestUpdateNodeMoveUsesTargetGroupPortContract(t *testing.T) {
+	for _, test := range []struct {
+		name   string
+		port   *int
+		want   int
+		status int
+	}{
+		{"omitted", nil, 42050, http.StatusOK},
+		{"automatic", new(0), 45001, http.StatusOK},
+		{"manual", new(46050), 46050, http.StatusOK},
+		{"collision rollback", new(45000), 42050, http.StatusBadRequest},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			client := newGroupTestClient(t)
+			home := firstTestGroup(t, client.db)
+			client.request(http.MethodPatch, testGroupPath(home.ID), gin.H{"preserve_inbound_ports": true}, http.StatusOK, nil)
+			node := client.createNode("moving", home.ID, true)
+			payload := gin.H{"name": node.Name, "type": "direct", "config": "{}", "enabled": true, "inbound_port": 42050}
+			client.request(http.MethodPut, testNodePath(node.ID), payload, http.StatusOK, nil)
+			target := client.createGroup("Target", 45000, true)
+			resident := client.createNode("resident", target.ID, true)
+			client.request(http.MethodPatch, testGroupPath(target.ID), gin.H{"preserve_inbound_ports": true}, http.StatusOK, nil)
+			payload["group_id"] = target.ID
+			delete(payload, "inbound_port")
+			if test.port != nil {
+				payload["inbound_port"] = *test.port
+			}
+			client.request(http.MethodPut, testNodePath(node.ID), payload, test.status, nil)
+			groupID := target.ID
+			if test.status != http.StatusOK {
+				groupID = home.ID
+			}
+			client.assertPort(node.ID, groupID, test.want, false)
+			client.assertPort(resident.ID, target.ID, 45000, false)
+		})
+	}
+}
+
+func TestGroupMoveUsesSourceAndTargetPreservePoliciesIndependently(t *testing.T) {
+	for _, test := range []struct {
+		name           string
+		sourcePreserve bool
+		targetPreserve bool
+		remainingPort  int
+		movedPort      int
+	}{
+		{"preserved to automatic", true, false, 42021, 45001},
+		{"automatic to preserved", false, true, 30002, 30001},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			client := newGroupTestClient(t)
+			home := firstTestGroup(t, client.db)
+			client.request(http.MethodPatch, testGroupPath(home.ID), gin.H{"preserve_inbound_ports": test.sourcePreserve}, http.StatusOK, nil)
+			first := client.createNode("moving", home.ID, true)
+			second := client.createNode("remaining", home.ID, true)
+			if test.sourcePreserve {
+				for index, node := range []models.ProxyNode{first, second} {
+					client.request(http.MethodPut, testNodePath(node.ID), gin.H{
+						"name": node.Name, "type": "direct", "config": "{}", "enabled": true, "inbound_port": 42020 + index,
+					}, http.StatusOK, nil)
+				}
+			}
+			target := client.createGroup("Target", 45000, true)
+			resident := client.createNode("resident", target.ID, true)
+			client.request(http.MethodPatch, testGroupPath(target.ID), gin.H{"preserve_inbound_ports": test.targetPreserve}, http.StatusOK, nil)
+			client.request(http.MethodPost, "/api/nodes/batch-move", gin.H{"ids": []int{first.ID}, "group_id": target.ID}, http.StatusOK, nil)
+			client.assertPort(first.ID, target.ID, test.movedPort, false)
+			client.assertPort(second.ID, home.ID, test.remainingPort, false)
+			client.assertPort(resident.ID, target.ID, 45000, false)
+			client.assertNodeOrder(home.ID, second.ID)
+			client.assertNodeOrder(target.ID, resident.ID, first.ID)
+		})
+	}
+}
+
+func TestGroupMixedPreservePoliciesAcrossReorderDeleteImportAndGroupMove(t *testing.T) {
+	client := newGroupTestClient(t)
+	home := firstTestGroup(t, client.db)
+	first := client.createNode("automatic first", home.ID, true)
+	second := client.createNode("automatic second", home.ID, false)
+	stable := client.createGroup("Preserved", 39000, true)
+	stableFirst := client.createNode("preserved first", stable.ID, true)
+	stableSecond := client.createNode("preserved second", stable.ID, false)
+	client.request(http.MethodPatch, testGroupPath(stable.ID), gin.H{"preserve_inbound_ports": true}, http.StatusOK, nil)
+	for _, group := range []struct {
+		id, first, second int
+	}{{home.ID, first.ID, second.ID}, {stable.ID, stableFirst.ID, stableSecond.ID}} {
+		client.request(http.MethodPost, "/api/nodes/reorder", gin.H{"group_id": group.id, "nodes": []gin.H{
+			{"id": group.first, "sort_order": 1}, {"id": group.second, "sort_order": 0},
+		}}, http.StatusOK, nil)
+	}
+	client.assertPort(first.ID, home.ID, 30002, false)
+	client.assertPort(second.ID, home.ID, 30001, false)
+	client.assertPort(stableFirst.ID, stable.ID, 39000, false)
+	client.assertPort(stableSecond.ID, stable.ID, 39001, false)
+	client.request(http.MethodPost, "/api/nodes/batch-delete", gin.H{"ids": []int{second.ID, stableFirst.ID}}, http.StatusOK, nil)
+	client.assertPort(first.ID, home.ID, 30001, false)
+	client.assertPort(stableSecond.ID, stable.ID, 39001, false)
+	client.request(http.MethodPost, "/api/nodes/batch-import", gin.H{
+		"group_id": stable.ID, "content": "socks5://127.0.0.1:1080#import-a\nsocks5://127.0.0.1:1081#import-b", "enabled": true,
+	}, http.StatusOK, nil)
+	nodes, err := models.LoadGroupNodes(t.Context(), client.db, stable.ID)
+	if err != nil || len(nodes) != 3 {
+		t.Fatalf("保留分组的批量导入失败：%d，%v", len(nodes), err)
+	}
+	client.assertPort(nodes[0].ID, stable.ID, 39001, false)
+	client.assertPort(nodes[1].ID, stable.ID, 39000, false)
+	client.assertPort(nodes[2].ID, stable.ID, 39002, false)
+	client.assertPort(first.ID, home.ID, 30001, false)
+	client.request(http.MethodDelete, testGroupPath(stable.ID)+"?mode=move&target_group_id="+strconv.Itoa(home.ID), nil, http.StatusOK, nil)
+	client.assertPort(stableSecond.ID, home.ID, 30002, false)
+	client.assertPort(first.ID, home.ID, 30001, false)
+	if firstTestGroup(t, client.db).PreserveInboundPorts {
+		t.Fatal("删除分组并移动节点时将来源保留策略覆盖了目标分组")
+	}
 }

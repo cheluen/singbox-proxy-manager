@@ -424,7 +424,7 @@ try {
   assert.ok(lbHits.has('backend-A') && lbHits.has('backend-B'), `LoadBalance 未在双成员间轮询分发：${[...lbHits].join(',')}`)
   steps.push('policy-failover-and-loadbalance-live')
 
-  // 3.2 策略整组关联自动同步（按组内 ID 升序）+ 断链后独立管理不再受分组影响
+  // 3.2 策略整组关联自动同步（跟随组内排序）+ 拖拽重排实时生效 + 断链后独立管理不再受分组影响
   const groupPolicy = await api('POST', '/nodes', {
     group_id: defaultGroupId,
     name: 'Group Sync Policy',
@@ -436,7 +436,37 @@ try {
     auth_enabled: false,
     enabled: true,
   })
-  assert.deepEqual(JSON.parse(groupPolicy.config).member_ids, [memberA.id, memberB.id], '整组策略未按组内 ID 升序展开')
+  assert.deepEqual(JSON.parse(groupPolicy.config).member_ids, [memberA.id, memberB.id], '整组策略未按组内顺序展开')
+  const beforeReorderHit = await curl([
+    '--proxy', `http://127.0.0.1:${groupPolicy.inbound_port}`,
+    `http://127.0.0.1:${targetPortA}/policy-before-reorder`,
+  ])
+  assert.equal(beforeReorderHit.code, 0, `整组策略排序前转发失败：${beforeReorderHit.stderr}`)
+  assert.equal(beforeReorderHit.stdout.trim(), 'backend-A', '排序前故障转移应优先命中排在首位的 memberA')
+  // 将组内节点拖动重排为 [memberB, memberA]，不编辑策略即可自动同步优先级并改变实际流量路由
+  await api('POST', '/nodes/reorder', {
+    group_id: noPortGroup.id,
+    nodes: [
+      { id: memberB.id, sort_order: 0 },
+      { id: memberA.id, sort_order: 1 },
+    ],
+  })
+  const syncedAfterReorder = await api('GET', `/nodes/${groupPolicy.id}`)
+  assert.deepEqual(JSON.parse(syncedAfterReorder.config).member_ids, [memberB.id, memberA.id], '组内拖动排序未自动同步到整组策略优先级')
+  const afterReorderHit = await curl([
+    '--proxy', `http://127.0.0.1:${groupPolicy.inbound_port}`,
+    `http://127.0.0.1:${targetPortA}/policy-after-reorder`,
+  ])
+  assert.equal(afterReorderHit.code, 0, `整组策略排序后转发失败：${afterReorderHit.stderr}`)
+  assert.equal(afterReorderHit.stdout.trim(), 'backend-B', '拖动重排后未编辑策略，真实流量未优先走排到首位的 memberB')
+  // 还原顺序后再验证新增节点同步
+  await api('POST', '/nodes/reorder', {
+    group_id: noPortGroup.id,
+    nodes: [
+      { id: memberA.id, sort_order: 0 },
+      { id: memberB.id, sort_order: 1 },
+    ],
+  })
   const memberC = await api('POST', '/nodes', {
     group_id: noPortGroup.id,
     name: 'Member C',

@@ -7,6 +7,7 @@ import (
 	"embed"
 	"encoding/hex"
 	"reflect"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -142,7 +143,7 @@ func verifyLegacyGroupMigration(t *testing.T, withDatabase func(func(*sql.DB))) 
 			tcp_reuse_enabled, upstream_mode, upstream_type, upstream_config, upstream_ip, upstream_location, upstream_country_code,
 			upstream_latency, upstream_error, sort_order, node_ip, location, country_code, latency, enabled, created_at, updated_at`},
 		{table: "settings", columns: `id, singleton_key, admin_password, admin_password_env_fingerprint, auth_generation,
-			preserve_inbound_ports, global_upstream_enabled, global_upstream_type, global_upstream_config, global_upstream_ip,
+			global_upstream_enabled, global_upstream_type, global_upstream_config, global_upstream_ip,
 			global_upstream_location, global_upstream_country_code, global_upstream_latency, global_upstream_error,
 			node_list_column_widths, created_at, updated_at`},
 		{table: "admin_sessions", columns: "id, token_hash, auth_generation, expires_at, user_agent, ip, created_at"},
@@ -166,6 +167,7 @@ func verifyLegacyGroupMigration(t *testing.T, withDatabase func(func(*sql.DB))) 
 		if err := models.InitDB(db); err != nil {
 			t.Fatalf("升级 1.7.29 数据库失败：%v", err)
 		}
+		verifyLegacyPreserveSettingAbsent(t, db)
 		var logSettings string
 		if err := db.QueryRow("SELECT COALESCE(log_settings_json,'{}') FROM settings WHERE singleton_key=1").Scan(&logSettings); err != nil || logSettings != "{}" {
 			t.Fatalf("升级后的日志设置 %q, %v", logSettings, err)
@@ -180,7 +182,7 @@ func verifyLegacyGroupMigration(t *testing.T, withDatabase func(func(*sql.DB))) 
 		}
 		groups, nodes := migratedGroupState(t, db)
 		if len(groups) != 1 || groups[0].ID <= 0 || groups[0].Name == "" || groups[0].SortOrder != 0 ||
-			!groups[0].AllocatePort || groups[0].StartPort != legacyGroupStartPort || groups[0].NodeCount != 4 || groups[0].EnabledNodeCount != 3 {
+			!groups[0].AllocatePort || !groups[0].PreserveInboundPorts || groups[0].StartPort != legacyGroupStartPort || groups[0].NodeCount != 4 || groups[0].EnabledNodeCount != 3 {
 			t.Fatalf("默认分组未继承旧端口和全部节点：%+v", groups)
 		}
 		if len(nodes) != 4 {
@@ -219,6 +221,7 @@ func verifyLegacyGroupMigration(t *testing.T, withDatabase func(func(*sql.DB))) 
 		if err := models.InitDB(db); err != nil {
 			t.Fatalf("重新打开已迁移数据库失败：%v", err)
 		}
+		verifyLegacyPreserveSettingAbsent(t, db)
 		var logSettings string
 		if err := db.QueryRow("SELECT log_settings_json FROM settings WHERE singleton_key=1").Scan(&logSettings); err != nil || logSettings != `{"enabled":false}` {
 			t.Fatalf("重新迁移改变了日志设置 %q, %v", logSettings, err)
@@ -269,6 +272,99 @@ func migratedGroupState(t *testing.T, db *sql.DB) ([]models.NodeGroup, []models.
 		t.Fatal(err)
 	}
 	return groups, nodes
+}
+
+func verifyLegacyPreserveSettingAbsent(t *testing.T, db *sql.DB) {
+	t.Helper()
+	rows, err := db.Query("SELECT * FROM settings WHERE singleton_key=1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rows.Close()
+	columns, err := rows.Columns()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, column := range columns {
+		if column == "preserve_inbound_ports" {
+			t.Fatal("旧版全局保留入站端口字段未删除")
+		}
+	}
+}
+
+func verifyGroupedPreserveUpgrade(t *testing.T, db *sql.DB) {
+	t.Helper()
+	for _, legacyPreserve := range []bool{false, true} {
+		t.Run(strconv.FormatBool(legacyPreserve), func(t *testing.T) {
+			resetApplicationTables(t, db)
+			defer resetApplicationTables(t, db)
+			if err := models.InitDB(db); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := db.Exec(`UPDATE node_groups SET name='Existing default',start_port=31000,revision=17`); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := db.Exec(`INSERT INTO node_groups(name,sort_order,allocate_port,start_port,upstream_config,revision)
+				VALUES ('Existing allocated',1,TRUE,32000,'',9),('Existing portless',2,FALSE,33000,'',12)`); err != nil {
+				t.Fatal(err)
+			}
+			groups, err := models.LoadGroups(t.Context(), db)
+			if err != nil || len(groups) != 3 {
+				t.Fatalf("准备历史分组失败：%+v，%v", groups, err)
+			}
+			for index, group := range groups {
+				port := 0
+				if group.AllocatePort {
+					port = 31731 + index
+				}
+				if _, err := db.Exec(`INSERT INTO proxy_nodes(name,type,config,inbound_port,inbound_port_pinned,sort_order,enabled,group_id,username,password,upstream_mode,upstream_config)
+					VALUES (?,'direct','{}',?,?,?,?,?,'historical-user','historical-auth','none','')`, group.Name, models.NullablePort(port), index == 0, 7+index, index == 0, group.ID); err != nil {
+					t.Fatal(err)
+				}
+			}
+			beforeGroups, beforeNodes := migratedGroupState(t, db)
+			settingsProjection := legacyGroupProjection{table: "settings", columns: models.SettingsSnapshotColumns}
+			beforeSettings := settingsProjection.read(t, db)
+			if _, err := db.Exec("ALTER TABLE node_groups DROP COLUMN preserve_inbound_ports"); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := db.Exec("ALTER TABLE settings ADD COLUMN preserve_inbound_ports BOOLEAN NOT NULL DEFAULT FALSE"); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := db.Exec("UPDATE settings SET preserve_inbound_ports=? WHERE singleton_key=1", legacyPreserve); err != nil {
+				t.Fatal(err)
+			}
+			if err := models.InitDB(db); err != nil {
+				t.Fatalf("已有分组的保留策略迁移失败：%v", err)
+			}
+			verifyLegacyPreserveSettingAbsent(t, db)
+			afterGroups, afterNodes := migratedGroupState(t, db)
+			for index := range beforeGroups {
+				beforeGroups[index].PreserveInboundPorts = legacyPreserve && beforeGroups[index].AllocatePort
+			}
+			if !reflect.DeepEqual(beforeGroups, afterGroups) || !reflect.DeepEqual(beforeNodes, afterNodes) || !reflect.DeepEqual(beforeSettings, settingsProjection.read(t, db)) {
+				t.Fatal("迁移未正确复制分组保留策略，或改变了节点端口、固定状态、认证、排序与其他历史字段")
+			}
+			if _, err := db.Exec("UPDATE node_groups SET preserve_inbound_ports=? WHERE id=?", !legacyPreserve, groups[0].ID); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := db.Exec(`INSERT INTO node_groups(name,sort_order,start_port,upstream_config) VALUES ('New default policy',3,34000,'')`); err != nil {
+				t.Fatal(err)
+			}
+			restartGroups, restartNodes := migratedGroupState(t, db)
+			if restartGroups[len(restartGroups)-1].PreserveInboundPorts {
+				t.Fatal("迁移后新建分组不应继承旧版全局保留策略")
+			}
+			if err := models.InitDB(db); err != nil {
+				t.Fatal(err)
+			}
+			verifyLegacyPreserveSettingAbsent(t, db)
+			afterGroups, afterNodes = migratedGroupState(t, db)
+			if !reflect.DeepEqual(restartGroups, afterGroups) || !reflect.DeepEqual(restartNodes, afterNodes) {
+				t.Fatal("重新初始化覆盖了已修改的分组保留策略或节点状态")
+			}
+		})
+	}
 }
 
 func verifyGroupUpstreamUpgrade(t *testing.T, db *sql.DB) {

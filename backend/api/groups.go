@@ -96,6 +96,7 @@ func (h *Handler) GetGroup(c *gin.Context) {
 type groupInput struct {
 	Name                     *string `json:"name"`
 	Allocate                 *bool   `json:"allocate_port"`
+	PreserveInboundPorts     *bool   `json:"preserve_inbound_ports"`
 	Start                    *int    `json:"start_port"`
 	URL                      *string `json:"subscription_url"`
 	Auto                     *bool   `json:"subscription_auto_update"`
@@ -117,6 +118,15 @@ func (input groupInput) apply(group *models.NodeGroup, service *services.SingBox
 	}
 	if input.Allocate != nil {
 		group.AllocatePort = *input.Allocate
+	}
+	if input.PreserveInboundPorts != nil {
+		group.PreserveInboundPorts = *input.PreserveInboundPorts
+	}
+	if !group.AllocatePort {
+		if input.PreserveInboundPorts != nil && *input.PreserveInboundPorts {
+			return invalidNodeRequest(errors.New("保留入站端口需要开启分配入站端口"))
+		}
+		group.PreserveInboundPorts = false
 	}
 	if input.URL != nil {
 		group.SubscriptionURL = strings.TrimSpace(*input.URL)
@@ -184,7 +194,7 @@ func (h *Handler) CreateGroup(c *gin.Context) {
 		if err := tx.QueryRowContext(ctx, "SELECT COALESCE(MAX(sort_order),-1)+1 FROM node_groups").Scan(&nextOrder); err != nil {
 			return err
 		}
-		result, err := tx.ExecContext(ctx, `INSERT INTO node_groups(name,sort_order,allocate_port,start_port,subscription_url,subscription_auto_update,subscription_interval_minutes,upstream_enabled,upstream_type,upstream_config) VALUES (?,?,?,?,?,?,?,?,?,?)`, group.Name, nextOrder, group.AllocatePort, group.StartPort, group.SubscriptionURL, group.SubscriptionAutoUpdate, group.SubscriptionIntervalMinutes, group.UpstreamEnabled, group.UpstreamType, group.UpstreamConfig)
+		result, err := tx.ExecContext(ctx, `INSERT INTO node_groups(name,sort_order,allocate_port,preserve_inbound_ports,start_port,subscription_url,subscription_auto_update,subscription_interval_minutes,upstream_enabled,upstream_type,upstream_config) VALUES (?,?,?,?,?,?,?,?,?,?,?)`, group.Name, nextOrder, group.AllocatePort, group.PreserveInboundPorts, group.StartPort, group.SubscriptionURL, group.SubscriptionAutoUpdate, group.SubscriptionIntervalMinutes, group.UpstreamEnabled, group.UpstreamType, group.UpstreamConfig)
 		if err != nil {
 			return err
 		}
@@ -233,15 +243,7 @@ func (h *Handler) UpdateGroup(c *gin.Context) {
 		return
 	}
 	allocateChanged := group.AllocatePort != previous.AllocatePort
-	reassign := allocateChanged && group.AllocatePort
-	if group.AllocatePort && !allocateChanged && group.StartPort != previous.StartPort {
-		preserve, err := getPreservePorts(ctx, tx)
-		if err != nil {
-			groupError(c, err)
-			return
-		}
-		reassign = !preserve
-	}
+	reassign := group.AllocatePort && (allocateChanged || !group.PreserveInboundPorts && (previous.PreserveInboundPorts || group.StartPort != previous.StartPort))
 	definitionChanged := group.UpstreamType != previous.UpstreamType || group.UpstreamConfig != previous.UpstreamConfig
 	upstreamChanged := group.UpstreamEnabled != previous.UpstreamEnabled || (group.UpstreamEnabled && definitionChanged)
 	applyRuntime := upstreamChanged || (reassign || allocateChanged) && group.NodeCount > 0
@@ -258,7 +260,7 @@ func (h *Handler) UpdateGroup(c *gin.Context) {
 				return err
 			}
 		}
-		_, err := tx.ExecContext(ctx, `UPDATE node_groups SET name=?,allocate_port=?,start_port=?,subscription_url=?,subscription_auto_update=?,subscription_interval_minutes=?,upstream_enabled=?,upstream_type=?,upstream_config=?,revision=revision+1,updated_at=CURRENT_TIMESTAMP WHERE id=?`, group.Name, group.AllocatePort, group.StartPort, group.SubscriptionURL, group.SubscriptionAutoUpdate, group.SubscriptionIntervalMinutes, group.UpstreamEnabled, group.UpstreamType, group.UpstreamConfig, id)
+		_, err := tx.ExecContext(ctx, `UPDATE node_groups SET name=?,allocate_port=?,preserve_inbound_ports=?,start_port=?,subscription_url=?,subscription_auto_update=?,subscription_interval_minutes=?,upstream_enabled=?,upstream_type=?,upstream_config=?,revision=revision+1,updated_at=CURRENT_TIMESTAMP WHERE id=?`, group.Name, group.AllocatePort, group.PreserveInboundPorts, group.StartPort, group.SubscriptionURL, group.SubscriptionAutoUpdate, group.SubscriptionIntervalMinutes, group.UpstreamEnabled, group.UpstreamType, group.UpstreamConfig, id)
 		if err != nil {
 			return err
 		}
@@ -332,10 +334,6 @@ func (h *Handler) checkPort(ctx context.Context, port int) error {
 }
 
 func (h *Handler) normalizeGroups(ctx context.Context, tx *sql.Tx, affected map[int]bool) error {
-	preserve, err := getPreservePorts(ctx, tx)
-	if err != nil {
-		return err
-	}
 	groups, err := models.LoadGroups(ctx, tx)
 	if err != nil {
 		return err
@@ -347,7 +345,7 @@ func (h *Handler) normalizeGroups(ctx context.Context, tx *sql.Tx, affected map[
 		if err = normalizeNodeSortOrderTx(ctx, tx, group.ID); err != nil {
 			return err
 		}
-		if !preserve {
+		if !group.PreserveInboundPorts {
 			if err = h.reassignAutomaticPortsTx(ctx, tx, group); err != nil {
 				return err
 			}

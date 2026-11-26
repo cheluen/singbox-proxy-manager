@@ -480,7 +480,6 @@ type WireGuardConfig struct {
 // Settings contains the settings used by the runtime and the admin panel.
 type Settings struct {
 	GroupUpstreams            map[int]GroupUpstream `json:"-"`
-	PreserveInboundPorts      bool                  `json:"preserve_inbound_ports"`
 	GlobalUpstreamEnabled     bool                  `json:"global_upstream_enabled"`
 	GlobalUpstreamType        string                `json:"global_upstream_type"`
 	GlobalUpstreamConfig      string                `json:"global_upstream_config"`
@@ -537,11 +536,11 @@ func InitDB(db *sql.DB) error {
 		_, err = db.Exec(`
 			INSERT INTO settings (
 				singleton_key, admin_password, admin_password_env_fingerprint, auth_generation,
-				start_port, preserve_inbound_ports, global_upstream_enabled,
+				start_port, global_upstream_enabled,
 				global_upstream_type, global_upstream_config
 			)
-			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-		`, 1, "", "", 0, 30001, false, false, "", "")
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+		`, 1, "", "", 0, 30001, false, "", "")
 		if err != nil {
 			return err
 		}
@@ -549,6 +548,9 @@ func InitDB(db *sql.DB) error {
 
 	if err := migrateGroupNodes(db, dialect); err != nil {
 		return fmt.Errorf("migrate grouped nodes: %w", err)
+	}
+	if err := migrateGroupPreserveInboundPorts(db, dialect); err != nil {
+		return fmt.Errorf("migrate grouped port preservation: %w", err)
 	}
 	// Clean up expired or password-generation-invalidated sessions opportunistically.
 	now := time.Now().Unix()
@@ -879,7 +881,6 @@ func schemaStatements(dialect appdb.Dialect) []string {
 				admin_password_env_fingerprint TEXT NOT NULL DEFAULT '',
 				auth_generation BIGINT NOT NULL DEFAULT 0,
 				start_port INTEGER DEFAULT 10000,
-				preserve_inbound_ports BOOLEAN NOT NULL DEFAULT FALSE,
 				global_upstream_enabled BOOLEAN NOT NULL DEFAULT FALSE,
 				global_upstream_type TEXT NOT NULL DEFAULT '',
 				global_upstream_config TEXT NOT NULL DEFAULT '',
@@ -947,7 +948,6 @@ func schemaStatements(dialect appdb.Dialect) []string {
 				admin_password_env_fingerprint VARCHAR(128) NOT NULL DEFAULT '',
 				auth_generation BIGINT NOT NULL DEFAULT 0,
 				start_port INTEGER DEFAULT 10000,
-				preserve_inbound_ports BOOLEAN NOT NULL DEFAULT FALSE,
 				global_upstream_enabled BOOLEAN NOT NULL DEFAULT FALSE,
 				global_upstream_type VARCHAR(64) NOT NULL DEFAULT '',
 				global_upstream_config LONGTEXT NOT NULL,
@@ -1015,7 +1015,6 @@ func schemaStatements(dialect appdb.Dialect) []string {
 				admin_password_env_fingerprint TEXT NOT NULL DEFAULT '',
 				auth_generation INTEGER NOT NULL DEFAULT 0,
 				start_port INTEGER DEFAULT 10000,
-				preserve_inbound_ports INTEGER NOT NULL DEFAULT 0,
 				global_upstream_enabled INTEGER NOT NULL DEFAULT 0,
 				global_upstream_type TEXT NOT NULL DEFAULT '',
 				global_upstream_config TEXT NOT NULL DEFAULT '',
@@ -1048,6 +1047,7 @@ func migrationColumns(dialect appdb.Dialect) []migrationColumn {
 	switch dialect {
 	case appdb.DialectPostgres:
 		return []migrationColumn{
+			{Table: "node_groups", Name: "preserve_inbound_ports", AlterSQL: "ALTER TABLE node_groups ADD COLUMN preserve_inbound_ports BOOLEAN NOT NULL DEFAULT FALSE"},
 			{Table: "proxy_nodes", Name: "inbound_mode", AlterSQL: "ALTER TABLE proxy_nodes ADD COLUMN inbound_mode TEXT NOT NULL DEFAULT 'mixed'"},
 			{Table: "settings", Name: "inbound_tls_cert_path", AlterSQL: "ALTER TABLE settings ADD COLUMN inbound_tls_cert_path TEXT NOT NULL DEFAULT ''"},
 			{Table: "settings", Name: "inbound_tls_key_path", AlterSQL: "ALTER TABLE settings ADD COLUMN inbound_tls_key_path TEXT NOT NULL DEFAULT ''"},
@@ -1065,7 +1065,6 @@ func migrationColumns(dialect appdb.Dialect) []migrationColumn {
 			{Table: "settings", Name: "singleton_key", AlterSQL: "ALTER TABLE settings ADD COLUMN singleton_key SMALLINT NOT NULL DEFAULT 1"},
 			{Table: "settings", Name: "admin_password_env_fingerprint", AlterSQL: "ALTER TABLE settings ADD COLUMN admin_password_env_fingerprint TEXT NOT NULL DEFAULT ''"},
 			{Table: "settings", Name: "auth_generation", AlterSQL: "ALTER TABLE settings ADD COLUMN auth_generation BIGINT NOT NULL DEFAULT 0"},
-			{Table: "settings", Name: "preserve_inbound_ports", AlterSQL: "ALTER TABLE settings ADD COLUMN preserve_inbound_ports BOOLEAN NOT NULL DEFAULT FALSE"},
 			{Table: "settings", Name: "global_upstream_enabled", AlterSQL: "ALTER TABLE settings ADD COLUMN global_upstream_enabled BOOLEAN NOT NULL DEFAULT FALSE"},
 			{Table: "settings", Name: "global_upstream_type", AlterSQL: "ALTER TABLE settings ADD COLUMN global_upstream_type TEXT NOT NULL DEFAULT ''"},
 			{Table: "settings", Name: "global_upstream_config", AlterSQL: "ALTER TABLE settings ADD COLUMN global_upstream_config TEXT NOT NULL DEFAULT ''"},
@@ -1079,6 +1078,7 @@ func migrationColumns(dialect appdb.Dialect) []migrationColumn {
 		}
 	case appdb.DialectMySQL:
 		return []migrationColumn{
+			{Table: "node_groups", Name: "preserve_inbound_ports", AlterSQL: "ALTER TABLE node_groups ADD COLUMN preserve_inbound_ports BOOLEAN NOT NULL DEFAULT FALSE"},
 			{Table: "proxy_nodes", Name: "inbound_mode", AlterSQL: "ALTER TABLE proxy_nodes ADD COLUMN inbound_mode VARCHAR(16) NOT NULL DEFAULT 'mixed'"},
 			{Table: "settings", Name: "inbound_tls_cert_path", AlterSQL: "ALTER TABLE settings ADD COLUMN inbound_tls_cert_path VARCHAR(4096) NOT NULL DEFAULT ''"},
 			{Table: "settings", Name: "inbound_tls_key_path", AlterSQL: "ALTER TABLE settings ADD COLUMN inbound_tls_key_path VARCHAR(4096) NOT NULL DEFAULT ''"},
@@ -1096,7 +1096,6 @@ func migrationColumns(dialect appdb.Dialect) []migrationColumn {
 			{Table: "settings", Name: "singleton_key", AlterSQL: "ALTER TABLE settings ADD COLUMN singleton_key SMALLINT NOT NULL DEFAULT 1"},
 			{Table: "settings", Name: "admin_password_env_fingerprint", AlterSQL: "ALTER TABLE settings ADD COLUMN admin_password_env_fingerprint VARCHAR(128) NOT NULL DEFAULT ''"},
 			{Table: "settings", Name: "auth_generation", AlterSQL: "ALTER TABLE settings ADD COLUMN auth_generation BIGINT NOT NULL DEFAULT 0"},
-			{Table: "settings", Name: "preserve_inbound_ports", AlterSQL: "ALTER TABLE settings ADD COLUMN preserve_inbound_ports BOOLEAN NOT NULL DEFAULT FALSE"},
 			{Table: "settings", Name: "global_upstream_enabled", AlterSQL: "ALTER TABLE settings ADD COLUMN global_upstream_enabled BOOLEAN NOT NULL DEFAULT FALSE"},
 			{Table: "settings", Name: "global_upstream_type", AlterSQL: "ALTER TABLE settings ADD COLUMN global_upstream_type VARCHAR(64) NOT NULL DEFAULT ''"},
 			{Table: "settings", Name: "global_upstream_config", AlterSQL: "ALTER TABLE settings ADD COLUMN global_upstream_config LONGTEXT NULL"},
@@ -1110,6 +1109,7 @@ func migrationColumns(dialect appdb.Dialect) []migrationColumn {
 		}
 	default:
 		return []migrationColumn{
+			{Table: "node_groups", Name: "preserve_inbound_ports", AlterSQL: "ALTER TABLE node_groups ADD COLUMN preserve_inbound_ports BOOLEAN NOT NULL DEFAULT FALSE"},
 			{Table: "proxy_nodes", Name: "inbound_mode", AlterSQL: "ALTER TABLE proxy_nodes ADD COLUMN inbound_mode TEXT NOT NULL DEFAULT 'mixed'"},
 			{Table: "settings", Name: "inbound_tls_cert_path", AlterSQL: "ALTER TABLE settings ADD COLUMN inbound_tls_cert_path TEXT NOT NULL DEFAULT ''"},
 			{Table: "settings", Name: "inbound_tls_key_path", AlterSQL: "ALTER TABLE settings ADD COLUMN inbound_tls_key_path TEXT NOT NULL DEFAULT ''"},
@@ -1127,7 +1127,6 @@ func migrationColumns(dialect appdb.Dialect) []migrationColumn {
 			{Table: "settings", Name: "singleton_key", AlterSQL: "ALTER TABLE settings ADD COLUMN singleton_key INTEGER NOT NULL DEFAULT 1"},
 			{Table: "settings", Name: "admin_password_env_fingerprint", AlterSQL: "ALTER TABLE settings ADD COLUMN admin_password_env_fingerprint TEXT NOT NULL DEFAULT ''"},
 			{Table: "settings", Name: "auth_generation", AlterSQL: "ALTER TABLE settings ADD COLUMN auth_generation INTEGER NOT NULL DEFAULT 0"},
-			{Table: "settings", Name: "preserve_inbound_ports", AlterSQL: "ALTER TABLE settings ADD COLUMN preserve_inbound_ports INTEGER NOT NULL DEFAULT 0"},
 			{Table: "settings", Name: "global_upstream_enabled", AlterSQL: "ALTER TABLE settings ADD COLUMN global_upstream_enabled INTEGER NOT NULL DEFAULT 0"},
 			{Table: "settings", Name: "global_upstream_type", AlterSQL: "ALTER TABLE settings ADD COLUMN global_upstream_type TEXT NOT NULL DEFAULT ''"},
 			{Table: "settings", Name: "global_upstream_config", AlterSQL: "ALTER TABLE settings ADD COLUMN global_upstream_config TEXT NOT NULL DEFAULT ''"},

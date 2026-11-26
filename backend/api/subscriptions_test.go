@@ -79,9 +79,19 @@ func TestSubscriptionRefreshCanonicalAliases(t *testing.T) {
 }
 
 func TestSubscriptionRefreshIncremental(t *testing.T) {
+	for _, preserve := range []bool{false, true} {
+		t.Run(strconv.FormatBool(preserve), func(t *testing.T) {
+			testSubscriptionRefreshIncremental(t, preserve)
+		})
+	}
+}
+
+func testSubscriptionRefreshIncremental(t *testing.T, preserve bool) {
+	t.Helper()
 	handler := newTestHandler(t, nil)
 	t.Setenv("PORT", "30000")
 	groupID := configureTestSubscription(t, handler, true)
+	setTestGroupPreserveInboundPorts(t, handler.db, groupID, preserve)
 	manualID := insertTestNode(t, handler.db)
 	if _, err := handler.db.Exec(`INSERT INTO node_groups(name,sort_order,start_port,upstream_config) VALUES ('Other',1,30000,'')`); err != nil {
 		t.Fatal(err)
@@ -318,8 +328,18 @@ func TestSubscriptionSharedIncomingKeyPreservesPolicyMember(t *testing.T) {
 }
 
 func TestSubscriptionRefreshRejectsStaleFetchAndFailure(t *testing.T) {
-	for _, fail := range []bool{false, true} {
-		t.Run(strconv.FormatBool(fail), func(t *testing.T) {
+	for _, test := range []struct {
+		name     string
+		fail     bool
+		preserve bool
+		payload  map[string]any
+	}{
+		{"subscription success", false, false, map[string]any{"subscription_url": "", "subscription_auto_update": false}},
+		{"subscription failure", true, false, map[string]any{"subscription_url": "", "subscription_auto_update": false}},
+		{"port policy success", false, true, map[string]any{"preserve_inbound_ports": true}},
+		{"port policy failure", true, true, map[string]any{"preserve_inbound_ports": true}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
 			handler := newTestHandler(t, nil)
 			groupID := configureTestSubscription(t, handler, true)
 			ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
@@ -332,7 +352,7 @@ func TestSubscriptionRefreshRejectsStaleFetchAndFailure(t *testing.T) {
 				case <-ctx.Done():
 					return nil, nil, ctx.Err()
 				}
-				if fail {
+				if test.fail {
 					return nil, nil, errors.New("secret-example")
 				}
 				return []services.ImportItem{subscriptionItem("过期", "first")}, nil, nil
@@ -354,10 +374,11 @@ func TestSubscriptionRefreshRejectsStaleFetchAndFailure(t *testing.T) {
 			if !handler.nodeWriteMu.TryLock() {
 				t.Fatal("网络抓取期间持有节点写锁")
 			}
-			_, editErr := handler.db.ExecContext(ctx, `UPDATE node_groups SET subscription_url='',subscription_auto_update=FALSE,revision=revision+1 WHERE id=?`, groupID)
 			handler.nodeWriteMu.Unlock()
-			if editErr != nil {
-				t.Fatal(editErr)
+			id := strconv.Itoa(groupID)
+			response := postJSON(t, handler.UpdateGroup, http.MethodPatch, "/api/node-groups/"+id, test.payload, ginParams("id", id))
+			if response.Code != http.StatusOK {
+				t.Fatalf("抓取期间修改分组失败：%d %s", response.Code, response.Body.String())
 			}
 			close(resume)
 			select {
@@ -369,7 +390,7 @@ func TestSubscriptionRefreshRejectsStaleFetchAndFailure(t *testing.T) {
 				t.Fatal("过期刷新未结束")
 			}
 			group, err := models.LoadGroup(ctx, handler.db, groupID)
-			if err != nil || group.NodeCount != 0 || group.SubscriptionLastError != "" || group.SubscriptionLastUpdatedAt != nil {
+			if err != nil || group.PreserveInboundPorts != test.preserve || group.NodeCount != 0 || group.SubscriptionLastError != "" || group.SubscriptionLastUpdatedAt != nil {
 				t.Fatal("抓取中的旧任务覆盖了新订阅状态")
 			}
 		})

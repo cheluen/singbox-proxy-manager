@@ -407,14 +407,13 @@ func configuredPort() string {
 	return defaultPort
 }
 
-// startSingBoxFromDatabase generates the unified config from the current
-// database contents and launches the sing-box child process. Failures are
-// logged but not fatal so the management UI stays reachable for recovery.
+// 启动前按当前分组顺序收敛已关联的策略成员，再生成统一配置并启动内核。
+// 数据库不可用时保留已有配置，管理界面仍可用于恢复。
 func startSingBoxFromDatabase(db *sql.DB, singBoxService *services.SingBoxService, configDir string) {
 	ctx := context.Background()
-	nodes, err := models.LoadProxyNodes(ctx, db)
+	nodes, err := api.ReconcileLinkedPolicyMembers(ctx, db)
 	if err != nil {
-		startPreservedConfigAfterDatabaseFailure(singBoxService, fmt.Errorf("failed to load proxy nodes: %w", err), configDir)
+		startPreservedConfigAfterDatabaseFailure(singBoxService, fmt.Errorf("failed to load or reconcile proxy nodes: %w", err), configDir)
 		return
 	}
 	settings, err := models.LoadRuntimeSettings(ctx, db)
@@ -451,7 +450,7 @@ func startPreservedConfigAfterDatabaseFailure(
 	databaseErr error,
 	configDir string,
 ) {
-	log.Printf("Database read failed; preserving existing sing-box configuration: %v", databaseErr)
+	log.Printf("Database load or reconciliation failed; preserving existing sing-box configuration: %v", databaseErr)
 	startErr := singBoxService.StartPreservedConfig()
 	if startErr != nil {
 		log.Printf("Failed to start preserved sing-box configuration: %v", startErr)

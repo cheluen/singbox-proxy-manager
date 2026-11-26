@@ -158,9 +158,7 @@ func TestReplaceNodeMovesLegacyNodeWithoutDetourToDirectMode(t *testing.T) {
 
 func TestUpdateNodeRejectsLocalInboundUpstreamAndRollsBack(t *testing.T) {
 	handler := newTestHandler(t, nil)
-	if _, err := handler.db.Exec("UPDATE settings SET preserve_inbound_ports = 1"); err != nil {
-		t.Fatalf("preserve inbound ports: %v", err)
-	}
+	setTestGroupPreserveInboundPorts(t, handler.db, firstTestGroup(t, handler.db).ID, true)
 	sourceID := insertTestNodeWithPortAndOrder(t, handler.db, "source", 36101, 0)
 	targetID := insertTestNodeWithPortAndOrder(t, handler.db, "target", 36102, 1)
 

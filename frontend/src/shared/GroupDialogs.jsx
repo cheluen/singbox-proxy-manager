@@ -18,6 +18,7 @@ export function GroupFormDialogBody({ group, ctl, onDone }) {
   const [upstreamEditorOpen, setUpstreamEditorOpen] = useState(false)
   const [upstreamDraft, setUpstreamDraft] = useState(null)
   const [upstreamEnabledTouched, setUpstreamEnabledTouched] = useState(false)
+  const [preserveTouched, setPreserveTouched] = useState(false)
   const [openedSnapshot] = useState(() => ({
     upstream_enabled: Boolean(savedGroup?.upstream_enabled),
     upstream_type: savedGroup?.upstream_type || '',
@@ -61,6 +62,7 @@ export function GroupFormDialogBody({ group, ctl, onDone }) {
       touchedFields: {
         name: form.isFieldTouched('name'),
         allocate_port: form.isFieldTouched('allocate_port'),
+        preserve_inbound_ports: form.isFieldTouched('preserve_inbound_ports') || preserveTouched,
         start_port: form.isFieldTouched('start_port'),
         subscription_url: form.isFieldTouched('subscription_url'),
         subscription_auto_update: form.isFieldTouched('subscription_auto_update'),
@@ -76,6 +78,15 @@ export function GroupFormDialogBody({ group, ctl, onDone }) {
     if (editing && Object.keys(plan.payload || {}).length === 0) {
       onDone()
       return
+    }
+    if (plan.disablingPreserve) {
+      const confirmed = await ctl.helpers.confirm({
+        title: t('warning'),
+        content: t('preserve_inbound_ports_disable_warning'),
+        okText: t('confirm'),
+        danger: true,
+      })
+      if (!confirmed) return
     }
     if (plan.upstreamConflict) {
       const confirmed = await ctl.helpers.confirm({
@@ -119,6 +130,7 @@ export function GroupFormDialogBody({ group, ctl, onDone }) {
         initialValues={{
           name: savedGroup?.name || '',
           allocate_port: editing ? Boolean(savedGroup?.allocate_port) : true,
+          preserve_inbound_ports: editing ? Boolean(savedGroup?.allocate_port && savedGroup?.preserve_inbound_ports) : false,
           start_port: savedGroup?.start_port || 30001,
           upstream_enabled: Boolean(savedGroup?.upstream_enabled),
           subscription_url: savedGroup?.subscription_url || '',
@@ -146,7 +158,30 @@ export function GroupFormDialogBody({ group, ctl, onDone }) {
               <span>{t('group_allocate_port_desc')}</span>
             </div>
             <Form.Item name="allocate_port" valuePropName="checked" noStyle>
-              <Switch aria-label={t('group_allocate_port')} data-testid="group-allocate-port" />
+              <Switch
+                aria-label={t('group_allocate_port')}
+                data-testid="group-allocate-port"
+                onChange={(checked) => {
+                  if (!checked && form.getFieldValue('preserve_inbound_ports')) {
+                    form.setFieldValue('preserve_inbound_ports', false)
+                    setPreserveTouched(true)
+                  }
+                }}
+              />
+            </Form.Item>
+          </div>
+          <div className="sb-setting-row sb-gap">
+            <div className="sb-setting-row__text">
+              <strong>{t('preserve_inbound_ports')}</strong>
+              <span>{allocatePort === false ? t('group_preserve_ports_requires_allocate') : t('preserve_inbound_ports_desc')}</span>
+            </div>
+            <Form.Item name="preserve_inbound_ports" valuePropName="checked" noStyle>
+              <Switch
+                disabled={!allocatePort}
+                aria-label={t('preserve_inbound_ports')}
+                data-testid="group-preserve-ports"
+                onChange={() => setPreserveTouched(true)}
+              />
             </Form.Item>
           </div>
           {allocatePort === false ? (

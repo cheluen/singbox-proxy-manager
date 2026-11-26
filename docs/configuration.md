@@ -1,6 +1,6 @@
 # 配置、数据库与运维指南
 
-本文档提供 SingBox Proxy Manager（`1.7.33`）完整的环境变量参考、多数据库配置、数据持久化、健康检查、安全加固与故障排查指南。
+本文档提供 SingBox Proxy Manager（`1.7.34`）完整的环境变量参考、多数据库配置、数据持久化、健康检查、安全加固与故障排查指南。
 
 ---
 
@@ -134,9 +134,9 @@
 - **Turso / libSQL**：固定 1 打开 / 0 空闲 / 1ns 连接寿命以规避驱动会话复用异常。
 
 数据库启动后自动创建并增量补齐核心应用表（无独立 `schema_version` 表）：
-- `node_groups`：节点分组定义、分组排序、端口分配开关（`allocate_port`）、分组起始端口（`start_port`）、分组级前置代理配置及检测结果（`upstream_*`）、独立订阅链接/定时周期与同步状态。
+- `node_groups`：节点分组定义、分组排序、端口分配开关（`allocate_port`）、分组级保留入站端口策略（`preserve_inbound_ports`）、分组起始端口（`start_port`）、分组级前置代理配置及检测结果（`upstream_*`）、独立订阅链接/定时周期与同步状态。
 - `proxy_nodes`：节点所属分组（`group_id`）、出站/策略配置（含 `member_sources` 整组同步来源）、入站端口（无端口存 `NULL`）/入站模式（`inbound_mode`，`mixed` 或 `https`）/认证/复用、前置代理定义、出口检测状态（`check_status` / `check_error`）与订阅同步标识（`subscription_key` / `subscription_name`）。
-- `settings`：全局单例配置、管理员密码与环境指纹、`auth_generation`、保留端口策略、全局前置代理、入站 TLS 已选证书与私钥逻辑路径（`inbound_tls_cert_path` / `inbound_tls_key_path`）、前端节点列表自定义列宽（`node_list_column_widths`）及日志持久化配置（`log_settings_json`）。
+- `settings`：全局单例配置、管理员密码与环境指纹、`auth_generation`、全局前置代理、入站 TLS 已选证书与私钥逻辑路径（`inbound_tls_cert_path` / `inbound_tls_key_path`）、前端节点列表自定义列宽（`node_list_column_widths`）及日志持久化配置（`log_settings_json`）。
 - `admin_sessions`：登录会话 SHA-256 哈希、密码代次、有效期、登录 IP 与 User-Agent。
 - `manager_instance_lock`：单实例数据库租约锁。
 - `log_events` / `traffic_buckets`（按需创建）：仅当管理员显式启用日志持久化并选择 `store_mode=primary` 时在主库自动创建；选择 `local_sqlite` 或 `independent` 时创建在对应日志目标库中。
@@ -184,6 +184,7 @@ config/
 ### 5.1 版本升级与模式切换
 
 > **版本原地升级说明**：
+> - **从 `1.7.33` 升级至 `1.7.34`**：四类数据库均在启动时自动向 `node_groups` 补齐 `preserve_inbound_ports` 列；若旧库 `settings` 表存在全局 `preserve_inbound_ports`，会一次性迁移至全部 `allocate_port=true` 的已有分组（无端口分组保持 `false`）并随后删除旧列，不改动任何既有节点端口、固定标记或排序；启动前还会幂等收敛存量整组关联策略的成员顺序，使其按组内 `(sort_order ASC, id ASC)` 生效。
 > - **从 `1.7.32` 升级至 `1.7.33`**：无数据库表结构变更，四类数据库均可直接原地无缝升级；旧版 WireGuard 订阅节点首次刷新时会自动规范化匹配键以保留原有节点 ID、端口与设置，`Dockerfile.release` 已补齐 `SINGBOX_ENV_ALLOWLIST` 默认声明。
 > - **从 `1.7.31` 升级至 `1.7.32`**：四类数据库均在启动时自动向 `proxy_nodes` 补齐 `inbound_mode`（默认 `'mixed'`）并向 `settings` 补齐 `inbound_tls_cert_path`、`inbound_tls_key_path`（默认 `''`），完整保留既有分组、节点、策略、端口与设置；若 `.env` 曾配置 `UTC+8` / `GMT+8` 等非 IANA 时区值，启动时会自动回退到标准 IANA 时区，建议同步调整 `.env` 中的 `TZ`。
 > - **从 `1.7.30` 升级至 `1.7.31`**：四类数据库均在启动时自动向 `node_groups` 补齐分组级前置代理字段（`upstream_*` 与内部修订号 `upstream_revision`，其中 MySQL 配置列使用 `LONGTEXT NOT NULL`、`upstream_ip` 为 `VARCHAR(255)`、`upstream_country_code` 为 `VARCHAR(32)`）并向 `settings` 补齐 `global_upstream_revision`，完整保留既有分组、节点、端口与订阅状态。

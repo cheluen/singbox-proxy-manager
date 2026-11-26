@@ -113,8 +113,8 @@ export default {
   start_port_required: '请输入起始端口',
   start_port_range: '端口必须在 1024 到 65535 之间',
   preserve_inbound_ports: '保留入站端口',
-  preserve_inbound_ports_desc: '开启后，拖拽排序、删除补位、修改起始端口都不会改写现有节点端口，只有手动编辑节点端口时才会变更。',
-  preserve_inbound_ports_disable_warning: '关闭后将按各分组起始端口对未固定节点重新顺序分配入站端口（可能导致端口变化），并重启 sing-box。是否继续？',
+  preserve_inbound_ports_desc: '开启后，当前分组内的拖拽排序、删除补位、修改起始端口都不会改写现有节点端口，只有手动编辑节点端口时才会变更。',
+  preserve_inbound_ports_disable_warning: '关闭后将按当前分组起始端口对本组未固定节点重新顺序分配入站端口（可能导致端口变化），并重启 sing-box。是否继续？',
   upstream_global: '全局前置代理',
   upstream_global_desc: '启用后，选择“跟随全局”的节点在所属分组未启用分组前置代理时，会通过该代理建立出站连接（优先级：节点自定义 > 分组前置代理 > 全局前置代理）。',
   upstream_global_proxy: '全局前置代理配置',
@@ -163,6 +163,6 @@ export default {
   
   // Table
   select_all: '全选',
-  drag_sort_disabled_filtered: '筛选状态下已禁用拖拽排序（开启“保留入站端口”后可用）',
+  drag_sort_disabled_filtered: '筛选状态下已禁用拖拽排序（当前分组开启“保留入站端口”后可用）',
   clear_filters: '清空筛选'
 }

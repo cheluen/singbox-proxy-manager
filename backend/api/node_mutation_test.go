@@ -15,11 +15,12 @@ import (
 )
 
 func TestNodeMutationLateFailureRestoresRuntimeWithoutOverwritingDatabase(t *testing.T) {
-	for _, failure := range []string{"conflict", "write-failure", "cancel"} {
+	for _, failure := range []string{"conflict", "group-conflict", "write-failure", "cancel"} {
 		t.Run(failure, func(t *testing.T) {
 			handler := newTestHandler(t, nil)
 			handler.db.SetMaxOpenConns(1)
 			nodeID := insertTestNode(t, handler.db)
+			groupID := firstTestGroup(t, handler.db).ID
 			nodes, err := models.LoadProxyNodes(context.Background(), handler.db)
 			if err != nil {
 				t.Fatal(err)
@@ -47,6 +48,9 @@ func TestNodeMutationLateFailureRestoresRuntimeWithoutOverwritingDatabase(t *tes
 				_, err := handler.nodeMutations.execute(ctx, nodeMutationOperation{
 					ApplyRuntime: true,
 					Mutate: func(ctx context.Context, tx *sql.Tx) error {
+						if _, err := tx.ExecContext(ctx, "UPDATE node_groups SET preserve_inbound_ports=TRUE WHERE id=?", groupID); err != nil {
+							return err
+						}
 						_, err := tx.ExecContext(ctx, "UPDATE proxy_nodes SET config = ? WHERE id = ?", `{"server":"candidate.example.com","server_port":443,"method":"aes-128-gcm","password":"p"}`, nodeID)
 						return err
 					},
@@ -66,6 +70,8 @@ func TestNodeMutationLateFailureRestoresRuntimeWithoutOverwritingDatabase(t *tes
 			switch failure {
 			case "conflict":
 				_, err = handler.db.Exec("UPDATE proxy_nodes SET remark = 'concurrent-remark' WHERE id = ?", nodeID)
+			case "group-conflict":
+				_, err = handler.db.Exec("UPDATE node_groups SET preserve_inbound_ports=TRUE WHERE id=?", groupID)
 			case "write-failure":
 				_, err = handler.db.Exec(`CREATE TRIGGER reject_candidate BEFORE UPDATE ON proxy_nodes BEGIN SELECT RAISE(ABORT, 'injected write failure'); END`)
 			case "cancel":
@@ -86,6 +92,9 @@ func TestNodeMutationLateFailureRestoresRuntimeWithoutOverwritingDatabase(t *tes
 			}
 			if failure == "conflict" && node.Remark != "concurrent-remark" {
 				t.Fatal("rollback overwrote a concurrent database change")
+			}
+			if firstTestGroup(t, handler.db).PreserveInboundPorts != (failure == "group-conflict") {
+				t.Fatal("failed candidate leaked its group port policy or overwrote a concurrent group change")
 			}
 			status := handler.singBoxService.RuntimeStatus()
 			if !status.Running || status.Degraded || status.ActiveConfigHash != originalHash || status.DesiredConfigHash != originalHash {

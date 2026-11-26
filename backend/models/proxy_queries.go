@@ -18,7 +18,7 @@ const ProxyNodeSelectColumns = `
 `
 
 const runtimeSettingsSelectColumns = `
-	preserve_inbound_ports, global_upstream_enabled,
+	global_upstream_enabled,
 	global_upstream_type, global_upstream_config, global_upstream_ip,
 	global_upstream_location, global_upstream_country_code, global_upstream_latency,
 	global_upstream_error, node_list_column_widths, inbound_tls_cert_path, inbound_tls_key_path
@@ -152,7 +152,6 @@ func LoadRuntimeSettings(ctx context.Context, db runtimeSettingsReader) (Setting
 		FROM settings
 		WHERE singleton_key = 1
 	`).Scan(
-		&settings.PreserveInboundPorts,
 		&settings.GlobalUpstreamEnabled,
 		&settings.GlobalUpstreamType,
 		&settings.GlobalUpstreamConfig,

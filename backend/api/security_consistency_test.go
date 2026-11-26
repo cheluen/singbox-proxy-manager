@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -328,15 +329,16 @@ exec sleep 300
 func TestGroupPortValidationFailureRollsBackGroupAndNode(t *testing.T) {
 	handler := newTestHandlerWithKernelScript(t, rejectPort41000Kernel)
 	nodeID := insertTestNode(t, handler.db)
+	setTestGroupPreserveInboundPorts(t, handler.db, firstTestGroup(t, handler.db).ID, true)
 	before := firstTestGroup(t, handler.db)
 	id := strconv.Itoa(before.ID)
 	response := postJSON(t, handler.UpdateGroup, http.MethodPatch, "/api/node-groups/"+id,
-		map[string]any{"name": "candidate", "start_port": 41000}, ginParams("id", id))
+		map[string]any{"name": "candidate", "start_port": 41000, "preserve_inbound_ports": false}, ginParams("id", id))
 	if response.Code != http.StatusInternalServerError || !bytes.Contains(response.Body.Bytes(), []byte("requested port rejected")) {
 		t.Fatalf("expected kernel rejection, got %d %s", response.Code, response.Body.String())
 	}
 	group := firstTestGroup(t, handler.db)
-	if group.Name != before.Name || group.StartPort != before.StartPort || group.Revision != before.Revision {
+	if group.Name != before.Name || group.StartPort != before.StartPort || group.Revision != before.Revision || !group.PreserveInboundPorts {
 		t.Fatalf("failed group update changed name, port, or revision: %+v", group)
 	}
 	node, err := models.LoadProxyNode(t.Context(), handler.db, nodeID)
@@ -346,17 +348,18 @@ func TestGroupPortValidationFailureRollsBackGroupAndNode(t *testing.T) {
 }
 
 func TestSettingsValidationFailureDoesNotPartiallyChangePasswordOrPorts(t *testing.T) {
-	handler := newTestHandlerWithKernelScript(t, rejectPort41000Kernel)
+	handler := newTestHandlerWithKernelScript(t, strings.Replace(rejectPort41000Kernel, `"listen_port": 41000`, `"server_port": 41000`, 1))
 	db := handler.db
 	nodeID := insertTestNode(t, db)
 	setTestGroupStartPort(t, db, 41000)
+	setTestGroupPreserveInboundPorts(t, db, firstTestGroup(t, db).ID, true)
 	oldHash, err := bcrypt.GenerateFromPassword([]byte("old-password-123"), bcrypt.DefaultCost)
 	if err != nil {
 		t.Fatalf("hash old password: %v", err)
 	}
 	if _, err := db.Exec(`
 		UPDATE settings
-		SET admin_password = ?, auth_generation = 7, preserve_inbound_ports = 1
+		SET admin_password = ?, auth_generation = 7
 		WHERE singleton_key = 1
 	`, string(oldHash)); err != nil {
 		t.Fatalf("seed settings: %v", err)
@@ -367,8 +370,10 @@ func TestSettingsValidationFailureDoesNotPartiallyChangePasswordOrPorts(t *testi
 	}
 
 	payload := map[string]interface{}{
-		"admin_password":         "new-password-456",
-		"preserve_inbound_ports": false,
+		"admin_password":          "new-password-456",
+		"global_upstream_enabled": true,
+		"global_upstream_type":    "socks5",
+		"global_upstream_config":  `{"server":"198.51.100.40","server_port":41000}`,
 	}
 	recorder := postJSON(t, handler.UpdateSettings, http.MethodPut, "/api/settings", payload, nil)
 	if recorder.Code != http.StatusInternalServerError || !bytes.Contains(recorder.Body.Bytes(), []byte("requested port rejected")) {
@@ -377,14 +382,15 @@ func TestSettingsValidationFailureDoesNotPartiallyChangePasswordOrPorts(t *testi
 
 	var currentHash string
 	var generation int64
-	var preserve bool
+	var globalEnabled bool
 	if err := db.QueryRow(`
-		SELECT admin_password, auth_generation, preserve_inbound_ports
+		SELECT admin_password, auth_generation, global_upstream_enabled
 		FROM settings WHERE singleton_key = 1
-	`).Scan(&currentHash, &generation, &preserve); err != nil {
+	`).Scan(&currentHash, &generation, &globalEnabled); err != nil {
 		t.Fatalf("query settings: %v", err)
 	}
-	if currentHash != string(oldHash) || generation != 7 || !preserve || firstTestGroup(t, db).StartPort != 41000 {
+	group := firstTestGroup(t, db)
+	if currentHash != string(oldHash) || generation != 7 || globalEnabled || !group.PreserveInboundPorts || group.StartPort != 41000 {
 		t.Fatalf("failed settings request changed password, generation, port policy, or group start port")
 	}
 	var inboundPort int

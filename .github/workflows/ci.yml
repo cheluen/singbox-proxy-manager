@@ -16,6 +16,7 @@ concurrency:
 
 env:
   GO_VERSION: "1.26.11"
+  GOLANGCI_LINT_VERSION: "v2.12.0"
   GOVULNCHECK_VERSION: "v1.7.0"
   NODE_VERSION: "22"
   GOTOOLCHAIN: "local"
@@ -105,6 +106,25 @@ jobs:
         uses: actions/setup-go@v5
         with:
           go-version: ${{ env.GO_VERSION }}
+          cache: false
+
+      - name: 读取 Go 缓存路径与运行器镜像
+        id: go-cache-paths
+        run: |
+          echo "gomodcache=$(go env GOMODCACHE)" >> "$GITHUB_OUTPUT"
+          echo "gocache=$(go env GOCACHE)" >> "$GITHUB_OUTPUT"
+          echo "ImageOS=$ImageOS" >> "$GITHUB_ENV"
+
+      - name: 恢复并更新 Go 增量缓存
+        uses: actions/cache@v4
+        with:
+          path: |
+            ${{ steps.go-cache-paths.outputs.gomodcache }}
+            ${{ steps.go-cache-paths.outputs.gocache }}
+          key: go-v2-${{ runner.os }}-${{ runner.arch }}-${{ env.ImageOS }}-${{ env.GO_VERSION }}-kernel-linux-amd64-${{ hashFiles('go.mod', 'go.sum', 'scripts/build-sing-box.sh') }}-${{ github.sha }}
+          restore-keys: |
+            go-v2-${{ runner.os }}-${{ runner.arch }}-${{ env.ImageOS }}-${{ env.GO_VERSION }}-kernel-linux-amd64-${{ hashFiles('go.mod', 'go.sum', 'scripts/build-sing-box.sh') }}-
+            go-v2-${{ runner.os }}-${{ runner.arch }}-${{ env.ImageOS }}-${{ env.GO_VERSION }}-kernel-linux-amd64-
 
       - name: 使用修复后的 Go 重编译固定版本内核
         run: |
@@ -129,13 +149,43 @@ jobs:
         uses: actions/setup-go@v5
         with:
           go-version: ${{ env.GO_VERSION }}
+          cache: false
+
+      - name: 读取 Go 缓存路径与运行器镜像
+        id: go-cache-paths
+        run: |
+          echo "gomodcache=$(go env GOMODCACHE)" >> "$GITHUB_OUTPUT"
+          echo "gocache=$(go env GOCACHE)" >> "$GITHUB_OUTPUT"
+          echo "ImageOS=$ImageOS" >> "$GITHUB_ENV"
+          echo "GOLANGCI_LINT_CACHE=$RUNNER_TEMP/golangci-lint-cache" >> "$GITHUB_ENV"
+
+      - name: 恢复并更新 Go 增量缓存
+        uses: actions/cache@v4
+        with:
+          path: |
+            ${{ steps.go-cache-paths.outputs.gomodcache }}
+            ${{ steps.go-cache-paths.outputs.gocache }}
+          key: go-v2-${{ runner.os }}-${{ runner.arch }}-${{ env.ImageOS }}-${{ env.GO_VERSION }}-lint-linux-amd64-${{ hashFiles('go.mod', 'go.sum', 'scripts/build-sing-box.sh') }}-${{ github.sha }}
+          restore-keys: |
+            go-v2-${{ runner.os }}-${{ runner.arch }}-${{ env.ImageOS }}-${{ env.GO_VERSION }}-lint-linux-amd64-${{ hashFiles('go.mod', 'go.sum', 'scripts/build-sing-box.sh') }}-
+            go-v2-${{ runner.os }}-${{ runner.arch }}-${{ env.ImageOS }}-${{ env.GO_VERSION }}-lint-linux-amd64-
+
+      - name: 恢复并更新 golangci-lint 分析缓存
+        uses: actions/cache@v4
+        with:
+          path: ${{ env.GOLANGCI_LINT_CACHE }}
+          key: golangci-lint-v2-${{ runner.os }}-${{ runner.arch }}-${{ env.ImageOS }}-${{ env.GO_VERSION }}-${{ env.GOLANGCI_LINT_VERSION }}-${{ hashFiles('.golangci.yml', 'go.sum') }}-${{ github.sha }}
+          restore-keys: |
+            golangci-lint-v2-${{ runner.os }}-${{ runner.arch }}-${{ env.ImageOS }}-${{ env.GO_VERSION }}-${{ env.GOLANGCI_LINT_VERSION }}-${{ hashFiles('.golangci.yml', 'go.sum') }}-
+            golangci-lint-v2-${{ runner.os }}-${{ runner.arch }}-${{ env.ImageOS }}-${{ env.GO_VERSION }}-${{ env.GOLANGCI_LINT_VERSION }}-
 
       - name: Run golangci-lint
         uses: golangci/golangci-lint-action@v9
         with:
-          version: v2.12.0
+          version: ${{ env.GOLANGCI_LINT_VERSION }}
           working-directory: ./
           args: ./backend/... ./internal/...
+          skip-cache: true
 
   vulnerability-backend:
     needs: [build-test-kernel]
@@ -147,6 +197,25 @@ jobs:
         uses: actions/setup-go@v5
         with:
           go-version: ${{ env.GO_VERSION }}
+          cache: false
+
+      - name: 读取 Go 缓存路径与运行器镜像
+        id: go-cache-paths
+        run: |
+          echo "gomodcache=$(go env GOMODCACHE)" >> "$GITHUB_OUTPUT"
+          echo "gocache=$(go env GOCACHE)" >> "$GITHUB_OUTPUT"
+          echo "ImageOS=$ImageOS" >> "$GITHUB_ENV"
+
+      - name: 恢复并更新 Go 增量缓存
+        uses: actions/cache@v4
+        with:
+          path: |
+            ${{ steps.go-cache-paths.outputs.gomodcache }}
+            ${{ steps.go-cache-paths.outputs.gocache }}
+          key: go-v2-${{ runner.os }}-${{ runner.arch }}-${{ env.ImageOS }}-${{ env.GO_VERSION }}-vuln-linux-amd64-${{ hashFiles('go.mod', 'go.sum', 'scripts/build-sing-box.sh') }}-${{ github.sha }}
+          restore-keys: |
+            go-v2-${{ runner.os }}-${{ runner.arch }}-${{ env.ImageOS }}-${{ env.GO_VERSION }}-vuln-linux-amd64-${{ hashFiles('go.mod', 'go.sum', 'scripts/build-sing-box.sh') }}-
+            go-v2-${{ runner.os }}-${{ runner.arch }}-${{ env.ImageOS }}-${{ env.GO_VERSION }}-vuln-linux-amd64-
 
       - name: Install pinned govulncheck
         run: GOBIN="${RUNNER_TEMP}/bin" go install "golang.org/x/vuln/cmd/govulncheck@${GOVULNCHECK_VERSION}"
@@ -188,11 +257,17 @@ jobs:
         uses: actions/setup-node@v4
         with:
           node-version: ${{ env.NODE_VERSION }}
-          cache: npm
-          cache-dependency-path: frontend/package-lock.json
+
+      - name: 恢复 npm 下载缓存
+        uses: actions/cache/restore@v4
+        with:
+          path: ~/.npm/_cacache
+          key: npm-v2-${{ runner.os }}-${{ runner.arch }}-node${{ env.NODE_VERSION }}-${{ hashFiles('frontend/package-lock.json') }}
+          restore-keys: |
+            npm-v2-${{ runner.os }}-${{ runner.arch }}-node${{ env.NODE_VERSION }}-
 
       - name: Install frontend dependencies
-        run: npm ci
+        run: npm ci --prefer-offline
         working-directory: frontend
 
       - name: Run ESLint
@@ -210,8 +285,6 @@ jobs:
         uses: actions/setup-node@v4
         with:
           node-version: ${{ env.NODE_VERSION }}
-          cache: npm
-          cache-dependency-path: frontend/package-lock.json
 
       - name: Audit production dependencies
         run: npm audit --omit=dev --audit-level=moderate
@@ -251,6 +324,25 @@ jobs:
         uses: actions/setup-go@v5
         with:
           go-version: ${{ env.GO_VERSION }}
+          cache: false
+
+      - name: 读取 Go 缓存路径与运行器镜像
+        id: go-cache-paths
+        run: |
+          echo "gomodcache=$(go env GOMODCACHE)" >> "$GITHUB_OUTPUT"
+          echo "gocache=$(go env GOCACHE)" >> "$GITHUB_OUTPUT"
+          echo "ImageOS=$ImageOS" >> "$GITHUB_ENV"
+
+      - name: 恢复并更新 Go 增量缓存
+        uses: actions/cache@v4
+        with:
+          path: |
+            ${{ steps.go-cache-paths.outputs.gomodcache }}
+            ${{ steps.go-cache-paths.outputs.gocache }}
+          key: go-v2-${{ runner.os }}-${{ runner.arch }}-${{ env.ImageOS }}-${{ env.GO_VERSION }}-backend-linux-amd64-${{ hashFiles('go.mod', 'go.sum', 'scripts/build-sing-box.sh') }}-${{ github.sha }}
+          restore-keys: |
+            go-v2-${{ runner.os }}-${{ runner.arch }}-${{ env.ImageOS }}-${{ env.GO_VERSION }}-backend-linux-amd64-${{ hashFiles('go.mod', 'go.sum', 'scripts/build-sing-box.sh') }}-
+            go-v2-${{ runner.os }}-${{ runner.arch }}-${{ env.ImageOS }}-${{ env.GO_VERSION }}-backend-linux-amd64-
 
       - name: Download dependencies
         run: go mod download
@@ -303,12 +395,26 @@ jobs:
         uses: actions/setup-node@v4
         with:
           node-version: ${{ env.NODE_VERSION }}
-          cache: npm
-          cache-dependency-path: frontend/package-lock.json
+
+      - name: 恢复 npm 下载缓存
+        id: npm-cache
+        uses: actions/cache/restore@v4
+        with:
+          path: ~/.npm/_cacache
+          key: npm-v2-${{ runner.os }}-${{ runner.arch }}-node${{ env.NODE_VERSION }}-${{ hashFiles('frontend/package-lock.json') }}
+          restore-keys: |
+            npm-v2-${{ runner.os }}-${{ runner.arch }}-node${{ env.NODE_VERSION }}-
 
       - name: Install frontend dependencies
-        run: npm ci
+        run: npm ci --prefer-offline
         working-directory: frontend
+
+      - name: 更新 npm 下载缓存
+        if: steps.npm-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: ~/.npm/_cacache
+          key: ${{ steps.npm-cache.outputs.cache-primary-key }}
 
       - name: 校验前端核心逻辑与可访问性
         run: npm run test:core && npm run audit
@@ -375,11 +481,17 @@ jobs:
         uses: actions/setup-node@v4
         with:
           node-version: ${{ env.NODE_VERSION }}
-          cache: npm
-          cache-dependency-path: frontend/package-lock.json
+
+      - name: 恢复 npm 下载缓存
+        uses: actions/cache/restore@v4
+        with:
+          path: ~/.npm/_cacache
+          key: npm-v2-${{ runner.os }}-${{ runner.arch }}-node${{ env.NODE_VERSION }}-${{ hashFiles('frontend/package-lock.json') }}
+          restore-keys: |
+            npm-v2-${{ runner.os }}-${{ runner.arch }}-node${{ env.NODE_VERSION }}-
 
       - name: Install frontend dependencies
-        run: npm ci
+        run: npm ci --prefer-offline
         working-directory: frontend
 
       - name: Check browser availability
@@ -403,11 +515,17 @@ jobs:
         uses: actions/setup-node@v4
         with:
           node-version: ${{ env.NODE_VERSION }}
-          cache: npm
-          cache-dependency-path: frontend/package-lock.json
+
+      - name: 恢复 npm 下载缓存
+        uses: actions/cache/restore@v4
+        with:
+          path: ~/.npm/_cacache
+          key: npm-v2-${{ runner.os }}-${{ runner.arch }}-node${{ env.NODE_VERSION }}-${{ hashFiles('frontend/package-lock.json') }}
+          restore-keys: |
+            npm-v2-${{ runner.os }}-${{ runner.arch }}-node${{ env.NODE_VERSION }}-
 
       - name: Install frontend dependencies
-        run: npm ci
+        run: npm ci --prefer-offline
         working-directory: frontend
 
       - name: Download frontend dist artifact
@@ -420,6 +538,25 @@ jobs:
         uses: actions/setup-go@v5
         with:
           go-version: ${{ env.GO_VERSION }}
+          cache: false
+
+      - name: 读取 Go 缓存路径与运行器镜像
+        id: go-cache-paths
+        run: |
+          echo "gomodcache=$(go env GOMODCACHE)" >> "$GITHUB_OUTPUT"
+          echo "gocache=$(go env GOCACHE)" >> "$GITHUB_OUTPUT"
+          echo "ImageOS=$ImageOS" >> "$GITHUB_ENV"
+
+      - name: 恢复并更新 Go 增量缓存
+        uses: actions/cache@v4
+        with:
+          path: |
+            ${{ steps.go-cache-paths.outputs.gomodcache }}
+            ${{ steps.go-cache-paths.outputs.gocache }}
+          key: go-v2-${{ runner.os }}-${{ runner.arch }}-${{ env.ImageOS }}-${{ env.GO_VERSION }}-fullstack-linux-amd64-${{ hashFiles('go.mod', 'go.sum', 'scripts/build-sing-box.sh') }}-${{ github.sha }}
+          restore-keys: |
+            go-v2-${{ runner.os }}-${{ runner.arch }}-${{ env.ImageOS }}-${{ env.GO_VERSION }}-fullstack-linux-amd64-${{ hashFiles('go.mod', 'go.sum', 'scripts/build-sing-box.sh') }}-
+            go-v2-${{ runner.os }}-${{ runner.arch }}-${{ env.ImageOS }}-${{ env.GO_VERSION }}-fullstack-linux-amd64-
 
       - uses: actions/download-artifact@v4
         with:
@@ -454,15 +591,8 @@ jobs:
 
   test-system-local-deploy:
     runs-on: ubuntu-latest
-    needs:
-      - lint-backend
-      - vulnerability-backend
-      - lint-frontend
-      - audit-frontend-production
-      - test-backend
-      - test-frontend-build
-      - test-frontend-e2e
-      - test-upstream-full-stack
+    needs: [release-plan, build-test-kernel]
+    if: needs.release-plan.outputs.run_full == 'true'
     steps:
       - uses: actions/checkout@v4
 
@@ -484,8 +614,27 @@ jobs:
           EOT
           mkdir -p config-ci
 
+      - name: 读取 Compose 源码镜像构建配置
+        id: local-build
+        run: |
+          configuration=$(docker compose --profile local config --format json)
+          jq -r '.services["sb-proxy-local"] | "image=\(.image)", "goproxy=\(.build.args.GOPROXY)", "gosumdb=\(.build.args.GOSUMDB)"' <<< "$configuration" >> "$GITHUB_OUTPUT"
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
       - name: Build local image
-        run: docker compose --profile local build sb-proxy-local
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: Dockerfile
+          load: true
+          tags: ${{ steps.local-build.outputs.image }}
+          build-args: |
+            GOPROXY=${{ steps.local-build.outputs.goproxy }}
+            GOSUMDB=${{ steps.local-build.outputs.gosumdb }}
+          cache-from: type=gha,scope=sbpm-source-image-v1
+          cache-to: type=gha,mode=max,scope=sbpm-source-image-v1
 
       - name: 验证容器拒绝未同意用户协议的启动
         run: |
@@ -641,7 +790,7 @@ jobs:
 
   test-release-image-build:
     runs-on: ubuntu-latest
-    needs: [release-plan, test-system-local-deploy, test-frontend-build, build-test-kernel]
+    needs: [release-plan, test-frontend-build, build-test-kernel]
     env:
       APP_VERSION: ${{ needs.release-plan.outputs.app_version }}
     steps:
@@ -653,11 +802,17 @@ jobs:
         uses: actions/setup-node@v4
         with:
           node-version: ${{ env.NODE_VERSION }}
-          cache: npm
-          cache-dependency-path: frontend/package-lock.json
+
+      - name: 恢复 npm 下载缓存
+        uses: actions/cache/restore@v4
+        with:
+          path: ~/.npm/_cacache
+          key: npm-v2-${{ runner.os }}-${{ runner.arch }}-node${{ env.NODE_VERSION }}-${{ hashFiles('frontend/package-lock.json') }}
+          restore-keys: |
+            npm-v2-${{ runner.os }}-${{ runner.arch }}-node${{ env.NODE_VERSION }}-
 
       - name: Install frontend dependencies
-        run: npm ci
+        run: npm ci --prefer-offline
         working-directory: frontend
 
       - name: Download frontend dist artifact
@@ -670,6 +825,25 @@ jobs:
         uses: actions/setup-go@v5
         with:
           go-version: ${{ env.GO_VERSION }}
+          cache: false
+
+      - name: 读取 Go 缓存路径与运行器镜像
+        id: go-cache-paths
+        run: |
+          echo "gomodcache=$(go env GOMODCACHE)" >> "$GITHUB_OUTPUT"
+          echo "gocache=$(go env GOCACHE)" >> "$GITHUB_OUTPUT"
+          echo "ImageOS=$ImageOS" >> "$GITHUB_ENV"
+
+      - name: 恢复并更新 Go 增量缓存
+        uses: actions/cache@v4
+        with:
+          path: |
+            ${{ steps.go-cache-paths.outputs.gomodcache }}
+            ${{ steps.go-cache-paths.outputs.gocache }}
+          key: go-v2-${{ runner.os }}-${{ runner.arch }}-${{ env.ImageOS }}-${{ env.GO_VERSION }}-release-linux-amd64-arm64-${{ hashFiles('go.mod', 'go.sum', 'scripts/build-sing-box.sh') }}-${{ github.sha }}
+          restore-keys: |
+            go-v2-${{ runner.os }}-${{ runner.arch }}-${{ env.ImageOS }}-${{ env.GO_VERSION }}-release-linux-amd64-arm64-${{ hashFiles('go.mod', 'go.sum', 'scripts/build-sing-box.sh') }}-
+            go-v2-${{ runner.os }}-${{ runner.arch }}-${{ env.ImageOS }}-${{ env.GO_VERSION }}-release-linux-amd64-arm64-
 
       - name: Build linux release binaries for image test
         run: |
@@ -738,6 +912,8 @@ jobs:
           file: Dockerfile.release
           push: false
           platforms: linux/amd64,linux/arm64
+          cache-from: type=gha,scope=sbpm-release-image-v1
+          cache-to: type=gha,mode=max,scope=sbpm-release-image-v1
 
       - name: 加载发行镜像用于验收
         uses: docker/build-push-action@v6
@@ -747,6 +923,7 @@ jobs:
           platforms: linux/amd64
           load: true
           tags: sbpm-release-license-test:ci
+          cache-from: type=gha,scope=sbpm-release-image-v1
 
       - name: 验证发行镜像内的许可证、用户协议与健康探针
         shell: bash
@@ -795,9 +972,42 @@ jobs:
           retention-days: 1
           overwrite: true
 
+  quality-gate:
+    runs-on: ubuntu-latest
+    needs:
+      - release-plan
+      - lint-backend
+      - vulnerability-backend
+      - lint-frontend
+      - audit-frontend-production
+      - test-backend
+      - test-frontend-build
+      - test-frontend-e2e
+      - test-upstream-full-stack
+      - test-system-local-deploy
+      - test-release-image-build
+    if: always() && needs.release-plan.outputs.run_full == 'true'
+    steps:
+      - name: 核验全部质量任务成功后才允许发布
+        env:
+          QUALITY_RESULTS: ${{ toJSON(needs) }}
+        run: |
+          python3 - <<'PY'
+          import json
+          import os
+
+          for name, job in sorted(json.loads(os.environ["QUALITY_RESULTS"]).items()):
+              if name == "release-plan":
+                  continue
+              result = job["result"]
+              print(f"{name}: {result}")
+              if result != "success":
+                  raise SystemExit(f"质量门禁失败：{name} 的状态为 {result}")
+          PY
+
   build-binaries:
     runs-on: ubuntu-latest
-    needs: [release-plan, test-frontend-build, test-release-image-build]
+    needs: [release-plan, test-frontend-build]
     if: needs.release-plan.outputs.should_release == 'true'
     env:
       APP_VERSION: ${{ needs.release-plan.outputs.app_version }}
@@ -820,6 +1030,25 @@ jobs:
         uses: actions/setup-go@v5
         with:
           go-version: ${{ env.GO_VERSION }}
+          cache: false
+
+      - name: 读取 Go 缓存路径与运行器镜像
+        id: go-cache-paths
+        run: |
+          echo "gomodcache=$(go env GOMODCACHE)" >> "$GITHUB_OUTPUT"
+          echo "gocache=$(go env GOCACHE)" >> "$GITHUB_OUTPUT"
+          echo "ImageOS=$ImageOS" >> "$GITHUB_ENV"
+
+      - name: 恢复并更新 Go 增量缓存
+        uses: actions/cache@v4
+        with:
+          path: |
+            ${{ steps.go-cache-paths.outputs.gomodcache }}
+            ${{ steps.go-cache-paths.outputs.gocache }}
+          key: go-v2-${{ runner.os }}-${{ runner.arch }}-${{ env.ImageOS }}-${{ env.GO_VERSION }}-release-${{ matrix.goos }}-${{ matrix.goarch }}-${{ hashFiles('go.mod', 'go.sum', 'scripts/build-sing-box.sh') }}-${{ github.sha }}
+          restore-keys: |
+            go-v2-${{ runner.os }}-${{ runner.arch }}-${{ env.ImageOS }}-${{ env.GO_VERSION }}-release-${{ matrix.goos }}-${{ matrix.goarch }}-${{ hashFiles('go.mod', 'go.sum', 'scripts/build-sing-box.sh') }}-
+            go-v2-${{ runner.os }}-${{ runner.arch }}-${{ env.ImageOS }}-${{ env.GO_VERSION }}-release-${{ matrix.goos }}-${{ matrix.goarch }}-
 
       - name: Download frontend dist artifact
         uses: actions/download-artifact@v4
@@ -851,7 +1080,7 @@ jobs:
       group: ghcr-${{ needs.release-plan.outputs.should_release == 'true' && needs.release-plan.outputs.release_tag || 'edge' }}
       cancel-in-progress: false
     runs-on: ubuntu-latest
-    needs: [release-plan, test-release-image-build]
+    needs: [release-plan, quality-gate, test-release-image-build]
     if: github.event_name == 'push' && needs.release-plan.outputs.run_full == 'true'
     outputs:
       digest: ${{ steps.push.outputs.digest }}
@@ -917,8 +1146,8 @@ jobs:
             org.opencontainers.image.version=${{ needs.release-plan.outputs.app_version }}
             org.opencontainers.image.revision=${{ steps.publish.outputs.revision }}
             org.opencontainers.image.description=SingBox Proxy Manager multi-arch image (linux/amd64, linux/arm64)
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+          cache-from: type=gha,scope=sbpm-release-image-v1
+          cache-to: type=gha,mode=max,scope=sbpm-release-image-v1
 
       - name: Cleanup legacy SHA and unreferenced untagged GHCR versions
         if: steps.publish.outputs.should_publish == 'true'
@@ -941,7 +1170,7 @@ jobs:
       group: github-release-publish
       cancel-in-progress: false
     runs-on: ubuntu-latest
-    needs: [release-plan, test-release-image-build, build-binaries, build-ghcr]
+    needs: [release-plan, quality-gate, test-release-image-build, build-binaries, build-ghcr]
     if: needs.release-plan.outputs.should_release == 'true' && needs.build-ghcr.outputs.should_publish == 'true'
     permissions:
       contents: write
@@ -1027,7 +1256,7 @@ jobs:
 
   cleanup-artifacts:
     runs-on: ubuntu-latest
-    needs: [release-plan, vulnerability-backend, test-backend, test-upstream-full-stack, test-system-local-deploy, test-release-image-build, build-binaries, create-release, build-ghcr]
+    needs: [release-plan, build-test-kernel, vulnerability-backend, test-backend, test-frontend-build, test-upstream-full-stack, test-system-local-deploy, test-release-image-build, quality-gate, build-binaries, create-release, build-ghcr]
     if: always() && needs.release-plan.outputs.run_full == 'true' && (github.event_name == 'push' || github.event.pull_request.head.repo.full_name == github.repository)
     permissions:
       actions: write

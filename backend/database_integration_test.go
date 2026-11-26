@@ -116,6 +116,7 @@ func runDatabaseIntegrationSuite(t *testing.T, allowed ...appdb.Dialect) {
 		verifyLegacyGroupMigration(t, func(verify func(*sql.DB)) { withDatabase(t, verify) })
 	})
 	t.Run("GroupUpstreamUpgradeFromV1_7_30", func(t *testing.T) { withDatabase(t, func(db *sql.DB) { verifyGroupUpstreamUpgrade(t, db) }) })
+	t.Run("GroupPreservePortsUpgrade", func(t *testing.T) { withDatabase(t, func(db *sql.DB) { verifyGroupedPreserveUpgrade(t, db) }) })
 }
 
 func runDatabaseIntegrationContract(t *testing.T, db *sql.DB) {
@@ -187,12 +188,13 @@ func runDatabaseIntegrationContract(t *testing.T, db *sql.DB) {
 	}
 
 	var preserve bool
-	if err := db.QueryRow("SELECT preserve_inbound_ports FROM settings LIMIT 1").Scan(&preserve); err != nil {
-		t.Fatalf("query settings (%s): %v", dialect, err)
+	if err := db.QueryRow("SELECT preserve_inbound_ports FROM node_groups WHERE id = ?", node.GroupID).Scan(&preserve); err != nil {
+		t.Fatalf("query group (%s): %v", dialect, err)
 	}
 	if preserve {
 		t.Fatalf("default preserve_inbound_ports should be false")
 	}
+	verifyLegacyPreserveSettingAbsent(t, db)
 	verifySharedReadContract(t, db, node)
 
 	verifyUpstreamMigrationContract(t, db, largeUpstreamConfig)
@@ -326,11 +328,11 @@ func verifySharedReadContract(t *testing.T, db *sql.DB, expected models.ProxyNod
 		t.Fatalf("共用节点列表读取不符：nodes=%d err=%v", len(nodes), err)
 	}
 	settings, err := models.LoadRuntimeSettings(ctx, db)
-	if err != nil || settings.PreserveInboundPorts || settings.InboundTLSCertPath != "" || settings.InboundTLSKeyPath != "" {
+	if err != nil || settings.InboundTLSCertPath != "" || settings.InboundTLSKeyPath != "" {
 		t.Fatalf("共用设置读取不符：settings=%+v err=%v", settings, err)
 	}
 	group, err := models.LoadGroup(ctx, db, expected.GroupID)
-	if err != nil || group.ID != expected.GroupID || group.StartPort != 30001 || !group.AllocatePort {
+	if err != nil || group.ID != expected.GroupID || group.StartPort != 30001 || !group.AllocatePort || group.PreserveInboundPorts {
 		t.Fatalf("共用分组读取不符：group=%+v err=%v", group, err)
 	}
 	var settingsID int
@@ -345,10 +347,10 @@ func verifySharedReadContract(t *testing.T, db *sql.DB, expected models.ProxyNod
 	if _, err := tx.ExecContext(ctx, "UPDATE proxy_nodes SET inbound_port_pinned = ?, inbound_mode = ? WHERE id = ?", true, models.InboundModeHTTPS, expected.ID); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := tx.ExecContext(ctx, "UPDATE settings SET preserve_inbound_ports = ?, inbound_tls_cert_path = ?, inbound_tls_key_path = ? WHERE singleton_key = 1", true, "/app/certs/fullchain.pem", "/app/keys/privkey.pem"); err != nil {
+	if _, err := tx.ExecContext(ctx, "UPDATE settings SET inbound_tls_cert_path = ?, inbound_tls_key_path = ? WHERE singleton_key = 1", "/app/certs/fullchain.pem", "/app/keys/privkey.pem"); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := tx.ExecContext(ctx, "UPDATE node_groups SET start_port = ? WHERE id = ?", 32050, group.ID); err != nil {
+	if _, err := tx.ExecContext(ctx, "UPDATE node_groups SET start_port = ?, preserve_inbound_ports = ? WHERE id = ?", 32050, true, group.ID); err != nil {
 		t.Fatal(err)
 	}
 	transactionNode, err := models.LoadProxyNode(ctx, tx, expected.ID)
@@ -360,11 +362,11 @@ func verifySharedReadContract(t *testing.T, db *sql.DB, expected models.ProxyNod
 		t.Fatalf("共用读取未使用事务内的节点列表：%v", err)
 	}
 	transactionSettings, err := models.LoadRuntimeSettings(ctx, tx)
-	if err != nil || !transactionSettings.PreserveInboundPorts || transactionSettings.InboundTLSCertPath != "/app/certs/fullchain.pem" || transactionSettings.InboundTLSKeyPath != "/app/keys/privkey.pem" {
+	if err != nil || transactionSettings.InboundTLSCertPath != "/app/certs/fullchain.pem" || transactionSettings.InboundTLSKeyPath != "/app/keys/privkey.pem" {
 		t.Fatalf("共用读取未使用事务内的设置状态：%v", err)
 	}
 	transactionGroup, err := models.LoadGroup(ctx, tx, group.ID)
-	if err != nil || transactionGroup.StartPort != 32050 {
+	if err != nil || transactionGroup.StartPort != 32050 || !transactionGroup.PreserveInboundPorts {
 		t.Fatalf("共用读取未使用事务内的分组端口：%v", err)
 	}
 	if err := tx.Rollback(); err != nil {

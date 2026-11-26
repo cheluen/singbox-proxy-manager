@@ -50,14 +50,13 @@ const readBody = async (request) => {
 function createFixture() {
   const state = {
     groups: [{
-      id: 1, name: 'Default', sort_order: 0, allocate_port: true, start_port: 30001,
+      id: 1, name: 'Default', sort_order: 0, allocate_port: true, preserve_inbound_ports: false, start_port: 30001,
       upstream_enabled: false, upstream_type: '', upstream_config: '', upstream_revision: 0,
       upstream_ip: '', upstream_location: '', upstream_country_code: '', upstream_latency: 0, upstream_error: '',
       subscription_url: '', subscription_auto_update: false, subscription_interval_minutes: 60, subscription_last_error: '',
     }],
     nodes: [makeNode(1), makeNode(2, { type: 'vless', check_status: 'untested', country_code: '', location: '', node_ip: '', latency: 0, tcp_reuse_enabled: false }), makeNode(3, { type: 'vmess', enabled: false, country_code: 'US', location: 'Boston, United States' }), makeNode(4)],
     settings: {
-      preserve_inbound_ports: false,
       global_upstream_enabled: false,
       global_upstream_type: '',
       global_upstream_config: '',
@@ -87,25 +86,41 @@ function createFixture() {
     expectedFailures: new Set(), activeChecks: 0, peakChecks: 0, checkDelay: 20, checkStatuses: {}, importDelay: 0,
     importResult: null, flagFailure: false, nextLoads: [], loginSecret: 'dusk-regression-admin', revoked: false,
   }
-  const reorderPorts = () => {
-    if (state.settings.preserve_inbound_ports) return
-    const used = new Set(state.nodes.filter((node) => node.inbound_port_pinned && node.inbound_port > 0).map((node) => node.inbound_port))
+  const reorderPorts = (targetGroupIds = null) => {
+    const scope = targetGroupIds ? new Set(targetGroupIds) : null
     for (const group of state.groups) {
-      const groupNodes = state.nodes.filter((node) => (node.group_id ?? state.groups[0]?.id) === group.id)
-      let port = group.start_port || 30001
-      groupNodes.forEach((node, index) => {
-        node.sort_order = index
-        if (group.allocate_port === false) {
+      if (scope && !scope.has(group.id)) continue
+      const groupNodes = state.nodes
+        .filter((node) => (node.group_id ?? state.groups[0]?.id) === group.id)
+        .sort((left, right) => (Number(left.sort_order ?? 0) - Number(right.sort_order ?? 0)) || (left.id - right.id))
+      groupNodes.forEach((node, index) => { node.sort_order = index })
+      if (group.allocate_port === false) {
+        for (const node of groupNodes) {
           node.inbound_port = 0
           node.inbound_port_pinned = false
-          return
         }
-        if (node.inbound_port_pinned && node.inbound_port > 0) return
+        continue
+      }
+      const otherUsed = new Set(
+        state.nodes
+          .filter((node) => (node.group_id ?? state.groups[0]?.id) !== group.id && node.inbound_port > 0)
+          .map((node) => node.inbound_port)
+      )
+      const used = new Set([
+        ...otherUsed,
+        ...groupNodes
+          .filter((node) => (group.preserve_inbound_ports ? node.inbound_port > 0 : node.inbound_port_pinned && node.inbound_port > 0))
+          .map((node) => node.inbound_port),
+      ])
+      let port = group.start_port || 30001
+      for (const node of groupNodes) {
+        if (group.preserve_inbound_ports && node.inbound_port > 0) continue
+        if (!group.preserve_inbound_ports && node.inbound_port_pinned && node.inbound_port > 0) continue
         while (used.has(port)) port += 1
         node.inbound_port = port
         used.add(port)
         port += 1
-      })
+      }
     }
   }
   const server = http.createServer(async (request, response) => {
@@ -142,8 +157,14 @@ function createFixture() {
       return send(200, enriched)
     }
     if (route === '/api/node-groups' && method === 'POST') {
+      const allocatePort = body?.allocate_port !== false
+      const preservePorts = Boolean(body?.preserve_inbound_ports)
+      if (!allocatePort && preservePorts) {
+        state.expectedFailures.add(route)
+        return send(400, { error: 'cannot enable preserve_inbound_ports when allocate_port is false' })
+      }
       const id = Math.max(0, ...state.groups.map((g) => g.id)) + 1
-      const created = { id, sort_order: state.groups.length, subscription_last_error: '', ...body }
+      const created = { id, sort_order: state.groups.length, subscription_last_error: '', ...body, allocate_port: allocatePort, preserve_inbound_ports: allocatePort && preservePorts }
       state.groups.push(created)
       state.groupMutations.push({ op: 'create', body })
       return send(201, created)
@@ -188,11 +209,22 @@ function createFixture() {
         const patchFields = { ...(body || {}) }
         delete patchFields.expected_upstream_revision
         delete patchFields.expected_upstream_enabled
+        const nextAllocate = Object.hasOwn(patchFields, 'allocate_port') ? Boolean(patchFields.allocate_port) : group.allocate_port !== false
+        if (!nextAllocate && patchFields.preserve_inbound_ports === true) {
+          state.expectedFailures.add(route)
+          return send(400, { error: 'cannot enable preserve_inbound_ports when allocate_port is false' })
+        }
+        const prevAllocate = group.allocate_port !== false
+        const prevPreserve = Boolean(group.preserve_inbound_ports)
+        const prevStartPort = group.start_port
+        if (!nextAllocate) patchFields.preserve_inbound_ports = false
         if (defChanged) {
           Object.assign(group, { upstream_revision: (group.upstream_revision || 0) + 1, upstream_ip: '', upstream_location: '', upstream_country_code: '', upstream_latency: 0, upstream_error: '' })
         }
         Object.assign(group, patchFields)
-        reorderPorts()
+        if (nextAllocate !== prevAllocate || Boolean(group.preserve_inbound_ports) !== prevPreserve || group.start_port !== prevStartPort) {
+          reorderPorts([gid])
+        }
         state.groupMutations.push({ op: 'update', id: gid, body })
         return send(200, group)
       }
@@ -285,6 +317,10 @@ function createFixture() {
       return send(200, { ip: '198.51.100.30', latency: 20 })
     }
     if (route === '/api/settings' && method === 'PUT') {
+      if (Object.hasOwn(body || {}, 'preserve_inbound_ports')) {
+        state.expectedFailures.add(route)
+        return send(400, { error: 'preserve_inbound_ports has moved to group settings' })
+      }
       state.settingsSaves.push(body)
       Object.assign(state.settings, body)
       if (Object.hasOwn(body || {}, 'inbound_tls_cert_path') || Object.hasOwn(body || {}, 'inbound_tls_key_path')) {
@@ -299,8 +335,6 @@ function createFixture() {
           }
         }
       }
-      const runtimeFields = ['start_port', 'preserve_inbound_ports', 'global_upstream_enabled', 'global_upstream_type', 'global_upstream_config']
-      if (runtimeFields.some((key) => Object.hasOwn(body || {}, key))) reorderPorts()
       if (body.admin_password) {
         state.loginSecret = body.admin_password
         state.revoked = true
@@ -312,14 +346,23 @@ function createFixture() {
       state.orders.push(body)
       const byID = new Map(state.nodes.map((node) => [node.id, node]))
       if (body.group_id != null) {
-        const reordered = body.nodes.map((item) => byID.get(item.id)).filter(Boolean)
+        const reordered = body.nodes.map((item, idx) => {
+          const node = byID.get(item.id)
+          if (node) node.sort_order = item.sort_order ?? idx
+          return node
+        }).filter(Boolean)
         const ids = new Set(reordered.map((node) => node.id))
         let cursor = 0
         state.nodes = state.nodes.map((node) => (ids.has(node.id) ? reordered[cursor++] : node))
+        reorderPorts([body.group_id])
       } else {
-        state.nodes = body.nodes.map((item) => byID.get(item.id))
+        state.nodes = body.nodes.map((item, idx) => {
+          const node = byID.get(item.id)
+          if (node) node.sort_order = item.sort_order ?? idx
+          return node
+        }).filter(Boolean)
+        reorderPorts()
       }
-      reorderPorts()
       return send(200, {})
     }
     if (route === '/api/nodes/batch-delete') {
@@ -499,20 +542,36 @@ const scenarios = {
     await page.waitForSelector('[data-testid="node-form"]', { hidden: true })
     await waitOverlaysClosed(page)
     assert.equal(state.nodes.find((node) => node.id === 1).inbound_port, 32001)
-    state.settings.preserve_inbound_ports = true
-    await page.reload({ waitUntil: 'networkidle2' })
+    // 确认系统设置不再展示旧版全局「保留入站端口」开关
+    await clickControl(page, '[data-testid="open-settings"]')
+    assert.equal(await page.$('#preserve_inbound_ports'), null, '系统设置不应再包含保留入站端口开关')
+    await closeOverlay(page)
+
+    // 在分组设置中开启「保留入站端口」，验证排序不改写端口、关闭分配时自动禁用保留、关闭保留时弹出本组确认框
+    await clickControl(page, '[data-testid="group-settings-button"]')
+    await clickText(page, 'Group Settings', { root: '.ant-dropdown:not(.ant-dropdown-hidden)' })
+    await page.waitForSelector('[data-testid="group-preserve-ports"]', { visible: true })
+    await toggle(page, '[data-testid="group-preserve-ports"]', true)
+    await clickControl(page, '[data-testid="group-form-submit"]')
+    await waitOverlaysClosed(page)
+    await eventually(() => state.groups[0].preserve_inbound_ports === true, '分组保留入站端口未保存')
     const ports = new Map(state.nodes.map((node) => [node.id, node.inbound_port]))
     await openNodeMenu(page, 3, 'Move to top')
     await eventually(() => state.orders.length === 2, '保留端口下的排序未生效')
     for (const node of state.nodes) assert.equal(node.inbound_port, ports.get(node.id))
-    await clickControl(page, '[data-testid="open-settings"]')
-    await toggle(page, '#preserve_inbound_ports', false)
-    await clickText(page, 'Save Settings')
+
+    await clickControl(page, '[data-testid="group-settings-button"]')
+    await clickText(page, 'Group Settings', { root: '.ant-dropdown:not(.ant-dropdown-hidden)' })
+    await page.waitForSelector('[data-testid="group-preserve-ports"]', { visible: true })
+    const mutationCountBefore = state.groupMutations.length
+    await toggle(page, '[data-testid="group-preserve-ports"]', false)
+    await clickControl(page, '[data-testid="group-form-submit"]')
     await confirmDialog(page, false)
-    assert.equal(state.settingsSaves.length, 0)
-    await clickText(page, 'Save Settings')
+    assert.equal(state.groupMutations.length, mutationCountBefore)
+    await clickControl(page, '[data-testid="group-form-submit"]')
     await confirmDialog(page)
-    await eventually(() => state.settingsSaves.length === 1, '端口设置确认后未保存')
+    await waitOverlaysClosed(page)
+    await eventually(() => state.groups[0].preserve_inbound_ports === false, '分组关闭保留入站端口确认后未保存')
   },
 
   async 'batch-import'({ page, state }) {
@@ -748,7 +807,7 @@ const scenarios = {
     await setInput(page, '[data-testid="nodes-search"]', '')
     await expectRows(page, [1, 2])
     assert.equal(await page.$eval('[data-row-id="1"] .sb-drag', (button) => button.disabled), true)
-    state.settings.preserve_inbound_ports = true
+    state.groups[0].preserve_inbound_ports = true
     await page.evaluate(() => window.dispatchEvent(new CustomEvent('sbpm-dusk:external-change')))
     await page.waitForFunction(() => !document.querySelector('[data-row-id="1"] .sb-drag')?.disabled)
     await openNodeMenu(page, 2, 'Move to top')
@@ -1301,6 +1360,8 @@ const scenarios = {
     await clickControl(page, '[data-testid="group-create-button"]')
     await setInput(page, '[data-testid="group-name-input"]', 'Pool NoPort')
     await toggle(page, '[data-testid="group-allocate-port"]', false)
+    assert.equal(await page.$eval('[data-testid="group-preserve-ports"]', (el) => el.disabled), true, '关闭分配入站端口时必须禁用保留入站端口')
+    assert.equal(await page.$eval('[data-testid="group-preserve-ports"]', (el) => el.getAttribute('aria-checked')), 'false', '关闭分配入站端口时保留入站端口必须关闭')
     assert.equal(await page.$eval('[data-testid="group-start-port"]', (el) => el.disabled), true)
     await clickControl(page, '[data-testid="group-form-submit"]')
     await waitOverlaysClosed(page)
@@ -1358,14 +1419,22 @@ const scenarios = {
       '分组标签顺序未更新'
     )
 
-    // 策略节点整组导入 + 按 ID 排序预览 + 编辑器内断链与详情卡片快捷断链
+    // 策略节点整组导入 + 跟随组内 sort_order 排序预览 + 编辑器内断链与详情卡片快捷断链
+    state.nodes.push(makeNode(7, { group_id: 2, sort_order: 0, inbound_port: 0, name: 'Pool Priority First' }))
+    state.nodes.find((n) => n.id === 2).sort_order = 1
     await clickControl(page, '[data-testid="group-tab-1"]')
+    await clickControl(page, '[data-testid="nodes-refresh"]')
     await clickControl(page, '[data-testid="nodes-add-node"]')
     await selectOption(page, 'proxy_type', 'Failover (Policy)')
     await setInput(page, '#name', 'Group Sync Policy')
     await clickControl(page, '[data-testid="policy-add-group-select"]')
     await clickText(page, 'Pool NoPort', { root: '.ant-select-dropdown:not(.ant-select-dropdown-hidden)', exact: false })
     await page.waitForSelector('[data-member-group-id="2"]', { visible: true })
+    assert.deepEqual(
+      await page.$$eval('[data-member-group-id="2"] .sb-policy-order__chip', (els) => els.map((el) => ({ id: Number(el.dataset.memberNodeId), text: el.textContent.trim() }))),
+      [{ id: 7, text: '#1Pool Priority First' }, { id: 2, text: '#2Node 002' }],
+      '策略整组预览未按组内 sort_order 排序或序号未对齐'
+    )
     await clickControl(page, '[data-testid="auth-generate"]')
     await saveNodeForm(page)
     await waitOverlaysClosed(page)
@@ -1373,15 +1442,15 @@ const scenarios = {
     assert.ok(createdPolicy, '整组策略节点未创建')
     assert.deepEqual(JSON.parse(createdPolicy.config).member_sources, [{ type: 'group', id: 2 }])
 
-    // 详情卡片展示已关联分组标签与断链按钮，点击断链将成员固化为独立节点列表
+    // 详情卡片展示已关联分组标签与断链按钮，点击断链将成员按组内 sort_order 固化为独立节点列表
     await clickControl(page, `[data-testid="node-open-${createdPolicy.id}"]`)
     await page.waitForSelector(`[data-testid="policy-linked-groups-${createdPolicy.id}"]`, { visible: true })
     await clickControl(page, '[data-testid="policy-detail-unlink-group-2"]')
     await eventually(() => {
       const updated = state.nodes.find((n) => n.id === createdPolicy.id)
       const cfg = JSON.parse(updated?.config || '{}')
-      return !Object.hasOwn(cfg, 'member_sources') && Array.isArray(cfg.member_ids) && cfg.member_ids.includes(2)
-    }, '详情快捷断链未解除分组关联')
+      return !Object.hasOwn(cfg, 'member_sources') && JSON.stringify(cfg.member_ids) === JSON.stringify([7, 2])
+    }, '详情快捷断链未按组内排序解除分组关联')
     await page.waitForSelector(`[data-testid="policy-linked-groups-${createdPolicy.id}"]`, { hidden: true })
   },
 

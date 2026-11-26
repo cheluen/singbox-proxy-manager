@@ -259,15 +259,18 @@ try {
   await waitOverlaysClosed(page)
   steps.push('batch-partial-export-responsive')
 
-  await clickControl(page, '[data-testid="open-settings"]')
-  await toggle(page, '#preserve_inbound_ports', true)
-  await submit('PUT', '/settings', () => clickText(page, 'Save Settings'))
+  await clickControl(page, '[data-testid="group-settings-button"]')
+  await clickText(page, 'Group Settings', { root: '.ant-dropdown:not(.ant-dropdown-hidden)' })
+  await page.waitForSelector('[data-testid="group-preserve-ports"]', { visible: true })
+  await toggle(page, '[data-testid="group-preserve-ports"]', true)
+  const activeGroupId = (await api('GET', '/node-groups'))[0].id
+  await submit('PATCH', `/node-groups/${activeGroupId}`, () => clickControl(page, '[data-testid="group-form-submit"]'))
   await waitOverlaysClosed(page)
   const ports = new Map((await api('GET', '/nodes')).map((node) => [node.id, node.inbound_port]))
   await openNodeMenu(page, imported.id, 'Move to top')
   await wait(async () => (await api('GET', '/nodes'))[0]?.id === imported.id, '界面排序未保存')
   for (const node of await api('GET', '/nodes')) assert.equal(node.inbound_port, ports.get(node.id))
-  steps.push('settings-sort-preserve-ports')
+  steps.push('group-sort-preserve-ports')
 
   // 真实前后端 + 数据库列宽持久化验收：拖拽列宽落库、不重启 sing-box、跨进程重启恢复并可一键复位。
   await page.setViewport({ width: 1440, height: 1000 })

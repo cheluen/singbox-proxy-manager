@@ -111,6 +111,13 @@ func setTestGroupStartPort(t *testing.T, db *sql.DB, port int) {
 	}
 }
 
+func setTestGroupPreserveInboundPorts(t *testing.T, db *sql.DB, groupID int, preserve bool) {
+	t.Helper()
+	if _, err := db.Exec("UPDATE node_groups SET preserve_inbound_ports = ? WHERE id = ?", preserve, groupID); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func insertTestNode(t *testing.T, db *sql.DB) int {
 	t.Helper()
 	return insertTestNodeWithPortAndOrder(t, db, "node1", 30001, 0)
@@ -658,9 +665,7 @@ func TestUpdateNodeAppliesInboundPortAndTCPReuseFlag(t *testing.T) {
 	})
 	nodeID := insertTestNode(t, handler.db)
 
-	if _, err := handler.db.Exec("UPDATE settings SET preserve_inbound_ports = 1"); err != nil {
-		t.Fatalf("enable preserve_inbound_ports: %v", err)
-	}
+	setTestGroupPreserveInboundPorts(t, handler.db, firstTestGroup(t, handler.db).ID, true)
 
 	payload := map[string]interface{}{
 		"name":              "node1-updated",
@@ -800,9 +805,7 @@ func TestCreateNodeAutoAssignSkipsUsedInboundPorts(t *testing.T) {
 		return nil, fmt.Errorf("not used")
 	})
 
-	if _, err := handler.db.Exec("UPDATE settings SET preserve_inbound_ports = 1"); err != nil {
-		t.Fatal(err)
-	}
+	setTestGroupPreserveInboundPorts(t, handler.db, firstTestGroup(t, handler.db).ID, true)
 	insertTestNodeWithPortAndOrder(t, handler.db, "node-a", 30001, 0)
 	insertTestNodeWithPortAndOrder(t, handler.db, "node-b", 30005, 1)
 
@@ -890,9 +893,7 @@ func TestCreateNodeAutoAssignSkipsSystemOccupiedPort(t *testing.T) {
 	t.Cleanup(func() { _ = listener.Close() })
 	startPort := listener.Addr().(*net.TCPAddr).Port
 	setTestGroupStartPort(t, handler.db, startPort)
-	if _, err := handler.db.Exec("UPDATE settings SET preserve_inbound_ports = 1"); err != nil {
-		t.Fatal(err)
-	}
+	setTestGroupPreserveInboundPorts(t, handler.db, firstTestGroup(t, handler.db).ID, true)
 	payload := map[string]interface{}{
 		"name": "automatic-port", "type": "direct", "config": `{}`,
 		"enabled": true, "auth_enabled": false,
@@ -955,9 +956,7 @@ func TestBatchImportNodesAutoAssignSkipsUsedInboundPorts(t *testing.T) {
 		return nil, fmt.Errorf("not used")
 	})
 
-	if _, err := handler.db.Exec("UPDATE settings SET preserve_inbound_ports = 1"); err != nil {
-		t.Fatalf("set settings: %v", err)
-	}
+	setTestGroupPreserveInboundPorts(t, handler.db, firstTestGroup(t, handler.db).ID, true)
 	insertTestNodeWithPortAndOrder(t, handler.db, "node-a", 30001, 0)
 	insertTestNodeWithPortAndOrder(t, handler.db, "node-b", 30005, 1)
 
@@ -1254,9 +1253,7 @@ func TestReorderNodesPreserveInboundPortsKeepsPorts(t *testing.T) {
 		return nil, fmt.Errorf("not used")
 	})
 
-	if _, err := handler.db.Exec("UPDATE settings SET preserve_inbound_ports = 1"); err != nil {
-		t.Fatalf("set preserve_inbound_ports: %v", err)
-	}
+	setTestGroupPreserveInboundPorts(t, handler.db, firstTestGroup(t, handler.db).ID, true)
 	firstID := insertTestNodeWithPortAndOrder(t, handler.db, "node-a", 30001, 0)
 	secondID := insertTestNodeWithPortAndOrder(t, handler.db, "node-b", 30005, 1)
 
@@ -1379,9 +1376,64 @@ exec sleep 300
 		t.Fatalf("column widths invalidated the active session: %v", err)
 	}
 
-	put(map[string]any{"preserve_inbound_ports": true, "node_list_column_widths": widths}, widths, true)
-	put(map[string]any{"preserve_inbound_ports": false}, widths, true)
+	put(map[string]any{"node_list_column_widths": widths}, widths, true)
+	groupID := strconv.Itoa(firstTestGroup(t, handler.db).ID)
+	for _, preserve := range []bool{true, false} {
+		response := postJSON(t, handler.UpdateGroup, http.MethodPatch, "/api/node-groups/"+groupID,
+			map[string]any{"preserve_inbound_ports": preserve}, ginParams("id", groupID))
+		if response.Code != http.StatusOK || firstTestGroup(t, handler.db).PreserveInboundPorts != preserve {
+			t.Fatalf("update group preserve mode: %d %s", response.Code, response.Body.String())
+		}
+		get(widths)
+	}
 	get(widths)
+}
+
+func TestSettingsRejectLegacyPreserveInboundPortsWithoutSideEffects(t *testing.T) {
+	client := newGroupTestClient(t)
+	group := firstTestGroup(t, client.db)
+	client.request(http.MethodPatch, testGroupPath(group.ID), gin.H{"preserve_inbound_ports": true}, http.StatusOK, nil)
+	node := client.createNode("unchanged", group.ID, true)
+	beforeSettings, err := models.LoadRuntimeSettings(t.Context(), client.db)
+	if err != nil {
+		t.Fatal(err)
+	}
+	beforeRuntime := client.handler.singBoxService.RuntimeStatus()
+	var beforeHash string
+	var beforeGeneration int
+	if err := client.db.QueryRow("SELECT admin_password,auth_generation FROM settings WHERE singleton_key=1").Scan(&beforeHash, &beforeGeneration); err != nil {
+		t.Fatal(err)
+	}
+	for _, legacy := range []bool{false, true} {
+		var response struct {
+			Error string `json:"error"`
+		}
+		client.request(http.MethodPut, "/api/settings", gin.H{
+			"preserve_inbound_ports": legacy, "node_list_column_widths": gin.H{"name": 211}, "admin_password": "rejected-update-123",
+		}, http.StatusBadRequest, &response)
+		if !strings.Contains(response.Error, "已迁移") || !strings.Contains(response.Error, "分组") {
+			t.Fatalf("旧版设置拒绝提示不明确：%q", response.Error)
+		}
+	}
+	var settingsResponse map[string]any
+	client.request(http.MethodGet, "/api/settings", nil, http.StatusOK, &settingsResponse)
+	if _, exists := settingsResponse["preserve_inbound_ports"]; exists {
+		t.Fatal("系统设置响应仍暴露旧版保留字段")
+	}
+	afterSettings, err := models.LoadRuntimeSettings(t.Context(), client.db)
+	if err != nil || !maps.Equal(beforeSettings.NodeListColumnWidths, afterSettings.NodeListColumnWidths) || !firstTestGroup(t, client.db).PreserveInboundPorts {
+		t.Fatal("拒绝旧 API 字段时修改了列宽或分组策略", err)
+	}
+	var afterHash string
+	var afterGeneration int
+	if err := client.db.QueryRow("SELECT admin_password,auth_generation FROM settings WHERE singleton_key=1").Scan(&afterHash, &afterGeneration); err != nil || afterHash != beforeHash || afterGeneration != beforeGeneration {
+		t.Fatal("拒绝旧 API 字段时修改了密码或会话代数", err)
+	}
+	client.assertPort(node.ID, group.ID, node.InboundPort, false)
+	afterRuntime := client.handler.singBoxService.RuntimeStatus()
+	if afterRuntime.PID != beforeRuntime.PID || afterRuntime.ActiveConfigHash != beforeRuntime.ActiveConfigHash {
+		t.Fatal("拒绝旧 API 字段时重启了内核")
+	}
 }
 
 func TestUpdateSettingsRejectsInvalidNodeListColumnWidths(t *testing.T) {
@@ -1409,9 +1461,7 @@ func TestUpdateGroupPreserveModeStartPortDoesNotRewritePorts(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	handler := newTestHandler(t, nil)
 
-	if _, err := handler.db.Exec("UPDATE settings SET preserve_inbound_ports = 1"); err != nil {
-		t.Fatalf("set settings: %v", err)
-	}
+	setTestGroupPreserveInboundPorts(t, handler.db, firstTestGroup(t, handler.db).ID, true)
 	nodeID := insertTestNodeWithPortAndOrder(t, handler.db, "node-a", 30010, 0)
 	groupID := strconv.Itoa(firstTestGroup(t, handler.db).ID)
 	rec := postJSON(t, handler.UpdateGroup, http.MethodPatch, "/api/node-groups/"+groupID,
@@ -1432,31 +1482,22 @@ func TestUpdateGroupPreserveModeStartPortDoesNotRewritePorts(t *testing.T) {
 	}
 }
 
-func TestUpdateSettingsDisablingPreserveModeRealignsPorts(t *testing.T) {
+func TestUpdateGroupDisablingPreserveModeRealignsPorts(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	handler := newTestHandler(t, func(proxyAddr, username, password string) (*services.IPInfo, error) {
 		return nil, fmt.Errorf("not used")
 	})
 
 	setTestGroupStartPort(t, handler.db, 32000)
-	if _, err := handler.db.Exec("UPDATE settings SET preserve_inbound_ports = 1"); err != nil {
-		t.Fatalf("set settings: %v", err)
-	}
+	setTestGroupPreserveInboundPorts(t, handler.db, firstTestGroup(t, handler.db).ID, true)
 	insertTestNodeWithPortAndOrder(t, handler.db, "node-a", 30010, 0)
 	insertTestNodeWithPortAndOrder(t, handler.db, "node-b", 30050, 1)
 
 	payload := map[string]interface{}{
 		"preserve_inbound_ports": false,
 	}
-	body, _ := json.Marshal(payload)
-
-	rec := httptest.NewRecorder()
-	ctx, _ := gin.CreateTestContext(rec)
-	req, _ := http.NewRequest(http.MethodPut, "/api/settings", bytes.NewReader(body))
-	req.Header.Set("Content-Type", "application/json")
-	ctx.Request = req
-
-	handler.UpdateSettings(ctx)
+	groupID := strconv.Itoa(firstTestGroup(t, handler.db).ID)
+	rec := postJSON(t, handler.UpdateGroup, http.MethodPatch, "/api/node-groups/"+groupID, payload, ginParams("id", groupID))
 	if rec.Code != http.StatusOK {
 		t.Fatalf("unexpected status %d body=%s", rec.Code, rec.Body.String())
 	}
@@ -1480,11 +1521,7 @@ func TestUpdateSettingsDisablingPreserveModeRealignsPorts(t *testing.T) {
 		t.Fatalf("unexpected realigned ports: %+v", got)
 	}
 
-	var preserveInboundPorts bool
-	if err := handler.db.QueryRow("SELECT preserve_inbound_ports FROM settings LIMIT 1").Scan(&preserveInboundPorts); err != nil {
-		t.Fatalf("query preserve_inbound_ports: %v", err)
-	}
-	if preserveInboundPorts {
+	if firstTestGroup(t, handler.db).PreserveInboundPorts {
 		t.Fatalf("expected preserve_inbound_ports=false after update")
 	}
 }
@@ -1495,9 +1532,7 @@ func TestDeleteNodePreserveInboundPortsKeepsRemainingPorts(t *testing.T) {
 		return nil, fmt.Errorf("not used")
 	})
 
-	if _, err := handler.db.Exec("UPDATE settings SET preserve_inbound_ports = 1"); err != nil {
-		t.Fatalf("set preserve_inbound_ports: %v", err)
-	}
+	setTestGroupPreserveInboundPorts(t, handler.db, firstTestGroup(t, handler.db).ID, true)
 	firstID := insertTestNodeWithPortAndOrder(t, handler.db, "node-a", 30001, 0)
 	deleteID := insertTestNodeWithPortAndOrder(t, handler.db, "node-b", 30005, 1)
 	thirdID := insertTestNodeWithPortAndOrder(t, handler.db, "node-c", 30009, 2)
@@ -1550,9 +1585,7 @@ func TestBatchDeleteNodesPreserveInboundPortsKeepsRemainingPorts(t *testing.T) {
 		return nil, fmt.Errorf("not used")
 	})
 
-	if _, err := handler.db.Exec("UPDATE settings SET preserve_inbound_ports = 1"); err != nil {
-		t.Fatalf("set preserve_inbound_ports: %v", err)
-	}
+	setTestGroupPreserveInboundPorts(t, handler.db, firstTestGroup(t, handler.db).ID, true)
 	deleteFirstID := insertTestNodeWithPortAndOrder(t, handler.db, "node-a", 30001, 0)
 	keepID := insertTestNodeWithPortAndOrder(t, handler.db, "node-b", 30005, 1)
 	deleteLastID := insertTestNodeWithPortAndOrder(t, handler.db, "node-c", 30009, 2)
