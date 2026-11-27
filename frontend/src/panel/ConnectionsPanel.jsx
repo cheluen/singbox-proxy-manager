@@ -1,12 +1,12 @@
 // 「当前连接」实时路由路径面板：按需 SSE 采集（离开页面立即断开释放）、三列拓扑布局、双层 SVG 贝塞尔流光曲线与路径高亮。
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import { Button } from 'antd'
-import { Activity, ArrowDown, ArrowUp, ChevronDown, ChevronUp, Pause, Play, RefreshCw, Route as RouteIcon, Shield } from 'lucide-react'
+import { Activity, ArrowDown, ArrowUp, ChevronDown, ChevronUp, Lock, Network, Pause, Play, RefreshCw, Route as RouteIcon, Shield } from 'lucide-react'
 import { useTranslation } from 'react-i18next'
 import api from '../core/api'
 import { formatRate } from '../core/format'
 import { formatUpstreamLabel } from '../shared/labels'
-import { EmptyState } from '../shared/primitives'
+import { EmptyState, Region } from '../shared/primitives'
 
 const COLLAPSE_THRESHOLD = 12
 const POLL_FALLBACK_MS = 1500
@@ -39,6 +39,7 @@ export default function ConnectionsPanel({ token }) {
 
   const stageRef = useRef(null)
   const clientRefs = useRef(new Map())
+  const channelRefs = useRef(new Map())
   const inboundRefs = useRef(new Map())
   const routeRefs = useRef(new Map())
 
@@ -171,8 +172,30 @@ export default function ConnectionsPanel({ token }) {
     [expandedAll, hasOverflow, sortedRoutes]
   )
 
-  // 按客户端 IP 与入站端口聚合左/中列节点卡片：同一 IP 连向多个入站只保留 1 张卡片。
+  // 按客户端 IP 与入站端口聚合左/中列节点卡片：同一 IP 连向多个入站只保留 1 张卡片；
+  // 通道并发基于完整快照统计，避免超过折叠阈值时误报未激活，连线与右侧列表仍按可见子集渲染。
   const { clients, inbounds, clientInboundPairs } = useMemo(() => {
+    const clientTotals = new Map()
+    for (const route of sortedRoutes) {
+      const ip = route.client_ip || 'unknown'
+      const mode = route.inbound_mode === 'https' ? 'https' : 'mixed'
+      const count = Number(route.active_count) || 0
+      if (!clientTotals.has(ip)) {
+        clientTotals.set(ip, {
+          ip,
+          mixedCount: 0,
+          httpsCount: 0,
+          countryCode: route.client_country_code || '',
+          isPrivate: Boolean(route.client_is_private),
+        })
+      }
+      const total = clientTotals.get(ip)
+      if (mode === 'https') total.httpsCount += count
+      else total.mixedCount += count
+      if (!total.countryCode && route.client_country_code) total.countryCode = route.client_country_code
+      if (route.client_is_private) total.isPrivate = true
+    }
+
     const clientMap = new Map()
     const inboundMap = new Map()
     const pairMap = new Map()
@@ -180,14 +203,20 @@ export default function ConnectionsPanel({ token }) {
     for (const route of displayedRoutes) {
       const ip = route.client_ip || 'unknown'
       const port = Number(route.inbound_port) || 0
+      const mode = route.inbound_mode === 'https' ? 'https' : 'mixed'
       const up = route.upload_bps == null ? null : Number(route.upload_bps)
       const down = route.download_bps == null ? null : Number(route.download_bps)
       const count = Number(route.active_count) || 0
 
       if (!clientMap.has(ip)) {
-        clientMap.set(ip, { ip, activeCount: 0 })
+        clientMap.set(ip, clientTotals.get(ip) || {
+          ip,
+          mixedCount: 0,
+          httpsCount: 0,
+          countryCode: route.client_country_code || '',
+          isPrivate: Boolean(route.client_is_private),
+        })
       }
-      clientMap.get(ip).activeCount += count
 
       if (!inboundMap.has(port)) {
         inboundMap.set(port, { port, activeCount: 0 })
@@ -196,7 +225,9 @@ export default function ConnectionsPanel({ token }) {
 
       const pairKey = `${ip}|${port}`
       if (!pairMap.has(pairKey)) {
-        pairMap.set(pairKey, { key: pairKey, ip, port, activeTraffic: false })
+        pairMap.set(pairKey, { key: pairKey, ip, port, mode, activeTraffic: false })
+      } else if (mode === 'https') {
+        pairMap.get(pairKey).mode = 'https'
       }
       if ((up || 0) + (down || 0) > 0) pairMap.get(pairKey).activeTraffic = true
     }
@@ -206,7 +237,7 @@ export default function ConnectionsPanel({ token }) {
       inbounds: Array.from(inboundMap.values()),
       clientInboundPairs: Array.from(pairMap.values()),
     }
-  }, [displayedRoutes])
+  }, [displayedRoutes, sortedRoutes])
 
   // 计算悬浮高亮集合：悬停左/中/右任一元素，整条关联路径同时点亮。
   const highlightSet = useMemo(() => {
@@ -240,7 +271,7 @@ export default function ConnectionsPanel({ token }) {
     const rightEdges = []
 
     for (const pair of clientInboundPairs) {
-      const fromEl = clientRefs.current.get(pair.ip)
+      const fromEl = channelRefs.current.get(`${pair.ip}|${pair.mode}`) || clientRefs.current.get(pair.ip)
       const toEl = inboundRefs.current.get(pair.port)
       if (!fromEl || !toEl) continue
       const fromRect = fromEl.getBoundingClientRect()
@@ -469,6 +500,8 @@ export default function ConnectionsPanel({ token }) {
               <div className="conn-col conn-col--clients">
                 {clients.map((client) => {
                   const hl = highlightSet?.clientIPs.has(client.ip)
+                  const mixedActive = client.mixedCount > 0
+                  const httpsActive = client.httpsCount > 0
                   return (
                     <div
                       key={client.ip}
@@ -477,8 +510,51 @@ export default function ConnectionsPanel({ token }) {
                       data-testid={`conn-client-${client.ip}`}
                       onMouseEnter={() => setHoverTarget({ kind: 'client', value: client.ip })}
                     >
-                      <span className="conn-node__ip mono truncate" title={client.ip}>{client.ip}</span>
-                      <span className="conn-node__badge mono">{t('conn_concurrent', { count: client.activeCount })}</span>
+                      <div className="conn-client__info">
+                        <span className="conn-node__ip mono truncate" title={client.ip}>{client.ip}</span>
+                        <div className="conn-client__geo">
+                          {client.isPrivate ? (
+                            <span
+                              className="sb-region"
+                              data-testid={`conn-geo-${client.ip}`}
+                              data-geo="private"
+                              data-tip={t('conn_private_ip_tip')}
+                            >
+                              <span className="sb-region__code sb-region__code--private mono">{t('conn_private_ip_short')}</span>
+                            </span>
+                          ) : client.countryCode ? (
+                            <span data-testid={`conn-geo-${client.ip}`} data-geo={client.countryCode.toLowerCase()}>
+                              <Region code={client.countryCode} showName={false} />
+                            </span>
+                          ) : (
+                            <span className="sb-dim conn-client__geo-empty" data-testid={`conn-geo-${client.ip}`} data-geo="unknown">—</span>
+                          )}
+                        </div>
+                      </div>
+                      <div className="conn-client__channels">
+                        <span
+                          ref={setMapRef(channelRefs, `${client.ip}|mixed`)}
+                          className={`conn-channel conn-channel--mixed${mixedActive ? ' is-active' : ''}`}
+                          data-testid={`conn-ch-mixed-${client.ip}`}
+                          data-active={mixedActive ? 'true' : 'false'}
+                          data-tip={t('conn_channel_mixed', { count: client.mixedCount })}
+                          aria-label={t('conn_channel_mixed', { count: client.mixedCount })}
+                        >
+                          <Network size={12} strokeWidth={2} aria-hidden="true" />
+                          <span className="conn-channel__count mono">{client.mixedCount}</span>
+                        </span>
+                        <span
+                          ref={setMapRef(channelRefs, `${client.ip}|https`)}
+                          className={`conn-channel conn-channel--https${httpsActive ? ' is-active' : ''}`}
+                          data-testid={`conn-ch-https-${client.ip}`}
+                          data-active={httpsActive ? 'true' : 'false'}
+                          data-tip={t('conn_channel_https', { count: client.httpsCount })}
+                          aria-label={t('conn_channel_https', { count: client.httpsCount })}
+                        >
+                          <Lock size={12} strokeWidth={2} aria-hidden="true" />
+                          <span className="conn-channel__count mono">{client.httpsCount}</span>
+                        </span>
+                      </div>
                     </div>
                   )
                 })}

@@ -1,6 +1,6 @@
 # 系统架构与核心机制
 
-本文档基于 `1.7.34` 源码梳理 SingBox Proxy Manager 的核心架构、运行时生命周期与安全边界。
+本文档基于 `1.7.35` 源码梳理 SingBox Proxy Manager 的核心架构、运行时生命周期与安全边界。
 
 ## 1. 总体定位与架构
 
@@ -40,7 +40,7 @@ flowchart LR
 
 | 组件 | 固定基线 | 源码依据 |
 | --- | --- | --- |
-| 应用版本 | `1.7.34`（后端嵌入 `version.txt`） | `internal/version/version.txt` |
+| 应用版本 | `1.7.35`（后端嵌入 `version.txt`） | `internal/version/version.txt` |
 | 容器基础镜像 | `alpine:3.24`（多架构静态二进制运行环境） | `Dockerfile`、`Dockerfile.release` |
 | Go 工具链 | **精确 `1.26.11`**（发行与内核构建强校验） | `go.mod`、`scripts/verify-go-build.sh` |
 | sing-box 内核 | **固定 `1.12.12`**（Go 1.26.11 重编译） | `scripts/build-sing-box.sh` |
@@ -55,7 +55,7 @@ flowchart LR
 | `backend/api/` | 路由处理器、会话认证、登录防爆破限流、节点/分组/订阅/策略/观测接口与变更协调（`node_mutation*.go`、`groups.go`、`subscriptions.go`、`policy_nodes.go`、`observability.go`） |
 | `backend/models/` | 节点、分组、策略与协议结构体、严格 JSON 校验、DDL 建表、分组迁移（`group_migration.go`）、查询与环境密码指纹同步 |
 | `backend/database/` | 多数据库驱动选择、连接池、MySQL DSN 规范化、独立日志库连接器（`log_target.go`）、PostgreSQL 占位符转换（`rebind.go`）、单实例数据库租约（`instance_lease.go`） |
-| `backend/services/` | `sing-box` 配置生成与进程生命周期、原子应用（`runtime_applier.go`）、脱敏与日志轮转（`singbox_log.go`）、策略 SOCKS5 调度器（`policy_dispatch.go`）、按需连接监控与日志/流量持久化（`connections.go`、`observability.go`、`log_store.go`、`log_query.go`）、资源/环境隔离、15 种协议链接编解码、批量导入与订阅 SSRF 防护、出口与前置 IP 检测、前置防环路 |
+| `backend/services/` | `sing-box` 配置生成与进程生命周期、原子应用（`runtime_applier.go`）、脱敏与日志轮转（`singbox_log.go`）、策略 SOCKS5 调度器（`policy_dispatch.go`）、按需连接监控/轻量离线客户端 IP 地区查询与日志/流量持久化（`connections.go`、`ipgeo.go`、`observability.go`、`log_store.go`、`log_query.go`）、资源/环境隔离、16 种协议链接编解码、批量导入与订阅 SSRF 防护、出口与前置 IP 检测、前置防环路 |
 | `internal/agreement/` | 嵌入 `USER_AGREEMENT.md` 正文，负责首次启动终端交互确认、同意哈希落盘与 `ACCEPT_USER_AGREEMENT` 环境变量门禁 |
 | `internal/kernel/` | 统一发行版内置内核嵌入、SHA-256 校验释放（`bundled_kernel` tag）；开发构建回退为空路径 |
 | `internal/version/` | 应用版本读取与 GitHub Release 按需更新查询（带互斥缓存） |
@@ -106,7 +106,7 @@ flowchart LR
 
 - **单进程多入站、HTTPS (TLS) 加密与无端口出站**：每个已启用且分配了入站端口的节点默认生成一个 `mixed` 类型入站（标签 `node-<ID>-in`），同时承载 HTTP 与 SOCKS5 协议；当 `inbound_mode = "https"` 时生成 `sing-box` 原生 `type: "http"` + `tls`（`certificate_path` / `key_path`，原生兼容现有 TCP 复用 `users` 路由，不提供 SOCKS5）。后端 `services/inbound_tls.go` 自动扫描证书与私钥目录（默认 `/app/certs` 与 `/app/keys`，支持子目录与软链接并防环限容），按 PEM 内容与 `tls.LoadX509KeyPair` 跨目录配对并按叶证书+公钥去重，唯一有效套件首次启用时自动落库稳定逻辑路径。**失效与热加载边界**：生成或重应用配置时，若选定证书丢失或已过期，系统仅省略该失效 HTTPS 入站监听器（保持出站且绝不降级明文），不阻断其他节点；运行期间同逻辑路径上的证书续签由内置 `sing-box` watcher 自动热加载（重载失败则沿用旧 TLS 配置并输出日志），更换证书路径或立即停用已过期监听器需要触发一次配置重应用。入站监听地址固定写入 `::`（双栈监听），默认开启 `sniff` 与目标地址覆盖。位于不分配端口分组内的已启用实体节点（数据库 `inbound_port IS NULL`、API 返回 `0`）不生成独立入站，但仍保留出站以供策略节点引用或隔离测 IP。
   > 注意：环境变量 `BIND_ADDRESS` **仅控制管理后台 HTTP 服务**，不影响节点代理入站的 `::` 监听地址。
-- **出站映射与策略调度**：常规实体协议直接生成对应 `outbounds`（标签 `node-<ID>-out`，零额外跳转）；`wireguard` 协议按 `sing-box 1.12` 规范写入顶层 `endpoints`；配置末尾固定附加内置 `direct` 出站作为 `route.final`。仅当存在已启用策略节点（`failover` / `loadbalance`）时，才会额外启动管理进程内置的本机 SOCKS5 策略调度器（`127.0.0.1` 随机端口 + 随机认证密钥）并生成单个内部认证回环入站 `internal-policy-dispatch-in`，将策略出站映射到成员实体出站。
+- **出站映射与策略调度**：常规实体协议直接生成对应 `outbounds`（标签 `node-<ID>-out`，零额外跳转）；`wireguard` 协议按 `sing-box 1.12` 规范写入顶层 `endpoints`；配置末尾固定附加内置 `direct` 出站作为 `route.final`。仅当存在已启用策略节点（`failover` / `loadbalance` / `urltest`）时，才会额外启动管理进程内置的本机 SOCKS5 策略调度器（`127.0.0.1` 随机端口 + 随机认证密钥）并生成单个内部认证回环入站 `internal-policy-dispatch-in`，将策略出站映射到成员实体出站。
 - **本机控制接口**：配置内置 `experimental.clash_api`（监听随机 `127.0.0.1` 端口与随机 Bearer 密钥），仅在面板打开「当前连接」、调用连接快照或开启日志持久化时按需采集。
 - **日志分流前脱敏**：`sing-box` 子进程 stdout/stderr 在写入控制台、轮转文件及日志观测缓冲之前先经行级脱敏处理器，自动拦截 HTTP/SOCKS5 认证失败错误中携带的明文密码与本机内部控制凭据。
 - **托管前置代理（三级优先级作用域）**：
@@ -171,13 +171,13 @@ flowchart LR
 ### 4.4 节点分组、策略节点与观测边界
 
 - **节点分组与分组独立订阅**：四类数据库均在迁移时自动创建 `node_groups` 表并将 `1.7.29` 及更早版本的既有节点无损归入首组（继承原 `start_port`，保留全部节点 ID、端口、固定状态、账密、备注与顺序）。分组支持独立配置 `subscription_url` 与定时刷新周期；同步会自动合并订阅内「配置哈希 + 原订阅名」相同的条目，并通过四层匹配规则（① 配置哈希 + 原订阅名 → ② 双方唯一配置哈希 → ③ 双方唯一原订阅名 + 协议 + 规范化服务器 → ④ 双方唯一原订阅名 + 协议；存在身份歧义时拒绝整次同步）尽可能保留既有节点的 ID、端口、固定标记、入站模式、账密、备注、顺序与策略引用（不按订阅新顺序重排既有节点）；拉取失败、部分非法或空订阅绝不清空已有节点。
-- **策略节点（`failover` / `loadbalance`）**：
+- **策略节点（`failover` / `loadbalance` / `urltest`）**：
   - 仅允许引用实体节点（支持跨组与无端口成员，禁止嵌套策略节点），前置模式固定为 `none`（转发至成员后沿用成员自身前置）。支持按分组整组关联并自动同步变动，面板点击「断链」时会将该组当前实体成员按原位置固化为独立成员保留优先级。
-  - 调度器仅在建连阶段选择出口（不迁移已建立连接）：故障转移按成员顺序优先尝试健康成员；负载均衡支持轮询（`round-robin`）与目标粘性（API 字段 `consistent-hashing`，基于 Rendezvous/HRW 哈希对规范化目标主机 `SHA256(host + NUL + 成员ID)` 排名，忽略端口且域名与其解析 IP 独立计算）。不健康成员留作末尾备选。
-  - 健康探测仅针对已启用实体成员，周期 `10–3600s`（默认 `30s`），默认验证 `1.1.1.1:443` TCP 连通性，自定义 URL 发送 `HEAD`（接受 `200–399`、不跟随重定向）。单次请求中若后续备选成员成功连通同一目标，调度器才异步触发对先前失败成员的独立探测并回写结果；若所有成员均失败则保留既有健康状态，避免单个不可达目标误伤全部成员。
+  - 调度器仅在建连阶段选择出口（不迁移已建立连接）：故障转移按成员顺序优先尝试健康成员；负载均衡支持轮询（`round-robin`）与目标粘性（API 字段 `consistent-hashing`，基于 Rendezvous/HRW 哈希对规范化目标主机 `SHA256(host + NUL + 成员ID)` 排名，忽略端口且域名与其解析 IP 独立计算）；最低延迟（`urltest`）将统一健康探测 `probe()` 测出的基准延迟与真实业务拨号耗时彻底分离，按基准探测延迟升序选取健康成员，并支持切换容差（`tolerance`，`0–5000ms`，默认 `50ms`，允许显式 `0`）防止小幅波动引发频繁换 IP；主用建连失败时即时顺延次快健康成员并触发紧急基准探测，未完成有效基准探测的成员排在已测健康成员之后，不健康成员留作末尾备选。
+  - 健康探测仅针对已启用实体成员，周期 `10–3600s`（默认 `30s`），默认验证 `1.1.1.1:443` TCP 连通性，自定义 URL 发送 `HEAD`（接受 `200–399`、不跟随重定向）。全局探测共享 8 并发受控槽位异步执行（避免大分组串行阻塞）；完成首轮探测且无活跃连接并持续空闲达到 `max(3 × interval, 5m)` 时自动懒暂停周期探测，新流量到达立即唤醒且不阻塞转发。对 `failover`/`loadbalance`，单次请求中若后续备选成员成功连通同一目标，调度器才异步触发对先前失败成员的独立探测并回写结果，所有成员均失败则保留既有健康状态；对 `urltest`，业务拨号失败后均会按限频异步触发独立基准探测以校验成员真实可用性。
   - 删除实体成员会自动剔除策略引用，停用成员则保留引用并在运行时跳过并展示告警，确保 `sing-box check` 永不因成员变动失败。
 - **当前连接与日志/流量观测机制与边界**：
-  - **按需实时连接采集**：前端通过 `fetch` 读取 SSE 流（`GET /api/connections/stream`），后端以约 `1.2s` 周期采样本机 `clash_api` 并聚合为客户端、入站端口与出站/策略/前置路径快照（无 SSE 订阅者且未开启日志持久化时停止全部定时采样并回收计数器；单次 GET 轮询最多保留 5 秒速率基线）。SSE 连接逐帧并定时复核管理员会话，登出、过期或改密后自动断开。
+  - **按需实时连接采集**：前端通过 `fetch` 读取 SSE 流（`GET /api/connections/stream`），后端以约 `1.2s` 周期采样本机 `clash_api` 并聚合为客户端、入站端口与出站/策略/前置路径快照（无 SSE 订阅者且未开启日志持久化时停止全部定时采样并回收计数器；单次 GET 轮询最多保留 5 秒速率基线）。客户端 IP 地区采用内嵌轻量离线国家表（`backend/services/ipgeo_data.bin.gz`，仅在首次遇到公网 IP 时懒加载，内网/回环/链路本地/CGNAT 地址直接标注「内网 / LAN」且零加载开销），并在客户端卡片右侧拆分展示 Mixed 与 HTTPS 通道亮起状态及各自并发数。SSE 连接逐帧并定时复核管理员会话，登出、过期或改密后自动断开。
   - **内存日志与可选持久化**：默认不落盘，仅在内存环形缓冲中保留最近 `1000` 条日志；日志页按游标分页拉取（无实时推送）。管理员显式启用持久化后，支持本地专用 SQLite（默认 `<CONFIG_DIR>/logs.db`）、复用主库或独立数据库（SQLite / PostgreSQL / MySQL / Turso），待写日志与分钟级流量桶每 `2s`（或满 100 条日志）批量写入，每分钟按保留天数（默认 7 天）和容量上限（默认 200 MiB）清理并回收空间；前端流量页提供总量汇总与路径明细表。
   - **来自官方 `sing-box v1.12.12` 内核的诚实边界**：① 同一策略节点同时有多个不同成员并发访问完全相同的目标主机端口时，官方 `/connections` 响应未携带外层与内层连接关联 ID，系统在无法唯一配对时将 `policy_member_id` 显式置 `0` 而不做错误归因；② `/connections` 仅暴露当前活跃连接，完全落在采样间隔内的极短连接或连接关闭前最后一次采样后的尾量字节可能未计入分钟流量桶，流量统计定位于运维观测而非精确计费。
 

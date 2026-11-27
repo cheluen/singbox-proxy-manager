@@ -295,8 +295,12 @@ export default function NodeEditor({ node, variant = 'node', formName, preserveP
 
   const handleTypeChange = (nextType) => {
     const currentPort = Number(form.getFieldValue('server_port') || 0)
-    if (nextType === 'wireguard' && (!currentPort || currentPort === 443)) form.setFieldsValue({ server_port: 2408 })
-    else if (proxyType === 'wireguard' && nextType !== 'wireguard' && currentPort === 2408) form.setFieldsValue({ server_port: 443 })
+    const defaultPortFor = (type) => (type === 'wireguard' ? 2408 : type === 'ssh' ? 22 : 443)
+    const prevDefault = defaultPortFor(proxyType)
+    const nextDefault = defaultPortFor(nextType)
+    if (!currentPort || currentPort === prevDefault) {
+      form.setFieldsValue({ server_port: nextDefault })
+    }
     setProxyType(nextType)
   }
 
@@ -376,7 +380,15 @@ export default function NodeEditor({ node, variant = 'node', formName, preserveP
           </Form.Item>
         </div>
         {proxyType === 'direct' ? <p className="sb-form-note">{t('direct_hint')}</p> : null}
-        {isPolicy ? <p className="sb-form-note">{proxyType === 'failover' ? t('policy_failover_hint') : t('policy_loadbalance_hint')}</p> : null}
+        {isPolicy ? (
+          <p className="sb-form-note">
+            {proxyType === 'failover'
+              ? t('policy_failover_hint')
+              : proxyType === 'urltest'
+                ? t('policy_urltest_hint')
+                : t('policy_loadbalance_hint')}
+          </p>
+        ) : null}
       </section>
 
       {isPolicy ? (
@@ -388,6 +400,24 @@ export default function NodeEditor({ node, variant = 'node', formName, preserveP
                 <Radio value="round-robin">{t('policy_strategy_rr')}</Radio>
                 <Radio value="consistent-hashing">{t('policy_strategy_hash')}</Radio>
               </Radio.Group>
+            </Form.Item>
+          ) : null}
+          {proxyType === 'urltest' ? (
+            <Form.Item
+              name="policy_tolerance"
+              label={t('policy_tolerance')}
+              extra={t('policy_tolerance_desc')}
+              rules={[{
+                validator: (_, value) => {
+                  if (value === undefined || value === null || value === '') return Promise.resolve()
+                  const num = Number(value)
+                  return Number.isInteger(num) && num >= 0 && num <= 5000
+                    ? Promise.resolve()
+                    : Promise.reject(new Error(t('policy_tolerance_range')))
+                },
+              }]}
+            >
+              <InputNumber min={0} max={5000} precision={0} style={{ width: '100%', maxWidth: 220 }} suffix="ms" data-testid="policy-tolerance-input" />
             </Form.Item>
           ) : null}
           <Form.Item

@@ -48,6 +48,7 @@
 
 .sb-region { display: inline-flex; align-items: center; gap: 7px; min-width: 0; max-width: 100%; }
 .sb-region__code { flex: none; padding: 1px 5px; border-radius: 5px; border: 1px solid var(--line-strong); font-size: 11px; font-weight: 600; color: var(--ink-2); line-height: 1.5; }
+.sb-region__code--private { border-color: color-mix(in srgb, var(--accent) 45%, var(--line-strong)); background: color-mix(in srgb, var(--accent-soft) 55%, transparent); color: var(--accent-strong); }
 
 .sb-secret { display: inline-flex; align-items: center; gap: 2px; min-width: 0; }
 .sb-secret__value { margin-right: 4px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }

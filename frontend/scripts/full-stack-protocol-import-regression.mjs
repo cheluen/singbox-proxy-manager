@@ -412,6 +412,38 @@ try {
     assert(field === 'flow' ? !outbound.flow : !outbound.tls?.utls, `${field} did not clear in runtime`)
   }
 
+  const sshBatch = await apiRequest('POST', '/nodes/batch-import', {
+    links: [
+      'ssh://ops:ssh-pass@198.51.100.20:2222?client_version=SSH-2.0-SBPM#system-ssh-link',
+      `proxies:
+  - {name: system-ssh-clash, type: ssh, server: 198.51.100.20, port: 2222, username: ops, password: "ssh-pass", client-version: SSH-2.0-SBPM}
+`,
+    ],
+    enabled: true,
+  })
+  assert(sshBatch.success === 2 && sshBatch.failed === 0, `SSH 批量导入失败：${JSON.stringify(sshBatch)}`)
+  const sshNodes = (await apiRequest('GET', '/nodes')).filter((node) => ['system-ssh-link', 'system-ssh-clash'].includes(node.name))
+  assert(sshNodes.length === 2 && sshNodes.every((node) => node.type === 'ssh' && node.enabled), 'SSH 导入节点未启用或协议异常')
+  for (const node of sshNodes) {
+    const outbound = runtimeOutbound(node)
+    assert(
+      outbound.type === 'ssh' && outbound.server === '198.51.100.20' && outbound.server_port === 2222 &&
+        outbound.user === 'ops' && outbound.client_version === 'SSH-2.0-SBPM',
+      `${node.name} 的 SSH 运行时配置异常：${JSON.stringify(outbound)}`
+    )
+  }
+  const sshLinkNode = sshNodes.find((node) => node.name === 'system-ssh-link')
+  await editNode(sshLinkNode)
+  assert(await page.$eval('#ssh_user', (input) => input.value) === 'ops', 'SSH 用户名未在编辑表单回显')
+  await setInput(page, '#ssh_user', 'admin')
+  await saveForm('PUT', `/nodes/${sshLinkNode.id}`)
+  const savedSSH = JSON.parse((await apiRequest('GET', `/nodes/${sshLinkNode.id}`)).config)
+  assert(savedSSH.user === 'admin' && savedSSH.client_version === 'SSH-2.0-SBPM', 'SSH 数据库未保存用户名或丢失原客户端版本')
+  const sshOutbound = runtimeOutbound(sshLinkNode)
+  assert(sshOutbound.user === 'admin' && sshOutbound.client_version === 'SSH-2.0-SBPM', 'SSH 运行时未保存用户名或丢失原客户端版本')
+  const sshExport = await apiRequest('GET', `/nodes/${sshLinkNode.id}/export`)
+  assert(sshExport.link.startsWith('ssh://admin:ssh-pass@198.51.100.20:2222'), 'SSH 分享链接未保留更新后的用户名和原密码')
+
   const unexpectedConsoleErrors = consoleErrors.filter(
     (line) =>
       !line.includes('Support for defaultProps will be removed from memo components') &&
@@ -420,7 +452,7 @@ try {
   assert(unexpectedConsoleErrors.length === 0, `browser errors: ${unexpectedConsoleErrors.join('\n')}`)
 
   process.stdout.write(
-    `${JSON.stringify({ success: true, version: state.version, importedTypes: state.nodes.map((node) => node.type).sort(), checked: ['failure-details', 'security-rejections', 'occupied-port', 'single-batch-detour', 'vmess-path', 'http-space-credentials', 'hy2-bandwidth', 'clear-select', 'vmess-security'] })}\n`
+    `${JSON.stringify({ success: true, version: state.version, importedTypes: state.nodes.map((node) => node.type).sort(), checked: ['failure-details', 'security-rejections', 'occupied-port', 'single-batch-detour', 'vmess-path', 'http-space-credentials', 'hy2-bandwidth', 'clear-select', 'vmess-security', 'ssh-import-edit-export'] })}\n`
   )
 } catch (error) {
   throw new Error(`${error.stack}\nBackend logs:\n${backendLogs.join('')}`)

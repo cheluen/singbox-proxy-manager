@@ -36,6 +36,8 @@ func BuildShareLink(node models.ProxyNode) (string, error) {
 		return buildTUICShareLink(node.Name, parsedConfig.(*models.TUICConfig))
 	case "anytls":
 		return buildAnyTLSShareLink(node.Name, parsedConfig.(*models.AnyTLSConfig))
+	case "ssh":
+		return buildSSHShareLink(node.Name, parsedConfig.(*models.SSHConfig))
 	case "socks5", "socks5h":
 		return buildSOCKS5ShareLink(node.Type, node.Name, parsedConfig.(*models.SOCKS5Config))
 	case "http":

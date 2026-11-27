@@ -32,7 +32,7 @@ const UPSTREAM_SCOPE_KEYS = {
 }
 
 const KNOWN_UPSTREAM_PROTOCOLS = new Set([
-  'direct', 'ss', 'vless', 'vmess', 'hy2', 'tuic', 'trojan', 'anytls', 'socks5', 'socks5h', 'http', 'wireguard',
+  'direct', 'ss', 'vless', 'vmess', 'hy2', 'tuic', 'trojan', 'anytls', 'socks5', 'socks5h', 'http', 'ssh', 'wireguard',
 ])
 
 export const policyWarningLabel = (raw, t) => {

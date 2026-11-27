@@ -1,7 +1,7 @@
 {
   "name": "sb-proxy-frontend",
   "private": true,
-  "version": "1.7.34",
+  "version": "1.7.35",
   "type": "module",
   "description": "SingBox Proxy Manager 暮色管理面板，连接真实后端接口",
   "scripts": {

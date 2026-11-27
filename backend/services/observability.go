@@ -15,6 +15,7 @@ import (
 	"time"
 
 	appdb "sb-proxy/backend/database"
+	"sb-proxy/backend/models"
 )
 
 const maxQueuedLogs = 4096
@@ -427,7 +428,7 @@ func (o *Observability) collect(at time.Time, deltas []routeDelta) {
 		r := d.route
 		if d.opened {
 			event := LogEvent{TS: at, Source: "panel", Level: "INFO", Message: "Proxy connection opened", IP: r.ClientIP, Port: r.InboundPort, Outbound: r.OutboundName, Member: r.MemberName}
-			if r.OutboundType == "failover" || r.OutboundType == "loadbalance" {
+			if models.IsPolicy(r.OutboundType) {
 				event.Policy = r.OutboundName
 			}
 			o.addEventLocked(event)

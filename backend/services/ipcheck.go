@@ -48,7 +48,7 @@ func (err ipCheckDiagnosticError) Unwrap() error { return err.cause }
 
 const maxIPCheckDiagnosticBytes = 2000
 
-const ipCheckCredentialField = `(?:[\w-]*(?:password|passwd|token|secret|[_-]key)|privatekey|presharedkey|apikey|key|pass|pwd|user(?:name)?|uuid|auth|(?:proxy-)?authorization|cookie)`
+const ipCheckCredentialField = `(?:[\w-]*(?:password|passwd|passphrase|token|secret|[_-]key)|privatekey|presharedkey|apikey|key|pass|pwd|user(?:name)?|uuid|auth|(?:proxy-)?authorization|cookie)`
 
 var (
 	ipCheckURL        = regexp.MustCompile(`(?i)[a-z][a-z0-9+.\-]*:(?://|\\/\\/)\S+`)

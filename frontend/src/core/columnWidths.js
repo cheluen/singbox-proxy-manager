@@ -8,7 +8,7 @@ export const NODE_LIST_COLUMN_LIMITS = {
   port: { min: 64, max: 160, fallbackMin: 66 },
   user: { min: 64, max: 420, fallbackMin: 88 },
   pass: { min: 84, max: 480, fallbackMin: 108 },
-  type: { min: 60, max: 220, fallbackMin: 78 },
+  type: { min: 60, max: 220, fallbackMin: 98 },
   server: { min: 72, max: 560, fallbackMin: 90 },
   region: { min: 44, max: 200, fallbackMin: 54 },
   ip: { min: 72, max: 360, fallbackMin: 88 },
@@ -44,7 +44,7 @@ export function columnWidthsEqual(a, b) {
 }
 
 const FALLBACK_MIN_BY_BREAKPOINT = {
-  wide: { name: 108, port: 66, user: 88, pass: 108, type: 78, server: 90, region: 54, ip: 88, latency: 64 },
+  wide: { name: 108, port: 66, user: 88, pass: 108, type: 98, server: 90, region: 54, ip: 88, latency: 64 },
   medium: { name: 96, port: 66, user: 88, pass: 112, type: 76, server: 90, region: 52, latency: 62 },
   compact: { name: 80, port: 65, user: 88, pass: 104, type: 76, region: 50, latency: 60 },
 }

@@ -70,12 +70,12 @@ export const stableConfigSignature = (rawConfig) => {
 
 export const isPolicyNode = (node) => {
   const type = String(node?.type || '').toLowerCase()
-  return type === 'failover' || type === 'loadbalance'
+  return type === 'failover' || type === 'loadbalance' || type === 'urltest'
 }
 
 export const isNodeExportable = (node) => {
   const type = String(node?.type || '').toLowerCase()
-  return type !== 'direct' && type !== 'failover' && type !== 'loadbalance'
+  return type !== 'direct' && !isPolicyNode({ type })
 }
 
 export const parseInboundPortFilterExpression = (value) => {

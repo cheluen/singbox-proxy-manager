@@ -38,6 +38,8 @@ func ParseShareLink(link string) (interface{}, string, string, error) {
 		return parseTUICLink(link)
 	} else if strings.HasPrefix(lowerLink, "anytls://") {
 		return parseAnyTLSLink(link)
+	} else if strings.HasPrefix(lowerLink, "ssh://") {
+		return parseSSHLink(link)
 	} else if strings.HasPrefix(lowerLink, "socks5://") || strings.HasPrefix(lowerLink, "socks5h://") || strings.HasPrefix(lowerLink, "socks://") {
 		return parseSOCKS5Link(link)
 	} else if strings.HasPrefix(lowerLink, "wireguard://") || strings.HasPrefix(lowerLink, "wg://") {

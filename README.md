@@ -5,7 +5,7 @@
   <p>集中管理各类代理节点，在浏览器里完成导入、测速、分组、策略调度，并转为本地 HTTP / SOCKS5 或 HTTPS 代理端口</p>
 
   <p>
-    <a href="https://github.com/cheluen/singbox-proxy-manager/releases"><img src="https://img.shields.io/badge/version-1.7.34-blue.svg" alt="Version" /></a>
+    <a href="https://github.com/cheluen/singbox-proxy-manager/releases"><img src="https://img.shields.io/badge/version-1.7.35-blue.svg" alt="Version" /></a>
     <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-green.svg" alt="MIT License" /></a>
     <img src="https://img.shields.io/badge/sing--box-1.12.12-orange.svg" alt="sing-box 1.12.12" />
     <img src="https://img.shields.io/badge/Go-1.26.11-00ADD8.svg" alt="Go 1.26.11" />
@@ -55,11 +55,11 @@
 | 模块 | 能帮你做什么 | 进阶说明 |
 | --- | --- | --- |
 | **开箱即用** | 官方发行版已打包前端面板与 `sing-box` 内核，单个可执行文件或 Docker 容器直接启动，免配运行环境 | [开发与构建](docs/development.md) |
-| **多协议与批量导入** | 支持 12 种实体节点类型；一次性粘贴分享链接、Base64、Clash YAML 或订阅 URL，自动分配端口与账密并并发测速 | [协议与导入导出](docs/protocols.md) |
+| **多协议与批量导入** | 支持 13 种实体节点类型（含 SSH）；一次性粘贴分享链接、Base64、Clash YAML 或订阅 URL，自动分配端口与账密并并发测速 | [协议与导入导出](docs/protocols.md) |
 | **节点分组与订阅** | 按用途划分分组、拖拽排序；每组独立控制是否分配端口、起始端口、保留入站端口及定时增量订阅同步 | [架构与分组机制](docs/architecture.md) |
-| **故障转移与负载均衡** | 内置「故障转移」和「负载均衡（轮询 / 目标粘性）」策略节点，支持跨组选成员或整组关联自动同步与一键断链 | [策略与 API](docs/api.md) |
+| **策略调度出站** | 内置「故障转移」「负载均衡（轮询 / 目标粘性）」与「最低延迟（容差防抖）」三种策略节点，支持跨组选成员或整组关联自动同步与一键断链 | [策略与 API](docs/api.md) |
 | **前置代理与加密入站** | 支持单节点 / 分组 / 全局三级优先级前置代理、Mixed 与 HTTPS (TLS) 加密入站切换，以及单端口 TCP 复用路由 | [配置与运维](docs/configuration.md) |
-| **实时连接与日志流量** | 三栏实时链路流图直观查看「客户端 → 入站 → 出站 / 策略 / 前置」速率与路径高亮，支持内存日志及可选持久化统计 | [架构与观测](docs/architecture.md) |
+| **实时连接与日志流量** | 三栏实时链路流图展示客户端内网/离线地区标识、Mixed / HTTPS 双通道拆分并发及「客户端 → 入站 → 出站 / 策略 / 前置」路径高亮，支持内存日志及可选持久化统计 | [架构与观测](docs/architecture.md) |
 | **高效率暗色面板** | 列宽拖拽自动保存、毛玻璃密码点按显隐、行内三栏详情一键复制 `curl` / 代理地址、`Ctrl/⌘ + K` 跨组快搜、中英双语 | [HTTP API](docs/api.md) |
 
 ---
@@ -94,7 +94,7 @@
 
 ## 支持协议
 
-除以下 12 种实体节点类型外，还内置 **故障转移（`failover`）** 与 **负载均衡（`loadbalance`，支持轮询 / 目标粘性）** 两种策略节点。
+除以下 13 种实体节点类型外，还内置 **故障转移（`failover`）**、**负载均衡（`loadbalance`，支持轮询 / 目标粘性）** 与 **最低延迟（`urltest`，支持容差防抖）** 三种策略节点。
 
 | 协议类型 | 面板表单 | 分享链接导入 | 分享链接导出 | Clash YAML 导入 |
 | --- | :---: | :---: | :---: | :---: |
@@ -108,6 +108,7 @@
 | WireGuard (`wireguard`，含 WARP / 多 Peer) | 支持 | `wg://` / `wireguard://` | 仅单 Peer | 支持 |
 | SOCKS5 / SOCKS5H (`socks5` / `socks5h`) | 支持 | `socks://` / `socks5://` / `socks5h://` | 支持 | 支持 |
 | HTTP / HTTPS (`http`) | 支持 | `http://` / `https://` | 支持 | 支持 |
+| SSH (`ssh`) | 支持 | `ssh://` | 支持 | 支持 |
 | Direct 本地直连 (`direct`) | 支持 | 不支持 | 不支持 | 不支持 |
 
 > 各协议的详细字段、导入边界与限制见 [协议支持与导入导出规范](docs/protocols.md)。
@@ -182,7 +183,7 @@ docker compose --profile ghcr ps
 ```bash
 mkdir -p singbox-proxy-manager && cd singbox-proxy-manager
 
-APP_VERSION=1.7.34
+APP_VERSION=1.7.35
 OS=linux      # 可选：linux / darwin / freebsd
 ARCH=amd64    # 可选：amd64 / arm64
 

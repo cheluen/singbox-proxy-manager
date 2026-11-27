@@ -866,6 +866,8 @@ func dialerOptionsForConfig(config interface{}) *models.DialerOptions {
 		return &typed.DialerOptions
 	case *models.HTTPProxyConfig:
 		return &typed.DialerOptions
+	case *models.SSHConfig:
+		return &typed.DialerOptions
 	case *models.WireGuardConfig:
 		return &typed.DialerOptions
 	default:
@@ -1156,6 +1158,12 @@ func upstreamDialTargets(config interface{}) ([]upstreamDialTarget, error) {
 		return single(typed.Server, typed.ServerPort), nil
 	case *models.HTTPProxyConfig:
 		return single(typed.Server, typed.ServerPort), nil
+	case *models.SSHConfig:
+		port := typed.ServerPort
+		if port == 0 {
+			port = 22
+		}
+		return single(typed.Server, port), nil
 	case *models.Hysteria2Config:
 		ports := make([]upstreamPortRange, 0, len(typed.ServerPorts)+1)
 		if typed.ServerPort > 0 {
@@ -1463,6 +1471,12 @@ func (s *SingBoxService) generateOutboundFromConfig(proxyType string, parsedConf
 			return OutboundConfig{}, fmt.Errorf("unexpected http config type %T", parsedConfig)
 		}
 		return s.generateHTTPProxyOutbound(config, tag)
+	case "ssh":
+		config, ok := parsedConfig.(*models.SSHConfig)
+		if !ok {
+			return OutboundConfig{}, fmt.Errorf("unexpected ssh config type %T", parsedConfig)
+		}
+		return generateSSHOutbound(config, tag)
 	default:
 		return OutboundConfig{}, fmt.Errorf("unsupported proxy type: %s", proxyType)
 	}

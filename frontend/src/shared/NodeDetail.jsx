@@ -179,7 +179,9 @@ function OutboundSection({ node }) {
           <Field label={t('policy_lb_strategy')} wide>
             {node.type === 'failover'
               ? t('policy_mode_failover')
-              : (cfg?.strategy === 'consistent-hashing' ? t('policy_strategy_hash') : t('policy_strategy_rr'))}
+              : node.type === 'urltest'
+                ? t('policy_mode_urltest', { tolerance: cfg?.tolerance ?? 50 })
+                : (cfg?.strategy === 'consistent-hashing' ? t('policy_strategy_hash') : t('policy_strategy_rr'))}
           </Field>
         ) : (
           <Field label={t('server_address')} wide>

@@ -1,5 +1,5 @@
-// 全栈新增特性端到端回归：失败检测持久化、节点分组/无端口组/订阅增量同步、策略出站（故障转移+负载均衡真实转发）、
-// 「当前连接」按需实时路由路径、以及「日志与流量统计」内存缓冲 + 持久化校验/落盘 + 视觉截图采样。
+// 全栈新增特性端到端回归：失败检测持久化、节点分组/无端口组/订阅增量同步、策略出站（故障转移+负载均衡+最低延迟真实转发）、
+// 「当前连接」按需实时路由路径/内网归属/Mixed+HTTPS 并发、以及「日志与流量统计」内存缓冲 + 持久化校验/落盘 + 视觉截图采样。
 import assert from 'node:assert/strict'
 import fs from 'node:fs'
 import http from 'node:http'
@@ -83,7 +83,7 @@ const createBackendEchoServer = (tag, ip = '') => http.createServer((req, res) =
 })
 
 // 自定义极简 SOCKS5 代理（将连接转发到对应成员的回显服务，便于精确识别命中成员 A 还是成员 B）。
-const createTaggedSocks5Server = (targetPort) => net.createServer((client) => {
+const createTaggedSocks5Server = (targetPort, connectionDelayMs = 0) => net.createServer((client) => {
   let stage = 0
   client.on('data', (chunk) => {
     if (stage === 0) {
@@ -99,7 +99,8 @@ const createTaggedSocks5Server = (targetPort) => net.createServer((client) => {
       stage = 2
       // 总是转发到与当前 tag 绑定的本地目标端口，便于断言流量实际命中的上游成员
       const upstream = net.createConnection({ host: '127.0.0.1', port: targetPort })
-      upstream.once('connect', () => {
+      upstream.once('connect', async () => {
+        if (connectionDelayMs > 0) await sleep(connectionDelayMs)
         client.write(Buffer.from([0x05, 0x00, 0x00, 0x01, 127, 0, 0, 1, 0, 0]))
         client.pipe(upstream)
         upstream.pipe(client)
@@ -136,6 +137,7 @@ const steps = []
 let backend
 let browser
 let page
+let httpsStreamProc
 let token = ''
 let targetA
 let targetB
@@ -144,6 +146,7 @@ let targetGroup
 let targetCustom
 let socksA
 let socksB
+let socksSlow
 let socksGlobal
 let socksGroup
 let socksCustom
@@ -351,7 +354,7 @@ try {
   await api('DELETE', `/node-groups/${subGroup.id}?mode=delete_nodes`)
   steps.push('group-subscription-ssrf-and-guards')
 
-  // 3. 策略出站节点：Failover（实时故障转移）+ LoadBalance（轮询分发 + 目标粘性）
+  // 3. 策略出站节点：Failover（实时故障转移）+ LoadBalance（轮询分发 + 目标粘性）+ URLTest（最低延迟）
   const failoverNode = await api('POST', '/nodes', {
     group_id: defaultGroupId,
     name: 'JP Failover',
@@ -423,6 +426,47 @@ try {
   }
   assert.ok(lbHits.has('backend-A') && lbHits.has('backend-B'), `LoadBalance 未在双成员间轮询分发：${[...lbHits].join(',')}`)
   steps.push('policy-failover-and-loadbalance-live')
+
+  socksSlow = createTaggedSocks5Server(targetPortB, 150)
+  const socksPortSlow = await listen(socksSlow)
+  const slowGroup = await api('POST', '/node-groups', {
+    name: 'Lowest Latency NoPort',
+    allocate_port: false,
+    start_port: startPort + 100,
+  })
+  const memberSlow = await api('POST', '/nodes', {
+    group_id: slowGroup.id,
+    name: 'Member Slow',
+    type: 'socks5',
+    config: JSON.stringify({ server: '127.0.0.1', server_port: socksPortSlow }),
+    auth_enabled: false,
+    enabled: true,
+  })
+  assert.equal(memberSlow.inbound_port, 0, '慢成员不应分配入站端口')
+  const urltestNode = await api('POST', '/nodes', {
+    group_id: defaultGroupId,
+    name: 'JP Lowest Latency',
+    type: 'urltest',
+    config: JSON.stringify({
+      member_ids: [memberSlow.id, memberA.id],
+      health_check_url: `http://127.0.0.1:${targetPortA}/`,
+      health_check_interval: 15,
+    }),
+    auth_enabled: false,
+    enabled: true,
+  })
+  assert.equal(JSON.parse(urltestNode.config).tolerance, 50, '最低延迟默认容差未落库为 50ms')
+  await wait(async () => {
+    const health = (await api('GET', `/nodes/${urltestNode.id}`)).policy_member_health || []
+    return health.length === 2 && health.every((member) => member.checked_at)
+  }, '最低延迟策略未完成双成员首轮健康探测')
+  const resUrltest = await curl([
+    '--proxy', `http://127.0.0.1:${urltestNode.inbound_port}`,
+    `http://127.0.0.1:${targetPortA}/`,
+  ])
+  assert.equal(resUrltest.code, 0, `最低延迟策略转发失败：${resUrltest.stderr}`)
+  assert.equal(resUrltest.stdout.trim(), 'backend-A', `最低延迟策略未选择更快的 Member A：${resUrltest.stdout}`)
+  steps.push('policy-urltest-lowest-latency-live')
 
   // 3.2 策略整组关联自动同步（跟随组内排序）+ 拖拽重排实时生效 + 断链后独立管理不再受分组影响
   const groupPolicy = await api('POST', '/nodes', {
@@ -677,6 +721,8 @@ try {
   assert.equal(await page.$eval(`[data-row-id="${failoverNode.id}"] .dusk-col--server`, (el) => el.textContent.trim()), '2 · 故障转移')
   assert.equal(await page.$eval(`[data-row-id="${lbNode.id}"] .dusk-col--type`, (el) => el.textContent.trim()), '负载均衡')
   assert.equal(await page.$eval(`[data-row-id="${lbNode.id}"] .dusk-col--server`, (el) => el.textContent.trim()), '2 · 轮询')
+  assert.equal(await page.$eval(`[data-row-id="${urltestNode.id}"] .dusk-col--type`, (el) => el.textContent.trim()), '最低延迟')
+  assert.equal(await page.$eval(`[data-row-id="${urltestNode.id}"] .dusk-col--server`, (el) => el.textContent.trim()), '2 · 最低延迟')
   await page.waitForSelector(`[data-testid="node-https-mark-${httpsTargetNode.id}"]`, { visible: true })
   // 打开 HTTPS 节点详情验证仅展示 HTTPS 与 curl 连接方式，且可平滑切换回 Mixed 再切回 HTTPS
   await clickControl(page, `[data-testid="node-open-${httpsTargetNode.id}"]`)
@@ -711,11 +757,18 @@ try {
   await clickControl(page, `[data-testid="group-tab-${defaultGroupId}"]`)
   await page.waitForSelector(`[data-row-id="${failoverNode.id}"]`, { visible: true })
 
-  // 启动一条慢速持续下载流经过 Failover 策略节点，检验「当前连接」实时三列视图与速率
+  // 并发慢速下载流经过 Mixed Failover 与 HTTPS 入站，检验「当前连接」实时三列视图、速率与内网/通道并发
   const streamProc = spawn('curl', [
     '--silent', '--no-buffer', '--max-time', '15', '--noproxy', '',
     '--proxy', `http://127.0.0.1:${failoverNode.inbound_port}`,
     '--proxy-user', 'policy-user:policy-secret',
+    `http://127.0.0.1:${targetPortA}/stream`,
+  ], { stdio: ['ignore', 'ignore', 'ignore'] })
+  httpsStreamProc = spawn('curl', [
+    '--silent', '--no-buffer', '--max-time', '15', '--noproxy', '',
+    '--proxy', `https://127.0.0.1:${switchedHttps.inbound_port}`,
+    '--proxy-insecure',
+    '--proxy-user', 'https-user:https-secret',
     `http://127.0.0.1:${targetPortA}/stream`,
   ], { stdio: ['ignore', 'ignore', 'ignore'] })
 
@@ -725,16 +778,31 @@ try {
     const rows = await page.$$('[data-testid="conn-outbound-row"]')
     return rows.length >= 1
   }, '当前连接面板未采集到活跃代理连接', 15000)
+  await page.waitForFunction(() => ['mixed', 'https'].every((mode) => {
+    const channel = document.querySelector(`[data-testid="conn-ch-${mode}-127.0.0.1"]`)
+    return channel?.dataset.active === 'true' && Number(channel.textContent.trim()) >= 1
+  }), { timeout: 15000 })
   // 等待第二帧出现速率数值
   await sleep(1600)
   const connText = await page.$eval('[data-testid="connections-topology"]', (el) => el.textContent)
   assert.ok(connText.includes('JP Failover'), `当前连接未展示策略节点名称：${connText}`)
   assert.ok(connText.includes(`:${failoverNode.inbound_port}`), `当前连接未展示入站端口：${connText}`)
   assert.equal(connText.includes('internal-policy'), false, `当前连接泄漏了内部回环标签：${connText}`)
+  await page.waitForSelector('[data-testid="conn-geo-127.0.0.1"]', { visible: true })
+  assert.ok(await page.$eval('[data-testid="conn-geo-127.0.0.1"]', (el) => el.textContent.includes('内网')), '当前连接未展示内网归属')
+  for (const mode of ['mixed', 'https']) {
+    const channel = await page.$eval(`[data-testid="conn-ch-${mode}-127.0.0.1"]`, (el) => ({
+      active: el.dataset.active,
+      count: Number(el.textContent.trim()),
+    }))
+    assert.equal(channel.active, 'true', `${mode} 通道未激活`)
+    assert.ok(channel.count >= 1, `${mode} 通道未显示活跃并发数：${channel.count}`)
+  }
   if (ARTIFACT_DIR) {
     await page.screenshot({ path: path.join(ARTIFACT_DIR, 'full-connections-live.png'), fullPage: true })
   }
   await stopProcess(streamProc, { graceMs: 2000 })
+  await stopProcess(httpsStreamProc, { graceMs: 2000 })
   steps.push('connections-live-topology-and-policy-mapping')
 
   // 切换到「日志」面板：验证默认内存缓冲、保存失败不生效、开启本地 SQLite 持久化与流量统计
@@ -797,9 +865,11 @@ try {
   throw new Error(`全栈新特性回归失败：${error.stack}\n已完成：${steps.join(', ')}\n后端日志：\n${backendLogs.join('').slice(-10000)}`)
 } finally {
   await browser?.close().catch(() => {})
+  await stopProcess(httpsStreamProc, { graceMs: 2000 })
   await stopProcess(backend, { graceMs: 10000 })
   await closeServer(socksA)
   await closeServer(socksB)
+  await closeServer(socksSlow)
   await closeServer(socksGlobal)
   await closeServer(socksGroup)
   await closeServer(socksCustom)

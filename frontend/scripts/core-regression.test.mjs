@@ -215,10 +215,10 @@ test('节点列表列宽清洗、范围约束与 CSS 变量映射准确', () => 
   const style = buildColumnWidthStyle({ name: 260, server: 320 }, true, 1440)
   assert.equal(style['--dusk-col-name'], '260px')
   assert.equal(style['--dusk-col-server'], '320px')
-  assert.equal(calculateTableMinWidth({ name: 260, server: 320 }, 1440), 1486)
+  assert.equal(calculateTableMinWidth({ name: 260, server: 320 }, 1440), 1506)
   assert.equal(calculateTableMinWidth({ name: 280 }, 1080), 1146)
   assert.equal(calculateTableMinWidth({ name: 280 }, 1000), 1003)
-  assert.equal(style['--dusk-table-min-width'], '1486px')
+  assert.equal(style['--dusk-table-min-width'], '1506px')
 })
 
 const nodes = [
@@ -353,36 +353,51 @@ test('中文与英文环境下策略节点名称、摘要、告警与连接前�
 
   assert.equal(protocolLabel('failover', tZh), '故障转移')
   assert.equal(protocolLabel('loadbalance', tZh), '负载均衡')
+  assert.equal(protocolLabel('urltest', tZh), '最低延迟')
+  assert.equal(protocolLabel('ssh', tZh), 'SSH')
   assert.equal(protocolLabel('direct', tZh), '直连')
   assert.equal(protocolLabel('failover', tEn), 'Failover')
   assert.equal(protocolLabel('loadbalance', tEn), 'LoadBalance')
+  assert.equal(protocolLabel('urltest', tEn), 'Lowest Latency')
+  assert.equal(protocolLabel('ssh', tEn), 'SSH')
   assert.equal(protocolLabel('direct', tEn), 'Direct')
 
   const zhTypes = new Map(localizedProxyTypes(tZh).map((item) => [item.value, item.label]))
   const enTypes = new Map(localizedProxyTypes(tEn).map((item) => [item.value, item.label]))
   assert.equal(zhTypes.get('failover'), '故障转移（策略）')
   assert.equal(zhTypes.get('loadbalance'), '负载均衡（策略）')
+  assert.equal(zhTypes.get('urltest'), '最低延迟（策略）')
+  assert.equal(zhTypes.get('ssh'), 'SSH')
   assert.equal(zhTypes.get('direct'), '本机直连')
   assert.equal(enTypes.get('failover'), 'Failover (Policy)')
   assert.equal(enTypes.get('loadbalance'), 'Load Balance (Policy)')
+  assert.equal(enTypes.get('urltest'), 'Lowest Latency (Policy)')
+  assert.equal(enTypes.get('ssh'), 'SSH')
   assert.equal(enTypes.get('direct'), 'Direct (Local)')
 
   const failover = { id: 10, name: 'Policy A', type: 'failover', config: JSON.stringify({ member_ids: [1, 2] }) }
   const lbRR = { id: 11, name: 'Policy B', type: 'loadbalance', config: JSON.stringify({ member_ids: [1, 2, 3], strategy: 'round-robin' }) }
   const lbHash = { id: 12, name: 'Policy C', type: 'loadbalance', config: JSON.stringify({ member_ids: [1, 2], strategy: 'consistent-hashing' }) }
+  const urltest = { id: 13, name: 'Policy D', type: 'urltest', config: JSON.stringify({ member_ids: [1, 2, 3], tolerance: 50 }) }
   assert.equal(serverAddress(failover, tZh), '2 · 故障转移')
   assert.equal(serverAddress(lbRR, tZh), '3 · 轮询')
   assert.equal(serverAddress(lbHash, tZh), '2 · 目标粘性')
+  assert.equal(serverAddress(urltest, tZh), '3 · 最低延迟')
   assert.equal(serverAddress(failover, tEn), '2 · failover')
   assert.equal(serverAddress(lbRR, tEn), '3 · rr')
   assert.equal(serverAddress(lbHash, tEn), '2 · sticky')
+  assert.equal(serverAddress(urltest, tEn), '3 · lowest latency')
   assert.equal(matchesSearch(failover, '故障转移'), true)
+  assert.equal(matchesSearch(urltest, '最低延迟'), true)
+  assert.equal(matchesSearch(urltest, 'lowest latency'), true)
+  assert.equal(matchesSearch(urltest, 'urltest'), true)
   assert.equal(matchesSearch(lbRR, '负载均衡'), true)
   assert.equal(matchesSearch(lbRR, '轮询'), true)
   assert.equal(matchesSearch(lbRR, '目标粘性'), false)
   assert.equal(matchesSearch(lbHash, '目标粘性'), true)
   assert.equal(matchesSearch(lbHash, 'target sticky'), true)
   assert.equal(matchesSearch(lbHash, '轮询'), false)
+  assert.equal(formatUpstreamLabel('custom: ssh', tZh, { zh: true, source: 'custom' }), '自定义前置 · SSH')
 
   assert.equal(policyWarningLabel('no healthy enabled members', tZh), '没有健康的已启用成员节点')
   assert.equal(policyWarningLabel('disabled members are skipped', tZh), '已自动跳过禁用的成员节点')
@@ -661,4 +676,59 @@ test('策略整组关联跟随组内 sort_order 排序，断链原地展开去�
   })
   assert.equal(Object.hasOwn(detached, 'member_sources'), false)
   assert.deepEqual(detached.member_ids, [30, 10])
+})
+
+test('SSH 出站与 urltest 最低延迟策略表单模型：回显、默认容差/零容差保留、不可导出与字段保留', () => {
+  // SSH 表单回显、构建与未展示 dialer 字段保留
+  const sshNode = {
+    id: 41,
+    name: 'SSH Jump',
+    type: 'ssh',
+    config: JSON.stringify({
+      server: '198.51.100.20',
+      server_port: 2222,
+      user: 'ops',
+      password: 'ssh-secret',
+      private_key: ['-----BEGIN RSA PRIVATE KEY-----', 'Proc-Type: 4,ENCRYPTED', '', 'line1', '-----END RSA PRIVATE KEY-----'],
+      private_key_passphrase: 'pass',
+      host_key: ['ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAA'],
+      host_key_algorithms: ['ssh-ed25519', 'rsa-sha2-512'],
+      client_version: 'SSH-2.0-OpenSSH_8.9',
+      connect_timeout: '5s',
+    }),
+  }
+  const sshModel = createProtocolFormModel(sshNode)
+  assert.equal(sshModel.initialValues.server_port, 2222)
+  assert.equal(sshModel.initialValues.ssh_user, 'ops')
+  assert.equal(sshModel.initialValues.ssh_password, 'ssh-secret')
+  assert.equal(sshModel.initialValues.ssh_host_key_algorithms, 'ssh-ed25519, rsa-sha2-512')
+  const builtSSH = sshModel.buildConfig('ssh', sshModel.initialValues)
+  assert.equal(builtSSH.server, '198.51.100.20')
+  assert.equal(builtSSH.server_port, 2222)
+  assert.equal(builtSSH.user, 'ops')
+  assert.deepEqual(builtSSH.private_key, ['-----BEGIN RSA PRIVATE KEY-----', 'Proc-Type: 4,ENCRYPTED', '', 'line1', '-----END RSA PRIVATE KEY-----'])
+  assert.deepEqual(builtSSH.host_key_algorithms, ['ssh-ed25519', 'rsa-sha2-512'])
+  assert.equal(builtSSH.connect_timeout, '5s')
+
+  // urltest 策略：默认容差 50、显式 0 值必须保留、排除策略节点与导出
+  const urltestDefault = createProtocolFormModel({
+    id: 51,
+    type: 'urltest',
+    config: JSON.stringify({ member_ids: [1, 2] }),
+  })
+  assert.equal(urltestDefault.initialValues.policy_tolerance, 50)
+  assert.equal(urltestDefault.buildConfig('urltest', urltestDefault.initialValues).tolerance, 50)
+  assert.equal(Object.hasOwn(urltestDefault.buildConfig('urltest', urltestDefault.initialValues), 'strategy'), false)
+
+  const urltestZero = createProtocolFormModel({
+    id: 52,
+    type: 'urltest',
+    config: JSON.stringify({ member_ids: [1, 2], tolerance: 0 }),
+  })
+  assert.equal(urltestZero.initialValues.policy_tolerance, 0)
+  assert.equal(urltestZero.buildConfig('urltest', urltestZero.initialValues).tolerance, 0)
+
+  // 从 urltest 切换回 failover 时不应残留 tolerance
+  const switchedFailover = urltestZero.buildConfig('failover', { ...urltestZero.initialValues })
+  assert.equal(Object.hasOwn(switchedFailover, 'tolerance'), false)
 })

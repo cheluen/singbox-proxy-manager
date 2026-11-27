@@ -25,12 +25,14 @@ const PROTOCOL_SHORT_KEYS = {
   direct: 'protocol_direct_short',
   failover: 'protocol_failover_short',
   loadbalance: 'protocol_loadbalance_short',
+  urltest: 'protocol_urltest_short',
 }
 
 const PROTOCOL_LABEL_KEYS = {
   direct: 'protocol_direct_label',
   failover: 'protocol_failover_label',
   loadbalance: 'protocol_loadbalance_label',
+  urltest: 'protocol_urltest_label',
   http: 'protocol_http_label',
 }
 
@@ -38,6 +40,7 @@ const PROTOCOLS = {
   direct: protocol('Direct (Local)', 'Direct'),
   failover: protocol('Failover (Policy)', 'Failover'),
   loadbalance: protocol('Load Balance (Policy)', 'LoadBalance'),
+  urltest: protocol('Lowest Latency (Policy)', 'Lowest Latency'),
 
   ss: protocol('Shadowsocks', 'SS', [
     { name: 'method', en: 'Method', zh: '加密方式', kind: 'select', required: true, options: opts('aes-128-gcm', 'aes-256-gcm', 'chacha20-ietf-poly1305', '2022-blake3-aes-128-gcm', '2022-blake3-aes-256-gcm') },
@@ -142,6 +145,23 @@ const PROTOCOLS = {
     { ...SKIP_VERIFY, name: 'proxy_insecure', showWhen: (v) => Boolean(v.proxy_tls) },
   ]),
 
+  ssh: protocol('SSH', 'SSH', [
+    { name: 'ssh_user', en: 'User', zh: 'SSH 用户名（留空默认 root）', kind: 'text', placeholder: 'root' },
+    { name: 'ssh_password', en: 'Password', zh: 'SSH 密码', kind: 'secret' },
+    {
+      name: 'ssh_private_key', en: 'Private Key', zh: '私钥内容 (PEM)', kind: 'textarea', rows: 4, span: 2, mono: true,
+      placeholder: '-----BEGIN OPENSSH PRIVATE KEY-----\n...\n-----END OPENSSH PRIVATE KEY-----',
+    },
+    { name: 'ssh_private_key_passphrase', en: 'Private Key Passphrase', zh: '私钥口令', kind: 'secret', span: 2 },
+    { name: 'ssh_private_key_path', en: 'Private Key Path', zh: '私钥文件路径', kind: 'text', group: 'advanced', span: 2, placeholder: '/path/to/id_ed25519' },
+    {
+      name: 'ssh_host_key', en: 'Host Key', zh: '主机公钥（每行一条，留空接受任意）', kind: 'textarea', rows: 3, group: 'advanced', span: 2, mono: true,
+      placeholder: 'ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAA...',
+    },
+    { name: 'ssh_host_key_algorithms', en: 'Host Key Algorithms', zh: '主机密钥算法（英文逗号分隔）', kind: 'text', group: 'advanced', placeholder: 'ssh-ed25519, rsa-sha2-512' },
+    { name: 'ssh_client_version', en: 'Client Version', zh: '客户端版本标识', kind: 'text', group: 'advanced', placeholder: 'SSH-2.0-OpenSSH_8.9' },
+  ]),
+
   wireguard: protocol('Cloudflare WireGuard', 'WireGuard', [
     { name: 'wireguard_local_address', en: 'Local Address', zh: '每行一个 CIDR', kind: 'textarea', rows: 3, required: true, span: 2, placeholder: '172.16.0.2/32\n2606:4700:110:8765::2/128' },
     { name: 'wireguard_private_key', en: 'Private Key', zh: '本地私钥', kind: 'secret', required: true, span: 2 },
@@ -175,7 +195,7 @@ const PROTOCOLS = {
   ]),
 }
 
-export const POLICY_NODE_TYPES = new Set(['failover', 'loadbalance'])
+export const POLICY_NODE_TYPES = new Set(['failover', 'loadbalance', 'urltest'])
 export const isPolicyType = (type) => POLICY_NODE_TYPES.has(String(type || '').toLowerCase())
 export const localizedProxyTypes = (t, { includePolicy = true } = {}) =>
   Object.entries(PROTOCOLS)

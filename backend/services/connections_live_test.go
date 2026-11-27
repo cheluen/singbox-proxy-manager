@@ -18,6 +18,111 @@ import (
 	"sb-proxy/backend/models"
 )
 
+func TestConnectionInboundMode(testContext *testing.T) {
+	for _, testCase := range []struct {
+		metadata string
+		mode     string
+		want     string
+	}{
+		{"mixed", "", models.InboundModeMixed},
+		{"mixed", models.InboundModeMixed, models.InboundModeMixed},
+		{"socks", models.InboundModeMixed, models.InboundModeMixed},
+		{"http", "", models.InboundModeHTTPS},
+		{"http", models.InboundModeMixed, models.InboundModeHTTPS},
+		{"mixed", models.InboundModeHTTPS, models.InboundModeHTTPS},
+		{"http", models.InboundModeHTTPS, models.InboundModeHTTPS},
+	} {
+		testContext.Run(testCase.metadata+"/"+testCase.mode, func(testContext *testing.T) {
+			wiring := &runtimeWiring{nodes: map[int]models.ProxyNode{
+				1: {ID: 1, Name: "entry", Type: "direct", InboundPort: 30001, InboundMode: testCase.mode},
+				2: {ID: 2, Name: "target", Type: "direct", InboundPort: 30002, InboundMode: models.InboundModeHTTPS},
+			}}
+			connection := clashConnection{Chains: []string{"node-2-out"}}
+			connection.Metadata.Type = testCase.metadata + "/node-1-in"
+			connection.Metadata.SourceIP = "8.8.8.8"
+			route, ok := connection.route(wiring)
+			if !ok || route.InboundMode != testCase.want || route.InboundID != 1 || route.InboundPort != 30001 || route.OutboundID != 2 {
+				testContext.Fatalf("入站模式或路由字段错误：%+v，期望模式 %s", route, testCase.want)
+			}
+		})
+	}
+}
+
+func TestConnectionInboundModesAndClientIPGeo(testContext *testing.T) {
+	wiring := &runtimeWiring{nodes: map[int]models.ProxyNode{
+		1: {ID: 1, Name: "mixed entry", Type: "direct", InboundPort: 30001, InboundMode: models.InboundModeMixed},
+		2: {ID: 2, Name: "https entry", Type: "direct", InboundPort: 30002, InboundMode: models.InboundModeHTTPS},
+	}}
+	clients := map[string]ClientIPGeo{
+		"8.8.8.8":        {CountryCode: "US"},
+		"2400:3200::1":   {CountryCode: "CN"},
+		"192.168.1.1":    {IsPrivate: true},
+		"::ffff:8.8.8.8": {CountryCode: "US"},
+	}
+	var raw []clashConnection
+	for clientIP := range clients {
+		for nodeID, inboundType := range map[int]string{1: "mixed", 2: "http"} {
+			connection := clashConnection{ID: fmt.Sprintf("%s/%d", clientIP, nodeID), Upload: 10, Download: 20}
+			connection.Metadata.Type = fmt.Sprintf("%s/node-%d-in", inboundType, nodeID)
+			connection.Metadata.SourceIP = clientIP
+			raw = append(raw, connection)
+		}
+	}
+	duplicate := clashConnection{ID: "duplicate", Upload: 10, Download: 20}
+	duplicate.Metadata.Type, duplicate.Metadata.SourceIP = "mixed/node-1-in", "8.8.8.8"
+	raw = append(raw, duplicate)
+	internal := clashConnection{ID: "internal"}
+	internal.Metadata.Type, internal.Metadata.SourceIP = "socks/"+dispatchTag, "127.0.0.1"
+	raw = append(raw, internal)
+	var monitor ConnectionMonitor
+	snapshot := ConnectionSnapshot{At: time.Unix(60, 0)}
+	counters, deltas := monitor.aggregate(&snapshot, raw, wiring, nil)
+	if snapshot.Clients != len(clients) || snapshot.Active != 9 || snapshot.RouteCount != 8 || len(snapshot.Routes) != 8 || len(counters) != 9 || len(deltas) != 9 {
+		testContext.Fatalf("新增字段改变了连接聚合结果：%+v", snapshot)
+	}
+	for _, route := range snapshot.Routes {
+		wantGeo := clients[route.ClientIP]
+		inbound := wiring.nodes[route.InboundID]
+		wantKey := fmt.Sprintf("%s|%d|%d||0", route.ClientIP, inbound.InboundPort, inbound.ID)
+		wantCount := 1
+		if route.ClientIP == "8.8.8.8" && route.InboundID == 1 {
+			wantCount = 2
+		}
+		if route.Key != wantKey || route.InboundMode != inbound.InboundMode || route.ClientCountryCode != wantGeo.CountryCode || route.ClientIsPrivate != wantGeo.IsPrivate || route.Count != wantCount || route.Upload != int64(wantCount*10) || route.Download != int64(wantCount*20) || route.UploadRate != nil || route.DownloadRate != nil {
+			testContext.Fatalf("客户端地区、入站模式或原有字段错误：%+v", route)
+		}
+	}
+	for _, delta := range deltas {
+		wantGeo := clients[delta.route.ClientIP]
+		if delta.route.ClientCountryCode != wantGeo.CountryCode || delta.route.ClientIsPrivate != wantGeo.IsPrivate || delta.route.InboundMode != wiring.nodes[delta.route.InboundID].InboundMode {
+			testContext.Fatalf("连接增量未携带新增字段：%+v", delta.route)
+		}
+	}
+	encoded, err := json.Marshal(snapshot)
+	if err != nil {
+		testContext.Fatal(err)
+	}
+	var payload struct {
+		Routes []map[string]json.RawMessage `json:"routes"`
+	}
+	if err = json.Unmarshal(encoded, &payload); err != nil {
+		testContext.Fatal(err)
+	}
+	for index, fields := range payload.Routes {
+		route := snapshot.Routes[index]
+		if string(fields["inbound_mode"]) != strconv.Quote(route.InboundMode) {
+			testContext.Fatalf("JSON 未透出入站模式：%s", encoded)
+		}
+		if route.ClientIsPrivate {
+			if string(fields["client_is_private"]) != "true" || len(fields["client_country_code"]) != 0 {
+				testContext.Fatalf("JSON 内网字段错误：%s", encoded)
+			}
+		} else if string(fields["client_country_code"]) != strconv.Quote(route.ClientCountryCode) || len(fields["client_is_private"]) != 0 {
+			testContext.Fatalf("JSON 公网字段错误：%s", encoded)
+		}
+	}
+}
+
 func TestConnectionRatesIncludeNewConnectionsAfterBaseline(t *testing.T) {
 	wiring := &runtimeWiring{nodes: map[int]models.ProxyNode{1: {ID: 1, Type: "direct", InboundPort: 30001}}}
 	var monitor ConnectionMonitor

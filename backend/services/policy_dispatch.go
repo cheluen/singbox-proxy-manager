@@ -1,6 +1,7 @@
 package services
 
 import (
+	"cmp"
 	"context"
 	"crypto/sha256"
 	"crypto/subtle"
@@ -28,27 +29,34 @@ type policySession struct {
 	Started        time.Time
 }
 type scheduledPolicy struct {
-	members    []int
-	health     map[int]models.MemberHealth
-	cursor     uint64
-	active     int
-	due        time.Time
-	probing    map[int]bool
-	lastUrgent map[int]time.Time
+	members        []int
+	health         map[int]models.MemberHealth
+	probed         map[int]bool
+	initialChecked map[int]bool
+	cursor         uint64
+	active         int
+	due            time.Time
+	probing        map[int]bool
+	lastUrgent     map[int]time.Time
+	activeConns    int
+	lastUsed       time.Time
+	initialProbed  bool
+	paused         bool
 }
 type policyDispatcher struct {
-	wiring      *runtimeWiring
-	logEvent    func(LogEvent)
-	listener    net.Listener
-	ctx         context.Context
-	cancel      context.CancelFunc
-	mu          sync.Mutex
-	policies    map[int]*scheduledPolicy
-	sockets     map[net.Conn]bool
-	sessions    map[string]policySession
-	wg          sync.WaitGroup
-	probeSlots  chan struct{}
-	lookupNetIP func(context.Context, string, string) ([]netip.Addr, error)
+	wiring         *runtimeWiring
+	logEvent       func(LogEvent)
+	listener       net.Listener
+	ctx            context.Context
+	cancel         context.CancelFunc
+	mu             sync.Mutex
+	policies       map[int]*scheduledPolicy
+	sockets        map[net.Conn]bool
+	sessions       map[string]policySession
+	wg             sync.WaitGroup
+	probeSlots     chan struct{}
+	idlePauseAfter time.Duration
+	lookupNetIP    func(context.Context, string, string) ([]netip.Addr, error)
 }
 
 func startPolicyDispatcher(w *runtimeWiring, logEvent func(LogEvent)) (*policyDispatcher, error) {
@@ -58,10 +66,12 @@ func startPolicyDispatcher(w *runtimeWiring, logEvent func(LogEvent)) (*policyDi
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	d := &policyDispatcher{wiring: w, logEvent: logEvent, listener: listener, ctx: ctx, cancel: cancel, policies: map[int]*scheduledPolicy{}, sockets: map[net.Conn]bool{}, sessions: map[string]policySession{}}
-	d.probeSlots = make(chan struct{}, 4)
+	d.probeSlots = make(chan struct{}, 8)
 	d.lookupNetIP = net.DefaultResolver.LookupNetIP
 	for id, cfg := range w.policies {
-		state := &scheduledPolicy{members: []int{}, health: map[int]models.MemberHealth{}, due: time.Now().Add(time.Second)}
+		now := time.Now()
+		state := &scheduledPolicy{members: []int{}, health: map[int]models.MemberHealth{}, probed: map[int]bool{}, due: now.Add(time.Second), lastUsed: now}
+		state.initialChecked = make(map[int]bool)
 		state.probing = make(map[int]bool)
 		state.lastUrgent = make(map[int]time.Time)
 		for _, member := range cfg.MemberIDs {
@@ -71,6 +81,7 @@ func startPolicyDispatcher(w *runtimeWiring, logEvent func(LogEvent)) (*policyDi
 				state.health[member] = models.MemberHealth{NodeID: member, Healthy: true}
 			}
 		}
+		state.initialProbed = len(state.members) == 0
 		d.policies[id] = state
 	}
 	d.wg.Go(d.accept)
@@ -220,13 +231,31 @@ func (d *policyDispatcher) candidates(id int, target string) []int {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	state := d.policies[id]
-	var ids, fallback []int
+	urltest := d.wiring.nodes[id].Type == "urltest"
+	var ids, unprobed, fallback []int
 	for _, member := range state.members {
 		if state.health[member].Healthy {
-			ids = append(ids, member)
+			if urltest && !state.probed[member] {
+				unprobed = append(unprobed, member)
+			} else {
+				ids = append(ids, member)
+			}
 		} else {
 			fallback = append(fallback, member)
 		}
+	}
+	if urltest {
+		slices.SortStableFunc(ids, func(left, right int) int {
+			return cmp.Compare(state.health[left].Latency, state.health[right].Latency)
+		})
+		if len(ids) > 0 && state.active > 0 && state.active != ids[0] {
+			active := slices.Index(ids, state.active)
+			if active > 0 && state.health[state.active].Latency-state.health[ids[0]].Latency <= d.wiring.policies[id].EffectiveTolerance() {
+				copy(ids[1:active+1], ids[:active])
+				ids[0] = state.active
+			}
+		}
+		return append(append(ids, unprobed...), fallback...)
 	}
 	if len(ids) < 2 || d.wiring.nodes[id].Type == "failover" {
 		return append(ids, fallback...)
@@ -279,26 +308,57 @@ func (d *policyDispatcher) dial(ctx context.Context, member int, target string) 
 }
 
 func (d *policyDispatcher) record(id, member int, start time.Time, err error, active bool) {
+	if active && d.wiring.nodes[id].Type == "urltest" {
+		d.mu.Lock()
+		state := d.policies[id]
+		recovered := false
+		if err == nil {
+			state.active = member
+			health := state.health[member]
+			if !health.Healthy {
+				health.Healthy = true
+				health.LastError = ""
+				state.health[member] = health
+				delete(state.probed, member)
+				recovered = true
+			}
+		}
+		d.mu.Unlock()
+		if recovered {
+			d.scheduleProbe(id, member, true)
+		}
+		return
+	}
 	now := time.Now().UTC()
 	h := models.MemberHealth{NodeID: member, Healthy: err == nil, Latency: int(time.Since(start).Milliseconds()), CheckedAt: &now}
 	if err != nil {
 		h.LastError = "member connection failed"
 	}
 	d.mu.Lock()
+	defer d.mu.Unlock()
 	state := d.policies[id]
 	if active && err == nil {
 		state.active = member
 	}
+	if !active && !state.initialProbed {
+		state.initialChecked[member] = true
+		state.initialProbed = len(state.initialChecked) == len(state.members)
+	}
 	old := state.health[member]
 	if old.CheckedAt != nil && old.CheckedAt.After(start) {
-		d.mu.Unlock()
 		return
 	}
 	state.health[member] = h
+	if !active {
+		if err == nil {
+			state.probed[member] = true
+		} else {
+			delete(state.probed, member)
+		}
+	}
 	if err != nil && state.active == member {
 		state.active = 0
 	}
-	d.mu.Unlock()
 }
 
 func (d *policyDispatcher) serve(conn net.Conn) {
@@ -306,6 +366,23 @@ func (d *policyDispatcher) serve(conn net.Conn) {
 	id, target, err := d.handshake(conn)
 	if err != nil {
 		return
+	}
+	now := time.Now()
+	d.mu.Lock()
+	state := d.policies[id]
+	paused := state.paused
+	state.paused = false
+	state.activeConns++
+	state.lastUsed = now
+	d.mu.Unlock()
+	defer func() {
+		d.mu.Lock()
+		state.activeConns--
+		state.lastUsed = time.Now()
+		d.mu.Unlock()
+	}()
+	if paused {
+		d.probeDue(id, now)
 	}
 	dialTarget, blocked := d.validateTarget(d.ctx, target)
 	if blocked {
@@ -351,6 +428,11 @@ func (d *policyDispatcher) serve(conn net.Conn) {
 		transfer(conn, remote)
 		<-upDone
 		return
+	}
+	if d.wiring.nodes[id].Type == "urltest" {
+		for _, failed := range failures {
+			d.scheduleProbe(id, failed, true)
+		}
 	}
 	d.logSelection(id, 0)
 	writeSOCKSReply(conn, 4)
@@ -404,20 +486,40 @@ func (d *policyDispatcher) probeLoop() {
 		case <-d.ctx.Done():
 			return
 		case now := <-ticker.C:
-			for id, state := range d.policies {
-				if now.Before(state.due) {
-					continue
-				}
-				cfg := d.wiring.policies[id]
-				state.due = now.Add(time.Duration(cfg.Interval) * time.Second)
-				for _, member := range state.members {
-					if d.ctx.Err() != nil {
-						return
-					}
-					d.scheduleProbe(id, member, false)
-				}
+			for id := range d.policies {
+				d.probeDue(id, now)
 			}
 		}
+	}
+}
+
+func (d *policyDispatcher) idleWindow(interval int) time.Duration {
+	if d.idlePauseAfter > 0 {
+		return d.idlePauseAfter
+	}
+	return max(3*time.Duration(interval)*time.Second, 5*time.Minute)
+}
+
+func (d *policyDispatcher) probeDue(id int, now time.Time) {
+	d.mu.Lock()
+	state := d.policies[id]
+	if now.Before(state.due) {
+		d.mu.Unlock()
+		return
+	}
+	cfg := d.wiring.policies[id]
+	if state.initialProbed && state.activeConns == 0 && now.Sub(state.lastUsed) >= d.idleWindow(cfg.Interval) {
+		state.paused = true
+		d.mu.Unlock()
+		return
+	}
+	state.due = now.Add(time.Duration(cfg.Interval) * time.Second)
+	d.mu.Unlock()
+	for _, member := range state.members {
+		if d.ctx.Err() != nil {
+			return
+		}
+		d.scheduleProbe(id, member, false)
 	}
 }
 
@@ -453,11 +555,7 @@ func (d *policyDispatcher) scheduleProbe(id, member int, urgent bool) {
 			d.record(id, member, start, err, false)
 		}
 	}
-	if urgent {
-		d.wg.Go(run)
-	} else {
-		run()
-	}
+	d.wg.Go(run)
 }
 
 func (d *policyDispatcher) probe(ctx context.Context, member int, rawURL string) error {

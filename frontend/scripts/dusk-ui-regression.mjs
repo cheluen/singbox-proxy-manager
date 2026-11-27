@@ -67,11 +67,12 @@ function createFixture() {
     },
     runtime: { running: true, degraded: false, pid: 1234 }, version: VERSION, update: { available: false },
     connectionsSnapshot: {
-      runtime_epoch: '1234-1', sampled_at: new Date().toISOString(), active_connections: 3, client_count: 1, route_count: 2,
-      total_upload_bps: 18400, total_download_bps: 262144,
+      runtime_epoch: '1234-1', sampled_at: new Date().toISOString(), active_connections: 5, client_count: 2, route_count: 3,
+      total_upload_bps: 24400, total_download_bps: 312144,
       routes: [
-        { key: '10.0.0.5|30001|node:1', client_ip: '10.0.0.5', inbound_port: 30001, inbound_node_id: 1, inbound_node_name: 'Node 001', route_id: '', outbound_node_id: 1, outbound_node_name: 'Node 001', active_count: 2, upload_bps: 12000, download_bps: 200000 },
-        { key: '10.0.0.5|30002|node:4|member:1', client_ip: '10.0.0.5', inbound_port: 30002, inbound_node_id: 2, inbound_node_name: 'Node 002', route_id: 'alice+30004', outbound_node_id: 4, outbound_node_name: 'JP Failover', policy_member_id: 1, policy_member_name: 'Node 001', upstream_source: 'custom', upstream_label: 'custom: socks5', active_count: 1, upload_bps: 6400, download_bps: 62144 },
+        { key: '10.0.0.5|30001|node:1', client_ip: '10.0.0.5', client_is_private: true, inbound_port: 30001, inbound_mode: 'mixed', inbound_node_id: 1, inbound_node_name: 'Node 001', route_id: '', outbound_node_id: 1, outbound_node_name: 'Node 001', active_count: 2, upload_bps: 12000, download_bps: 200000 },
+        { key: '10.0.0.5|30002|node:4|member:1', client_ip: '10.0.0.5', client_is_private: true, inbound_port: 30002, inbound_mode: 'https', inbound_node_id: 2, inbound_node_name: 'Node 002', route_id: 'alice+30004', outbound_node_id: 4, outbound_node_name: 'JP Failover', policy_member_id: 1, policy_member_name: 'Node 001', upstream_source: 'custom', upstream_label: 'custom: socks5', active_count: 1, upload_bps: 6400, download_bps: 62144 },
+        { key: '8.8.8.8|30002|node:2', client_ip: '8.8.8.8', client_country_code: 'US', client_is_private: false, inbound_port: 30002, inbound_mode: 'https', inbound_node_id: 2, inbound_node_name: 'Node 002', route_id: '', outbound_node_id: 2, outbound_node_name: 'Node 002', active_count: 2, upload_bps: 6000, download_bps: 50000 },
       ],
     },
     sseActive: 0, sseOpened: 0, sseClosed: 0,
@@ -1383,10 +1384,11 @@ const scenarios = {
     assert.equal(await page.$eval('#server', (el) => el.closest('.ant-form-item')?.hidden || el.offsetParent === null), true, '策略节点不应显示服务器地址输入框')
     await closeOverlay(page)
 
-    // 中文环境下故障转移 / 负载均衡节点类型、服务器摘要与下拉选项应完整中文化
+    // 中文环境下故障转移 / 负载均衡 / 最低延迟节点类型、服务器摘要与下拉选项应完整中文化
     state.nodes.push(
       makeNode(5, { name: 'JP Policy Failover', type: 'failover', config: JSON.stringify({ member_ids: [1, 4] }) }),
       makeNode(6, { name: 'JP Policy LB', type: 'loadbalance', config: JSON.stringify({ member_ids: [1, 4], strategy: 'round-robin' }) }),
+      makeNode(8, { name: 'JP Policy Lowest', type: 'urltest', config: JSON.stringify({ member_ids: [1, 4], tolerance: 35 }) }),
     )
     await clickControl(page, 'button[title="中文"]')
     await page.waitForFunction(() => document.documentElement.lang === 'zh-CN')
@@ -1396,12 +1398,20 @@ const scenarios = {
     assert.equal(await page.$eval('[data-row-id="5"] .dusk-col--server', (el) => el.textContent.trim()), '2 · 故障转移')
     assert.equal(await page.$eval('[data-row-id="6"] .dusk-col--type', (el) => el.textContent.trim()), '负载均衡')
     assert.equal(await page.$eval('[data-row-id="6"] .dusk-col--server', (el) => el.textContent.trim()), '2 · 轮询')
+    assert.equal(await page.$eval('[data-row-id="8"] .dusk-col--type', (el) => el.textContent.trim()), '最低延迟')
+    assert.equal(await page.$eval('[data-row-id="8"] .dusk-col--server', (el) => el.textContent.trim()), '2 · 最低延迟')
     await clickControl(page, '[data-testid="nodes-add-node"]')
+    await selectOption(page, 'proxy_type', 'SSH')
+    assert.equal(await page.$eval('#server_port', (el) => el.value), '22', '切换至 SSH 时默认端口应自动设为 22')
     await selectOption(page, 'proxy_type', '故障转移（策略）')
     await selectOption(page, 'proxy_type', '负载均衡（策略）')
+    await selectOption(page, 'proxy_type', '最低延迟（策略）')
+    await page.waitForSelector('[data-testid="policy-tolerance-input"]', { visible: true })
+    assert.equal(await page.$eval('[data-testid="policy-tolerance-input"]', (el) => el.value), '50', '最低延迟策略默认切换容差应为 50 ms')
     await closeOverlay(page)
     await clickControl(page, 'button[title="English"]')
     await page.waitForFunction(() => document.documentElement.lang === 'en')
+    assert.equal(await page.$eval('[data-row-id="8"] .dusk-col--type', (el) => el.textContent.trim()), 'Lowest Latency')
 
     // 分组标签拖动排序：将右侧分组 Pool NoPort(2) 拖到 Default(1) 左侧
     const tab2 = await page.$('[data-testid="group-tab-2"]')
@@ -1540,8 +1550,15 @@ const scenarios = {
     await clickControl(page, '[data-testid="nav-tab-connections"]')
     await page.waitForSelector('[data-testid="connections-topology"]', { visible: true })
     await eventually(() => state.sseOpened >= 1 && state.sseActive >= 1, '打开连接面板未启动按需采集')
-    assert.equal(await page.$$eval('[data-testid="conn-outbound-row"]', (els) => els.length), 2)
-    assert.equal(await page.$$eval('[data-testid^="conn-client-"]', (els) => els.length), 1, '同客户端 IP 应合并为一张卡片')
+    assert.equal(await page.$$eval('[data-testid="conn-outbound-row"]', (els) => els.length), 3)
+    assert.equal(await page.$$eval('[data-testid^="conn-client-"]', (els) => els.length), 2, '同客户端 IP 应合并为一张卡片，不同 IP 独立展示')
+    // 验证内网标注 + 公网地区小卡片 + Mixed/HTTPS 双通道亮起与并发拆分
+    assert.equal(await page.$eval('[data-testid="conn-geo-10.0.0.5"]', (el) => el.dataset.geo), 'private')
+    assert.equal(await page.$eval('[data-testid="conn-ch-mixed-10.0.0.5"]', (el) => `${el.dataset.active}:${el.textContent.trim()}`), 'true:2')
+    assert.equal(await page.$eval('[data-testid="conn-ch-https-10.0.0.5"]', (el) => `${el.dataset.active}:${el.textContent.trim()}`), 'true:1')
+    assert.equal(await page.$eval('[data-testid="conn-geo-8.8.8.8"]', (el) => `${el.dataset.geo}:${el.textContent.trim()}`), 'us:US')
+    assert.equal(await page.$eval('[data-testid="conn-ch-mixed-8.8.8.8"]', (el) => `${el.dataset.active}:${el.textContent.trim()}`), 'false:0')
+    assert.equal(await page.$eval('[data-testid="conn-ch-https-8.8.8.8"]', (el) => `${el.dataset.active}:${el.textContent.trim()}`), 'true:2')
     await clickControl(page, '[data-testid="nav-tab-logs"]')
     await page.waitForSelector('[data-testid="logs-panel"]', { visible: true })
     await eventually(() => state.sseActive === 0 && state.sseClosed >= 1, '离开当前连接面板后未立即释放采集')

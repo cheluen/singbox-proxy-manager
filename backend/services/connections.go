@@ -17,24 +17,27 @@ import (
 )
 
 type ConnectionRoute struct {
-	Key            string   `json:"key"`
-	ClientIP       string   `json:"client_ip"`
-	InboundPort    int      `json:"inbound_port"`
-	InboundID      int      `json:"inbound_node_id"`
-	InboundName    string   `json:"inbound_node_name"`
-	RouteID        string   `json:"route_id"`
-	OutboundID     int      `json:"outbound_node_id"`
-	OutboundName   string   `json:"outbound_node_name"`
-	OutboundType   string   `json:"outbound_type"`
-	MemberID       int      `json:"policy_member_id"`
-	MemberName     string   `json:"policy_member_name"`
-	Upstream       string   `json:"upstream_label"`
-	UpstreamSource string   `json:"upstream_source,omitempty"`
-	Count          int      `json:"active_count"`
-	Upload         int64    `json:"upload_bytes"`
-	Download       int64    `json:"download_bytes"`
-	UploadRate     *float64 `json:"upload_bps"`
-	DownloadRate   *float64 `json:"download_bps"`
+	Key               string   `json:"key"`
+	ClientIP          string   `json:"client_ip"`
+	ClientCountryCode string   `json:"client_country_code,omitempty"`
+	ClientIsPrivate   bool     `json:"client_is_private,omitempty"`
+	InboundPort       int      `json:"inbound_port"`
+	InboundMode       string   `json:"inbound_mode,omitempty"`
+	InboundID         int      `json:"inbound_node_id"`
+	InboundName       string   `json:"inbound_node_name"`
+	RouteID           string   `json:"route_id"`
+	OutboundID        int      `json:"outbound_node_id"`
+	OutboundName      string   `json:"outbound_node_name"`
+	OutboundType      string   `json:"outbound_type"`
+	MemberID          int      `json:"policy_member_id"`
+	MemberName        string   `json:"policy_member_name"`
+	Upstream          string   `json:"upstream_label"`
+	UpstreamSource    string   `json:"upstream_source,omitempty"`
+	Count             int      `json:"active_count"`
+	Upload            int64    `json:"upload_bytes"`
+	Download          int64    `json:"download_bytes"`
+	UploadRate        *float64 `json:"upload_bps"`
+	DownloadRate      *float64 `json:"download_bps"`
 }
 
 type ConnectionSnapshot struct {
@@ -315,7 +318,7 @@ func (route *ConnectionRoute) setUpstream(w *runtimeWiring, nodeID int) {
 }
 
 func (c clashConnection) route(w *runtimeWiring) (ConnectionRoute, bool) {
-	_, tag, _ := strings.Cut(c.Metadata.Type, "/")
+	inboundType, tag, _ := strings.Cut(c.Metadata.Type, "/")
 	id, ok := tagID(tag, "node-", "-in")
 	if !ok {
 		return ConnectionRoute{}, false
@@ -335,7 +338,10 @@ func (c clashConnection) route(w *runtimeWiring) (ConnectionRoute, bool) {
 			}
 		}
 	}
-	route := ConnectionRoute{ClientIP: c.Metadata.SourceIP, InboundID: id, InboundName: in.Name, InboundPort: in.InboundPort, OutboundID: out.ID, OutboundName: out.Name, OutboundType: out.Type}
+	route := ConnectionRoute{ClientIP: c.Metadata.SourceIP, InboundID: id, InboundName: in.Name, InboundPort: in.InboundPort, InboundMode: models.InboundModeMixed, OutboundID: out.ID, OutboundName: out.Name, OutboundType: out.Type}
+	if inboundType == "http" || in.InboundMode == models.InboundModeHTTPS {
+		route.InboundMode = models.InboundModeHTTPS
+	}
 	route.setUpstream(w, out.ID)
 	reuse := out.Username + "+" + strconv.Itoa(out.InboundPort)
 	if out.Username != "" && strings.Contains(c.Rule, "auth_user="+reuse+" =>") {
@@ -392,7 +398,7 @@ func (m *ConnectionMonitor) aggregate(snapshot *ConnectionSnapshot, raw []clashC
 	next := make(map[string]connectionCounter, len(raw))
 	deltas := make([]routeDelta, 0, len(raw))
 	routes := map[string]*ConnectionRoute{}
-	clients := map[string]bool{}
+	clients := map[string]ClientIPGeo{}
 	elapsed := snapshot.At.Sub(m.last.At).Seconds()
 	hasRate := m.counters != nil && elapsed > 0
 	if hasRate {
@@ -418,6 +424,12 @@ func (m *ConnectionMonitor) aggregate(snapshot *ConnectionSnapshot, raw []clashC
 	}
 	for _, sampled := range routed {
 		c, r := sampled.connection, sampled.route
+		geo, known := clients[r.ClientIP]
+		if !known {
+			geo = LookupClientIPGeo(r.ClientIP)
+			clients[r.ClientIP] = geo
+		}
+		r.ClientCountryCode, r.ClientIsPrivate = geo.CountryCode, geo.IsPrivate
 		prev, seen := m.counters[c.ID]
 		up, down := c.Upload, c.Download
 		if seen {
@@ -449,7 +461,6 @@ func (m *ConnectionMonitor) aggregate(snapshot *ConnectionSnapshot, raw []clashC
 		aggregate.Count++
 		aggregate.Upload += c.Upload
 		aggregate.Download += c.Download
-		clients[r.ClientIP] = true
 		snapshot.Active++
 		if hasRate {
 			*aggregate.UploadRate += float64(up) / elapsed

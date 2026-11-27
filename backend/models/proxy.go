@@ -1229,7 +1229,7 @@ func (p ProxyDefinition) ParseConfig() (interface{}, error) {
 	var config interface{}
 	proxyType := strings.ToLower(strings.TrimSpace(p.Type))
 	switch proxyType {
-	case "failover", "loadbalance":
+	case "failover", "loadbalance", "urltest":
 		config = &PolicyConfig{}
 	case "direct":
 		config = &DirectConfig{}
@@ -1251,6 +1251,8 @@ func (p ProxyDefinition) ParseConfig() (interface{}, error) {
 		config = &SOCKS5Config{}
 	case "http":
 		config = &HTTPProxyConfig{}
+	case "ssh":
+		config = &SSHConfig{}
 	case "wireguard":
 		config = &WireGuardConfig{}
 	default:
@@ -1273,7 +1275,7 @@ func (p ProxyDefinition) ParseConfig() (interface{}, error) {
 		return policy, policy.normalize(proxyType)
 	}
 	switch config.(type) {
-	case *DirectConfig, *SSConfig, *SOCKS5Config, *WireGuardConfig:
+	case *DirectConfig, *SSConfig, *SOCKS5Config, *SSHConfig, *WireGuardConfig:
 		return config, nil
 	}
 

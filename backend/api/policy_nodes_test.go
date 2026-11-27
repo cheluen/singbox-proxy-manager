@@ -12,6 +12,7 @@ import (
 	"os"
 	"reflect"
 	"slices"
+	"strings"
 	"testing"
 	"time"
 
@@ -58,6 +59,184 @@ func TestPolicyMemberValidationAndPruning(t *testing.T) {
 	client.request(http.MethodGet, testNodePath(policy.ID), nil, 200, &policy)
 	if err := json.Unmarshal([]byte(policy.Config), &parsed); err != nil || len(parsed.MemberIDs) != 0 || len(policy.Warnings) == 0 {
 		t.Fatal("group deletion left a dangling reference")
+	}
+}
+
+func TestPolicyURLTestToleranceCreateAndEdit(testContext *testing.T) {
+	for _, testCase := range []struct {
+		name      string
+		field     string
+		tolerance int
+	}{
+		{name: "默认", tolerance: 50},
+		{name: "null", field: `,"tolerance":null`, tolerance: 50},
+		{name: "显式零", field: `,"tolerance":0`, tolerance: 0},
+		{name: "合法值", field: `,"tolerance":125`, tolerance: 125},
+		{name: "上限", field: `,"tolerance":5000`, tolerance: 5000},
+	} {
+		testContext.Run(testCase.name, func(testContext *testing.T) {
+			client := newGroupTestClient(testContext)
+			member := client.createNode("member", 0, true)
+			config := fmt.Sprintf(`{"member_ids":[%d],"strategy":"consistent-hashing"%s}`, member.ID, testCase.field)
+			payload := gin.H{"name": "最低延迟", "type": "urltest", "enabled": true, "config": config}
+			var policy models.ProxyNode
+			client.request(http.MethodPost, "/api/nodes", payload, http.StatusCreated, &policy)
+			assertTolerance := func() {
+				testContext.Helper()
+				var parsed models.PolicyConfig
+				if err := json.Unmarshal([]byte(policy.Config), &parsed); err != nil || parsed.Tolerance == nil || *parsed.Tolerance != testCase.tolerance || parsed.Strategy != "" || parsed.Interval != 30 {
+					testContext.Fatalf("API 未归一化 urltest 容差或 strategy：%s，%v", policy.Config, err)
+				}
+				if policy.PolicyStatus == nil || !slices.Equal(policy.Effective, []int{member.ID}) || policy.UpstreamMode != models.UpstreamModeNone || !strings.Contains(policy.Config, fmt.Sprintf(`"tolerance":%d`, testCase.tolerance)) {
+					testContext.Fatalf("API 策略状态或容差 JSON 错误：%+v", policy)
+				}
+			}
+			assertTolerance()
+			payload["config"] = fmt.Sprintf(`{"member_ids":[%d],"tolerance":7}`, member.ID)
+			client.request(http.MethodPut, testNodePath(policy.ID), payload, http.StatusOK, nil)
+			payload["config"] = config
+			client.request(http.MethodPut, testNodePath(policy.ID), payload, http.StatusOK, &policy)
+			assertTolerance()
+		})
+	}
+}
+
+func TestPolicyURLTestRejectsOutOfRangeTolerance(testContext *testing.T) {
+	client := newGroupTestClient(testContext)
+	member := client.createNode("member", 0, true)
+	policy := createLinkedTestPolicyOfType(client, "urltest", []models.PolicyMemberSource{{Type: models.PolicyMemberSourceNode, ID: member.ID}})
+	for _, tolerance := range []int{-1, 5001} {
+		payload := gin.H{"name": policy.Name, "type": "urltest", "enabled": true, "config": fmt.Sprintf(`{"member_ids":[%d],"tolerance":%d}`, member.ID, tolerance)}
+		for _, request := range []struct {
+			method string
+			path   string
+		}{{http.MethodPost, "/api/nodes"}, {http.MethodPut, testNodePath(policy.ID)}} {
+			var rejection struct {
+				Error string `json:"error"`
+			}
+			client.request(request.method, request.path, payload, http.StatusBadRequest, &rejection)
+			if rejection.Error != "invalid config format" {
+				testContext.Fatalf("越界容差未返回统一配置错误：%s", rejection.Error)
+			}
+		}
+		var unchanged models.ProxyNode
+		client.request(http.MethodGet, testNodePath(policy.ID), nil, http.StatusOK, &unchanged)
+		if unchanged.Config != policy.Config {
+			testContext.Fatal("越界编辑改变了原策略配置")
+		}
+	}
+}
+
+func TestPolicyURLTestReferencesNestingAndPruning(testContext *testing.T) {
+	client := newGroupTestClient(testContext)
+	first := client.createNode("first", 0, true)
+	second := client.createNode("second", 0, true)
+	policy := createLinkedTestPolicyOfType(client, "urltest", []models.PolicyMemberSource{{Type: models.PolicyMemberSourceNode, ID: first.ID}, {Type: models.PolicyMemberSourceNode, ID: second.ID}})
+	for _, protocol := range []string{"failover", "loadbalance", "urltest"} {
+		other := createLinkedTestPolicyOfType(client, protocol, []models.PolicyMemberSource{{Type: models.PolicyMemberSourceNode, ID: second.ID}})
+		client.request(http.MethodPost, "/api/nodes", gin.H{"name": "nested", "type": protocol, "enabled": true, "config": fmt.Sprintf(`{"member_ids":[%d]}`, policy.ID)}, http.StatusBadRequest, nil)
+		client.request(http.MethodPost, "/api/nodes", gin.H{"name": "nested-urltest", "type": "urltest", "enabled": true, "config": fmt.Sprintf(`{"member_ids":[%d]}`, other.ID)}, http.StatusBadRequest, nil)
+		client.request(http.MethodPut, testNodePath(policy.ID), gin.H{"name": policy.Name, "type": "urltest", "enabled": true, "config": fmt.Sprintf(`{"member_ids":[%d]}`, other.ID)}, http.StatusBadRequest, nil)
+	}
+	for _, config := range []string{`{"member_ids":[]}`, `{"member_ids":[99999]}`, fmt.Sprintf(`{"member_ids":[%d]}`, policy.ID)} {
+		client.request(http.MethodPut, testNodePath(policy.ID), gin.H{"name": policy.Name, "type": "urltest", "enabled": true, "config": config}, http.StatusBadRequest, nil)
+	}
+	client.request(http.MethodPut, testNodePath(first.ID), gin.H{"name": first.Name, "type": "urltest", "enabled": true, "config": fmt.Sprintf(`{"member_ids":[%d]}`, second.ID)}, http.StatusBadRequest, nil)
+	var unchanged models.ProxyNode
+	client.request(http.MethodGet, testNodePath(first.ID), nil, http.StatusOK, &unchanged)
+	if unchanged.Type != first.Type {
+		testContext.Fatal("被引用的物理成员被转换成策略节点")
+	}
+	client.request(http.MethodPatch, testNodePath(first.ID), gin.H{"enabled": false}, http.StatusOK, nil)
+	policy = assertPolicyMembers(client, policy.ID, []int{first.ID, second.ID}, nil)
+	if !slices.Equal(policy.Effective, []int{second.ID}) || len(policy.Warnings) == 0 {
+		testContext.Fatal("urltest 未跳过禁用成员或未保留引用")
+	}
+	client.request(http.MethodPost, "/api/nodes/batch-delete", gin.H{"ids": []int{second.ID}}, http.StatusOK, nil)
+	assertPolicyMembers(client, policy.ID, []int{first.ID}, nil)
+	client.request(http.MethodDelete, testNodePath(first.ID), nil, http.StatusOK, nil)
+	policy = assertPolicyMembers(client, policy.ID, []int{}, nil)
+	if len(policy.Effective) != 0 || len(policy.Warnings) == 0 {
+		testContext.Fatal("删除成员后 urltest 留下悬空引用")
+	}
+}
+
+func TestPolicyURLTestRejectsUpstreamAndShareExport(testContext *testing.T) {
+	client := newGroupTestClient(testContext)
+	member := client.createNode("member", 0, true)
+	policy := createLinkedTestPolicyOfType(client, "urltest", []models.PolicyMemberSource{{Type: models.PolicyMemberSourceNode, ID: member.ID}})
+	for _, fields := range []gin.H{
+		{"upstream_mode": "global"},
+		{"upstream_mode": "group"},
+		{"upstream_mode": "legacy"},
+		{"upstream_mode": "custom", "upstream_type": "http", "upstream_config": `{"server":"127.0.0.1","server_port":8080}`},
+		{"upstream_mode": "none", "upstream_type": "http", "upstream_config": `{"server":"127.0.0.1","server_port":8080}`},
+	} {
+		payload := gin.H{"name": policy.Name, "type": "urltest", "enabled": true, "config": policy.Config}
+		for field, value := range fields {
+			payload[field] = value
+		}
+		client.request(http.MethodPost, "/api/nodes", payload, http.StatusBadRequest, nil)
+		client.request(http.MethodPut, testNodePath(policy.ID), payload, http.StatusBadRequest, nil)
+		client.request(http.MethodPut, testNodePath(policy.ID)+"/upstream", fields, http.StatusBadRequest, nil)
+	}
+	var unchanged models.ProxyNode
+	client.request(http.MethodGet, testNodePath(policy.ID), nil, http.StatusOK, &unchanged)
+	if unchanged.UpstreamMode != models.UpstreamModeNone || unchanged.UpstreamType != "" || unchanged.UpstreamConfig != "" {
+		testContext.Fatal("urltest 禁用前置代理失败")
+	}
+	client.request(http.MethodGet, testNodePath(policy.ID)+"/export", nil, http.StatusBadRequest, nil)
+}
+
+func TestPolicyURLTestGroupSyncAndUnlink(testContext *testing.T) {
+	client := newGroupTestClient(testContext)
+	pool := client.createGroup("pool", 33001, false)
+	destination := client.createGroup("destination", 34001, false)
+	first := client.createNode("first", pool.ID, true)
+	second := client.createNode("second", pool.ID, true)
+	disabled := client.createNode("disabled", pool.ID, false)
+	outside := client.createNode("outside", destination.ID, true)
+	var excluded models.ProxyNode
+	client.request(http.MethodPost, "/api/nodes", gin.H{"name": "excluded-policy", "type": "failover", "group_id": pool.ID, "enabled": true, "config": fmt.Sprintf(`{"member_ids":[%d]}`, first.ID)}, http.StatusCreated, &excluded)
+	sources := []models.PolicyMemberSource{{Type: models.PolicyMemberSourceGroup, ID: pool.ID}, {Type: models.PolicyMemberSourceNode, ID: outside.ID}}
+	policy := createLinkedTestPolicyOfType(client, "urltest", sources)
+	policy = assertPolicyMembers(client, policy.ID, []int{first.ID, second.ID, disabled.ID, outside.ID}, sources)
+	if !slices.Equal(policy.Effective, []int{first.ID, second.ID, outside.ID}) {
+		testContext.Fatal("整组 urltest 未跳过策略节点或禁用物理成员")
+	}
+	reorderPolicyTestGroup(client, pool.ID, second.ID, first.ID, disabled.ID, excluded.ID)
+	assertPolicyMembers(client, policy.ID, []int{second.ID, first.ID, disabled.ID, outside.ID}, sources)
+	third := client.createNode("third", pool.ID, true)
+	assertPolicyMembers(client, policy.ID, []int{second.ID, first.ID, disabled.ID, third.ID, outside.ID}, sources)
+	client.request(http.MethodPost, "/api/nodes/batch-move", gin.H{"ids": []int{first.ID}, "group_id": destination.ID}, http.StatusOK, nil)
+	assertPolicyMembers(client, policy.ID, []int{second.ID, disabled.ID, third.ID, outside.ID}, sources)
+	client.request(http.MethodDelete, testNodePath(disabled.ID), nil, http.StatusOK, nil)
+	policy = assertPolicyMembers(client, policy.ID, []int{second.ID, third.ID, outside.ID}, sources)
+	var config models.PolicyConfig
+	if err := json.Unmarshal([]byte(policy.Config), &config); err != nil {
+		testContext.Fatal(err)
+	}
+	config.MemberSources = nil
+	encoded, err := json.Marshal(config)
+	if err != nil {
+		testContext.Fatal(err)
+	}
+	client.request(http.MethodPut, testNodePath(policy.ID), gin.H{"name": policy.Name, "type": "urltest", "enabled": true, "config": string(encoded)}, http.StatusOK, nil)
+	afterUnlink := client.createNode("after-unlink", pool.ID, true)
+	client.request(http.MethodPost, "/api/nodes/batch-move", gin.H{"ids": []int{second.ID}, "group_id": destination.ID}, http.StatusOK, nil)
+	reorderPolicyTestGroup(client, pool.ID, afterUnlink.ID, third.ID, excluded.ID)
+	assertPolicyMembers(client, policy.ID, []int{second.ID, third.ID, outside.ID}, nil)
+	config.MemberSources = sources
+	encoded, err = json.Marshal(config)
+	if err != nil {
+		testContext.Fatal(err)
+	}
+	client.request(http.MethodPut, testNodePath(policy.ID), gin.H{"name": policy.Name, "type": "urltest", "enabled": true, "config": string(encoded)}, http.StatusOK, nil)
+	assertPolicyMembers(client, policy.ID, []int{afterUnlink.ID, third.ID, outside.ID}, sources)
+	client.request(http.MethodDelete, testGroupPath(pool.ID)+"?mode=delete_nodes", nil, http.StatusOK, nil)
+	policy = assertPolicyMembers(client, policy.ID, []int{outside.ID}, nil)
+	if err := json.Unmarshal([]byte(policy.Config), &config); err != nil || config.Tolerance == nil || *config.Tolerance != models.DefaultPolicyTolerance {
+		testContext.Fatalf("整组同步或断链丢失 urltest 容差：%s，%v", policy.Config, err)
 	}
 }
 
@@ -190,7 +369,7 @@ func TestPolicyGroupMembersUseSortOrderAndIDWithUnorderedInput(t *testing.T) {
 }
 
 func TestPolicyGroupReorderBeforeAndAfterCreation(t *testing.T) {
-	for _, protocol := range []string{"failover", "loadbalance"} {
+	for _, protocol := range []string{"failover", "loadbalance", "urltest"} {
 		for _, createAfterReorder := range []bool{false, true} {
 			t.Run(fmt.Sprintf("%s/create_after_reorder=%t", protocol, createAfterReorder), func(t *testing.T) {
 				client := newGroupTestClient(t)

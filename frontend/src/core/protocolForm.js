@@ -1,6 +1,7 @@
+import { isPolicyType } from './protocolSchema.js'
 export { localizedProxyTypes, isPolicyType } from './protocolSchema.js'
 
-const isPolicyTypeName = (type) => type === 'failover' || type === 'loadbalance'
+const isPolicyTypeName = (type) => isPolicyType(type)
 
 // 清洗策略成员来源（支持单个实体节点与整组自动同步），去重并保留顺序。
 export function normalizePolicyMemberSources(sources, fallbackMemberIds = []) {
@@ -425,6 +426,35 @@ export function createProtocolFormModel(node, { isUpstreamEditor = false, isFiel
     delete normalizedConfig.reduce_rtt
   }
 
+  const sshUser = node?.type === 'ssh' ? (normalizedConfig.user || '') : ''
+  const sshPrivateKey = node?.type === 'ssh'
+    ? (Array.isArray(normalizedConfig.private_key)
+        ? normalizedConfig.private_key.join('\n')
+        : (normalizedConfig.private_key || ''))
+    : ''
+  const sshPrivateKeyPath = node?.type === 'ssh' ? (normalizedConfig.private_key_path || '') : ''
+  const sshPrivateKeyPassphrase = node?.type === 'ssh' ? (normalizedConfig.private_key_passphrase || '') : ''
+  const sshHostKey = node?.type === 'ssh'
+    ? (Array.isArray(normalizedConfig.host_key)
+        ? normalizedConfig.host_key.join('\n')
+        : (normalizedConfig.host_key || ''))
+    : ''
+  const sshHostKeyAlgorithms = node?.type === 'ssh'
+    ? (Array.isArray(normalizedConfig.host_key_algorithms)
+        ? normalizedConfig.host_key_algorithms.join(', ')
+        : (normalizedConfig.host_key_algorithms || ''))
+    : ''
+  const sshClientVersion = node?.type === 'ssh' ? (normalizedConfig.client_version || '') : ''
+  if (node?.type === 'ssh') {
+    delete normalizedConfig.user
+    delete normalizedConfig.private_key
+    delete normalizedConfig.private_key_path
+    delete normalizedConfig.private_key_passphrase
+    delete normalizedConfig.host_key
+    delete normalizedConfig.host_key_algorithms
+    delete normalizedConfig.client_version
+  }
+
   const initialPolicyMemberIds = Array.isArray(normalizedConfig.member_ids)
     ? normalizedConfig.member_ids.map(Number).filter((id) => Number.isInteger(id) && id > 0)
     : []
@@ -445,10 +475,11 @@ export function createProtocolFormModel(node, { isUpstreamEditor = false, isFiel
       ? Boolean(node?.username && node?.password)
       : true,
     server: normalizedConfig.server || '',
-    server_port: normalizedConfig.server_port || 443,
+    server_port: normalizedConfig.server_port || (node?.type === 'ssh' ? 22 : 443),
     policy_member_ids: initialPolicyMemberIds,
     policy_member_sources: initialPolicyMemberSources,
     policy_strategy: normalizedConfig.strategy || 'round-robin',
+    policy_tolerance: normalizedConfig.tolerance ?? 50,
     policy_health_check_url: normalizedConfig.health_check_url || '',
     policy_health_check_interval: normalizedConfig.health_check_interval || 30,
     ...normalizedConfig,
@@ -463,6 +494,14 @@ export function createProtocolFormModel(node, { isUpstreamEditor = false, isFiel
     proxy_tls: proxyTLS,
     proxy_sni: proxySNI,
     proxy_insecure: proxyInsecure,
+    ssh_user: sshUser,
+    ssh_password: node?.type === 'ssh' ? (protocolPassword ?? '') : '',
+    ssh_private_key: sshPrivateKey,
+    ssh_private_key_path: sshPrivateKeyPath,
+    ssh_private_key_passphrase: sshPrivateKeyPassphrase,
+    ssh_host_key: sshHostKey,
+    ssh_host_key_algorithms: sshHostKeyAlgorithms,
+    ssh_client_version: sshClientVersion,
     wireguard_private_key: node?.type === 'wireguard' ? normalizedConfig.private_key || '' : '',
     wireguard_peer_public_key: node?.type === 'wireguard' ? normalizedConfig.peer_public_key || '' : '',
     wireguard_pre_shared_key: node?.type === 'wireguard' ? normalizedConfig.pre_shared_key || '' : '',
@@ -501,12 +540,14 @@ export function createProtocolFormModel(node, { isUpstreamEditor = false, isFiel
 
   const finalizeFormConfig = (type, config) => {
     if (isUpstreamEditor) config = { ...config, detour: '' }
-    if (type === 'failover' || type === 'loadbalance') {
+    if (isPolicyType(type)) {
       const finalized = { ...config }
       const sources = Array.isArray(finalized.member_sources) ? finalized.member_sources : []
       if (!sources.some((entry) => entry?.type === 'group')) {
         delete finalized.member_sources
       }
+      if (type !== 'loadbalance') delete finalized.strategy
+      if (type !== 'urltest') delete finalized.tolerance
       return finalized
     }
     if (type === 'hy2') {
@@ -539,7 +580,7 @@ export function createProtocolFormModel(node, { isUpstreamEditor = false, isFiel
     if (type === 'direct') {
       return {}
     }
-    if (type === 'failover' || type === 'loadbalance') {
+    if (isPolicyType(type)) {
       const sources = normalizePolicyMemberSources(values.policy_member_sources, values.policy_member_ids)
       const hasGroupSource = sources.some((entry) => entry.type === 'group')
       const memberIds = hasGroupSource
@@ -555,6 +596,14 @@ export function createProtocolFormModel(node, { isUpstreamEditor = false, isFiel
         return {
           ...base,
           strategy: values.policy_strategy === 'consistent-hashing' ? 'consistent-hashing' : 'round-robin',
+        }
+      }
+      if (type === 'urltest') {
+        const rawTol = values.policy_tolerance
+        const tolerance = rawTol === '' || rawTol === null || rawTol === undefined ? 50 : Number(rawTol)
+        return {
+          ...base,
+          tolerance: Number.isFinite(tolerance) ? Math.round(tolerance) : 50,
         }
       }
       return base
@@ -686,6 +735,30 @@ export function createProtocolFormModel(node, { isUpstreamEditor = false, isFiel
           sni: values.proxy_sni || '',
           insecure: values.proxy_insecure || false,
         }
+
+      case 'ssh': {
+        const rawPrivateKey = typeof values.ssh_private_key === 'string'
+          ? values.ssh_private_key.replace(/\r\n/g, '\n')
+          : ''
+        const privateKeyLines = rawPrivateKey.trim()
+          ? rawPrivateKey.replace(/\n+$/, '').split('\n')
+          : []
+        const hostKeyLines = typeof values.ssh_host_key === 'string'
+          ? values.ssh_host_key.replace(/\r\n/g, '\n').split('\n').map((line) => line.trim()).filter(Boolean)
+          : []
+        const hostKeyAlgorithms = splitMultilineList(values.ssh_host_key_algorithms)
+        return {
+          ...config,
+          user: values.ssh_user ?? '',
+          password: values.ssh_password ?? '',
+          private_key: privateKeyLines,
+          private_key_path: String(values.ssh_private_key_path || '').trim(),
+          private_key_passphrase: values.ssh_private_key_passphrase ?? '',
+          host_key: hostKeyLines,
+          host_key_algorithms: hostKeyAlgorithms,
+          client_version: String(values.ssh_client_version || '').trim(),
+        }
+      }
 
       case 'wireguard': {
         const peers = parsePeersJSON(values.wireguard_peers_json)

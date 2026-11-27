@@ -3,6 +3,7 @@ package services
 import (
 	"context"
 	"encoding/base64"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -417,7 +418,7 @@ func convertClashProxyToImportItem(proxy map[string]any) (ImportItem, error) {
 		}
 		hysteria2ServerPorts = ports
 	}
-	if rawType != "wireguard" && rawType != "wg" && (server == "" || port <= 0) {
+	if rawType != "wireguard" && rawType != "wg" && rawType != "ssh" && (server == "" || port <= 0) {
 		return ImportItem{}, fmt.Errorf("missing server/port")
 	}
 
@@ -990,6 +991,49 @@ func convertClashProxyToImportItem(proxy map[string]any) (ImportItem, error) {
 		}
 
 		return ImportItem{Source: "clash:" + name, Type: "wireguard", Name: name, Config: cfg}, nil
+
+	case "ssh":
+		port = 22
+		if rawPort, present := proxy["port"]; present && rawPort != nil {
+			var err error
+			port, err = strconv.Atoi(strings.TrimSpace(fmt.Sprint(rawPort)))
+			if err != nil {
+				return ImportItem{}, fmt.Errorf("invalid ssh port")
+			}
+		}
+		cfg := models.SSHConfig{
+			Server:               server,
+			ServerPort:           port,
+			User:                 getCredentialString(proxy, "username", "user"),
+			Password:             getCredentialString(proxy, "password"),
+			PrivateKeyPath:       getCredentialString(proxy, "private-key-path", "private_key_path"),
+			PrivateKeyPassphrase: getCredentialString(proxy, "private-key-passphrase", "private_key_passphrase"),
+			ClientVersion:        getString(proxy, "client-version", "client_version"),
+		}
+		for field, target := range map[string]*models.ListableString{
+			"private_key":         &cfg.PrivateKey,
+			"host_key":            &cfg.HostKey,
+			"host_key_algorithms": &cfg.HostKeyAlgorithms,
+		} {
+			raw, present := firstMapValue(proxy, strings.ReplaceAll(field, "_", "-"), field)
+			if !present {
+				continue
+			}
+			encoded, err := json.Marshal(raw)
+			if err != nil {
+				return ImportItem{}, fmt.Errorf("invalid ssh %s: %w", field, err)
+			}
+			if err := json.Unmarshal(encoded, target); err != nil {
+				return ImportItem{}, fmt.Errorf("invalid ssh %s: %w", field, err)
+			}
+		}
+		if err := cfg.Validate(); err != nil {
+			return ImportItem{}, err
+		}
+		if err := applyClashDialerOptions(&cfg.DialerOptions, proxy); err != nil {
+			return ImportItem{}, err
+		}
+		return ImportItem{Source: "clash:" + name, Type: "ssh", Name: name, Config: cfg}, nil
 
 	case "socks5", "socks5h", "socks":
 		if getBool(proxy, "tls") {

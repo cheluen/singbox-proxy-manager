@@ -10,6 +10,8 @@ import (
 const (
 	PolicyMemberSourceNode  = "node"
 	PolicyMemberSourceGroup = "group"
+	DefaultPolicyTolerance  = 50
+	MaxPolicyTolerance      = 5000
 )
 
 type PolicyMemberSource struct {
@@ -21,6 +23,7 @@ type PolicyConfig struct {
 	MemberIDs     []int                `json:"member_ids"`
 	MemberSources []PolicyMemberSource `json:"member_sources,omitempty"`
 	Strategy      string               `json:"strategy,omitempty"`
+	Tolerance     *int                 `json:"tolerance,omitempty"`
 	HealthURL     string               `json:"health_check_url,omitempty"`
 	Interval      int                  `json:"health_check_interval"`
 }
@@ -40,15 +43,38 @@ type PolicyStatus struct {
 	Warnings  []string       `json:"policy_warnings"`
 }
 
-func IsPolicy(protocol string) bool { return protocol == "failover" || protocol == "loadbalance" }
+func IsPolicy(protocol string) bool {
+	return protocol == "failover" || protocol == "loadbalance" || protocol == "urltest"
+}
+
+func (config *PolicyConfig) EffectiveTolerance() int {
+	if config.Tolerance == nil {
+		return DefaultPolicyTolerance
+	}
+	return *config.Tolerance
+}
 
 func (config *PolicyConfig) normalize(protocol string) error {
-	if protocol == "failover" {
+	switch protocol {
+	case "failover":
 		config.Strategy = ""
-	} else if config.Strategy == "" {
-		config.Strategy = "round-robin"
-	} else if config.Strategy != "round-robin" && config.Strategy != "consistent-hashing" {
-		return fmt.Errorf("invalid load balancing strategy")
+		config.Tolerance = nil
+	case "urltest":
+		config.Strategy = ""
+		if config.Tolerance == nil {
+			tolerance := DefaultPolicyTolerance
+			config.Tolerance = &tolerance
+		}
+		if *config.Tolerance < 0 || *config.Tolerance > MaxPolicyTolerance {
+			return fmt.Errorf("tolerance must be between 0 and %d milliseconds", MaxPolicyTolerance)
+		}
+	case "loadbalance":
+		config.Tolerance = nil
+		if config.Strategy == "" {
+			config.Strategy = "round-robin"
+		} else if config.Strategy != "round-robin" && config.Strategy != "consistent-hashing" {
+			return fmt.Errorf("invalid load balancing strategy")
+		}
 	}
 	if config.Interval == 0 {
 		config.Interval = 30

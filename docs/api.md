@@ -138,13 +138,13 @@ curl -fsS -X POST http://127.0.0.1:30000/api/nodes/batch-import \
 
 ### 策略节点
 
-在 `POST /api/nodes` 或 `PUT /api/nodes/:id` 中使用 `type=failover` 或 `type=loadbalance`。`config` 沿用节点接口的 JSON 字符串格式，其解码示例如下。
+在 `POST /api/nodes` 或 `PUT /api/nodes/:id` 中使用 `type=failover`、`type=loadbalance` 或 `type=urltest`。`config` 沿用节点接口的 JSON 字符串格式，其解码示例如下。
 
 ```json
-{"member_ids":[12,9],"member_sources":[{"type":"group","id":2},{"type":"node","id":9}],"strategy":"round-robin","health_check_url":"https://example.org/health","health_check_interval":30}
+{"member_ids":[12,9],"member_sources":[{"type":"group","id":2},{"type":"node","id":9}],"strategy":"round-robin","tolerance":50,"health_check_url":"https://example.org/health","health_check_interval":30}
 ```
 
-`member_ids` 按优先级排序，重复 ID 会合并；也支持通过可选 `member_sources`（每项为 `{"type":"group"|"node","id":整数}`）按分组整组引入实体节点并自动随组内节点增删、移动、拖拽排序与订阅刷新同步（组内实体节点跟随 `(sort_order ASC, id ASC)` 分组顺序展开；面板点击「断链」时会把该组当前实体成员按原位置固化为独立成员保留优先级，当所有分组来源均移除后 `member_sources` 自动省略并退回静态 `member_ids` 管理）。创建或编辑时至少选择一个已有实体节点或有效分组，支持跨组与无端口成员。故障转移忽略 `strategy`。负载均衡支持 `round-robin`（面板显示“轮询”）和 `consistent-hashing`（面板显示“目标粘性 / Target Sticky”，采用基于规范化目标主机 `SHA256(host + NUL + 成员ID)` 的 Rendezvous/HRW 排名，忽略端口、域名与 IP 独立计算，仅在建连阶段选路）。健康检查仅探测已启用实体成员，周期为 10 至 3600 秒（默认 30 秒），未配置 URL 时默认探测 `1.1.1.1:443` TCP 连通性（自定义 URL 发送 `HEAD`、接受 `200–399`、不跟随重定向），所有成员本次均建连失败时不立即标记全部不健康。策略的前置模式为 `none`，成员沿用各自的前置设置。策略支持普通入站认证、TCP 复用、`mixed` / `https` 入站模式及 `POST /api/nodes/:id/check-ip`。分享链接仅适用于支持该格式的实体节点。
+`member_ids` 按优先级排序，重复 ID 会合并；也支持通过可选 `member_sources`（每项为 `{"type":"group"|"node","id":整数}`）按分组整组引入实体节点并自动随组内节点增删、移动、拖拽排序与订阅刷新同步（组内实体节点跟随 `(sort_order ASC, id ASC)` 分组顺序展开；面板点击「断链」时会把该组当前实体成员按原位置固化为独立成员保留优先级，当所有分组来源均移除后 `member_sources` 自动省略并退回静态 `member_ids` 管理）。创建或编辑时至少选择一个已有实体节点或有效分组，支持跨组与无端口成员。故障转移忽略并清理 `strategy` 与 `tolerance`。负载均衡清理 `tolerance`，支持 `round-robin`（面板显示“轮询”）和 `consistent-hashing`（面板显示“目标粘性 / Target Sticky”，采用基于规范化目标主机 `SHA256(host + NUL + 成员ID)` 的 Rendezvous/HRW 排名，忽略端口、域名与 IP 独立计算，仅在建连阶段选路）。最低延迟（`urltest`）清理 `strategy`，支持 `tolerance` 切换容差（单位毫秒，范围 `0–5000`，默认 `50`，允许显式 `0`，越界返回 `400`），按统一健康探测测得的基准延迟升序选路（不混入真实业务拨号耗时），主用失效即时顺延次快健康成员并触发紧急探测。健康检查仅探测已启用实体成员，周期为 10 至 3600 秒（默认 30 秒），未配置 URL 时默认探测 `1.1.1.1:443` TCP 连通性（自定义 URL 发送 `HEAD`、接受 `200–399`、不跟随重定向），共享 8 并发异步探测并在无流量空闲后懒暂停；`failover`/`loadbalance` 所有成员本次均建连失败时不立即标记全部不健康。策略的前置模式为 `none`，成员沿用各自的前置设置。策略支持普通入站认证、TCP 复用、`mixed` / `https` 入站模式及 `POST /api/nodes/:id/check-ip`。分享链接仅适用于支持该格式的实体节点。
 
 节点响应附加 `effective_member_ids`、`policy_active_member_id`、`policy_member_health` 和 `policy_warnings`。健康记录包括 `node_id`、`healthy`、`latency`（毫秒）、`last_error`、`checked_at`。删除成员会移除引用，停用成员会保留引用并暂停转发。成员全部不可用时可查询告警、编辑策略并添加替代成员。
 
@@ -153,7 +153,7 @@ curl -fsS -X POST http://127.0.0.1:30000/api/nodes/batch-import \
 管理员可通过 `GET /api/connections` 获取快照（内核未运行时返回 `200` 空快照，本机采集或解码异常返回 `503`），或通过 `GET /api/connections/stream` 订阅 SSE 的 `snapshot` 事件。采样间隔约 1.2 秒。内核停止或连续三次采样失败时，服务端发送一次 `error` 事件，数据为 `{"error":"原因"}`。采样恢复后继续发送 `snapshot`。服务端逐帧并定时复核管理员会话。退出、过期或修改密码后，下次复核会关闭流。单次轮询保留 5 秒计数基线，供后续轮询计算速率。
 
 - 顶层字段为 `runtime_epoch`、`sampled_at`、`active_connections`、`client_count`、`route_count`、`total_upload_bps`、`total_download_bps`、`routes`。
-- 每条路径包含 `key`、`client_ip`、`inbound_port`、`inbound_node_id`、`inbound_node_name`、`route_id`、`outbound_node_id`、`outbound_node_name`、`outbound_type`、`policy_member_id`、`policy_member_name`、`upstream_label`、`active_count`、`upload_bytes`、`download_bytes`、`upload_bps`、`download_bps`，以及可选字段 `upstream_source`（无前置代理时省略，存在时取值为 `custom`、`group`、`global` 或 `legacy`）。
+- 每条路径包含 `key`、`client_ip`、`inbound_port`、`inbound_node_id`、`inbound_node_name`、`route_id`、`outbound_node_id`、`outbound_node_name`、`outbound_type`、`policy_member_id`、`policy_member_name`、`upstream_label`、`active_count`、`upload_bytes`、`download_bytes`、`upload_bps`、`download_bps`，以及可选字段 `client_country_code`（公网客户端离线识别的 2 位大写国家码）、`client_is_private`（内网/回环/链路本地/CGNAT 客户端为 `true`）、`inbound_mode`（`mixed` 或 `https`）与 `upstream_source`（无前置代理时省略，存在时取值为 `custom`、`group`、`global` 或 `legacy`）。
 - 速率单位为字节/秒。内核首次采样或重载后第一帧的速率为 `null`。`route_id` 始终对应实际命中的复用用户名。单个策略有多个成员同时访问相同目标时，官方内核可能缺少区分外层连接所需的信息，无法唯一关联的成员 ID 返回 `0`，名称为空。
 
 ### 日志与流量统计
