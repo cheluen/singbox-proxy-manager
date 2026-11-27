@@ -79,7 +79,7 @@ type ipgeoReader struct {
 }
 
 func (reader *ipgeoReader) ReadByte() (byte, error) {
-	count, err := reader.Reader.Read(reader.byteBuffer[:])
+	count, err := reader.Read(reader.byteBuffer[:])
 	if count == 1 {
 		return reader.byteBuffer[0], nil
 	}

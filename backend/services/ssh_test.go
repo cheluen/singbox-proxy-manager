@@ -273,10 +273,11 @@ func TestSSHManagedUpstreamsAndInboundCollisions(testContext *testing.T) {
 				GroupUpstreams: map[int]models.GroupUpstream{},
 			}
 			expectedTag := globalUpstreamTag
-			if mode == models.UpstreamModeGroup {
+			switch mode {
+			case models.UpstreamModeGroup:
 				settings.GroupUpstreams[7] = models.GroupUpstream{Enabled: true, ProxyDefinition: models.ProxyDefinition{Type: "ssh", Config: node.UpstreamConfig}}
 				expectedTag = groupUpstreamTag(7)
-			} else if mode == models.UpstreamModeCustom {
+			case models.UpstreamModeCustom:
 				expectedTag = "node-1-upstream"
 			}
 			data, err := service.BuildGlobalConfigContext(testContext.Context(), []models.ProxyNode{node}, settings)
