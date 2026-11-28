@@ -12,6 +12,7 @@ export function useNodeActions(manager) {
   const { t, notify, confirm, onPasswordChanged, errorText, outboundSignature, isNodeExportable } = helpers
   const importBusyRef = useRef(false)
   const importRequestRef = useRef(null)
+  const batchEnabledBusyRef = useRef(false)
   const mountedRef = useRef(false)
   useEffect(() => {
     mountedRef.current = true
@@ -82,6 +83,35 @@ export function useNodeActions(manager) {
   }, [reorder, visibleRef])
 
   /* ---------- 批量操作 ---------- */
+
+  const setSelectedEnabled = useCallback(async (enabled) => {
+    if (batchEnabledBusyRef.current) return false
+    const ids = selectedNodesRef.current.map((node) => node.id)
+    if (ids.length === 0) return false
+    batchEnabledBusyRef.current = true
+    return track(enabled ? 'batchEnable' : 'batchDisable', async () => {
+      try {
+        const response = await api.post('/nodes/batch-enabled', { ids, enabled })
+        const updated = Number(response.data?.updated_count ?? ids.length)
+        if (updated === 0) {
+          notify.info(t(enabled ? 'batch_enable_unchanged' : 'batch_disable_unchanged'))
+        } else {
+          notify.success(t(enabled ? 'batch_enable_success' : 'batch_disable_success', { count: updated }))
+        }
+        await Promise.all([loadNodes({ silent: true }), loadGroups()])
+        return true
+      } catch (error) {
+        notify.error(errorText(error, t('server_error')))
+        await Promise.all([loadNodes({ silent: true }), loadGroups()])
+        return false
+      } finally {
+        batchEnabledBusyRef.current = false
+      }
+    })
+  }, [errorText, loadGroups, loadNodes, notify, selectedNodesRef, t, track])
+
+  const enableSelected = useCallback(() => setSelectedEnabled(true), [setSelectedEnabled])
+  const disableSelected = useCallback(() => setSelectedEnabled(false), [setSelectedEnabled])
 
   const deleteSelected = useCallback(async () => {
     const ids = selectedNodesRef.current.map((node) => node.id)
@@ -277,7 +307,7 @@ export function useNodeActions(manager) {
   }, [errorText, loadSettings, notify, t])
 
   return {
-    reorder, moveNode, deleteSelected, dedupeSelected, applyBatchAuth, checkSelected, checkVisible,
+    reorder, moveNode, enableSelected, disableSelected, deleteSelected, dedupeSelected, applyBatchAuth, checkSelected, checkVisible,
     exportNode, exportSelected, exportScope, parseLink, importBatch, restartRuntime, saveSettings, checkGlobalUpstream,
   }
 }

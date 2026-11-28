@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strconv"
 	"strings"
 	"testing"
@@ -210,6 +211,68 @@ sleep 300
 	}
 	if count != 1 || proxyType != "socks5" || name != "remote-valid-socks" {
 		t.Fatalf("remote database retained wrong nodes: count=%d type=%q name=%q", count, proxyType, name)
+	}
+}
+
+func TestBatchSetNodesEnabledRemoteDatabaseIntegration(testContext *testing.T) {
+	db := openBatchImportIntegrationDatabase(testContext)
+	if db == nil {
+		testContext.Skip("需要配置远程数据库集成测试环境")
+	}
+	resetBatchImportIntegrationTables(testContext, db)
+	testContext.Cleanup(func() {
+		resetBatchImportIntegrationTables(testContext, db)
+		_ = db.Close()
+	})
+	if err := models.InitDB(db); err != nil {
+		testContext.Fatal(err)
+	}
+	if os.Getenv("SINGBOX_TEST_BINARY") == "" {
+		testContext.Fatal("远程批量启停测试需要设置 SINGBOX_TEST_BINARY")
+	}
+	useRealSingBoxForChecks(testContext)
+	testContext.Setenv("SBPM_SINGBOX_STARTUP_GRACE", "10ms")
+	service := services.NewSingBoxService(testContext.TempDir())
+	testContext.Cleanup(func() { _ = service.Stop() })
+	handler := NewHandler(db, service)
+	ids := insertBatchEnabledTestNodes(testContext, handler, false, true, false)
+	for _, enabled := range []bool{true, true, false, false} {
+		before := loadBatchEnabledTestNodes(testContext, handler)
+		beforeRuntime := service.RuntimeStatus()
+		updated := 0
+		for _, node := range before {
+			if node.Enabled != enabled {
+				updated++
+			}
+		}
+		response := postJSON(testContext, handler.BatchSetNodesEnabled, http.MethodPost, "/api/nodes/batch-enabled", map[string]any{"ids": ids, "enabled": enabled}, nil)
+		assertBatchEnabledResponse(testContext, response, enabled, updated, len(ids)-updated)
+		after := loadBatchEnabledTestNodes(testContext, handler)
+		for index, node := range after {
+			if node.Enabled != enabled {
+				testContext.Fatalf("远程节点 %d 未更新启停状态", node.ID)
+			}
+			if before[index].Enabled == enabled {
+				if !reflect.DeepEqual(before[index], node) {
+					testContext.Fatalf("远程未变节点 %d 的检测状态或时间戳被改写", node.ID)
+				}
+			} else if node.CheckRevision != before[index].CheckRevision+1 || node.CheckStatus != "untested" || node.CheckedAt != nil || node.NodeIP != "" {
+				testContext.Fatalf("远程已变节点 %d 未重置检测状态", node.ID)
+			}
+		}
+		if updated == 0 && service.RuntimeStatus() != beforeRuntime {
+			testContext.Fatal("远程无变化批次重启了内核")
+		}
+	}
+	before := loadBatchEnabledTestNodes(testContext, handler)
+	beforeRuntime := service.RuntimeStatus()
+	missingID := ids[len(ids)-1] + 1
+	response := postJSON(testContext, handler.BatchSetNodesEnabled, http.MethodPost, "/api/nodes/batch-enabled", map[string]any{"ids": []int{ids[0], missingID, ids[1]}, "enabled": true}, nil)
+	if response.Code != http.StatusNotFound || !strings.Contains(response.Body.String(), "node "+strconv.Itoa(missingID)+" not found") {
+		testContext.Fatalf("远程缺失节点未返回 404：HTTP %d，%s", response.Code, response.Body.String())
+	}
+	if !reflect.DeepEqual(before, loadBatchEnabledTestNodes(testContext, handler)) || service.RuntimeStatus() != beforeRuntime {
+		testContext.Fatal("远程缺失节点请求部分修改了数据库或内核")
 	}
 }
 

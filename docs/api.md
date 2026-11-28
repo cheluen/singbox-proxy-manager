@@ -9,7 +9,7 @@
 - **基础前缀**：`/api`（默认服务监听 `http://0.0.0.0:30000`）。
 - **鉴权方式**：受保护接口需携带 `Authorization` 请求头，同时支持 `Authorization: Bearer <token>`（前缀大小写不敏感）与裸令牌 `Authorization: <token>`。会话无效或已吊销时返回 `401 Unauthorized`。
 - **请求体限制**：默认受 `API_MAX_BODY_BYTES`（`1048576` 字节，即 `1 MiB`）约束。已知 `Content-Length` 超限返回 `413`，未知长度流式超限在解码阶段返回 `400`。
-- **CORS 与请求校验**：配置 `CORS_ALLOWED_ORIGINS` 后精确匹配 Origin（不匹配时不返回跨域头，而非 `403`），`OPTIONS` 统一返回 `204`，允许方法为 `GET, POST, PUT, PATCH, DELETE, OPTIONS`。普通 JSON 接口采用标准绑定，仅 `PATCH /api/nodes/:id` 严格拒绝未知字段与尾随 JSON 数据。
+- **CORS 与请求校验**：配置 `CORS_ALLOWED_ORIGINS` 后精确匹配 Origin（不匹配时不返回跨域头，而非 `403`），`OPTIONS` 统一返回 `204`，允许方法为 `GET, POST, PUT, PATCH, DELETE, OPTIONS`。普通 JSON 接口采用标准绑定，`PATCH /api/nodes/:id` 与 `POST /api/nodes/batch-enabled` 严格拒绝未知字段与尾随 JSON 数据。
 - **重要差异提醒**：`POST /api/nodes`、`PUT /api/nodes/:id` 与 `POST /api/nodes/batch-import` 中的 `enabled` 字段为 Go 普通布尔值，**API 请求中省略时默认为 `false`**（管理面板 UI 表单默认勾选为 `true`）。
 
 ---
@@ -101,6 +101,7 @@
 | `POST /api/parse-link` | `{ "link": "..." }` | 解析单条分享链接但不落库，返回 `200 { "type", "name", "config" }`（`config` 为 JSON 字符串）；格式非法返回 `400`。 |
 | `POST /api/nodes/batch-import` | `{ "content"?: "...", "links"?: [...], "source_type"?: "auto"\|"subscription"\|"http_proxy", "enabled"?: bool, "group_id"?: int }` | **非空白** `content` 优先于 `links`。执行抓取展开、分组 `sing-box check` 预检隔离、端口分配与联合复校；无可解析节点返回 `400`，目标组不存在 `404`，存储或最终应用失败 `500`；若解析出候选但全部被内核校验拒绝，仍返回 `200` 且 `success: 0`。正常返回 `200 { "total", "success", "failed", "results": [...] }`（成功项含 `success/id/name/port/username/password` 及可选 `source/link`，失败项含 `source/error`）。 |
 | `POST /api/nodes/batch-delete` | `{ "ids": [1, 2, 3] }` | 批量删除节点；要求全部为正整数 ID、无重复且全部存在；返回 `200 { "message", "deleted_count" }`（`400`/`404`/`500`）并应用内核。 |
+| `POST /api/nodes/batch-enabled` | `{ "ids": [1, 2, 3], "enabled": true }` | 批量开启或关闭已有节点；严格拒绝未知字段与尾随 JSON，要求显式提供布尔 `enabled` 以及非空、正整数、无重复且全部存在的 `ids`（跨 500 ID 自动分块校验）。仅更新状态实际发生变化的节点并单次应用内核（自动处理 HTTPS 证书校验、策略引用收敛、检测状态重置与整批回滚）；若目标节点均已处于目标状态则跳过写库与内核重启。返回 `200 { "message", "enabled", "updated_count", "unchanged_count" }`（`400`/`404`/`500`）。 |
 | `POST /api/nodes/batch-export` | `{ "ids": [1, 2, 3] }` | 逐项导出选中节点分享链接，整体返回 `200`（成功项含 `id/success/name/type/link`，缺失或不可导出项在 `results` 中以 `id/success:false/error` 逐项反馈）；仅空列表或非法 JSON 返回 `400`。 |
 | `POST /api/nodes/batch-auth` | `{ "node_ids": [1, 2], "auth_enabled"?: bool, "username": "...", "password": "..." }` | 批量设置或清空选中节点的入站认证（账密需成对、用户名不含 `+`），校验全部 ID 有效且无重复后应用内核，返回 `200 { "message": "authentication updated" }`（`400`/`404`/`500`）。 |
 | `POST /api/nodes/reorder` | `{ "group_id"?: int, "nodes": [{ "id": 1, "sort_order": 0 }, ...] }` | 重排节点顺序；无论是否指定 `group_id`，均须提交目标范围内的完整节点集合且 `sort_order` 为 `0..N-1` 唯一排列。自动模式下重排未固定端口，保留模式下不改动端口；返回 `200 { "message": "nodes reordered" }`（`400`/`404`/`500`）。 |

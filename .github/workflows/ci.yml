@@ -454,6 +454,7 @@ jobs:
           - test:e2e:preserve-ports
           - test:e2e:batch-import
           - test:e2e:batch-auth
+          - test:e2e:batch-enabled
           - test:e2e:batch-check-ip-live
           - test:e2e:check-failed-ui
           - test:e2e:groups-policy-ui

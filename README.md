@@ -5,7 +5,7 @@
   <p>集中管理各类代理节点，在浏览器里完成导入、测速、分组、策略调度，并转为本地 HTTP / SOCKS5 或 HTTPS 代理端口</p>
 
   <p>
-    <a href="https://github.com/cheluen/singbox-proxy-manager/releases"><img src="https://img.shields.io/badge/version-1.7.36-blue.svg" alt="Version" /></a>
+    <a href="https://github.com/cheluen/singbox-proxy-manager/releases"><img src="https://img.shields.io/badge/version-1.7.37-blue.svg" alt="Version" /></a>
     <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-green.svg" alt="MIT License" /></a>
     <img src="https://img.shields.io/badge/sing--box-1.12.12-orange.svg" alt="sing-box 1.12.12" />
     <img src="https://img.shields.io/badge/Go-1.26.11-00ADD8.svg" alt="Go 1.26.11" />
@@ -183,7 +183,7 @@ docker compose --profile ghcr ps
 ```bash
 mkdir -p singbox-proxy-manager && cd singbox-proxy-manager
 
-APP_VERSION=1.7.36
+APP_VERSION=1.7.37
 OS=linux      # 可选：linux / darwin / freebsd
 ARCH=amd64    # 可选：amd64 / arm64
 
@@ -270,7 +270,7 @@ chmod 600 .env
 | [系统架构与核心机制](docs/architecture.md) | 单常驻内核模型、分组与策略调度、实时连接与日志观测、内置内核与预压缩前端、原子变更与安全边界 | 维护者、架构评审 |
 | [配置、数据库与运维指南](docs/configuration.md) | 全部环境变量参考、HTTPS 证书目录与热加载、SQLite / PostgreSQL / MySQL / Turso 接入与租约、日志持久化、升级与排障 | 运维与生产部署人员 |
 | [协议支持与导入导出规范](docs/protocols.md) | 12 种实体类型与 2 种策略节点、15 种导入 / 12 种导出 Scheme、Clash 导入边界、分组订阅与手动去重 | 进阶用户、排障人员 |
-| [HTTP API 参考](docs/api.md) | 会话鉴权与全部 42 个接口（节点、分组、订阅、策略、连接、日志流量、系统设置）的参数、返回与状态码 | 脚本与自动化调用方 |
+| [HTTP API 参考](docs/api.md) | 会话鉴权与全部 43 个接口（节点、分组、订阅、策略、连接、日志流量、系统设置）的参数、返回与状态码 | 脚本与自动化调用方 |
 | [本地开发、构建与测试指南](docs/development.md) | Go 1.26.11 + sing-box 1.12.12 重编译、本地联调、测试矩阵与 CI/CD 流水线 | 贡献者、二次开发者 |
 
 ---

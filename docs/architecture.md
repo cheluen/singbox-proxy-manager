@@ -1,6 +1,6 @@
 # 系统架构与核心机制
 
-本文档基于 `1.7.36` 源码梳理 SingBox Proxy Manager 的核心架构、运行时生命周期与安全边界。
+本文档基于 `1.7.37` 源码梳理 SingBox Proxy Manager 的核心架构、运行时生命周期与安全边界。
 
 ## 1. 总体定位与架构
 
@@ -40,7 +40,7 @@ flowchart LR
 
 | 组件 | 固定基线 | 源码依据 |
 | --- | --- | --- |
-| 应用版本 | `1.7.36`（后端嵌入 `version.txt`） | `internal/version/version.txt` |
+| 应用版本 | `1.7.37`（后端嵌入 `version.txt`） | `internal/version/version.txt` |
 | 容器基础镜像 | `alpine:3.24`（多架构静态二进制运行环境） | `Dockerfile`、`Dockerfile.release` |
 | Go 工具链 | **精确 `1.26.11`**（发行与内核构建强校验） | `go.mod`、`scripts/verify-go-build.sh` |
 | sing-box 内核 | **固定 `1.12.12`**（Go 1.26.11 重编译） | `scripts/build-sing-box.sh` |

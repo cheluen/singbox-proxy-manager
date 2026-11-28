@@ -244,6 +244,7 @@ func main() {
 		authorized.POST("/nodes/batch-import", handler.BatchImportNodes)
 		authorized.POST("/nodes/batch-delete", handler.BatchDeleteNodes)
 		authorized.POST("/nodes/batch-export", handler.BatchExportNodes)
+		authorized.POST("/nodes/batch-enabled", handler.BatchSetNodesEnabled)
 		authorized.PUT("/nodes/:id", handler.UpdateNode)
 		authorized.PATCH("/nodes/:id", handler.UpdateNodeFlags)
 		authorized.PUT("/nodes/:id/upstream", handler.UpdateNodeUpstream)

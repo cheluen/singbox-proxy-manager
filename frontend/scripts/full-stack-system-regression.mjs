@@ -335,6 +335,53 @@ try {
 
   await setInput(page, '[data-testid="nodes-search"]', '')
   await clickControl(page, '[data-testid="nodes-clear-selection"]')
+  await page.waitForFunction(() => !document.querySelector('[data-testid="dashboard-toolbar-selection"]'))
+  await clickControl(page, '[data-testid="nodes-add-node"]')
+  await selectOption(page, 'proxy_type', 'Direct (Local)')
+  await setInput(page, '#name', 'System batch forwarding')
+  await setInput(page, '#username', 'system-batch-user')
+  await setInput(page, '#password', INBOUND_SECRET)
+  const batchDirect = await submit('POST', '/nodes', () => saveNodeForm(page))
+  await waitOverlaysClosed(page)
+  assert.equal(batchDirect.type, 'direct')
+  assert.notEqual(batchDirect.id, direct.id)
+  const forwardingTargets = [
+    { node: rotated, username: 'rotated-user', secret: ROTATED_INBOUND_SECRET },
+    { node: batchDirect, username: 'system-batch-user', secret: INBOUND_SECRET },
+  ]
+  const forwardingIds = forwardingTargets.map(({ node }) => node.id)
+  const assertBatchEnabledState = async (enabled) => {
+    for (const { node } of forwardingTargets) {
+      const updated = await api('GET', `/nodes/${node.id}`)
+      assert.equal(updated.enabled, enabled, `节点 ${node.id} 的数据库/API 启停状态不匹配`)
+      assert.equal(updated.inbound_port, node.inbound_port, `节点 ${node.id} 的批量启停改变了代理端口`)
+    }
+    await page.waitForFunction((ids, expected) => ids.every((id) => (
+      document.querySelector(`[data-testid="node-enabled-${id}"]`)?.getAttribute('aria-checked') === String(expected)
+    )), {}, forwardingIds, enabled)
+  }
+  await assertBatchEnabledState(true)
+  for (const { node, username, secret: inboundSecret } of forwardingTargets) await forward(node, username, inboundSecret)
+  for (const id of forwardingIds) await clickControl(page, `[data-testid="node-select-${id}"]`)
+  const disabled = await submit('POST', '/nodes/batch-enabled', () => clickControl(page, '[data-testid="nodes-batch-disable"]'))
+  assert.deepEqual(disabled, { message: 'nodes updated', enabled: false, updated_count: 2, unchanged_count: 0 })
+  await assertBatchEnabledState(false)
+  for (const { node, username, secret: inboundSecret } of forwardingTargets) {
+    for (const protocol of ['http', 'socks5']) {
+      const transport = protocol === 'http' ? ['--proxy', `http://127.0.0.1:${node.inbound_port}`] : ['--socks5-hostname', `127.0.0.1:${node.inbound_port}`]
+      const result = await curl([...transport, '--proxy-user', `${username}:${inboundSecret}`, `http://127.0.0.1:${targetPort}/`])
+      assert.ok(result.code > 0, `批量关闭后节点 ${node.id} 的 ${protocol} 端口仍提供转发`)
+      assert.equal(result.stdout.includes('sbpm-system-forwarding-ok'), false, '关闭的节点仍返回真实目标服务内容')
+    }
+  }
+  const enabled = await submit('POST', '/nodes/batch-enabled', () => clickControl(page, '[data-testid="nodes-batch-enable"]'))
+  assert.deepEqual(enabled, { message: 'nodes updated', enabled: true, updated_count: 2, unchanged_count: 0 })
+  await assertBatchEnabledState(true)
+  for (const { node, username, secret: inboundSecret } of forwardingTargets) await forward(node, username, inboundSecret)
+  steps.push('batch-enabled-http-socks-live-forwarding')
+
+  await clickControl(page, '[data-testid="nodes-clear-selection"]')
+  await page.waitForFunction(() => !document.querySelector('[data-testid="dashboard-toolbar-selection"]'))
   await clickControl(page, '[data-testid="open-settings"]')
   await setInput(page, '#admin_secret', NEXT_SECRET)
   await setInput(page, '#admin_secret_confirm', NEXT_SECRET)

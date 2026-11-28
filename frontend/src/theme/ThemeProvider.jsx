@@ -22,7 +22,7 @@ export function ThemeProvider({ children }) {
   }, [])
   return (
     <ConfigProvider theme={DUSK_ANTD_CONFIG} locale={i18n.language?.startsWith('zh') ? zhCN : enUS}>
-      <AntApp className="sb-app" message={{ maxCount: 3, top: 12 }}>
+      <AntApp className="sb-app" message={{ maxCount: 3, top: 54 }}>
         {children}
       </AntApp>
     </ConfigProvider>

@@ -1,7 +1,7 @@
 // 命令面板（Ctrl/⌘ K）：一个输入框里既能跳到节点，也能执行任何操作。
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { Modal } from 'antd'
-import { CornerDownLeft, Download, FileStack, KeyRound, LogOut, Plus, RefreshCw, RotateCcw, Search, Server, Settings, Trash2, X, Zap } from 'lucide-react'
+import { CornerDownLeft, Download, FileStack, KeyRound, LogOut, Plus, Power, PowerOff, RefreshCw, RotateCcw, Search, Server, Settings, Trash2, X, Zap } from 'lucide-react'
 import { useTranslation } from 'react-i18next'
 import { matchesSearch, protocolLabel } from '../core/nodeView'
 import { Kbd } from '../shared/primitives'
@@ -45,6 +45,12 @@ export function CommandPalette({ open, onClose, ctl, session, onJump }) {
       { id: 'select-all', icon: Server, label: t('select_all'), run: () => ctl.selectAllVisible(true) },
       ...(selected > 0
         ? [
+            ...(!ctl.working.batchEnable && !ctl.working.batchDisable && ctl.selectedNodes.some((node) => node.enabled === false)
+              ? [{ id: 'sel-enable', icon: Power, label: t('cmd_selected', { action: t('batch_enable'), count: selected }), run: () => ctl.enableSelected() }]
+              : []),
+            ...(!ctl.working.batchEnable && !ctl.working.batchDisable && ctl.selectedNodes.some((node) => node.enabled !== false)
+              ? [{ id: 'sel-disable', icon: PowerOff, label: t('cmd_selected', { action: t('batch_disable'), count: selected }), run: () => ctl.disableSelected() }]
+              : []),
             { id: 'sel-check', icon: Zap, label: t('cmd_selected', { action: t('check_ip'), count: selected }), run: () => ctl.checkSelected() },
             { id: 'sel-auth', icon: KeyRound, label: t('cmd_selected', { action: t('set_auth'), count: selected }), run: () => ctl.open({ kind: 'auth' }) },
             { id: 'sel-export', icon: Download, label: t('cmd_selected', { action: t('export'), count: selected }), run: () => ctl.exportSelected() },

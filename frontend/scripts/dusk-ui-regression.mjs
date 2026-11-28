@@ -83,9 +83,9 @@ function createFixture() {
     ],
     logsTraffic: { persisted: true, upload_bytes: 2048000, download_bytes: 10485760, total_bytes: 12533760, items: [{ client_ip: '10.0.0.5', inbound_port: 30001, route_id: '', outbound_node_id: 1, outbound_node_name: 'Node 001', policy_member_name: '', upload_bytes: 2048000, download_bytes: 10485760, total_bytes: 12533760 }] },
     logSettingsFailMessage: '',
-    requests: [], loads: [], flags: [], orders: [], deletes: [], auth: [], imports: [], saves: [], upstreams: [], settingsSaves: [], checks: [], groupMutations: [], moves: [],
+    requests: [], loads: [], flags: [], orders: [], deletes: [], auth: [], batchEnabled: [], imports: [], saves: [], upstreams: [], settingsSaves: [], checks: [], groupMutations: [], moves: [],
     expectedFailures: new Set(), activeChecks: 0, peakChecks: 0, checkDelay: 20, checkStatuses: {}, importDelay: 0,
-    importResult: null, flagFailure: false, nextLoads: [], loginSecret: 'dusk-regression-admin', revoked: false,
+    importResult: null, flagFailure: false, batchEnabledFailure: false, nextLoads: [], loginSecret: 'dusk-regression-admin', revoked: false,
   }
   const reorderPorts = (targetGroupIds = null) => {
     const scope = targetGroupIds ? new Set(targetGroupIds) : null
@@ -365,6 +365,27 @@ function createFixture() {
         reorderPorts()
       }
       return send(200, {})
+    }
+    if (route === '/api/nodes/batch-enabled' && method === 'POST') {
+      state.batchEnabled.push(body)
+      if (!Array.isArray(body?.ids) || body.ids.length === 0 || typeof body.enabled !== 'boolean' ||
+        body.ids.some((id) => !Number.isSafeInteger(id) || id <= 0) || new Set(body.ids).size !== body.ids.length ||
+        Object.keys(body).some((key) => key !== 'ids' && key !== 'enabled')) {
+        return send(400, { error: 'invalid batch enabled request' })
+      }
+      const selected = body.ids.map((id) => state.nodes.find((node) => node.id === id))
+      if (selected.some((node) => !node)) return send(404, { error: 'node not found' })
+      if (state.batchEnabledFailure) {
+        state.expectedFailures.add(route)
+        return send(500, { error: '批量启停故障注入' })
+      }
+      const changedNodes = selected.filter((node) => (node.enabled !== false) !== body.enabled)
+      for (const node of changedNodes) Object.assign(node, {
+        enabled: body.enabled, check_status: 'untested', check_error: '', checked_at: null,
+        node_ip: '', location: '', country_code: '', latency: 0,
+      })
+      const updatedCount = changedNodes.length
+      return send(200, { message: 'nodes updated', enabled: body.enabled, updated_count: updatedCount, unchanged_count: selected.length - updatedCount })
     }
     if (route === '/api/nodes/batch-delete') {
       state.deletes.push(body.ids)
@@ -717,6 +738,232 @@ const scenarios = {
     await waitOverlaysClosed(page)
     await assertMaskedInboundPassword(page, 1, sharedSecret)
     await assertMaskedInboundPassword(page, 2, sharedSecret)
+  },
+
+  async 'batch-enabled'({ page, state, refresh }) {
+    const toolbarSelector = '[data-testid="dashboard-toolbar-selection"]'
+    const ids = [1, 3]
+    const batchRoute = '/api/nodes/batch-enabled'
+    const primaryActions = ['enable', 'disable', 'check', 'auth', 'export']
+    const resetCheckState = { check_status: 'untested', check_error: '', checked_at: null, node_ip: '', location: '', country_code: '', latency: 0 }
+    const checkState = (node) => Object.fromEntries(Object.keys(resetCheckState).map((key) => [key, node[key]]))
+    await page.bringToFront()
+    await page.emulateMediaFeatures([{ name: 'prefers-reduced-motion', value: 'no-preference' }])
+    const waitOpen = () => page.waitForFunction((selector) => {
+      const toolbar = document.querySelector(selector)
+      return toolbar?.dataset.state === 'open' && !toolbar.getAnimations().some((animation) => animation.playState === 'running')
+    }, {}, toolbarSelector)
+    const waitRemoved = () => page.waitForFunction((selector) => !document.querySelector(selector), {}, toolbarSelector)
+    const waitButtons = (enableDisabled, disableDisabled) => page.waitForFunction((selector, enableOff, disableOff) => {
+      const toolbar = document.querySelector(selector)
+      return toolbar?.dataset.state === 'open' &&
+        toolbar.querySelector('[data-testid="nodes-batch-enable"]')?.disabled === enableOff &&
+        toolbar.querySelector('[data-testid="nodes-batch-disable"]')?.disabled === disableOff
+    }, {}, toolbarSelector, enableDisabled, disableDisabled)
+    const waitEnabledState = async (enabled) => {
+      await page.waitForFunction((selectedIds, next) => selectedIds.every((id) =>
+        document.querySelector(`[data-testid="node-enabled-${id}"]`)?.getAttribute('aria-checked') === String(next)
+      ), {}, ids, enabled)
+      await waitButtons(enabled, !enabled)
+    }
+    const samples = await page.evaluate(async (selector) => {
+      await document.fonts.ready
+      document.querySelector('[data-testid="node-select-1"]').click()
+      const frames = []
+      const deadline = performance.now() + 5000
+      let settledFrames = 0
+      while (performance.now() < deadline) {
+        await new Promise((resolve) => requestAnimationFrame(resolve))
+        const toolbar = document.querySelector(selector)
+        if (!toolbar) continue
+        const bounds = toolbar.getBoundingClientRect()
+        const opacity = Number(getComputedStyle(toolbar).opacity)
+        frames.push({ state: toolbar.dataset.state, center: (bounds.left + bounds.right) / 2, viewportCenter: innerWidth / 2, opacity })
+        const settled = toolbar.dataset.state === 'open' && !toolbar.getAnimations().some((animation) => animation.playState === 'running')
+        settledFrames = settled ? settledFrames + 1 : 0
+        if (settledFrames >= 2) break
+      }
+      return frames
+    }, toolbarSelector)
+    assert.ok(samples.length >= 2, '批量条未产生可验证的进场和稳态帧')
+    assert.ok(samples.some((frame) => frame.state === 'entering' || frame.opacity < 1), '未采样到批量条进场过程')
+    assert.equal(samples.at(-1).state, 'open')
+    assert.ok(samples.at(-1).opacity >= 0.99, '批量条未完成进场')
+    for (const frame of samples) assert.ok(Math.abs(frame.center - frame.viewportCenter) <= 2, `批量条进场发生水平偏移：${JSON.stringify(frame)}`)
+
+    await clickControl(page, '[data-testid="nodes-clear-selection"]')
+    const departure = await page.evaluate((selector) => document.querySelector(selector)?.dataset.state || 'unmounted', toolbarSelector)
+    assert.ok(['leaving', 'unmounted'].includes(departure), '清空选择后未退场')
+    await waitRemoved()
+    await selectNodes(page, [1])
+    await waitOpen()
+    const interruptedDeparture = await page.evaluate(async (selector) => {
+      const checkbox = document.querySelector('[data-testid="node-select-1"]')
+      const departing = await new Promise((resolve, reject) => {
+        const observer = new MutationObserver(() => {
+          const toolbar = document.querySelector(selector)
+          if (checkbox.checked || (toolbar && toolbar.dataset.state !== 'leaving')) return
+          observer.disconnect()
+          clearTimeout(timer)
+          resolve(toolbar?.dataset.state || 'unmounted')
+        })
+        const timer = setTimeout(() => {
+          observer.disconnect()
+          reject(new Error('取消选择未更新批量条状态'))
+        }, 5000)
+        observer.observe(document.getElementById('root'), { attributes: true, attributeFilter: ['data-state'], childList: true, subtree: true })
+        document.querySelector('[data-testid="nodes-clear-selection"]').click()
+      })
+      checkbox.click()
+      return departing
+    }, toolbarSelector)
+    assert.ok(['leaving', 'unmounted'].includes(interruptedDeparture))
+    await waitOpen()
+    await selectNodes(page, [3])
+    await waitButtons(false, false)
+
+    const applyEnabled = async (enabled, selector, updatedCount, unchangedCount) => {
+      const previousRequests = state.batchEnabled.length
+      const expectedCheckStates = new Map(state.nodes.map((node) => [
+        node.id,
+        ids.includes(node.id) && (node.enabled !== false) !== enabled ? resetCheckState : checkState(node),
+      ]))
+      const [response] = await Promise.all([
+        page.waitForResponse((response) => response.request().method() === 'POST' && new URL(response.url()).pathname === batchRoute),
+        clickControl(page, selector),
+      ])
+      assert.equal(response.status(), 200)
+      assert.deepEqual(await response.json(), { message: 'nodes updated', enabled, updated_count: updatedCount, unchanged_count: unchangedCount })
+      await waitEnabledState(enabled)
+      assert.equal(state.batchEnabled.length, previousRequests + 1, '一次批量操作必须只发出一个批量请求')
+      assert.deepEqual(state.batchEnabled.at(-1), { ids, enabled })
+      assert.equal(state.nodes.find((node) => node.id === 4).enabled, true, '批量操作改变了未选中的节点')
+      assert.equal(state.flags.length, 0, '批量操作不应退化为逐条 PATCH')
+      for (const node of state.nodes) {
+        assert.deepEqual(checkState(node), expectedCheckStates.get(node.id), `节点 ${node.id} 的检测状态未按实际变更重置或保留`)
+      }
+    }
+    await applyEnabled(false, '[data-testid="nodes-batch-disable"]', 1, 1)
+    const toast = await page.waitForSelector('.ant-message-notice-content', { visible: true })
+    try {
+      await page.waitForFunction(async (notice) => {
+        const before = notice.getBoundingClientRect()
+        await new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve)))
+        const after = notice.getBoundingClientRect()
+        return notice.isConnected && after.width > 0 && after.height > 0 &&
+          before.x === after.x && before.y === after.y && before.width === after.width && before.height === after.height
+      }, {}, toast)
+      const toastPoint = await page.evaluate((notice) => {
+        const bounds = notice.getBoundingClientRect()
+        const centerX = (bounds.left + bounds.right) / 2
+        const centerY = (bounds.top + bounds.bottom) / 2
+        const hit = document.elementFromPoint(centerX, centerY)
+        return {
+          centerX, centerY, pointerEvents: getComputedStyle(notice).pointerEvents,
+          passesThrough: Boolean(hit && !hit.closest('.ant-message')),
+        }
+      }, toast)
+      assert.equal(toastPoint.pointerEvents, 'none', 'Toast 不应截获指针事件')
+      assert.equal(toastPoint.passesThrough, true, 'Toast 中心应命中下层页面而非消息容器')
+      await page.mouse.move(toastPoint.centerX, toastPoint.centerY)
+      await page.waitForFunction((notice) => !notice.isConnected, { timeout: 6000 }, toast)
+    } finally {
+      await toast.dispose()
+    }
+    await applyEnabled(true, '[data-testid="nodes-batch-enable"]', 2, 0)
+    await clickControl(page, '[data-testid="open-palette"]')
+    await applyEnabled(false, '[data-testid="palette-sel-disable"]', 2, 0)
+    await page.waitForSelector('[data-testid="palette-input"]', { hidden: true })
+    await clickControl(page, '[data-testid="open-palette"]')
+    await applyEnabled(true, '[data-testid="palette-sel-enable"]', 2, 0)
+    await page.waitForSelector('[data-testid="palette-input"]', { hidden: true })
+
+    const previousState = state.nodes.map((node) => ({ id: node.id, enabled: node.enabled, ...checkState(node) }))
+    const previousRequests = state.batchEnabled.length
+    state.batchEnabledFailure = true
+    try {
+      const [response] = await Promise.all([
+        page.waitForResponse((response) => response.request().method() === 'POST' && new URL(response.url()).pathname === batchRoute),
+        clickControl(page, '[data-testid="nodes-batch-disable"]'),
+      ])
+      assert.equal(response.status(), 500)
+      await page.waitForFunction(() => Array.from(document.querySelectorAll('.ant-message-error')).some((element) => element.textContent.includes('批量启停故障注入')))
+      await waitEnabledState(true)
+      assert.deepEqual(state.nodes.map((node) => ({ id: node.id, enabled: node.enabled, ...checkState(node) })), previousState, '失败请求改变了真实节点状态')
+      assert.equal(state.batchEnabled.length, previousRequests + 1)
+    } finally {
+      state.batchEnabledFailure = false
+    }
+
+    await clickControl(page, '[data-testid="status-filter"] [data-value="untested"]')
+    await expectRows(page, [1, 2, 3])
+    const previousFilteredRequests = state.batchEnabled.length
+    const [filteredResponse] = await Promise.all([
+      page.waitForResponse((response) => response.request().method() === 'POST' && new URL(response.url()).pathname === batchRoute),
+      clickControl(page, '[data-testid="nodes-batch-disable"]'),
+    ])
+    assert.equal(filteredResponse.status(), 200)
+    assert.deepEqual(await filteredResponse.json(), { message: 'nodes updated', enabled: false, updated_count: 2, unchanged_count: 0 })
+    await expectRows(page, [2])
+    await waitRemoved()
+    assert.equal(state.batchEnabled.length, previousFilteredRequests + 1)
+    assert.deepEqual(state.batchEnabled.at(-1), { ids, enabled: false })
+    await clickControl(page, '[data-testid="status-filter"] [data-value="all"]')
+    await expectRows(page, [1, 2, 3, 4])
+    assert.equal(await page.$$eval('[data-testid^="node-select-"]', (checkboxes) => checkboxes.some((checkbox) => checkbox.checked)), false, '筛选后的批量关闭未清空选择')
+    await waitRemoved()
+
+    await page.emulateMediaFeatures([{ name: 'prefers-reduced-motion', value: 'reduce' }])
+    try {
+      assert.equal(await page.evaluate(() => matchMedia('(prefers-reduced-motion: reduce)').matches), true)
+      await selectNodes(page, ids)
+      await waitOpen()
+      await clickControl(page, '[data-testid="nodes-clear-selection"]')
+      await waitRemoved()
+    } finally {
+      await page.emulateMediaFeatures([])
+    }
+
+    const originalGroups = state.groups
+    const layoutGroupId = Math.max(0, ...originalGroups.map((group) => group.id)) + 1
+    state.groups = [...originalGroups, { ...originalGroups[0], id: layoutGroupId, name: 'Layout target', sort_order: originalGroups.length, start_port: 31001 }]
+    try {
+      await refresh()
+      await page.waitForSelector(`[data-testid="group-tab-${layoutGroupId}"]`, { visible: true })
+      await selectNodes(page, ids)
+      await waitOpen()
+      await page.waitForSelector('[data-testid="nodes-batch-move"]', { visible: true })
+      for (const language of ['en', 'zh']) {
+        await clickControl(page, language === 'zh' ? 'button[title="中文"]' : 'button[title="English"]')
+        await page.waitForFunction((next) => document.documentElement.lang === next, {}, language === 'zh' ? 'zh-CN' : 'en')
+        for (const width of [390, 640, 768, 900, 1025, 1180, 1181, 1280, 1440]) {
+          await page.setViewport({ width, height: 1000 })
+          const layout = await page.evaluate(async (selector, actions) => {
+            await document.fonts.ready
+            await new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve)))
+            const toolbar = document.querySelector(selector)
+            const bounds = toolbar.getBoundingClientRect()
+            const moveBounds = toolbar.querySelector('[data-testid="nodes-batch-move"]')?.getBoundingClientRect()
+            return {
+              left: bounds.left, right: bounds.right, viewport: innerWidth,
+              scrollWidth: toolbar.scrollWidth, clientWidth: toolbar.clientWidth,
+              moveVisible: Boolean(moveBounds && moveBounds.width > 0 && moveBounds.height > 0),
+              labels: actions.map((action) => toolbar.querySelector(`[data-testid="nodes-batch-${action}"]`)?.getAttribute('aria-label')?.trim() || ''),
+            }
+          }, toolbarSelector, primaryActions)
+          assert.ok(layout.left >= 0 && layout.right <= layout.viewport + 1 && layout.scrollWidth <= layout.clientWidth + 1,
+            `${language} ${width}px 批量条横向溢出：${JSON.stringify(layout)}`)
+          assert.ok(layout.labels.every(Boolean), `${language} ${width}px 批量主操作缺少辅助技术名称`)
+          if (width > 1180) assert.ok(layout.moveVisible, `${language} ${width}px 移动到分组按钮未参与宽屏布局`)
+        }
+      }
+    } finally {
+      state.groups = originalGroups
+      await refresh()
+      await page.waitForSelector(`[data-testid="group-tab-${layoutGroupId}"]`, { hidden: true })
+    }
+    await clickControl(page, '[data-testid="nodes-clear-selection"]')
+    await waitRemoved()
   },
 
   async 'batch-check-ip-live'({ page, state, refresh }) {

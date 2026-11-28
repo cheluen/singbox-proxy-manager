@@ -80,6 +80,16 @@ test('登录页移除终端装饰与功能说明，不保留废弃样式和词�
   assert.ok(login.includes('<h1 lang="en" data-testid="project-brand">'))
 })
 
+test('批量条定位与动效分离，不复用会覆盖居中变换的通用入场动画', () => {
+  const styles = readFileSync(new URL('../src/shared/forms.css', import.meta.url), 'utf8')
+  const bulkRules = styles.match(/[^{}]*\.sb-bulk[^{}]*\{[^{}]*\}/g) || []
+  assert.ok(bulkRules.length > 0, '未找到批量条样式')
+  for (const rule of bulkRules) {
+    assert.doesNotMatch(rule, /\banimation(?:-name)?\s*:[^;{}]*\bsb-fade-up\b/, '批量条不能复用覆盖 transform 的 sb-fade-up')
+    assert.doesNotMatch(rule, /\btransform\s*:[^;{}]*translateX\(\s*-50%\s*\)/, '批量条居中定位不能与动效共享 transform')
+  }
+})
+
 test('列表、设置、内核与版本只接收最新请求结果，卸载后不更新状态', async () => {
   const coordinator = createLatestRequestCoordinator()
   const values = []

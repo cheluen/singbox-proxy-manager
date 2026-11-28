@@ -1,7 +1,7 @@
 {
   "name": "sb-proxy-frontend",
   "private": true,
-  "version": "1.7.36",
+  "version": "1.7.37",
   "type": "module",
   "description": "SingBox Proxy Manager 暮色管理面板，连接真实后端接口",
   "scripts": {
@@ -15,6 +15,7 @@
     "test:e2e:preserve-ports": "node ./scripts/dusk-ui-regression.mjs preserve-ports",
     "test:e2e:batch-import": "node ./scripts/dusk-ui-regression.mjs batch-import",
     "test:e2e:batch-auth": "node ./scripts/dusk-ui-regression.mjs batch-auth",
+    "test:e2e:batch-enabled": "node ./scripts/dusk-ui-regression.mjs batch-enabled",
     "test:e2e:batch-check-ip-live": "node ./scripts/dusk-ui-regression.mjs batch-check-ip-live",
     "test:e2e:outbound-dedup": "node ./scripts/dusk-ui-regression.mjs outbound-dedup",
     "test:e2e:remark": "node ./scripts/dusk-ui-regression.mjs remark",

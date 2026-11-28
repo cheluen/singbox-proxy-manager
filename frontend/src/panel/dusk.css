@@ -126,7 +126,7 @@ body.is-resizing-cols, body.is-resizing-cols * { cursor: col-resize !important; 
 .dusk-dot--warn { background: var(--warn); }
 .dusk-dot--bad { background: var(--bad); }
 .dusk-dot--muted { background: var(--muted); }
-.dusk .sb-bulk--docked { bottom: 42px; }
+.dusk .sb-bulk-dock { bottom: 42px; }
 
 /* ---------- 命令面板 ---------- */
 .dusk-palette .ant-modal-content { overflow: hidden; border: 1px solid var(--line-strong); }
@@ -196,7 +196,7 @@ body.is-resizing-cols, body.is-resizing-cols * { cursor: col-resize !important; 
   .dusk-row__pass { max-width: 100%; }
   .dusk-expand { grid-area: expand; margin: 6px -6px -6px -2px; padding: 14px 12px 16px; }
   .dusk-expand__grid { grid-template-columns: minmax(0, 1fr); }
-  .dusk .sb-bulk--docked { bottom: 16px; }
+  .dusk .sb-bulk-dock { bottom: calc(16px + env(safe-area-inset-bottom, 0px)); }
 }
 /* 窄屏保留完整品牌名，将常用操作放到独立一行，而不是截断标题。 */
 @media (max-width: 480px) {
