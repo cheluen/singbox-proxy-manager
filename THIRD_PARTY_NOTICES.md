@@ -44,7 +44,7 @@ with this application without prior consent.
 
 ## 3. 嵌入式离线 IP 国家/地区数据
 
-后端 `backend/services/ipgeo_data.bin.gz` 仅用于「当前连接」面板的轻量离线客户端 IP 国家码识别，当前二进制由 [`scripts/build-ipgeo-db.py`](scripts/build-ipgeo-db.py) 基于 [sapics/ip-location-db](https://github.com/sapics/ip-location-db) 的 `geo-whois-asn-country` 数据集编译生成，采用 [Creative Commons Zero v1.0 Universal (CC0-1.0)](https://creativecommons.org/publicdomain/zero/1.0/) 公共领域奉献分发（该脚本亦支持从上游 `user-country` PDDL-1.0 Release 重新编译更新）。
+后端 `backend/services/ipgeo_data.bin` 仅用于「当前连接」面板的轻量离线客户端 IP 国家码识别，当前分块压缩二进制由 [`scripts/build-ipgeo-db.py`](scripts/build-ipgeo-db.py) 基于 [sapics/ip-location-db](https://github.com/sapics/ip-location-db) 的 `geo-whois-asn-country` 数据集编译生成，采用 [Creative Commons Zero v1.0 Universal (CC0-1.0)](https://creativecommons.org/publicdomain/zero/1.0/) 公共领域奉献分发（该脚本亦支持从上游 `user-country` PDDL-1.0 Release 重新编译更新）。
 
 ## 4. 关联声明
 

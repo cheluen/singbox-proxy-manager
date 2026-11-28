@@ -1,21 +1,12 @@
 #!/usr/bin/env python3
-"""将 sapics/ip-location-db (user-country, PDDL-1.0) 编译为极轻量嵌入式二进制地区表。
-
-二进制格式（gzip 压缩后内嵌至 backend/services/ipgeo_data.bin.gz）：
-  - Magic: 4 字节 "SBG1"
-  - countryCount: uvarint (1..255，索引 0 保留表示未分配间隙)
-  - countries: countryCount * 2 字节 ASCII 大写 ISO 3166-1 alpha-2 代码
-  - v4Count: uvarint（IPv4 /24 边界表项数，按 start24 严格递增）
-    每项: deltaStart24 (uvarint) + countryIdx (1 字节)
-  - v6Count: uvarint（IPv6 /48 边界表项数，按 start48 严格递增）
-    每项: deltaStart48 (uvarint) + countryIdx (1 字节)
-"""
+"""将 sapics/ip-location-db 编译为分块嵌入式 IP 地区表。"""
 
 import argparse
-import gzip
 import pathlib
+import struct
 import subprocess
 import tempfile
+import zlib
 
 
 DEFAULT_V4_URL = (
@@ -37,6 +28,16 @@ def encode_uvarint(value: int) -> bytes:
         value >>= 7
     out.append(value)
     return bytes(out)
+
+
+def positive_int(value: str) -> int:
+    try:
+        number = int(value)
+    except ValueError as error:
+        raise argparse.ArgumentTypeError("must be an integer") from error
+    if number <= 0:
+        raise argparse.ArgumentTypeError("must be positive")
+    return number
 
 
 def parse_ranges(csv_path: pathlib.Path, shift: int, max_key: int) -> list[tuple[int, int, str]]:
@@ -111,15 +112,81 @@ def download(url: str, dest: pathlib.Path) -> None:
     )
 
 
+def compress_block(transitions: list[tuple[int, int]]) -> bytes:
+    raw = bytearray([transitions[0][1]])
+    previous_key = transitions[0][0]
+    for key, country_index in transitions[1:]:
+        raw += encode_uvarint(key - previous_key)
+        raw.append(country_index)
+        previous_key = key
+    compressor = zlib.compressobj(level=9, method=zlib.DEFLATED, wbits=-15)
+    return compressor.compress(bytes(raw)) + compressor.flush()
+
+
+def build_sbg2(
+    countries: list[str],
+    v4_transitions: list[tuple[int, int]],
+    v6_transitions: list[tuple[int, int]],
+    block_size: int,
+) -> bytes:
+    if block_size <= 0:
+        raise ValueError("block_size must be positive")
+    if len(countries) > 255:
+        raise ValueError(f"too many country codes: {len(countries)}")
+
+    v4_blocks = [
+        (chunk[0][0], compress_block(chunk))
+        for start in range(0, len(v4_transitions), block_size)
+        if (chunk := v4_transitions[start : start + block_size])
+    ]
+    v6_blocks = [
+        (chunk[0][0], compress_block(chunk))
+        for start in range(0, len(v6_transitions), block_size)
+        if (chunk := v6_transitions[start : start + block_size])
+    ]
+    if len(v4_blocks) > 0xFFFF or len(v6_blocks) > 0xFFFF:
+        raise ValueError("too many compressed blocks")
+
+    index_size = len(v4_blocks) * 8 + len(v6_blocks) * 12
+    offset = 10 + len(countries) * 2 + index_size + 4
+    indexes = bytearray()
+    payload = bytearray()
+    for first_key, compressed in v4_blocks:
+        indexes += struct.pack(">II", first_key, offset)
+        payload += compressed
+        offset += len(compressed)
+    for first_key, compressed in v6_blocks:
+        indexes += struct.pack(">QI", first_key, offset)
+        payload += compressed
+        offset += len(compressed)
+    if offset > 0xFFFFFFFF:
+        raise ValueError("output is too large")
+
+    output = bytearray(b"SBG2")
+    output += struct.pack(">BBHH", len(countries), 0, len(v4_blocks), len(v6_blocks))
+    for country in countries:
+        encoded = country.encode("ascii")
+        if len(encoded) != 2:
+            raise ValueError(f"invalid country code: {country!r}")
+        output += encoded
+    output += indexes
+    output += struct.pack(">I", offset)
+    output += payload
+    return bytes(output)
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Build compact embedded IP-country DB")
     parser.add_argument(
         "--output",
-        default="backend/services/ipgeo_data.bin.gz",
-        help="Output .bin.gz file path",
+        default="backend/services/ipgeo_data.bin",
+        help="Output .bin file path",
     )
     parser.add_argument("--v4-csv", default="", help="Optional local IPv4 num CSV path")
     parser.add_argument("--v6-csv", default="", help="Optional local IPv6 num CSV path")
+    parser.add_argument(
+        "--block-size", type=positive_int, default=4096, help="Transitions per compressed block"
+    )
     args = parser.parse_args()
 
     with tempfile.TemporaryDirectory(prefix="sbpm-ipgeo-") as tmp_dir:
@@ -141,31 +208,19 @@ def main() -> None:
 
         v4_trans = build_transitions(v4_ranges, country_to_idx, (1 << 24) - 1)
         v6_trans = build_transitions(v6_ranges, country_to_idx, (1 << 48) - 1)
-
-        payload = bytearray(b"SBG1")
-        payload += encode_uvarint(len(countries))
-        for cc in countries:
-            payload += cc.encode("ascii")
-
-        for trans in (v4_trans, v6_trans):
-            payload += encode_uvarint(len(trans))
-            prev = 0
-            for key, idx in trans:
-                payload += encode_uvarint(key - prev)
-                payload.append(idx)
-                prev = key
-
+        payload = build_sbg2(countries, v4_trans, v6_trans, args.block_size)
         out_path = pathlib.Path(args.output)
         out_path.parent.mkdir(parents=True, exist_ok=True)
-        compressed = gzip.compress(bytes(payload), compresslevel=9, mtime=0)
-        out_path.write_bytes(compressed)
+        out_path.write_bytes(payload)
 
-        ram_mb = (len(v4_trans) * 4 + len(v6_trans) * 8) / (1024 * 1024)
+        v4_blocks = (len(v4_trans) + args.block_size - 1) // args.block_size
+        v6_blocks = (len(v6_trans) + args.block_size - 1) // args.block_size
+        sparse_index_bytes = v4_blocks * 8 + v6_blocks * 12
         print(
             f"Built {out_path}: countries={len(countries)}, "
-            f"v4_entries={len(v4_trans)}, v6_entries={len(v6_trans)}, "
-            f"raw={len(payload)//1024}KB, gz={len(compressed)//1024}KB, "
-            f"runtime_ram~{ram_mb:.2f}MB"
+            f"v4_blocks={v4_blocks}, v6_blocks={v6_blocks}, "
+            f"sparse_index={sparse_index_bytes}B, output={len(payload)}B "
+            f"({len(payload) / 1024:.1f}KB)"
         )
 
 
